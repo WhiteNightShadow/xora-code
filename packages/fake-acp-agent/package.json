@@ -1,0 +1,33 @@
+{
+  "name": "@whitenight-code/fake-acp-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Deterministic ACP stdio agent for desktop integration and contract tests",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "bin": {
+    "fake-acp-agent": "./dist/src/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "require": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "18.19.39",
+    "typescript": "4.9.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

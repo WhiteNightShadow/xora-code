@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-build:
+    name: ${{ matrix.name }} — pinned Grok + Electron
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+            grokTarget: darwin-arm64
+          - name: Windows x64
+            runner: windows-2025
+            grokTarget: win32-x64
+          - name: Linux x64
+            runner: ubuntu-24.04
+            grokTarget: linux-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out WhiteNight Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: yarn
+
+      - name: Activate Yarn Classic 1.22.22
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          test "$(yarn --version)" = "1.22.22"
+
+      - name: Install JavaScript dependencies
+        run: yarn install --frozen-lockfile --non-interactive
+
+      - name: Set up pinned Rust 1.92.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+
+      - name: Cache Grok Build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/dotslash*
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/whitenight-grok-${{ matrix.grokTarget }}/target
+          key: grok-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/grok/sidecar.lock.json') }}
+
+      - name: Install Grok Build's DotSlash prerequisite
+        shell: bash
+        run: |
+          if ! command -v dotslash >/dev/null 2>&1; then
+            cargo install dotslash --locked --version 0.5.7
+          fi
+          dotslash --version | grep -F 0.5.7
+
+      - name: Install pinned protoc for the Windows fallback
+        if: runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the exact pinned Grok source on the native runner
+        run: >-
+          node build/grok/build-sidecar.mjs
+          --work-dir "${{ runner.temp }}/whitenight-grok-${{ matrix.grokTarget }}"
+          --target "${{ matrix.grokTarget }}"
+          --stage-dir resources/sidecars/grok
+
+      - name: Run real Grok ACP, authentication, and process-cleanup smoke tests
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok.exe
+          else
+            node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok
+          fi
+
+      - name: Verify unsigned CI build metadata (not a formal package check)
+        run: >-
+          node build/grok/release-metadata.mjs --verify
+          --stage-dir resources/sidecars/grok
+          --target "${{ matrix.grokTarget }}"
+
+      - name: Build Electron and all workspace packages
+        run: yarn build
+
+      - name: Run ACP, fake-Agent, runtime, and security tests
+        run: yarn test
+
+      - name: Run sidecar metadata and release manifest safety tests
+        run: node --test build/grok/test/*.test.mjs build/grok/test/*.test.ts
+
+      - name: Upload the audited native sidecar
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-${{ matrix.grokTarget }}-${{ github.sha }}
+          path: |
+            resources/sidecars/grok/*
+          if-no-files-found: error
+          retention-days: 7

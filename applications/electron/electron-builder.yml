@@ -1,0 +1,69 @@
+appId: io.github.whitenightshadow.whitenightcode
+productName: WhiteNight Code
+executableName: whitenight-code
+copyright: Copyright © 2026 WhiteNight Code contributors
+electronDist: ../../node_modules/electron/dist
+electronVersion: 39.8.7
+asar: true
+asarUnpack:
+  - "**/lib/backend/native/**"
+  - "**/lib/backend/shell-integrations/**"
+  - "**/lib/prebuilds/**"
+nodeGypRebuild: false
+npmRebuild: false
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - src-gen
+  - lib
+  - resources
+  - scripts
+  - package.json
+  - "!**/node_modules/**"
+extraResources:
+  - from: ../../plugins
+    to: app/plugins
+  - from: ../../resources/sidecars/grok
+    to: sidecars/grok
+  - from: ../../LICENSE
+    to: legal/WhiteNight-Code-LICENSE
+  - from: ../../NOTICE.md
+    to: legal/WhiteNight-Code-NOTICE.md
+  - from: ../../THIRD-PARTY-NOTICES.md
+    to: legal/THIRD-PARTY-NOTICES.md
+  - from: ../../resources/legal
+    to: legal/upstream
+  - from: ../../resources/update
+    to: update
+  - from: ../../build/grok/sidecar.lock.json
+    to: update/sidecar.lock.json
+  - from: ../../build/grok/acp-initialize-fixture.json
+    to: update/acp-initialize-fixture.json
+win:
+  target:
+    - nsis
+mac:
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  hardenedRuntime: true
+  protocols:
+    - name: WhiteNight Code
+      schemes:
+        - whitenight-code
+  target:
+    - dmg
+    - zip
+linux:
+  category: Development
+  mimeTypes:
+    - inode/directory
+  target:
+    - AppImage
+    - deb
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  runAfterFinish: false
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}

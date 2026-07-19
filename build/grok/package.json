@@ -1,0 +1,12 @@
+{
+  "name": "@whitenight-code/grok-build-metadata",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.mjs test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

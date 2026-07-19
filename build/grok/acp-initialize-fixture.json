@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "clientCapabilities": {
+    "fs": {
+      "readTextFile": false,
+      "writeTextFile": false
+    },
+    "terminal": false
+  },
+  "clientInfo": {
+    "name": "WhiteNight Code sidecar verifier",
+    "version": "0.1.0"
+  }
+}

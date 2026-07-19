@@ -1,0 +1,34 @@
+node_modules/
+lib/
+src-gen/
+dist/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+*.log
+.DS_Store
+
+# Generated Theia build configuration and native-module staging
+.browser_modules/
+applications/*/esbuild.mjs
+applications/*/gen-esbuild.*.mjs
+
+# Theia and downloaded VS Code extensions
+plugins/*
+!plugins/.gitkeep
+
+# Local product state
+.theia/
+.whitenight-code/
+
+# Electron packaging output
+applications/electron/release/
+applications/electron/dist/
+
+# Release-staged sidecar binaries
+resources/sidecars/grok/*
+!resources/sidecars/grok/README.md
+
+# IDE metadata
+.idea/
+*.swp

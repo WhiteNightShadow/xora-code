@@ -1,0 +1,37 @@
+{
+  "name": "whitenight-code",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An open-source, model-neutral desktop Agent IDE built on Eclipse Theia, Electron, and ACP, with first-class Grok Build integration.",
+  "author": "WhiteNight Code contributors",
+  "license": "Apache-2.0",
+  "packageManager": "yarn@1.22.22",
+  "engines": {
+    "node": ">=24 <25",
+    "yarn": "1.22.22"
+  },
+  "workspaces": [
+    "applications/*",
+    "build/*",
+    "packages/*",
+    "theia-extensions/*"
+  ],
+  "scripts": {
+    "build": "yarn build:packages && yarn build:extensions && yarn build:applications",
+    "build:dev": "yarn build",
+    "build:packages": "lerna run build --scope '@whitenight-code/acp-client' --scope '@whitenight-code/fake-acp-agent' --scope '@whitenight-code/runtime-core' --scope '@whitenight-code/update-build-tools' --stream",
+    "build:extensions": "lerna run build --scope '@whitenight-code/product-extension' --scope '@whitenight-code/agent' --stream",
+    "build:applications": "lerna run build --scope '@whitenight-code/browser-app' --scope '@whitenight-code/electron-app' --concurrency 1 --stream",
+    "clean": "lerna run clean --stream",
+    "lint": "lerna run lint --stream",
+    "test": "lerna run test --stream",
+    "start:browser": "yarn workspace @whitenight-code/browser-app start",
+    "start:electron": "yarn workspace @whitenight-code/electron-app start",
+    "package:electron": "yarn workspace @whitenight-code/electron-app package",
+    "package:electron:preview": "yarn workspace @whitenight-code/electron-app package:preview"
+  },
+  "devDependencies": {
+    "lerna": "9.0.7",
+    "rimraf": "6.0.1"
+  }
+}

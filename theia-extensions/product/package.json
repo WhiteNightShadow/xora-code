@@ -1,0 +1,35 @@
+{
+  "name": "@whitenight-code/product-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WhiteNight Code product branding and welcome experience",
+  "license": "Apache-2.0",
+  "keywords": [
+    "theia-extension"
+  ],
+  "files": [
+    "lib",
+    "src"
+  ],
+  "theiaExtensions": [
+    {
+      "frontend": "lib/browser/whitenight-product-frontend-module"
+    }
+  ],
+  "dependencies": {
+    "@theia/core": "1.73.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.18",
+    "rimraf": "6.0.1",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf lib *.tsbuildinfo",
+    "compile": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test",
+    "watch": "tsc -p tsconfig.json --watch --preserveWatchOutput"
+  }
+}

@@ -1,0 +1,438 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release-gate:
+    name: Verify release identity and signing credentials
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+      sequence: ${{ steps.metadata.outputs.sequence }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      APP_UPDATE_ED25519_PRIVATE_KEY_BASE64: ${{ secrets.APP_UPDATE_ED25519_PRIVATE_KEY_BASE64 }}
+      SIDECAR_UPDATE_ED25519_PRIVATE_KEY_BASE64: ${{ secrets.SIDECAR_UPDATE_ED25519_PRIVATE_KEY_BASE64 }}
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      LINUX_GPG_PRIVATE_KEY_BASE64: ${{ secrets.LINUX_GPG_PRIVATE_KEY_BASE64 }}
+      LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Node.js 24 for release validation
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Require every platform and update-signing credential
+        shell: bash
+        run: |
+          required=(
+            APP_UPDATE_ED25519_PRIVATE_KEY_BASE64
+            SIDECAR_UPDATE_ED25519_PRIVATE_KEY_BASE64
+            APPLE_CERTIFICATE_P12_BASE64
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_API_KEY_P8_BASE64
+            APPLE_API_KEY_ID
+            APPLE_API_ISSUER_ID
+            APPLE_TEAM_ID
+            WINDOWS_CERTIFICATE_PFX_BASE64
+            WINDOWS_CERTIFICATE_PASSWORD
+            LINUX_GPG_PRIVATE_KEY_BASE64
+            LINUX_GPG_PASSPHRASE
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "Formal release is blocked. Missing signing credentials: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Verify committed sidecar trust anchor and independent private keys
+        env:
+          SIDECAR_UPDATE_KEY_ID: sidecar-release-2026
+        run: node build/grok/verify-release-key-configuration.mjs
+
+      - name: Verify tag, application version, and monotonic sequence
+        id: metadata
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const tag = process.env.RELEASE_TAG;
+            if (tag !== `v${pkg.version}`) {
+              throw new Error(`Release tag ${tag} does not match package version ${pkg.version}`);
+            }
+          '
+          git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}" >/dev/null
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "sequence=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  build-native-release:
+    name: ${{ matrix.name }}
+    needs: release-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64 — DMG + ZIP
+            runner: macos-15
+            platform: mac
+            arch: arm64
+            grokTarget: darwin-arm64
+          - name: macOS x64 — DMG + ZIP
+            runner: macos-15-intel
+            platform: mac
+            arch: x64
+            grokTarget: darwin-x64
+          - name: Windows x64 — NSIS
+            runner: windows-2025
+            platform: windows
+            arch: x64
+            grokTarget: win32-x64
+          - name: Linux x64 — AppImage + deb
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            grokTarget: linux-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 210
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-gate.outputs.tag }}
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: yarn
+
+      - name: Activate Yarn Classic 1.22.22
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          test "$(yarn --version)" = "1.22.22"
+
+      - name: Install JavaScript dependencies
+        run: yarn install --frozen-lockfile --non-interactive
+
+      - name: Set up pinned Rust 1.92.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+
+      - name: Cache Grok Build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/dotslash*
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/whitenight-grok-${{ matrix.grokTarget }}/target
+          key: release-grok-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/grok/sidecar.lock.json') }}
+
+      - name: Install Grok Build's DotSlash prerequisite
+        shell: bash
+        run: |
+          if ! command -v dotslash >/dev/null 2>&1; then
+            cargo install dotslash --locked --version 0.5.7
+          fi
+          dotslash --version | grep -F 0.5.7
+
+      - name: Install pinned protoc for the Windows fallback
+        if: runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build pinned Grok 0.2.102 on the native runner
+        run: >-
+          node build/grok/build-sidecar.mjs
+          --work-dir "${{ runner.temp }}/whitenight-grok-${{ matrix.grokTarget }}"
+          --target "${{ matrix.grokTarget }}"
+          --stage-dir resources/sidecars/grok
+
+      - name: Run release-blocking Grok ACP/auth/process-cleanup smoke test
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok.exe
+          else
+            node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok
+          fi
+
+      - name: Build Agent/runtime packages and run contract tests
+        shell: bash
+        run: |
+          yarn build:packages
+          yarn build:extensions
+          yarn test
+          node --test build/grok/test/*.test.mjs build/grok/test/*.test.ts
+
+      - name: Import the Apple Developer ID certificate
+        if: matrix.platform == 'mac'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Sign, verify, and smoke-test the macOS Grok sidecar
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          identity="$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
+          test -n "$identity"
+          codesign --force --options runtime --timestamp --sign "$identity" resources/sidecars/grok/grok
+          codesign --verify --strict --verbose=2 resources/sidecars/grok/grok
+          node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok
+
+      - name: Decode the Windows code-signing certificate
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+        run: |
+          [IO.File]::WriteAllBytes("${{ runner.temp }}\whitenight-code.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
+
+      - name: Sign, verify, and smoke-test the Windows Grok sidecar
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw "signtool.exe was not found" }
+          & $signtool.FullName sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /f "${{ runner.temp }}\whitenight-code.pfx" /p $env:WINDOWS_CERTIFICATE_PASSWORD resources\sidecars\grok\grok.exe
+          if ($LASTEXITCODE -ne 0) { throw "Signing grok.exe failed" }
+          & $signtool.FullName verify /pa /all resources\sidecars\grok\grok.exe
+          if ($LASTEXITCODE -ne 0) { throw "grok.exe signature verification failed" }
+          node build\grok\smoke-sidecar.mjs --binary resources\sidecars\grok\grok.exe
+          if ($LASTEXITCODE -ne 0) { throw "Signed grok.exe ACP smoke test failed" }
+
+      - name: Refresh release.json after platform signing
+        run: >-
+          node build/grok/release-metadata.mjs
+          --stage-dir resources/sidecars/grok
+          --target "${{ matrix.grokTarget }}"
+
+      - name: Run the fail-closed formal sidecar verifier
+        run: yarn workspace @whitenight-code/electron-app verify:sidecar
+
+      - name: Create the Apple notarization key file
+        if: matrix.platform == 'mac'
+        shell: bash
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          node -e 'require("node:fs").writeFileSync(process.argv[1], Buffer.from(process.env.APPLE_API_KEY_P8_BASE64, "base64"), { mode: 0o600 })' "${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8"
+
+      - name: Build, sign, and notarize macOS DMG and ZIP
+        if: matrix.platform == 'mac'
+        env:
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "true"
+        run: >-
+          yarn workspace @whitenight-code/electron-app verify:sidecar &&
+          yarn workspace @whitenight-code/electron-app build:prod &&
+          yarn workspace @whitenight-code/electron-app electron-builder
+          --mac dmg zip --${{ matrix.arch }} --publish never
+          --config.mac.notarize=true
+
+      - name: Verify and staple macOS release artifacts
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          find applications/electron/dist -name '*.app' -type d -prune -print0 |
+            xargs -0 -n1 codesign --verify --deep --strict --verbose=2
+          for image in applications/electron/dist/*.dmg; do
+            xcrun stapler staple "$image"
+            xcrun stapler validate "$image"
+          done
+
+      - name: Build and sign the Windows NSIS installer
+        if: matrix.platform == 'windows'
+        env:
+          CSC_LINK: ${{ runner.temp }}\whitenight-code.pfx
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: >-
+          yarn workspace @whitenight-code/electron-app verify:sidecar &&
+          yarn workspace @whitenight-code/electron-app build:prod &&
+          yarn workspace @whitenight-code/electron-app electron-builder
+          --win nsis --x64 --publish never
+
+      - name: Verify Windows application and installer signatures
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          $executables = Get-ChildItem applications\electron\dist -Recurse -File -Filter *.exe
+          if (-not $executables) { throw "No signed Windows artifacts were produced" }
+          foreach ($executable in $executables) {
+            & $signtool.FullName verify /pa /all $executable.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signature verification failed: $($executable.FullName)" }
+          }
+
+      - name: Build Linux AppImage and deb with GitHub update metadata
+        if: matrix.platform == 'linux'
+        run: >-
+          yarn workspace @whitenight-code/electron-app verify:sidecar &&
+          yarn workspace @whitenight-code/electron-app build:prod &&
+          yarn workspace @whitenight-code/electron-app electron-builder
+          --linux AppImage deb --x64 --publish never
+          --config.publish.provider=github
+          --config.publish.owner=WhiteNightShadow
+          --config.publish.repo=whitenight-code
+
+      - name: Generate the release SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: applications/electron/dist/WhiteNight-Code-${{ needs.release-gate.outputs.version }}-${{ matrix.grokTarget }}.cdx.json
+          upload-artifact: false
+
+      - name: Archive the signed/staged Grok sidecar
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          mkdir -p release-sidecar
+          cp resources/sidecars/grok/grok "release-sidecar/WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}"
+          tar -C resources/sidecars/grok -czf "release-sidecar/WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.tar.gz" grok release.json notices
+
+      - name: Archive the signed Windows Grok sidecar
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-sidecar | Out-Null
+          Copy-Item resources\sidecars\grok\grok.exe "release-sidecar\WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.exe"
+          Compress-Archive -Path resources\sidecars\grok\grok.exe,resources\sidecars\grok\release.json,resources\sidecars\grok\notices -DestinationPath "release-sidecar\WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.zip"
+
+      - name: Upload native release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.grokTarget }}
+          path: |
+            applications/electron/dist/*.dmg
+            applications/electron/dist/*.zip
+            applications/electron/dist/*.exe
+            applications/electron/dist/*.AppImage
+            applications/electron/dist/*.deb
+            applications/electron/dist/*.blockmap
+            applications/electron/dist/*.cdx.json
+            release-sidecar/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Sign manifests, checksums, and publish
+    needs:
+      - release-gate
+      - build-native-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APP_UPDATE_ED25519_PRIVATE_KEY_BASE64: ${{ secrets.APP_UPDATE_ED25519_PRIVATE_KEY_BASE64 }}
+      SIDECAR_UPDATE_ED25519_PRIVATE_KEY_BASE64: ${{ secrets.SIDECAR_UPDATE_ED25519_PRIVATE_KEY_BASE64 }}
+      LINUX_GPG_PRIVATE_KEY_BASE64: ${{ secrets.LINUX_GPG_PRIVATE_KEY_BASE64 }}
+      LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-gate.outputs.tag }}
+
+      - name: Set up Node.js 24 for manifest signing
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download all native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: downloaded-release-assets
+          merge-multiple: false
+
+      - name: Collect unique, flat release assets
+        run: >-
+          node build/grok/collect-release-assets.mjs
+          --input downloaded-release-assets
+          --output release-files
+
+      - name: Sign independent application and sidecar update manifests
+        env:
+          APP_UPDATE_KEY_ID: app-release-2026
+          SIDECAR_UPDATE_KEY_ID: sidecar-release-2026
+        run: >-
+          node build/grok/sign-release-manifests.mjs
+          --assets-dir release-files
+          --output-dir release-files
+          --base-url "https://github.com/WhiteNightShadow/whitenight-code/releases/download/${{ needs.release-gate.outputs.tag }}"
+          --app-version "${{ needs.release-gate.outputs.version }}"
+          --sequence "${{ needs.release-gate.outputs.sequence }}"
+
+      - name: Generate and GPG-sign release checksums
+        shell: bash
+        run: |
+          node -e 'require("node:fs").writeFileSync(process.argv[1], Buffer.from(process.env.LINUX_GPG_PRIVATE_KEY_BASE64, "base64"), { mode: 0o600 })' "${{ runner.temp }}/release-signing-key.asc"
+          gpg --batch --import "${{ runner.temp }}/release-signing-key.asc"
+          cd release-files
+          sha256sum * > SHA256SUMS
+          printf '%s' "$LINUX_GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+          gpg --batch --verify SHA256SUMS.asc SHA256SUMS
+
+      - name: Create the immutable GitHub Release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.release-gate.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to replace signed assets at the same sequence." >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" release-files/* --verify-tag --title "WhiteNight Code $RELEASE_TAG" --generate-notes

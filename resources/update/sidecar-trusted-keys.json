@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "keys": [],
+  "releaseGate": "Add at least one offline-generated Ed25519 public key before enabling signed component releases. Private keys must remain only in the release secret store."
+}
