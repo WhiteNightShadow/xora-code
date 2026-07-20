@@ -299,7 +299,7 @@ export function generateManagedGrokToml(
 ): string {
   const profile = validateProviderProfile(profileInput);
   const lines = [
-    "# Managed by WhiteNight Code. Do not add plaintext credentials.",
+    "# Managed by Xora Code. Do not add plaintext credentials.",
     `[model.${tomlString(profile.id)}]`,
     `model = ${tomlString(profile.model)}`,
     `base_url = ${tomlString(profile.baseUrl)}`,

@@ -1,0 +1,3153 @@
+.xora-agent-widget {
+    min-width: 320px;
+}
+
+.xora-agent-brand-icon {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    flex: 0 0 20px;
+    color: inherit;
+    background: currentColor;
+    -webkit-mask: url('./agent-mark.png') center / contain no-repeat;
+    mask: url('./agent-mark.png') center / contain no-repeat;
+}
+
+.xora-agent-root {
+    display: grid;
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+    height: 100%;
+    color: var(--theia-foreground);
+    background: var(--theia-sideBar-background);
+}
+
+#main-toolbar .toolbar-item[data-id='xora-code.agent.management.open'],
+#main-toolbar .toolbar-item[data-id='xora-code.agent.management.open'] .action-label {
+    width: 28px;
+    min-width: 28px;
+    padding: 0;
+    color: var(--theia-icon-foreground, var(--theia-foreground));
+    background: transparent;
+}
+
+.xora-agent-header,
+.xora-agent-controls,
+.xora-composer-actions,
+.xora-card > div:first-child,
+.xora-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.xora-agent-header {
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--theia-sideBar-border);
+}
+
+.xora-agent-header > div {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.xora-agent-header .xora-agent-header-actions {
+    gap: 5px;
+}
+
+.xora-agent-header-actions .theia-button {
+    min-width: auto;
+    margin: 0;
+}
+
+.xora-agent-settings-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.xora-agent-icon-button {
+    padding-left: 7px;
+    padding-right: 7px;
+}
+
+.xora-runtime {
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    text-transform: uppercase;
+    background: var(--theia-badge-background);
+    color: var(--theia-badge-foreground);
+}
+
+.xora-runtime-ready {
+    background: var(--theia-testing-iconPassed);
+    color: var(--theia-editor-background);
+}
+
+.xora-runtime-crashed {
+    background: var(--theia-testing-iconFailed);
+}
+
+.xora-agent-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px 8px;
+    padding: 8px 12px;
+}
+
+.xora-agent-control {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+}
+
+.xora-agent-control-wide {
+    grid-column: 1 / -1;
+}
+
+.xora-agent-controls select {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    color: var(--theia-dropdown-foreground);
+    background: var(--theia-dropdown-background);
+    border: 1px solid var(--theia-dropdown-border);
+    padding: 5px;
+}
+
+.xora-trust-card,
+.xora-card {
+    margin: 8px 12px;
+    padding: 10px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 6px;
+    background: var(--theia-editorWidget-background);
+}
+
+.xora-trust-card p,
+.xora-empty p {
+    color: var(--theia-descriptionForeground);
+    line-height: 1.45;
+}
+
+.xora-transcript {
+    overflow: auto;
+    padding: 4px 0 12px;
+}
+
+.xora-empty {
+    padding: 36px 22px;
+    text-align: center;
+}
+
+.xora-empty .codicon {
+    font-size: 26px;
+}
+
+.xora-empty .theia-button {
+    margin-top: 8px;
+}
+
+.xora-message {
+    padding: 8px 12px;
+}
+
+.xora-message-user {
+    margin: 6px 12px;
+    border-radius: 8px;
+    background: var(--theia-inputOption-activeBackground);
+}
+
+.xora-message-role {
+    margin-bottom: 4px;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    text-transform: uppercase;
+}
+
+.xora-message-text {
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
+.xora-card > div:first-child {
+    justify-content: space-between;
+}
+
+.xora-card pre {
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 11px;
+}
+
+.xora-plan-completed {
+    text-decoration: line-through;
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-permission-card {
+    border-color: var(--theia-inputValidation-warningBorder);
+}
+
+.xora-retry-card {
+    border-color: var(--theia-inputValidation-errorBorder);
+}
+
+.xora-retry-card p {
+    margin: 8px 0 0;
+    color: var(--theia-descriptionForeground);
+    white-space: pre-wrap;
+}
+
+.xora-retry-prompt {
+    max-height: 72px;
+    margin-top: 8px;
+    overflow: auto;
+    padding: 7px 8px;
+    color: var(--theia-foreground);
+    background: var(--theia-textCodeBlock-background);
+    border-radius: 4px;
+    white-space: pre-wrap;
+}
+
+.xora-terminal-output {
+    padding: 9px;
+    color: var(--theia-terminal-foreground, var(--theia-editor-foreground));
+    background: var(--theia-terminal-background, var(--theia-textCodeBlock-background));
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 4px;
+    font-family: var(--theia-code-font-family);
+}
+
+.xora-card-actions {
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.xora-composer {
+    padding: 10px 12px;
+    border-top: 1px solid var(--theia-sideBar-border);
+}
+
+.xora-composer textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 76px;
+    resize: vertical;
+    padding: 8px;
+    color: var(--theia-input-foreground);
+    background: var(--theia-input-background);
+    border: 1px solid var(--theia-input-border);
+    border-radius: 5px;
+    font-family: var(--theia-ui-font-family);
+}
+
+.xora-composer-actions {
+    justify-content: space-between;
+    margin-top: 7px;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+/* The Agent surface is permanently visible on the right. Hide the obsolete
+   text toolbar entry left behind in toolbar.json by earlier previews; the
+   compact settings entry remains available globally. */
+#main-toolbar .toolbar-item[data-id='xora-code.agent.open'] {
+    display: none !important;
+}
+
+.xora-management-root {
+    height: 100%;
+    overflow: auto;
+    padding: 20px;
+    box-sizing: border-box;
+    background: var(--theia-editor-background);
+}
+
+.xora-management-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 18px;
+}
+
+.xora-management-content {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.xora-management-content > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.xora-management-content h2 {
+    margin-bottom: 4px;
+}
+
+.xora-management-content header p {
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-provider-list .xora-card {
+    margin-left: 0;
+    margin-right: 0;
+}
+
+.xora-provider-form form,
+form.xora-provider-form,
+.xora-provider-edit-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.xora-provider-form label,
+.xora-provider-edit-form label,
+.xora-provider-key-form label {
+    display: grid;
+    gap: 5px;
+}
+
+.xora-provider-form input,
+.xora-provider-form select,
+.xora-provider-form textarea,
+.xora-provider-edit-form input,
+.xora-provider-edit-form select,
+.xora-provider-key-form input {
+    box-sizing: border-box;
+    min-width: 0;
+    padding: 6px;
+    color: var(--theia-input-foreground);
+    background: var(--theia-input-background);
+    border: 1px solid var(--theia-input-border);
+}
+
+.xora-provider-card > p,
+.xora-provider-edit-hint,
+.xora-provider-models {
+    color: var(--theia-descriptionForeground);
+    line-height: 1.45;
+}
+
+.xora-provider-key-form {
+    display: grid;
+    gap: 10px;
+}
+
+.xora-provider-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 10px;
+}
+
+.xora-provider-edit-hint,
+.xora-provider-models,
+.xora-provider-edit-actions {
+    grid-column: 1 / -1;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.xora-management-json {
+    box-sizing: border-box;
+    width: 100%;
+    max-height: 360px;
+    overflow: auto;
+    padding: 14px;
+    margin: 8px 0 0;
+    color: var(--theia-editor-foreground);
+    background: var(--theia-textCodeBlock-background);
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.xora-integration-list {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 18px;
+}
+
+.xora-integration-card {
+    margin-left: 0;
+    margin-right: 0;
+}
+
+.xora-integration-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.xora-integration-header strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 14px;
+}
+
+.xora-status-badge {
+    flex: 0 0 auto;
+    padding: 2px 7px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 16px;
+}
+
+.xora-status-badge.enabled {
+    color: var(--theia-testing-iconPassed);
+    background: color-mix(in srgb, var(--theia-testing-iconPassed) 10%, transparent);
+}
+
+.xora-status-badge.disabled {
+    color: var(--theia-descriptionForeground);
+    background: var(--theia-editorWidget-background);
+}
+
+.xora-integration-fields {
+    display: grid;
+    grid-template-columns: minmax(90px, max-content) minmax(0, 1fr);
+    gap: 5px 14px;
+    margin: 0;
+}
+
+.xora-integration-fields dt {
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-integration-fields dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.xora-integration-muted,
+.xora-management-empty > p {
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-integration-actions {
+    margin-top: 12px;
+}
+
+.xora-raw-details {
+    margin-top: 12px;
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-raw-details summary {
+    width: max-content;
+    max-width: 100%;
+    cursor: pointer;
+    user-select: none;
+}
+
+.xora-response-fallback {
+    padding: 10px 12px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 5px;
+}
+
+@media (max-width: 620px) {
+    .xora-management-root {
+        padding: 12px;
+    }
+
+    .xora-management-tabs {
+        flex-wrap: wrap;
+    }
+
+    .xora-provider-form form,
+    form.xora-provider-form,
+    .xora-provider-edit-form {
+        grid-template-columns: 1fr;
+    }
+
+    .xora-integration-fields {
+        grid-template-columns: 1fr;
+        gap: 2px;
+    }
+
+    .xora-integration-fields dd {
+        margin-bottom: 6px;
+    }
+}
+
+/* Xora Code agent workbench -------------------------------------------------
+   The sidebar is intentionally conversation-first. Configuration remains available
+   in the dedicated settings widget and is progressively disclosed here. */
+
+.xora-agent-widget {
+    min-width: 360px;
+    container-type: inline-size;
+}
+
+.xora-agent-root {
+    --xora-agent-pad: 12px;
+    --xora-agent-content-font-size: 12.5px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    font-size: 13px;
+    color: var(--theia-foreground);
+    background: var(--theia-sideBar-background);
+}
+
+.xora-agent-header {
+    flex: 0 0 auto;
+    min-height: 52px;
+    box-sizing: border-box;
+    padding: 8px var(--xora-agent-pad);
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-sideBar-border) 68%, transparent);
+}
+
+.xora-agent-heading {
+    min-width: 0;
+    flex: 1;
+}
+
+.xora-agent-heading-icon {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    border-radius: 8px;
+    color: #f8fafc;
+    background: radial-gradient(circle at 46% 34%, #203865, #0b1020 76%);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, #72d8ff 24%, transparent);
+}
+
+.xora-agent-heading-icon .xora-agent-brand-icon {
+    width: 19px;
+    height: 19px;
+    flex-basis: 19px;
+}
+
+.xora-agent-heading-copy {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.xora-agent-heading-copy strong {
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 17px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-agent-runtime-line {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    overflow: hidden;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+    line-height: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-agent-runtime-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.xora-agent-runtime-separator {
+    opacity: .55;
+}
+
+.xora-context-trigger {
+    display: grid;
+    width: 26px;
+    height: 26px;
+    flex: 0 0 auto;
+    padding: 0;
+    border: 0;
+    place-items: center;
+    border-radius: 6px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
+.xora-context-trigger:hover {
+    color: var(--theia-foreground);
+    background: var(--theia-toolbar-hoverBackground);
+}
+
+.xora-context-trigger[aria-expanded='true'] {
+    color: var(--theia-focusBorder);
+    background: color-mix(in srgb, var(--theia-focusBorder) 12%, transparent);
+}
+
+.xora-context-ring {
+    --xora-context-progress: 0%;
+    position: relative;
+    display: block;
+    width: 14px;
+    height: 14px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: conic-gradient(
+        currentColor 0 var(--xora-context-progress),
+        color-mix(in srgb, currentColor 22%, transparent) var(--xora-context-progress) 100%
+    );
+}
+
+.xora-context-ring::after {
+    position: absolute;
+    inset: 2.5px;
+    border-radius: 50%;
+    content: '';
+    background: var(--theia-input-background);
+}
+
+.xora-context-trigger.has-usage {
+    color: var(--theia-focusBorder);
+}
+
+.xora-context-running .xora-context-ring,
+.xora-context-ring.xora-context-running {
+    color: var(--theia-progressBar-background);
+    animation: xora-context-spin 1s linear infinite;
+}
+
+@keyframes xora-context-spin {
+    to { transform: rotate(360deg); }
+}
+
+.xora-runtime-dot {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 6px;
+    border-radius: 50%;
+    background: var(--theia-descriptionForeground);
+}
+
+.xora-runtime-ready {
+    background: var(--theia-testing-iconPassed);
+}
+
+.xora-runtime-starting,
+.xora-runtime-initializing,
+.xora-runtime-draining,
+.xora-runtime-updating,
+.xora-runtime-auth-required {
+    background: var(--theia-charts-yellow, #cca700);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--theia-charts-yellow, #cca700) 15%, transparent);
+}
+
+.xora-runtime-crashed {
+    background: var(--theia-testing-iconFailed);
+}
+
+.xora-agent-header-actions {
+    flex: 0 0 auto;
+}
+
+.xora-agent-icon-button {
+    display: inline-grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    color: var(--theia-icon-foreground, var(--theia-foreground));
+    background: transparent;
+    cursor: pointer;
+}
+
+.xora-agent-icon-button:hover:not(:disabled) {
+    background: var(--theia-toolbar-hoverBackground);
+}
+
+.xora-agent-icon-button:disabled {
+    opacity: .42;
+    cursor: default;
+}
+
+.xora-agent-icon-button:focus-visible,
+.xora-context-trigger:focus-visible,
+.xora-agent-pane-tabs button:focus-visible,
+.xora-activity-filters button:focus-visible,
+.xora-session-item:focus-visible,
+.xora-prompt-suggestions button:focus-visible,
+.xora-empty-settings:focus-visible,
+.xora-jump-latest:focus-visible,
+.xora-composer-submit:focus-visible,
+.xora-composer-tool:focus-visible,
+.xora-composer-image-preview:focus-visible,
+.xora-composer-image-remove:focus-visible,
+.xora-message-header button:focus-visible {
+    outline: 2px solid var(--theia-focusBorder);
+    outline-offset: 1px;
+}
+
+.xora-agent-pane-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    flex: 0 0 auto;
+    padding: 0 var(--xora-agent-pad);
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-sideBar-border) 55%, transparent);
+}
+
+.xora-agent-pane-tabs button {
+    position: relative;
+    display: inline-flex;
+    min-width: 0;
+    min-height: 34px;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 7px;
+    border: 0;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.xora-agent-pane-tabs button::after {
+    position: absolute;
+    right: 18%;
+    bottom: -1px;
+    left: 18%;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    content: '';
+    background: transparent;
+}
+
+.xora-agent-pane-tabs button:hover,
+.xora-agent-pane-tabs button.active {
+    color: var(--theia-foreground);
+}
+
+.xora-agent-pane-tabs button.active::after {
+    background: var(--theia-focusBorder);
+}
+
+.xora-agent-pane-tabs small,
+.xora-activity-filters small {
+    min-width: 16px;
+    box-sizing: border-box;
+    padding: 0 4px;
+    border-radius: 999px;
+    color: var(--theia-badge-foreground);
+    background: color-mix(in srgb, var(--theia-badge-background) 75%, transparent);
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 15px;
+    text-align: center;
+}
+
+.xora-activity-filters {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 7px var(--xora-agent-pad) 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-sideBar-border) 38%, transparent);
+    scrollbar-width: none;
+}
+
+.xora-activity-filters::-webkit-scrollbar {
+    display: none;
+}
+
+.xora-activity-filters button {
+    display: inline-flex;
+    min-height: 25px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.xora-activity-filters button:hover {
+    color: var(--theia-foreground);
+    background: var(--theia-toolbar-hoverBackground);
+}
+
+.xora-activity-filters button.active {
+    border-color: color-mix(in srgb, var(--theia-focusBorder) 45%, transparent);
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-focusBorder) 10%, transparent);
+}
+
+.xora-agent-popover-scrim {
+    position: absolute;
+    z-index: 20;
+    inset: 52px 0 0;
+    background: color-mix(in srgb, var(--theia-sideBar-background) 12%, transparent);
+}
+
+.xora-agent-popover {
+    position: absolute;
+    z-index: 21;
+    top: 50px;
+    right: 8px;
+    left: 8px;
+    max-height: min(520px, calc(100% - 116px));
+    overflow: hidden;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 10px;
+    color: var(--theia-foreground);
+    background: var(--theia-editorWidget-background);
+    box-shadow: 0 12px 32px color-mix(in srgb, #000 32%, transparent);
+}
+
+.xora-popover-header {
+    display: flex;
+    min-height: 46px;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px 8px 12px;
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-widget-border) 70%, transparent);
+}
+
+.xora-popover-header > div {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.xora-popover-header strong,
+.xora-popover-header span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-popover-header strong {
+    font-size: 13px;
+}
+
+.xora-popover-header > div > span {
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+}
+
+.xora-session-list {
+    max-height: min(390px, calc(100vh - 250px));
+    overflow: auto;
+    padding: 5px;
+}
+
+.xora-session-item {
+    display: grid;
+    width: 100%;
+    min-height: 48px;
+    grid-template-columns: 8px minmax(0, 1fr) 18px;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 7px;
+    color: var(--theia-foreground);
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.xora-session-item:hover:not(:disabled) {
+    background: var(--theia-list-hoverBackground);
+}
+
+.xora-session-item.active {
+    background: var(--theia-list-activeSelectionBackground);
+    color: var(--theia-list-activeSelectionForeground);
+}
+
+.xora-session-item:disabled {
+    opacity: .55;
+    cursor: default;
+}
+
+.xora-session-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--theia-descriptionForeground);
+}
+
+.xora-session-status-running {
+    background: var(--theia-charts-yellow, #cca700);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--theia-charts-yellow, #cca700) 14%, transparent);
+}
+
+.xora-session-status-completed {
+    background: var(--theia-testing-iconPassed);
+}
+
+.xora-session-status-failed {
+    background: var(--theia-testing-iconFailed);
+}
+
+.xora-session-item-copy {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+}
+
+.xora-session-item-copy strong,
+.xora-session-item-copy span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-session-item-copy strong {
+    font-size: 12px;
+    font-weight: 550;
+}
+
+.xora-session-item-copy span {
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+}
+
+.xora-session-item.active .xora-session-item-copy span {
+    color: color-mix(in srgb, currentColor 72%, transparent);
+}
+
+.xora-session-empty {
+    padding: 24px 14px;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+    line-height: 1.55;
+    text-align: center;
+}
+
+.xora-popover-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 7px 9px;
+    border-top: 1px solid color-mix(in srgb, var(--theia-widget-border) 70%, transparent);
+}
+
+.xora-popover-footer .theia-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+}
+
+.xora-context-model {
+    display: grid;
+    gap: 3px;
+    padding: 13px 14px 10px;
+}
+
+.xora-context-usage {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 11px 12px 2px;
+    padding: 11px 12px;
+    border: 1px solid color-mix(in srgb, var(--theia-focusBorder) 24%, var(--theia-widget-border));
+    border-radius: 9px;
+    background: linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--theia-focusBorder) 10%, transparent),
+        color-mix(in srgb, var(--theia-editor-background) 68%, transparent)
+    );
+}
+
+.xora-context-ring-large {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    color: var(--theia-focusBorder);
+}
+
+.xora-context-ring-large::after {
+    inset: 5px;
+    background: color-mix(in srgb, var(--theia-editor-background) 92%, var(--theia-sideBar-background));
+}
+
+.xora-context-usage > div {
+    display: grid;
+    min-width: 0;
+    gap: 1px;
+}
+
+.xora-context-usage span,
+.xora-context-usage small {
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+}
+
+.xora-context-usage strong {
+    font-size: 17px;
+    line-height: 1.25;
+}
+
+.xora-context-failed .xora-context-ring {
+    color: var(--theia-errorForeground);
+}
+
+.xora-context-cancelled .xora-context-ring {
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-context-model > span,
+.xora-context-model small {
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+}
+
+.xora-context-model strong {
+    overflow: hidden;
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-context-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+    gap: 6px;
+    margin: 0;
+    padding: 0 12px 12px;
+}
+
+.xora-context-metrics > div {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    padding: 8px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 68%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--theia-editor-background) 45%, transparent);
+}
+
+.xora-context-metrics dt {
+    overflow: hidden;
+    color: var(--theia-descriptionForeground);
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-context-metrics dd {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    font-size: 12px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-context-disclaimer {
+    margin: 0;
+    padding: 9px 13px 11px;
+    border-top: 1px solid color-mix(in srgb, var(--theia-widget-border) 55%, transparent);
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    line-height: 1.5;
+}
+
+.xora-context-compaction-history {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 12px 10px;
+    padding: 7px 8px;
+    border-radius: 6px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-focusBorder) 8%, transparent);
+    font-size: 10px;
+}
+
+.xora-agent-contextbar {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 4px var(--xora-agent-pad);
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-sideBar-border) 45%, transparent);
+    background: color-mix(in srgb, var(--theia-sideBar-background) 88%, var(--theia-editor-background));
+}
+
+.xora-agent-context-control {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 4px;
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-agent-session-control {
+    flex: 1;
+}
+
+.xora-agent-context-control select {
+    min-width: 0;
+    max-width: 100%;
+    height: 26px;
+    padding: 0 18px 0 3px;
+    overflow: hidden;
+    color: var(--theia-foreground);
+    background: transparent;
+    border: 0;
+    font: inherit;
+    text-overflow: ellipsis;
+}
+
+.xora-agent-context-control select:focus-visible,
+.xora-composer-selectors select:focus-visible {
+    outline: 1px solid var(--theia-focusBorder);
+    outline-offset: 1px;
+}
+
+.xora-transcript {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 8px 0 20px;
+    scroll-behavior: auto;
+    scrollbar-gutter: stable;
+}
+
+.xora-pane-empty {
+    display: grid;
+    min-height: 260px;
+    place-content: center;
+    justify-items: center;
+    padding: 28px;
+    color: var(--theia-descriptionForeground);
+    text-align: center;
+}
+
+.xora-pane-empty > .codicon {
+    display: grid;
+    width: 36px;
+    height: 36px;
+    place-items: center;
+    margin-bottom: 10px;
+    border: 1px solid color-mix(in srgb, var(--theia-focusBorder) 28%, var(--theia-widget-border));
+    border-radius: 11px;
+    color: var(--theia-focusBorder);
+    background: color-mix(in srgb, var(--theia-focusBorder) 7%, transparent);
+    font-size: 17px;
+}
+
+.xora-pane-empty strong {
+    color: var(--theia-foreground);
+    font-size: 13px;
+}
+
+.xora-pane-empty p {
+    max-width: 320px;
+    margin: 6px 0 0;
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.xora-empty {
+    display: flex;
+    min-height: min(440px, 74%);
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    padding: 28px 24px;
+    text-align: center;
+}
+
+.xora-empty-mark {
+    display: grid;
+    width: 42px;
+    height: 42px;
+    place-items: center;
+    margin-bottom: 12px;
+    border: 1px solid color-mix(in srgb, var(--theia-button-background) 35%, var(--theia-widget-border));
+    border-radius: 13px;
+    color: var(--theia-button-background);
+    background: color-mix(in srgb, var(--theia-button-background) 8%, transparent);
+}
+
+.xora-empty-mark .codicon {
+    font-size: 19px;
+}
+
+.xora-empty-mark .xora-agent-brand-icon {
+    width: 25px;
+    height: 25px;
+    flex-basis: 25px;
+}
+
+.xora-empty h3 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -.15px;
+}
+
+.xora-empty p {
+    max-width: 350px;
+    margin: 7px 0 18px;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.xora-prompt-suggestions {
+    display: grid;
+    width: min(100%, 350px);
+    gap: 6px;
+}
+
+.xora-prompt-suggestions button {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) 16px;
+    align-items: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 7px 10px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 75%, transparent);
+    border-radius: 8px;
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 76%, transparent);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.xora-prompt-suggestions button:hover {
+    border-color: color-mix(in srgb, var(--theia-focusBorder) 55%, var(--theia-widget-border));
+    background: var(--theia-list-hoverBackground);
+    transform: translateY(-1px);
+}
+
+.xora-prompt-suggestions button > .codicon:last-child {
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-empty-settings {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 14px;
+    padding: 4px 7px;
+    border: 0;
+    color: var(--theia-textLink-foreground);
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.xora-empty-settings.is-connected {
+    color: var(--theia-testing-iconPassed);
+}
+
+.xora-trust-card {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 12px;
+    margin: 14px var(--xora-agent-pad);
+    padding: 14px;
+    border: 1px solid color-mix(in srgb, var(--theia-inputValidation-warningBorder) 70%, var(--theia-widget-border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--theia-inputValidation-warningBackground) 45%, var(--theia-editorWidget-background));
+}
+
+.xora-trust-icon {
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border-radius: 9px;
+    color: var(--theia-charts-yellow, #cca700);
+    background: color-mix(in srgb, var(--theia-charts-yellow, #cca700) 12%, transparent);
+}
+
+.xora-trust-card p {
+    margin: 5px 0 10px;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.xora-message {
+    position: relative;
+    margin: 2px var(--xora-agent-pad) 10px;
+    padding: 8px 2px;
+    font-size: var(--xora-agent-content-font-size);
+}
+
+.xora-message-user {
+    width: fit-content;
+    max-width: calc(100% - 48px);
+    margin-left: auto;
+    padding: 9px 11px;
+    border: 1px solid color-mix(in srgb, var(--theia-button-background) 18%, transparent);
+    border-radius: 12px 12px 4px 12px;
+    background: color-mix(in srgb, var(--theia-button-background) 11%, var(--theia-editorWidget-background));
+}
+
+.xora-message-header {
+    display: flex;
+    min-height: 18px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.xora-message-header button {
+    display: grid;
+    width: 24px;
+    height: 22px;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.xora-message:hover .xora-message-header button,
+.xora-message-header button:focus-visible {
+    opacity: 1;
+}
+
+.xora-message-header button:hover {
+    color: var(--theia-foreground);
+    background: var(--theia-toolbar-hoverBackground);
+}
+
+.xora-message-user .xora-message-header {
+    display: none;
+}
+
+.xora-message-text {
+    overflow-wrap: anywhere;
+    line-height: 1.58;
+    user-select: text;
+}
+
+.xora-message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin: 1px 0 6px;
+}
+
+.xora-message-attachment {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 7px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 72%, transparent);
+    border-radius: 7px;
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 82%, transparent);
+    font-size: 11px;
+}
+
+.xora-message-attachment > span:nth-child(2) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-message-attachment small {
+    flex: 0 0 auto;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+}
+
+.xora-retry-attachments {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 7px 0;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.xora-activity {
+    display: block;
+    margin: 4px var(--xora-agent-pad);
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 64%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 60%, transparent);
+    content-visibility: auto;
+    contain-intrinsic-size: auto 44px;
+}
+
+.xora-activity-summary {
+    display: grid;
+    grid-template-columns: 26px minmax(0, 1fr) auto 14px;
+    min-height: 42px;
+    box-sizing: border-box;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px;
+    color: var(--theia-descriptionForeground);
+    cursor: pointer;
+    list-style: none;
+}
+
+.xora-tool-icon {
+    --xora-tool-accent: var(--theia-icon-foreground, var(--theia-foreground));
+    display: inline-grid;
+    width: 25px;
+    height: 25px;
+    flex: 0 0 25px;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--xora-tool-accent) 26%, transparent);
+    border-radius: 7px;
+    color: var(--xora-tool-accent);
+    background: color-mix(in srgb, var(--xora-tool-accent) 8%, transparent);
+}
+
+.xora-tool-icon > .codicon {
+    font-size: 13px;
+}
+
+.tone-file { --xora-tool-accent: var(--theia-charts-blue, #3794ff); }
+.tone-file-write { --xora-tool-accent: var(--theia-gitDecoration-modifiedResourceForeground, #e2c08d); }
+.tone-danger { --xora-tool-accent: var(--theia-testing-iconFailed, #f14c4c); }
+.tone-search { --xora-tool-accent: var(--theia-charts-purple, #b180d7); }
+.tone-web { --xora-tool-accent: var(--theia-charts-blue, #3794ff); }
+.tone-terminal { --xora-tool-accent: var(--theia-terminal-ansiGreen, #89d185); }
+.tone-test { --xora-tool-accent: var(--theia-testing-iconPassed, #73c991); }
+.tone-skill { --xora-tool-accent: var(--theia-charts-purple, #b180d7); }
+.tone-mcp { --xora-tool-accent: var(--theia-charts-green, #89d185); }
+.tone-plugin { --xora-tool-accent: var(--theia-charts-magenta, #d670d6); }
+.tone-plan { --xora-tool-accent: var(--theia-charts-yellow, #cca700); }
+.tone-agent { --xora-tool-accent: var(--theia-focusBorder, #007fd4); }
+.tone-group { --xora-tool-accent: var(--theia-descriptionForeground); }
+.tone-other { --xora-tool-accent: var(--theia-descriptionForeground); }
+
+.xora-tool-copy,
+.xora-tool-group-copy {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+}
+
+.xora-tool-title-line {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+}
+
+.xora-tool-kind {
+    display: inline-flex;
+    width: fit-content;
+    min-height: 16px;
+    box-sizing: border-box;
+    align-items: center;
+    padding: 0 5px;
+    border: 1px solid color-mix(in srgb, var(--xora-tool-accent, var(--theia-widget-border)) 26%, var(--theia-widget-border));
+    border-radius: 999px;
+    color: color-mix(in srgb, var(--xora-tool-accent, var(--theia-foreground)) 76%, var(--theia-foreground));
+    background: color-mix(in srgb, var(--xora-tool-accent, var(--theia-foreground)) 7%, transparent);
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 14px;
+    white-space: nowrap;
+}
+
+.xora-tool-target {
+    overflow: hidden;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    line-height: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-tool-category-list {
+    display: flex;
+    min-width: 0;
+    gap: 4px;
+    overflow: hidden;
+}
+
+.xora-tool-category-list > span {
+    flex: 0 0 auto;
+    padding: 0 5px;
+    border-radius: 999px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-descriptionForeground) 8%, transparent);
+    font-size: 9px;
+    line-height: 15px;
+}
+
+.xora-activity-summary::-webkit-details-marker,
+.xora-inline-diff > summary::-webkit-details-marker {
+    display: none;
+}
+
+.xora-activity-title {
+    overflow: hidden;
+    color: var(--theia-foreground);
+    font-size: 12px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-activity-meta,
+.xora-tool-status {
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.xora-tool-status-running,
+.xora-tool-status-pending {
+    color: var(--theia-charts-yellow, #cca700);
+}
+
+.xora-tool-status-completed {
+    color: var(--theia-testing-iconPassed);
+}
+
+.xora-tool-status-failed,
+.xora-tool-status-rejected {
+    color: var(--theia-testing-iconFailed);
+}
+
+.xora-details-chevron {
+    transition: transform 120ms ease;
+}
+
+.xora-activity[open] > .xora-activity-summary .xora-details-chevron {
+    transform: rotate(90deg);
+}
+
+.xora-tool-group-body {
+    padding: 3px 5px 5px;
+    border-top: 1px solid color-mix(in srgb, var(--theia-widget-border) 55%, transparent);
+}
+
+.xora-tool-group-item {
+    margin: 3px 0;
+    border-color: transparent;
+    background: transparent;
+}
+
+.xora-tool-group-item:hover,
+.xora-tool-group-item[open] {
+    border-color: color-mix(in srgb, var(--theia-widget-border) 68%, transparent);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 74%, transparent);
+}
+
+.xora-tool-group-item .xora-activity-summary {
+    min-height: 38px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+}
+
+.xora-agent-markdown {
+    color: color-mix(in srgb, var(--theia-foreground) 94%, var(--theia-descriptionForeground));
+    white-space: normal;
+}
+
+.xora-agent-markdown > :first-child {
+    margin-top: 0;
+}
+
+.xora-agent-markdown > :last-child {
+    margin-bottom: 0;
+}
+
+.xora-agent-markdown-paragraph {
+    margin: 0 0 7px;
+}
+
+.xora-agent-markdown-heading {
+    margin: 13px 0 6px;
+    color: var(--theia-foreground);
+    font-size: 13px;
+    font-weight: 650;
+    line-height: 1.38;
+}
+
+.xora-agent-markdown h1.xora-agent-markdown-heading {
+    font-size: 15px;
+}
+
+.xora-agent-markdown-list {
+    margin: 4px 0 8px;
+    padding-left: 19px;
+}
+
+.xora-agent-markdown-list li {
+    margin: 2px 0;
+    padding-left: 1px;
+}
+
+.xora-agent-markdown-list li::marker {
+    color: color-mix(in srgb, var(--xora-agent-accent, var(--theia-focusBorder)) 72%, var(--theia-foreground));
+    font-size: .9em;
+}
+
+.xora-agent-markdown strong {
+    color: var(--theia-foreground);
+    font-weight: 650;
+}
+
+.xora-agent-markdown-inline-code {
+    padding: 1px 4px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 72%, transparent);
+    border-radius: 4px;
+    color: var(--theia-textPreformat-foreground);
+    background: var(--theia-textCodeBlock-background);
+    font-family: var(--theia-code-font-family);
+    font-size: .91em;
+}
+
+.xora-agent-markdown-code {
+    max-height: 340px;
+    overflow: auto;
+    margin: 6px 0 9px;
+    padding: 9px 10px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 72%, transparent);
+    border-radius: 7px;
+    color: var(--theia-editor-foreground);
+    background: var(--theia-textCodeBlock-background);
+    font-family: var(--theia-code-font-family);
+    font-size: 10.5px;
+    line-height: 1.55;
+    white-space: pre;
+    user-select: text;
+}
+
+.xora-agent-markdown-table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    margin: 6px 0 9px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 72%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 72%, transparent);
+}
+
+.xora-agent-markdown-table {
+    width: 100%;
+    min-width: max-content;
+    border-spacing: 0;
+    border-collapse: separate;
+    font-size: 11.5px;
+    line-height: 1.45;
+}
+
+.xora-agent-markdown-table th,
+.xora-agent-markdown-table td {
+    min-width: 72px;
+    padding: 6px 8px;
+    border-right: 1px solid color-mix(in srgb, var(--theia-widget-border) 58%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-widget-border) 58%, transparent);
+    text-align: left;
+    vertical-align: top;
+}
+
+.xora-agent-markdown-table th {
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-foreground) 5%, transparent);
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.xora-agent-markdown-table :is(th, td)[data-align='center'] {
+    text-align: center;
+}
+
+.xora-agent-markdown-table :is(th, td)[data-align='right'] {
+    text-align: right;
+}
+
+.xora-agent-markdown-table tr > :last-child {
+    border-right: 0;
+}
+
+.xora-agent-markdown-table tbody tr:last-child > td {
+    border-bottom: 0;
+}
+
+.xora-agent-markdown-code.is-streaming {
+    border-bottom-color: var(--theia-focusBorder);
+}
+
+.xora-activity-body {
+    padding: 2px 10px 10px 42px;
+    color: var(--theia-descriptionForeground);
+    font-size: 11.5px;
+    line-height: 1.5;
+}
+
+.xora-tool-technical-line {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 7px;
+    font-size: 10px;
+}
+
+.xora-tool-technical-line > span:first-child {
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-tool-technical-line code {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--theia-textPreformat-foreground);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-readonly-chip {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 0 5px;
+    border-radius: 999px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-descriptionForeground) 9%, transparent);
+    line-height: 15px;
+}
+
+.xora-activity-body pre,
+.xora-inline-diff pre,
+.xora-permission-card pre {
+    max-height: 260px;
+    box-sizing: border-box;
+    overflow: auto;
+    margin: 6px 0 0;
+    padding: 9px 10px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 70%, transparent);
+    border-radius: 6px;
+    color: var(--theia-editor-foreground);
+    background: var(--theia-textCodeBlock-background);
+    font-family: var(--theia-code-font-family);
+    font-size: 10.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.xora-tool-input > summary,
+.xora-inline-diff > summary {
+    width: fit-content;
+    color: var(--theia-textLink-foreground);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.xora-plan-list {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    padding: 2px 10px 10px 33px;
+    list-style: none;
+}
+
+.xora-plan-list li {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    align-items: start;
+    gap: 6px;
+    color: var(--theia-descriptionForeground);
+    line-height: 1.45;
+}
+
+.xora-plan-list .xora-plan-in-progress {
+    color: var(--theia-foreground);
+}
+
+.xora-plan-list .xora-plan-completed {
+    text-decoration: none;
+    opacity: .78;
+}
+
+.xora-plan-completed .codicon {
+    color: var(--theia-testing-iconPassed);
+}
+
+.xora-plan-failed .codicon {
+    color: var(--theia-testing-iconFailed);
+}
+
+.xora-permission-dock {
+    position: relative;
+    z-index: 2;
+    flex: 0 0 auto;
+    max-height: 42%;
+    overflow: auto;
+    padding: 0 var(--xora-agent-pad) 8px;
+    background: linear-gradient(to bottom, transparent, var(--theia-sideBar-background) 16px);
+}
+
+.xora-permission-card {
+    padding: 12px;
+    border: 1px solid var(--theia-inputValidation-warningBorder);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--theia-inputValidation-warningBackground) 56%, var(--theia-editorWidget-background));
+    box-shadow: 0 4px 18px color-mix(in srgb, #000 18%, transparent);
+}
+
+.xora-permission-card header {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+}
+
+.xora-permission-card header > .codicon {
+    color: var(--theia-charts-yellow, #cca700);
+    font-size: 17px;
+}
+
+.xora-permission-card header div {
+    display: grid;
+    gap: 2px;
+}
+
+.xora-permission-card header span {
+    overflow-wrap: anywhere;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.xora-permission-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.xora-permission-card header .xora-tool-kind {
+    color: color-mix(in srgb, var(--xora-tool-accent, var(--theia-foreground)) 76%, var(--theia-foreground));
+    font-size: 9px;
+    line-height: 14px;
+}
+
+.xora-permission-card header strong {
+    color: var(--theia-foreground);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.xora-permission-history {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 7px;
+    margin: 3px var(--xora-agent-pad);
+    padding: 5px 8px;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.xora-diff-card {
+    margin: 5px var(--xora-agent-pad);
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--theia-gitDecoration-modifiedResourceForeground) 30%, var(--theia-widget-border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--theia-gitDecoration-modifiedResourceForeground) 4%, var(--theia-editorWidget-background));
+    content-visibility: auto;
+    contain-intrinsic-size: auto 82px;
+    transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.xora-diff-card:hover {
+    border-color: color-mix(in srgb, var(--theia-gitDecoration-modifiedResourceForeground) 52%, var(--theia-widget-border));
+    background: color-mix(in srgb, var(--theia-gitDecoration-modifiedResourceForeground) 6%, var(--theia-editorWidget-background));
+    box-shadow: 0 3px 12px color-mix(in srgb, #000 8%, transparent);
+}
+
+.xora-diff-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 10px 8px;
+}
+
+.xora-diff-file-link {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    margin: -3px;
+    padding: 3px;
+    border: 0;
+    border-radius: 7px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.xora-diff-file-link:hover {
+    background: color-mix(in srgb, var(--theia-foreground) 5%, transparent);
+}
+
+.xora-diff-file-link:focus-visible {
+    outline: 1px solid var(--theia-focusBorder);
+    outline-offset: 1px;
+}
+
+.xora-diff-file-icon {
+    display: inline-flex;
+    width: 28px;
+    height: 28px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    color: var(--theia-gitDecoration-modifiedResourceForeground);
+    background: color-mix(in srgb, var(--theia-gitDecoration-modifiedResourceForeground) 12%, transparent);
+}
+
+.xora-diff-file-icon .codicon {
+    font-size: 15px;
+}
+
+.xora-diff-file-copy {
+    display: grid;
+    min-width: 0;
+    gap: 1px;
+}
+
+.xora-diff-file-copy strong,
+.xora-diff-file-copy > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-diff-file-copy strong {
+    color: var(--theia-foreground);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 17px;
+}
+
+.xora-diff-file-copy > span {
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    line-height: 14px;
+}
+
+.xora-diff-stats {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.xora-diff-stats b,
+.xora-diff-stats i {
+    min-width: 22px;
+    padding: 2px 5px;
+    border-radius: 999px;
+    font-style: normal;
+    font-weight: 600;
+    line-height: 16px;
+    text-align: center;
+}
+
+.xora-diff-stats b {
+    color: var(--theia-gitDecoration-addedResourceForeground, #81b88b);
+    background: color-mix(in srgb, var(--theia-gitDecoration-addedResourceForeground, #81b88b) 10%, transparent);
+}
+
+.xora-diff-stats i {
+    color: var(--theia-gitDecoration-deletedResourceForeground, #c74e39);
+    background: color-mix(in srgb, var(--theia-gitDecoration-deletedResourceForeground, #c74e39) 10%, transparent);
+}
+
+.xora-diff-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    min-height: 31px;
+    padding: 2px 7px 4px;
+    border-top: 1px solid color-mix(in srgb, var(--theia-widget-border) 46%, transparent);
+}
+
+.xora-diff-actions > button,
+.xora-diff-actions > .xora-inline-diff > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 26px;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 4px 7px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    font-size: 10.5px;
+    line-height: 18px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.xora-diff-actions > button:hover:not(:disabled),
+.xora-diff-actions > .xora-inline-diff > summary:hover {
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-foreground) 6%, transparent);
+}
+
+.xora-diff-actions > button:focus-visible,
+.xora-diff-actions > .xora-inline-diff > summary:focus-visible {
+    outline: 1px solid var(--theia-focusBorder);
+    outline-offset: -1px;
+}
+
+.xora-diff-actions > button:disabled {
+    opacity: .42;
+    cursor: default;
+}
+
+.xora-diff-actions > button .codicon,
+.xora-diff-actions > .xora-inline-diff > summary .codicon {
+    font-size: 12px;
+}
+
+.xora-diff-actions .xora-inline-diff {
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    background: transparent;
+}
+
+.xora-diff-actions .xora-inline-diff[open] {
+    flex: 1 0 100%;
+}
+
+.xora-diff-actions .xora-inline-diff > summary {
+    width: auto;
+    list-style: none;
+}
+
+.xora-diff-actions .xora-inline-diff > summary .xora-details-chevron {
+    transition: transform 120ms ease;
+}
+
+.xora-diff-actions .xora-inline-diff[open] > summary .xora-details-chevron {
+    transform: rotate(180deg);
+}
+
+.xora-diff-actions .xora-inline-diff > pre {
+    width: calc(100% - 4px);
+    max-height: 280px;
+    box-sizing: border-box;
+    margin: 3px 2px 5px;
+}
+
+@media (max-width: 380px) {
+    .xora-diff-header {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .xora-diff-stats {
+        margin-left: 36px;
+    }
+}
+
+.xora-changes-overview {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    margin: 4px var(--xora-agent-pad) 10px;
+    padding: 10px;
+    border: 1px solid color-mix(in srgb, var(--theia-gitDecoration-modifiedResourceForeground) 34%, var(--theia-widget-border));
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--theia-gitDecoration-modifiedResourceForeground) 6%, transparent);
+}
+
+.xora-changes-overview > div {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.xora-changes-overview strong {
+    font-size: 12px;
+}
+
+.xora-changes-overview > div > span {
+    overflow: hidden;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-change-stats {
+    display: inline-flex;
+    gap: 6px;
+    font-size: 10px;
+    font-style: normal;
+    white-space: nowrap;
+}
+
+.xora-change-stats b {
+    color: var(--theia-gitDecoration-addedResourceForeground, #81b88b);
+}
+
+.xora-change-stats i {
+    color: var(--theia-gitDecoration-deletedResourceForeground, #c74e39);
+    font-style: normal;
+}
+
+.xora-runtime-notice {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 7px;
+    margin: 8px var(--xora-agent-pad);
+    padding: 8px 9px;
+    border-radius: 7px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-editorInfo-foreground) 7%, transparent);
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.xora-history-window-notice {
+    margin: 5px var(--xora-agent-pad) 9px;
+    padding: 6px 9px;
+    border-radius: 6px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 72%, transparent);
+    font-size: 10px;
+    line-height: 1.4;
+    text-align: center;
+}
+
+.xora-jump-latest {
+    position: absolute;
+    z-index: 5;
+    right: 18px;
+    bottom: 122px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 9px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 999px;
+    color: var(--theia-foreground);
+    background: var(--theia-editorWidget-background);
+    box-shadow: 0 3px 12px color-mix(in srgb, #000 20%, transparent);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.xora-retry-card {
+    margin: 8px var(--xora-agent-pad);
+    padding: 10px;
+    border-radius: 8px;
+}
+
+.xora-composer {
+    flex: 0 0 auto;
+    padding: 8px var(--xora-agent-pad) 10px;
+    border-top: 0;
+    background: var(--theia-sideBar-background);
+}
+
+.xora-composer-surface {
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--theia-input-border) 80%, var(--theia-widget-border));
+    border-radius: 11px;
+    background: var(--theia-input-background);
+    box-shadow: 0 2px 10px color-mix(in srgb, #000 12%, transparent);
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.xora-composer-surface:focus-within {
+    border-color: var(--theia-focusBorder);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--theia-focusBorder) 35%, transparent), 0 3px 14px color-mix(in srgb, #000 15%, transparent);
+}
+
+.xora-image-file-input {
+    display: none;
+}
+
+.xora-composer-attachments {
+    display: flex;
+    gap: 7px;
+    overflow-x: auto;
+    padding: 9px 10px 1px;
+    scrollbar-width: thin;
+}
+
+.xora-composer-image {
+    position: relative;
+    width: 50px;
+    height: 50px;
+    flex: 0 0 50px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 82%, transparent);
+    border-radius: 8px;
+    background: var(--theia-editorWidget-background);
+}
+
+.xora-composer-image-preview {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: zoom-in;
+}
+
+.xora-composer-image-preview img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.xora-composer-image-remove {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    display: grid;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    place-items: center;
+    color: #fff;
+    background: color-mix(in srgb, #080b12 80%, transparent);
+    box-shadow: 0 1px 4px color-mix(in srgb, #000 40%, transparent);
+    cursor: pointer;
+}
+
+.xora-composer-image-remove .codicon {
+    font-size: 12px;
+}
+
+.xora-composer-image-reading {
+    display: grid;
+    place-items: center;
+    color: var(--theia-descriptionForeground);
+    border-style: dashed;
+}
+
+.xora-image-preview-scrim {
+    position: absolute;
+    z-index: 40;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background: color-mix(in srgb, #06080d 76%, transparent);
+}
+
+.xora-image-preview-dialog {
+    display: flex;
+    width: min(100%, 560px);
+    max-height: calc(100% - 24px);
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 12px;
+    background: var(--theia-editorWidget-background);
+    box-shadow: 0 18px 50px color-mix(in srgb, #000 48%, transparent);
+}
+
+.xora-image-preview-dialog > header {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 8px 6px 12px;
+    border-bottom: 1px solid var(--theia-widget-border);
+}
+
+.xora-image-preview-dialog > header > div {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.xora-image-preview-dialog > header strong,
+.xora-image-preview-dialog > header span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-image-preview-dialog > header span {
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.xora-image-preview-stage {
+    display: grid;
+    min-height: 160px;
+    flex: 1;
+    overflow: auto;
+    place-items: center;
+    padding: 12px;
+    background: repeating-conic-gradient(color-mix(in srgb, var(--theia-editor-background) 92%, #fff) 0 25%, var(--theia-editor-background) 0 50%) 50% / 16px 16px;
+}
+
+.xora-image-preview-stage img {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.xora-composer textarea {
+    display: block;
+    width: 100%;
+    min-height: 44px;
+    max-height: 160px;
+    box-sizing: border-box;
+    resize: none;
+    overflow-y: auto;
+    padding: 11px 12px 6px;
+    border: 0;
+    outline: 0;
+    color: var(--theia-input-foreground);
+    background: transparent;
+    font-family: var(--theia-ui-font-family);
+    font-size: 13.5px;
+    line-height: 1.5;
+}
+
+.xora-composer textarea::placeholder {
+    color: var(--theia-input-placeholderForeground);
+}
+
+.xora-composer-gate {
+    display: flex;
+    min-height: 26px;
+    box-sizing: border-box;
+    align-items: center;
+    gap: 6px;
+    margin: 0 8px 3px;
+    padding: 4px 7px;
+    border-radius: 7px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 72%, transparent);
+    font-size: 10.5px;
+    line-height: 1.35;
+}
+
+.xora-composer-gate > span:nth-child(2) {
+    min-width: 0;
+    flex: 1;
+}
+
+.xora-composer-gate > .codicon {
+    flex: 0 0 auto;
+    color: var(--theia-charts-yellow, #e7b45a);
+}
+
+.xora-composer-gate-runtime > .codicon,
+.xora-composer-gate-restore > .codicon {
+    animation: xora-runtime-pulse 1.25s ease-in-out infinite;
+}
+
+.xora-composer-gate button {
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 5px;
+    color: var(--theia-textLink-foreground);
+    background: transparent;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.xora-composer-gate button:hover {
+    background: color-mix(in srgb, var(--theia-focusBorder) 12%, transparent);
+}
+
+.xora-composer-actions {
+    display: flex;
+    min-height: 34px;
+    align-items: center;
+    gap: 7px;
+    margin: 0;
+    padding: 2px 5px 5px 8px;
+}
+
+.xora-composer-selectors {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: nowrap;
+}
+
+.xora-composer-selectors label {
+    display: flex;
+    min-width: 0;
+    max-width: none;
+    flex: 1 1 0;
+    align-items: center;
+    gap: 2px;
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-composer-selectors select {
+    min-width: 0;
+    max-width: 100%;
+    height: 26px;
+    padding: 0 15px 0 2px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 4px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    font-size: 11px;
+    text-overflow: ellipsis;
+}
+
+.xora-composer-selectors label:hover,
+.xora-composer-selectors select:hover:not(:disabled) {
+    color: var(--theia-foreground);
+}
+
+.xora-composer-tool {
+    display: grid;
+    width: 26px;
+    height: 26px;
+    flex: 0 0 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    place-items: center;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    cursor: pointer;
+}
+
+.xora-composer-tool:hover:not(:disabled) {
+    color: var(--theia-foreground);
+    background: var(--theia-toolbar-hoverBackground);
+}
+
+.xora-composer-tool:disabled {
+    opacity: .42;
+    cursor: default;
+}
+
+.xora-permission-mode-control.is-full-access,
+.xora-permission-mode-control.is-full-access select {
+    color: var(--theia-charts-orange, #d18616);
+}
+
+.xora-current-provider-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+}
+
+.xora-current-provider-copy {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+}
+
+.xora-current-provider-copy span {
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.xora-current-provider-card > label {
+    display: flex;
+    min-width: 210px;
+    align-items: center;
+    gap: 7px;
+    color: var(--theia-descriptionForeground);
+}
+
+.xora-current-provider-card select {
+    min-width: 0;
+    width: 100%;
+    height: 31px;
+    box-sizing: border-box;
+    padding: 4px 26px 4px 8px;
+    border: 1px solid var(--theia-input-border);
+    border-radius: 5px;
+    color: var(--theia-input-foreground);
+    background: var(--theia-input-background);
+}
+
+.xora-composer-hint {
+    flex: 0 0 auto;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.xora-image-live {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+.xora-composer-image-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 0 10px 8px;
+    color: var(--theia-inputValidation-warningForeground, var(--theia-charts-yellow, #cca700));
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.xora-composer-image-error .codicon {
+    margin-top: 2px;
+    flex: 0 0 auto;
+}
+
+.xora-composer-submit {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    color: var(--theia-button-foreground);
+    background: var(--theia-button-background);
+    cursor: pointer;
+}
+
+.xora-composer-submit:hover:not(:disabled) {
+    background: var(--theia-button-hoverBackground);
+}
+
+.xora-composer-submit:disabled {
+    color: var(--theia-disabledForeground);
+    background: color-mix(in srgb, var(--theia-button-background) 22%, transparent);
+    cursor: default;
+}
+
+.xora-composer-stop {
+    color: var(--theia-button-foreground);
+    background: var(--theia-inputValidation-errorBorder);
+}
+
+/* Settings workbench ------------------------------------------------------------ */
+
+.xora-agent-management {
+    container-type: inline-size;
+}
+
+.xora-management-root {
+    height: 100%;
+    box-sizing: border-box;
+    overflow: auto;
+    padding: 24px 28px 44px;
+    background: var(--theia-editor-background);
+}
+
+.xora-management-content {
+    max-width: 780px;
+    margin: 0 auto;
+}
+
+.xora-management-page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    padding-bottom: 14px;
+}
+
+.xora-management-page-header h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -.25px;
+}
+
+.xora-management-page-header p,
+.xora-management-section-heading p {
+    margin: 5px 0 0;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.xora-management-tabs {
+    display: flex;
+    gap: 2px;
+    margin: 0 0 20px;
+    padding: 3px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 72%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 65%, transparent);
+}
+
+.xora-management-tabs .theia-button {
+    min-width: 0;
+    flex: 1;
+    margin: 0;
+    padding: 5px 10px;
+    border: 0;
+    border-radius: 5px;
+    font-weight: 500;
+}
+
+.xora-management-tabs .theia-button.secondary {
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+}
+
+.xora-management-tabs .theia-button.secondary:hover {
+    color: var(--theia-foreground);
+    background: var(--theia-list-hoverBackground);
+}
+
+.xora-management-section-heading {
+    margin-bottom: 12px;
+}
+
+.xora-management-section-heading h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.xora-provider-list,
+.xora-integration-list {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+}
+
+.xora-management-root .xora-card {
+    margin: 0;
+    padding: 13px 14px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 75%, transparent);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 72%, transparent);
+}
+
+.xora-management-root .xora-message-warning {
+    margin-bottom: 8px;
+    color: var(--theia-inputValidation-warningForeground, var(--theia-charts-yellow, #cca700));
+    border-color: color-mix(in srgb, var(--theia-inputValidation-warningBorder) 72%, var(--theia-widget-border));
+    background: color-mix(in srgb, var(--theia-inputValidation-warningBackground) 42%, var(--theia-editorWidget-background));
+}
+
+.xora-management-root details.xora-card > summary {
+    cursor: pointer;
+    line-height: 1.55;
+}
+
+.xora-management-root details.xora-card[open] > summary {
+    margin-bottom: 11px;
+}
+
+.xora-provider-card > div:first-child {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.xora-provider-card > p,
+.xora-provider-edit-hint,
+.xora-provider-models,
+.xora-provider-form > p {
+    margin: 7px 0 0;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.xora-provider-form form,
+form.xora-provider-form,
+.xora-provider-edit-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    margin-top: 11px;
+}
+
+.xora-provider-form label,
+.xora-provider-edit-form label,
+.xora-provider-key-form label {
+    display: grid;
+    gap: 5px;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+}
+
+.xora-provider-form input,
+.xora-provider-form select,
+.xora-provider-form textarea,
+.xora-provider-edit-form input,
+.xora-provider-edit-form select,
+.xora-provider-key-form input {
+    min-height: 30px;
+    box-sizing: border-box;
+    padding: 5px 7px;
+    border-radius: 5px;
+}
+
+.xora-provider-form textarea {
+    min-height: 64px;
+    resize: vertical;
+}
+
+.xora-provider-key-form {
+    display: grid;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.xora-provider-field-wide,
+.xora-xai-provider-form .xora-provider-field-wide {
+    grid-column: 1 / -1;
+}
+
+.xora-provider-security-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin: 1px 0 0;
+    padding: 9px 10px;
+    border: 1px solid color-mix(in srgb, var(--theia-charts-yellow, #cca700) 34%, var(--theia-widget-border));
+    border-radius: 6px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-charts-yellow, #cca700) 7%, transparent);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.xora-provider-security-note .codicon {
+    flex: 0 0 auto;
+    margin-top: 2px;
+    color: var(--theia-charts-yellow, #cca700);
+}
+
+.xora-provider-card-actions,
+.xora-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.xora-management-root .theia-button {
+    margin: 0;
+}
+
+.xora-status-badge {
+    padding: 1px 7px;
+    font-size: 10px;
+    line-height: 17px;
+}
+
+.xora-integration-card {
+    padding: 12px 14px;
+}
+
+.xora-integration-header {
+    margin-bottom: 8px;
+}
+
+.xora-integration-header strong {
+    font-size: 13px;
+}
+
+.xora-integration-fields {
+    gap: 4px 12px;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.xora-raw-details {
+    margin-top: 9px;
+    font-size: 11px;
+}
+
+.xora-management-json {
+    max-height: 280px;
+    padding: 10px;
+    font-size: 11px;
+}
+
+@container (max-width: 500px) {
+    .xora-composer-hint {
+        display: none;
+    }
+
+    .xora-current-provider-card {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .xora-current-provider-card > label {
+        min-width: 0;
+    }
+}
+
+@container (max-width: 410px) {
+    .xora-agent-root {
+        --xora-agent-pad: 9px;
+    }
+
+    .xora-agent-heading-icon {
+        display: none;
+    }
+
+    .xora-agent-popover {
+        right: 6px;
+        left: 6px;
+    }
+
+    .xora-context-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .xora-agent-contextbar {
+        flex-wrap: wrap;
+    }
+
+    .xora-agent-context-control {
+        flex: 1 1 100%;
+    }
+
+    .xora-empty {
+        padding-left: 16px;
+        padding-right: 16px;
+    }
+
+    .xora-composer-selectors label > .codicon {
+        display: none;
+    }
+
+    .xora-composer-actions {
+        align-items: center;
+    }
+
+    .xora-composer-selectors {
+        flex-wrap: nowrap;
+    }
+
+    .xora-composer-image {
+        width: 44px;
+        height: 44px;
+        flex-basis: 44px;
+    }
+
+    .xora-composer-selectors select {
+        width: 100%;
+    }
+
+    .xora-activity-summary {
+        grid-template-columns: 25px minmax(0, 1fr) auto 12px;
+        gap: 6px;
+        padding-right: 7px;
+        padding-left: 7px;
+    }
+
+    .xora-tool-target {
+        display: none;
+    }
+
+    .xora-tool-group .xora-activity-meta {
+        display: none;
+    }
+
+    .xora-tool-title-line {
+        gap: 4px;
+    }
+
+    .xora-activity-body {
+        padding-left: 38px;
+    }
+
+    .xora-changes-overview {
+        grid-template-columns: 26px minmax(0, 1fr);
+    }
+
+    .xora-changes-overview .xora-change-stats {
+        grid-column: 2;
+    }
+
+    .xora-permission-card .xora-card-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@container (max-width: 640px) {
+    .xora-management-root {
+        padding: 18px 16px 36px;
+    }
+
+    .xora-management-page-header {
+        align-items: center;
+    }
+
+    .xora-management-tabs {
+        overflow-x: auto;
+    }
+
+    .xora-management-tabs .theia-button {
+        flex: 0 0 auto;
+    }
+
+    .xora-provider-form form,
+    form.xora-provider-form,
+    .xora-provider-edit-form {
+        grid-template-columns: 1fr;
+    }
+
+    .xora-integration-fields {
+        grid-template-columns: 1fr;
+        gap: 2px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .xora-transcript {
+        scroll-behavior: auto;
+    }
+
+    .xora-prompt-suggestions button,
+    .xora-details-chevron,
+    .xora-composer-surface {
+        transition: none;
+    }
+}
+
+/* Xora Agent signature -------------------------------------------------------
+   These final overrides intentionally form one stable product layer above the
+   legacy workbench rules while the stylesheet is split in a later refactor. */
+
+.xora-agent-root {
+    --xora-agent-accent: var(--xora-cyan, #62d6ff);
+    --xora-agent-accent-secondary: var(--xora-violet, #8c7cff);
+    background:
+        radial-gradient(circle at 88% -8%, color-mix(in srgb, var(--xora-agent-accent-secondary) 7%, transparent), transparent 31%),
+        var(--theia-sideBar-background);
+}
+
+.xora-agent-header {
+    min-height: 56px;
+    border-bottom-color: color-mix(in srgb, var(--xora-agent-accent) 13%, var(--theia-sideBar-border));
+    background: color-mix(in srgb, var(--theia-sideBar-background) 97%, var(--xora-agent-accent-secondary));
+    backdrop-filter: none;
+}
+
+.xora-agent-streaming-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    line-height: 1.58;
+}
+
+.xora-agent-heading-icon,
+.xora-empty-mark {
+    background:
+        radial-gradient(circle at 28% 18%, color-mix(in srgb, var(--xora-agent-accent) 42%, transparent), transparent 38%),
+        linear-gradient(145deg, #17213a, #0b0d12 74%);
+    box-shadow:
+        inset 0 0 0 1px color-mix(in srgb, var(--xora-agent-accent) 28%, transparent),
+        0 8px 22px color-mix(in srgb, var(--xora-agent-accent-secondary) 16%, transparent);
+}
+
+.xora-runtime-ready {
+    background: var(--xora-mint, #4fd1a8);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--xora-mint, #4fd1a8) 13%, transparent);
+}
+
+.xora-agent-pane-tabs {
+    gap: 3px;
+    margin: 5px var(--xora-agent-pad) 4px;
+    padding: 3px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 58%, transparent);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 58%, transparent);
+}
+
+.xora-agent-pane-tabs button {
+    min-height: 29px;
+    border-radius: 6px;
+}
+
+.xora-agent-pane-tabs button::after {
+    display: none;
+}
+
+.xora-agent-pane-tabs button:hover {
+    background: color-mix(in srgb, var(--theia-foreground) 5%, transparent);
+}
+
+.xora-agent-pane-tabs button.active {
+    color: var(--theia-foreground);
+    background:
+        linear-gradient(135deg, color-mix(in srgb, var(--xora-agent-accent) 10%, transparent), color-mix(in srgb, var(--xora-agent-accent-secondary) 9%, transparent)),
+        var(--theia-input-background);
+    box-shadow: 0 1px 5px color-mix(in srgb, #000 12%, transparent);
+}
+
+.xora-transcript {
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--xora-agent-accent-secondary) 2.5%, transparent), transparent 150px);
+}
+
+.xora-prompt-suggestions button,
+.xora-activity,
+.xora-inline-diff,
+.xora-permission-card,
+.xora-runtime-notice {
+    border-color: color-mix(in srgb, var(--theia-widget-border) 68%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 62%, transparent);
+}
+
+.xora-prompt-suggestions button:hover,
+.xora-activity:hover {
+    border-color: color-mix(in srgb, var(--xora-agent-accent) 34%, var(--theia-widget-border));
+    background: color-mix(in srgb, var(--xora-agent-accent) 5%, var(--theia-editorWidget-background));
+}
+
+.xora-composer {
+    padding-top: 7px;
+    background:
+        linear-gradient(180deg, transparent, color-mix(in srgb, var(--theia-sideBar-background) 95%, transparent) 14px),
+        transparent;
+}
+
+.xora-composer-surface {
+    border-color: color-mix(in srgb, var(--theia-input-border) 62%, var(--xora-agent-accent-secondary));
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--theia-input-background) 94%, var(--xora-agent-accent-secondary));
+    box-shadow: 0 7px 24px color-mix(in srgb, #000 17%, transparent);
+}
+
+.xora-composer-surface:focus-within {
+    border-color: color-mix(in srgb, var(--xora-agent-accent) 70%, var(--xora-agent-accent-secondary));
+    box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--xora-agent-accent) 19%, transparent),
+        0 9px 28px color-mix(in srgb, var(--xora-agent-accent-secondary) 15%, #000 13%);
+}
+
+.xora-composer textarea {
+    min-height: 48px;
+    padding: 12px 13px 7px;
+    caret-color: var(--xora-agent-accent);
+}
+
+.xora-composer-submit {
+    border-radius: 9px;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--xora-agent-accent) 78%, #2465d8), var(--xora-agent-accent-secondary));
+    box-shadow: 0 5px 14px color-mix(in srgb, var(--xora-agent-accent-secondary) 22%, transparent);
+}
+
+.xora-composer-submit:hover:not(:disabled) {
+    filter: brightness(1.08);
+    background: linear-gradient(135deg, var(--xora-agent-accent), var(--xora-agent-accent-secondary));
+}
+
+.xora-composer-submit:disabled {
+    box-shadow: none;
+    filter: saturate(.35);
+}
+
+.xora-composer-stop {
+    background: var(--xora-danger, #ff6b7a);
+}
+
+.xora-empty-settings.is-connected {
+    color: var(--xora-mint, #4fd1a8);
+}
+
+.xora-management-root {
+    background:
+        radial-gradient(circle at 88% -10%, color-mix(in srgb, var(--xora-violet, #8c7cff) 6%, transparent), transparent 35%),
+        var(--theia-editor-background);
+}
+
+.xora-management-tabs {
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 72%, transparent);
+}
+
+.xora-management-root .xora-card {
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 76%, transparent);
+}

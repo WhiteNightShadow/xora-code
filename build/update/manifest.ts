@@ -15,7 +15,7 @@ export interface SidecarArtifact {
 
 export interface SidecarManifestPayload {
   schemaVersion: 1;
-  product: "whitenight-grok-sidecar";
+  product: "xora-grok-sidecar";
   sequence: number;
   channel: "stable" | "beta" | "nightly";
   version: string;
@@ -176,7 +176,7 @@ export function isAppVersionCompatible(
 export function validateSidecarManifestPayload(input: unknown): SidecarManifestPayload {
   assertObject(input, "$manifest.payload");
   if (input.schemaVersion !== 1) throw new Error("manifest payload schemaVersion must be 1");
-  if (input.product !== "whitenight-grok-sidecar") throw new Error("unexpected manifest product");
+  if (input.product !== "xora-grok-sidecar") throw new Error("unexpected manifest product");
   if (!Number.isSafeInteger(input.sequence) || Number(input.sequence) < 1) {
     throw new Error("manifest sequence must be a positive safe integer");
   }
@@ -261,7 +261,7 @@ export function validateSidecarManifestPayload(input: unknown): SidecarManifestP
 
   return {
     schemaVersion: 1,
-    product: "whitenight-grok-sidecar",
+    product: "xora-grok-sidecar",
     sequence: Number(input.sequence),
     channel: input.channel,
     version: input.version,

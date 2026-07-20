@@ -1,0 +1,52 @@
+{
+  "private": true,
+  "name": "@xora-code/agent",
+  "version": "0.1.0",
+  "description": "Xora Code ACP agent workbench",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@theia/core": "1.73.1",
+    "@theia/editor": "1.73.1",
+    "@theia/electron": "1.73.1",
+    "@theia/filesystem": "1.73.1",
+    "@theia/navigator": "1.73.1",
+    "@theia/toolbar": "1.73.1",
+    "@theia/workspace": "1.73.1",
+    "@xora-code/acp-client": "0.1.0",
+    "@xora-code/runtime-core": "0.1.0",
+    "@xora-code/update-build-tools": "0.1.0",
+    "smol-toml": "1.6.1"
+  },
+  "devDependencies": {
+    "rimraf": "2.7.1",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "react": "18.3.1"
+  },
+  "theiaExtensions": [
+    {
+      "frontend": "lib/browser/agent-frontend-module",
+      "backend": "lib/node/agent-backend-module",
+      "electronMain": "lib/electron-main/agent-main-module"
+    },
+    {
+      "frontendElectron": "lib/electron-browser/agent-electron-frontend-module"
+    }
+  ],
+  "files": [
+    "lib",
+    "src"
+  ],
+  "scripts": {
+    "clean": "rimraf lib *.tsbuildinfo",
+    "build": "tsc -b",
+    "pretest": "yarn build",
+    "test": "node --test test/*.test.cjs"
+  },
+  "keywords": [
+    "theia-extension",
+    "acp",
+    "coding-agent"
+  ]
+}

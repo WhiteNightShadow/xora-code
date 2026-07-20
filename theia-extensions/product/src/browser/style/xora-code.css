@@ -1,0 +1,662 @@
+/* Xora Visual Language 1.0 ---------------------------------------------------
+   Quiet shell, luminous Agent. The editor remains a high-density work surface;
+   product identity lives in navigation, focus, status and Agent surfaces. */
+
+:root {
+    --xora-cyan: #62d6ff;
+    --xora-violet: #8c7cff;
+    --xora-mint: #4fd1a8;
+    --xora-amber: #e7b45a;
+    --xora-danger: #ff6b7a;
+    --xora-radius-sm: 6px;
+    --xora-radius-md: 10px;
+    --xora-radius-lg: 14px;
+    --xora-shell-line: color-mix(in srgb, var(--theia-foreground) 9%, transparent);
+    --xora-shell-raised: color-mix(in srgb, var(--theia-editorWidget-background) 84%, var(--theia-editor-background));
+    --xora-shell-muted: color-mix(in srgb, var(--theia-sideBar-background) 88%, var(--theia-editor-background));
+}
+
+/* Theia's default preload veil waits 800 ms after the workbench is already
+   laid out. Preserve a short visual handoff without making startup feel stuck. */
+body.xora-compact-workbench .theia-preload {
+    transition-duration: 120ms;
+}
+
+.theia-ApplicationShell {
+    background:
+        radial-gradient(circle at 92% 0%, color-mix(in srgb, var(--xora-violet) 5%, transparent), transparent 32%),
+        var(--theia-editor-background);
+}
+
+#theia-top-panel {
+    border-bottom-color: var(--xora-shell-line);
+    background: color-mix(in srgb, var(--theia-titleBar-activeBackground) 90%, var(--theia-editor-background));
+    backdrop-filter: blur(16px) saturate(115%);
+}
+
+#main-toolbar {
+    border-bottom-color: var(--xora-shell-line);
+    background:
+        linear-gradient(90deg, color-mix(in srgb, var(--xora-cyan) 3%, transparent), color-mix(in srgb, var(--xora-violet) 4%, transparent)),
+        color-mix(in srgb, var(--theia-mainToolbar-background) 94%, var(--theia-editor-background));
+}
+
+/* The Electron workbench owns the title-bar surface. On macOS the web content
+   runs underneath the hidden native title bar and leaves room for traffic
+   lights. Windows/Linux use Theia's built-in frameless controls above it. */
+body.xora-electron-frameless #main-toolbar {
+    -webkit-app-region: drag;
+    app-region: drag;
+    border-bottom-color: transparent;
+}
+
+body.xora-electron-frameless #main-toolbar :is(
+    .toolbar-item,
+    button,
+    input,
+    textarea,
+    select,
+    a,
+    [role='button'],
+    [contenteditable='true'],
+    .theia-progress-bar-container
+) {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+
+body.xora-electron-frameless.xora-platform-darwin #main-toolbar {
+    min-height: 36px;
+    padding-left: 82px;
+}
+
+/* Frameless windows use the title surfaces that are already present instead
+   of placing a transparent overlay above the workbench. The unused part of an
+   editor tab row and both side-panel titles are generous drag targets, while
+   every actionable control remains clickable. */
+body.xora-electron-frameless :is(
+    .theia-sidepanel-toolbar,
+    #theia-main-content-panel .lm-TabBar
+) {
+    -webkit-app-region: drag;
+    app-region: drag;
+    user-select: none;
+}
+
+body.xora-electron-frameless :is(
+    .theia-sidepanel-toolbar,
+    #theia-main-content-panel .lm-TabBar
+) :is(
+    .lm-TabBar-tab,
+    .lm-TabBar-toolbar,
+    button,
+    input,
+    textarea,
+    select,
+    a,
+    [role='button'],
+    [contenteditable='true']
+) {
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+
+/* An empty editor dock has no tab bar. Its top edge is otherwise the largest
+   blank area in a fresh window, so expose just that edge as a drag surface. */
+body.xora-electron-frameless #theia-main-content-panel:not(:has(.lm-TabBar))::before {
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 32px;
+    content: '';
+    -webkit-app-region: drag;
+    app-region: drag;
+}
+
+/* hiddenInset places macOS traffic lights over the web content. Reserve their
+   native safe inset in the Explorer title so neither its label nor actions sit
+   underneath the controls. The right Agent title is unaffected. */
+body.xora-electron-frameless.xora-platform-darwin .theia-sidepanel-toolbar.theia-left-side-panel {
+    box-sizing: border-box;
+    min-height: 32px;
+}
+
+body.xora-electron-frameless.xora-platform-darwin .theia-sidepanel-toolbar.theia-left-side-panel .theia-sidepanel-title {
+    margin-left: 70px;
+}
+
+body.xora-electron-frameless.xora-platform-darwin:has(#theia-left-content-panel.theia-mod-collapsed) #theia-main-content-panel .lm-TabBar {
+    padding-left: 70px;
+}
+
+body.xora-electron-frameless:not(.xora-platform-darwin) #theia-top-panel {
+    border-bottom-color: transparent;
+    box-shadow: inset 0 -1px 0 var(--xora-shell-line);
+}
+
+body.xora-electron-frameless #window-controls .control-button {
+    transition: background-color 100ms ease, color 100ms ease;
+}
+
+/* Compact desktop workbench -------------------------------------------------
+   Remove secondary IDE chrome without removing the surfaces people work in:
+   project tree, editors, the terminal panel and the fixed Agent stay intact.
+   macOS keeps one visually merged safe row for traffic lights; Windows/Linux
+   keep only native-equivalent window controls and the invisible drag target. */
+body.xora-compact-workbench.xora-electron-frameless #theia-top-panel {
+    border: 0;
+    box-shadow: none;
+    background: var(--theia-editor-background);
+    backdrop-filter: none;
+}
+
+body.xora-compact-workbench.xora-electron-frameless:not(.xora-platform-darwin) #theia-top-panel {
+    min-height: 30px;
+}
+
+body.xora-compact-workbench.xora-electron-frameless:not(.xora-platform-darwin) #theia-top-panel > :not(#theia-drag-panel):not(#window-controls) {
+    display: none !important;
+}
+
+body.xora-compact-workbench.xora-electron-frameless:not(.xora-platform-darwin) #main-toolbar {
+    display: none !important;
+    min-height: 0 !important;
+    height: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+}
+
+body.xora-compact-workbench.xora-electron-frameless.xora-platform-darwin #main-toolbar {
+    display: flex !important;
+    min-height: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    background: var(--theia-editor-background);
+}
+
+body.xora-compact-workbench.xora-electron-frameless.xora-platform-darwin #main-toolbar > *,
+body.xora-compact-workbench.xora-electron-frameless.xora-platform-darwin #main-toolbar::before,
+body.xora-compact-workbench.xora-electron-frameless.xora-platform-darwin #main-toolbar::after {
+    display: none !important;
+}
+
+/* Hide only the activity rail. The adjacent project tree remains mounted and
+   retains its saved width, selection, context menus and resize sash. */
+body.xora-compact-workbench.xora-electron-frameless #theia-left-content-panel > .theia-app-sidebar-container {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    overflow: hidden;
+    border: 0;
+}
+
+body.xora-compact-workbench.xora-electron-frameless #theia-left-content-panel.theia-mod-collapsed {
+    max-width: 0;
+}
+
+/* The bottom terminal/output dock is intentionally untouched. Only the thin
+   status strip is removed. */
+body.xora-compact-workbench.xora-electron-frameless #theia-statusBar,
+body.xora-compact-workbench.xora-electron-frameless.theia-no-open-workspace #theia-statusBar {
+    display: none !important;
+    min-height: 0 !important;
+    height: 0 !important;
+    border: 0 !important;
+}
+
+#main-toolbar::before {
+    position: absolute;
+    z-index: 0;
+    top: 50%;
+    left: 50%;
+    padding-left: 20px;
+    transform: translate(-50%, -50%);
+    content: 'Xora Code';
+    color: color-mix(in srgb, var(--theia-mainToolbar-foreground) 84%, transparent);
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: .02em;
+    pointer-events: none;
+}
+
+#main-toolbar::after {
+    position: absolute;
+    z-index: 0;
+    top: 50%;
+    left: calc(50% - 39px);
+    width: 14px;
+    height: 14px;
+    transform: translateY(-50%);
+    content: '';
+    background: linear-gradient(135deg, var(--xora-cyan), var(--xora-violet));
+    -webkit-mask: url('./xora-mark.svg') center / contain no-repeat;
+    mask: url('./xora-mark.svg') center / contain no-repeat;
+    pointer-events: none;
+}
+
+#main-toolbar .toolbar-wrapper {
+    position: relative;
+    z-index: 1;
+}
+
+.theia-app-sidebar-container,
+.lm-Widget.theia-sidebar-menu,
+.lm-Widget.theia-sidebar-menu i {
+    background: var(--xora-shell-muted);
+}
+
+.lm-TabBar.theia-app-sides {
+    padding-top: 5px;
+    color: color-mix(in srgb, var(--theia-activityBar-inactiveForeground) 82%, transparent);
+}
+
+.lm-TabBar.theia-app-sides .lm-TabBar-tab {
+    min-height: 40px;
+    height: 40px;
+    margin: 2px 5px;
+    border-radius: var(--xora-radius-md);
+    transition: color 120ms ease, background-color 120ms ease, transform 120ms ease;
+}
+
+.lm-TabBar.theia-app-sides .lm-TabBar-tab:hover {
+    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--theia-foreground) 7%, transparent);
+}
+
+.lm-TabBar.theia-app-sides .lm-TabBar-tab.lm-mod-current {
+    box-shadow: none;
+    color: var(--theia-foreground);
+    background:
+        linear-gradient(135deg, color-mix(in srgb, var(--xora-cyan) 15%, transparent), color-mix(in srgb, var(--xora-violet) 14%, transparent)),
+        var(--xora-shell-raised);
+}
+
+.lm-TabBar.theia-app-sides .lm-TabBar-tab.lm-mod-current::after {
+    position: absolute;
+    right: 5px;
+    bottom: 5px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    content: '';
+    background: var(--xora-cyan);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--xora-cyan) 78%, transparent);
+}
+
+#theia-left-content-panel > .lm-Panel,
+#theia-right-content-panel > .lm-Panel {
+    border-color: var(--xora-shell-line);
+}
+
+.theia-side-panel {
+    background: var(--xora-shell-muted);
+}
+
+.theia-sidepanel-toolbar,
+.theia-side-panel .lm-TabBar.theia-app-centers {
+    background: color-mix(in srgb, var(--xora-shell-muted) 88%, transparent);
+}
+
+/* Xora Code is a permanent product surface rather than a collapsible Theia
+   auxiliary view. Keep its human title casing and remove the redundant right
+   activity rail while preserving the resize sash and saved panel width. */
+#theia-right-content-panel.xora-agent-fixed-panel .theia-sidepanel-title {
+    text-transform: none;
+    letter-spacing: .01em;
+}
+
+#theia-right-content-panel.xora-agent-fixed-panel > .theia-app-sidebar-container {
+    width: 0;
+    min-width: 0;
+    max-width: 0;
+    overflow: hidden;
+    border: 0;
+}
+
+#theia-main-content-panel .lm-TabBar.theia-app-centers {
+    min-height: 37px;
+    background: color-mix(in srgb, var(--theia-editorGroupHeader-tabsBackground) 90%, var(--theia-editor-background));
+}
+
+#theia-main-content-panel .lm-TabBar .lm-TabBar-tab {
+    position: relative;
+    border-right-color: transparent;
+    background: transparent;
+}
+
+#theia-main-content-panel .lm-TabBar .lm-TabBar-tab.lm-mod-current {
+    color: var(--theia-tab-activeForeground);
+    background: var(--theia-editor-background);
+}
+
+#theia-main-content-panel .lm-TabBar .lm-TabBar-tab.lm-mod-current::after {
+    position: absolute;
+    right: 22%;
+    bottom: 0;
+    left: 22%;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    content: '';
+    background: linear-gradient(90deg, var(--xora-cyan), var(--xora-violet));
+}
+
+#theia-statusBar,
+body.theia-no-open-workspace #theia-statusBar {
+    min-height: 24px;
+    border-top-color: var(--xora-shell-line);
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-editor-background) 90%, #111827);
+}
+
+#theia-statusBar .area .element {
+    color: color-mix(in srgb, var(--theia-foreground) 76%, transparent);
+}
+
+#theia-statusBar .area .element.hasCommand:hover {
+    border-radius: 4px;
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--xora-cyan) 10%, transparent);
+}
+
+.lm-Menu,
+.theia-menu,
+.theia-quick-pick-widget,
+.theia-dialog {
+    border-color: var(--xora-shell-line);
+    border-radius: var(--xora-radius-md);
+    box-shadow: 0 16px 44px color-mix(in srgb, #000 32%, transparent);
+}
+
+.theia-button.main {
+    border-radius: var(--xora-radius-sm);
+    background: color-mix(in srgb, var(--theia-button-background) 78%, var(--xora-violet));
+}
+
+.theia-button.main:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--theia-button-hoverBackground) 72%, var(--xora-cyan));
+}
+
+.theia-input,
+.theia-select-component,
+input.theia-input,
+textarea.theia-input {
+    border-radius: var(--xora-radius-sm);
+}
+
+.xora-code-welcome {
+    color: var(--theia-foreground);
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--theia-focusBorder) 5%, transparent), transparent 180px),
+        var(--theia-editor-background);
+    overflow: auto;
+}
+
+.xora-code-welcome__content {
+    box-sizing: border-box;
+    width: min(1080px, 100%);
+    min-height: 100%;
+    margin: 0 auto;
+    padding: clamp(20px, 3.5vh, 34px) clamp(20px, 4vw, 40px) 28px;
+    text-align: center;
+}
+
+.xora-code-welcome__mark {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    margin: 0 auto 10px;
+    border: 1px solid color-mix(in srgb, #72d8ff 45%, transparent);
+    border-radius: 12px;
+    background:
+        radial-gradient(circle at 30% 18%, color-mix(in srgb, var(--xora-cyan) 36%, transparent), transparent 38%),
+        linear-gradient(145deg, #12182a, #0b0d12 72%);
+    box-shadow: 0 10px 30px color-mix(in srgb, var(--xora-violet) 17%, transparent);
+}
+
+.xora-code-welcome__mark::before {
+    width: 31px;
+    height: 31px;
+    content: '';
+    background: linear-gradient(135deg, #f8fafc 28%, var(--xora-cyan) 62%, var(--xora-violet));
+    -webkit-mask: url('./xora-mark.svg') center / contain no-repeat;
+    mask: url('./xora-mark.svg') center / contain no-repeat;
+}
+
+.xora-code-welcome__eyebrow {
+    margin: 0 0 4px;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .14em;
+}
+
+.xora-code-welcome h1 {
+    margin: 0;
+    font-size: clamp(26px, 4vw, 34px);
+    font-weight: 650;
+    letter-spacing: -.035em;
+}
+
+.xora-code-welcome__lead {
+    max-width: 680px;
+    margin: 8px auto 16px;
+    color: var(--theia-descriptionForeground);
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+.xora-code-welcome__section {
+    margin-top: 12px;
+    padding: 14px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 94%, transparent);
+    text-align: left;
+}
+
+.xora-code-welcome__section-heading {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.xora-code-welcome__section-heading > span {
+    display: grid;
+    flex: 0 0 24px;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    color: var(--theia-button-foreground);
+    background: var(--theia-button-background);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.xora-code-welcome__section-heading h2 {
+    margin: 0 0 2px;
+    font-size: 14px;
+}
+
+.xora-code-welcome__section-heading p {
+    margin: 0;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.xora-code-welcome__actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 10px;
+}
+
+.xora-code-welcome__provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 10px;
+}
+
+.xora-code-welcome__provider-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-width: 0;
+    min-height: 150px;
+    padding: 13px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 9px;
+    background: var(--theia-input-background);
+}
+
+.xora-code-welcome__provider-card--featured {
+    border-color: color-mix(in srgb, var(--theia-button-background) 70%, var(--theia-widget-border));
+    background: color-mix(in srgb, var(--theia-button-background) 9%, var(--theia-input-background));
+}
+
+.xora-code-welcome__provider-kicker {
+    color: var(--theia-focusBorder);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .08em;
+}
+
+.xora-code-welcome__provider-card h3 {
+    margin: 5px 0;
+    font-size: 14px;
+}
+
+.xora-code-welcome__provider-card p {
+    margin: 0 0 10px;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.xora-code-welcome__provider-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.xora-code-welcome__key-form {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.xora-code-welcome__key-form label {
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.xora-code-welcome__key-form input {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--theia-input-border, var(--theia-widget-border));
+    border-radius: 5px;
+    color: var(--theia-input-foreground);
+    background: var(--theia-input-background);
+}
+
+.xora-code-welcome__key-form input:focus {
+    border-color: var(--theia-focusBorder);
+    outline: none;
+}
+
+.xora-code-welcome__error {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--theia-inputValidation-errorBorder);
+    border-radius: 7px;
+    color: var(--theia-errorForeground);
+    background: var(--theia-inputValidation-errorBackground);
+    font-size: 12px;
+}
+
+.xora-code-welcome__action {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 64px;
+    padding: 12px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 9px;
+    color: var(--theia-foreground);
+    background: var(--theia-input-background);
+    text-align: left;
+    cursor: pointer;
+}
+
+.xora-code-welcome__action:hover {
+    border-color: var(--theia-focusBorder);
+    background: var(--theia-list-hoverBackground);
+}
+
+.xora-code-welcome__action:focus-visible {
+    outline: 2px solid var(--theia-focusBorder);
+    outline-offset: 2px;
+}
+
+.xora-code-welcome__action--primary {
+    border-color: color-mix(in srgb, var(--theia-button-background) 65%, var(--theia-widget-border));
+}
+
+.xora-code-welcome__action-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.xora-code-welcome__action-copy strong {
+    font-size: 14px;
+}
+
+.xora-code-welcome__action-copy small {
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.xora-code-welcome__action-arrow {
+    color: var(--theia-button-foreground);
+    background: var(--theia-button-background);
+    display: grid;
+    flex: 0 0 24px;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    font-weight: 700;
+}
+
+.xora-code-welcome__disclaimer {
+    max-width: 700px;
+    margin: 14px auto 0;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+@media (max-width: 760px) {
+    #main-toolbar::before,
+    #main-toolbar::after {
+        display: none;
+    }
+
+    .xora-code-welcome__content {
+        padding: 18px 16px 24px;
+    }
+
+    .xora-code-welcome__provider-card {
+        min-height: 0;
+    }
+}

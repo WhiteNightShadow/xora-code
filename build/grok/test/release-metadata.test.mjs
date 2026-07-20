@@ -1,4 +1,4 @@
-// Copyright (c) 2026 WhiteNight Code contributors.
+// Copyright (c) 2026 Xora Code contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";

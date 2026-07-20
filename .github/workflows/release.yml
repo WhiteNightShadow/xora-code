@@ -230,7 +230,7 @@ jobs:
         env:
           WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
         run: |
-          [IO.File]::WriteAllBytes("${{ runner.temp }}\whitenight-code.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
+          [IO.File]::WriteAllBytes("${{ runner.temp }}\xora-code.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
 
       - name: Sign, verify, and smoke-test the Windows Grok sidecar
         if: matrix.platform == 'windows'
@@ -240,7 +240,7 @@ jobs:
         run: |
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
           if (-not $signtool) { throw "signtool.exe was not found" }
-          & $signtool.FullName sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /f "${{ runner.temp }}\whitenight-code.pfx" /p $env:WINDOWS_CERTIFICATE_PASSWORD resources\sidecars\grok\grok.exe
+          & $signtool.FullName sign /fd SHA256 /td SHA256 /tr https://timestamp.digicert.com /f "${{ runner.temp }}\xora-code.pfx" /p $env:WINDOWS_CERTIFICATE_PASSWORD resources\sidecars\grok\grok.exe
           if ($LASTEXITCODE -ne 0) { throw "Signing grok.exe failed" }
           & $signtool.FullName verify /pa /all resources\sidecars\grok\grok.exe
           if ($LASTEXITCODE -ne 0) { throw "grok.exe signature verification failed" }
@@ -254,7 +254,7 @@ jobs:
           --target "${{ matrix.grokTarget }}"
 
       - name: Run the fail-closed formal sidecar verifier
-        run: yarn workspace @whitenight-code/electron-app verify:sidecar
+        run: yarn workspace @xora-code/electron-app verify:sidecar
 
       - name: Create the Apple notarization key file
         if: matrix.platform == 'mac'
@@ -273,9 +273,9 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_IDENTITY_AUTO_DISCOVERY: "true"
         run: >-
-          yarn workspace @whitenight-code/electron-app verify:sidecar &&
-          yarn workspace @whitenight-code/electron-app build:prod &&
-          yarn workspace @whitenight-code/electron-app electron-builder
+          yarn workspace @xora-code/electron-app verify:sidecar &&
+          yarn workspace @xora-code/electron-app build:prod &&
+          yarn workspace @xora-code/electron-app electron-builder
           --mac dmg zip --${{ matrix.arch }} --publish never
           --config.mac.notarize=true
 
@@ -293,12 +293,12 @@ jobs:
       - name: Build and sign the Windows NSIS installer
         if: matrix.platform == 'windows'
         env:
-          CSC_LINK: ${{ runner.temp }}\whitenight-code.pfx
+          CSC_LINK: ${{ runner.temp }}\xora-code.pfx
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: >-
-          yarn workspace @whitenight-code/electron-app verify:sidecar &&
-          yarn workspace @whitenight-code/electron-app build:prod &&
-          yarn workspace @whitenight-code/electron-app electron-builder
+          yarn workspace @xora-code/electron-app verify:sidecar &&
+          yarn workspace @xora-code/electron-app build:prod &&
+          yarn workspace @xora-code/electron-app electron-builder
           --win nsis --x64 --publish never
 
       - name: Verify Windows application and installer signatures
@@ -316,20 +316,20 @@ jobs:
       - name: Build Linux AppImage and deb with GitHub update metadata
         if: matrix.platform == 'linux'
         run: >-
-          yarn workspace @whitenight-code/electron-app verify:sidecar &&
-          yarn workspace @whitenight-code/electron-app build:prod &&
-          yarn workspace @whitenight-code/electron-app electron-builder
+          yarn workspace @xora-code/electron-app verify:sidecar &&
+          yarn workspace @xora-code/electron-app build:prod &&
+          yarn workspace @xora-code/electron-app electron-builder
           --linux AppImage deb --x64 --publish never
           --config.publish.provider=github
           --config.publish.owner=WhiteNightShadow
-          --config.publish.repo=whitenight-code
+          --config.publish.repo=xora-code
 
       - name: Generate the release SBOM
         uses: anchore/sbom-action@v0
         with:
           path: .
           format: cyclonedx-json
-          output-file: applications/electron/dist/WhiteNight-Code-${{ needs.release-gate.outputs.version }}-${{ matrix.grokTarget }}.cdx.json
+          output-file: applications/electron/dist/Xora-Code-${{ needs.release-gate.outputs.version }}-${{ matrix.grokTarget }}.cdx.json
           upload-artifact: false
 
       - name: Archive the signed/staged Grok sidecar
@@ -337,16 +337,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-sidecar
-          cp resources/sidecars/grok/grok "release-sidecar/WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}"
-          tar -C resources/sidecars/grok -czf "release-sidecar/WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.tar.gz" grok release.json notices
+          cp resources/sidecars/grok/grok "release-sidecar/Xora-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}"
+          tar -C resources/sidecars/grok -czf "release-sidecar/Xora-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.tar.gz" grok release.json notices
 
       - name: Archive the signed Windows Grok sidecar
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release-sidecar | Out-Null
-          Copy-Item resources\sidecars\grok\grok.exe "release-sidecar\WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.exe"
-          Compress-Archive -Path resources\sidecars\grok\grok.exe,resources\sidecars\grok\release.json,resources\sidecars\grok\notices -DestinationPath "release-sidecar\WhiteNight-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.zip"
+          Copy-Item resources\sidecars\grok\grok.exe "release-sidecar\Xora-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.exe"
+          Compress-Archive -Path resources\sidecars\grok\grok.exe,resources\sidecars\grok\release.json,resources\sidecars\grok\notices -DestinationPath "release-sidecar\Xora-Code-Grok-Build-0.2.102-${{ matrix.grokTarget }}.zip"
 
       - name: Upload native release artifacts
         uses: actions/upload-artifact@v4
@@ -412,7 +412,7 @@ jobs:
           node build/grok/sign-release-manifests.mjs
           --assets-dir release-files
           --output-dir release-files
-          --base-url "https://github.com/WhiteNightShadow/whitenight-code/releases/download/${{ needs.release-gate.outputs.tag }}"
+          --base-url "https://github.com/WhiteNightShadow/xora-code/releases/download/${{ needs.release-gate.outputs.tag }}"
           --app-version "${{ needs.release-gate.outputs.version }}"
           --sequence "${{ needs.release-gate.outputs.sequence }}"
 
@@ -435,4 +435,4 @@ jobs:
             echo "Release $RELEASE_TAG already exists; refusing to replace signed assets at the same sequence." >&2
             exit 1
           fi
-          gh release create "$RELEASE_TAG" release-files/* --verify-tag --title "WhiteNight Code $RELEASE_TAG" --generate-notes
+          gh release create "$RELEASE_TAG" release-files/* --verify-tag --title "Xora Code $RELEASE_TAG" --generate-notes

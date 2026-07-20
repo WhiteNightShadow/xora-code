@@ -1,11 +1,11 @@
-# `@grok-desktop/acp-client`
+# `@xora-code/acp-client`
 
 A small ACP/JSON-RPC 2.0 client for newline-delimited stdio transports. It does
 not spawn or kill a process and never reads stderr: the desktop process owns the
 Grok sidecar lifecycle and must pass only `child.stdout` to `consume()`.
 
 ```ts
-import { AcpClient, createNodeWritableSink } from "@whitenight-code/acp-client";
+import { AcpClient, createNodeWritableSink } from "@xora-code/acp-client";
 
 const client = new AcpClient({ write: createNodeWritableSink(child.stdin) });
 void client.consume(child.stdout);

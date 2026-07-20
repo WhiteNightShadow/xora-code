@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright (c) 2026 WhiteNight Code contributors.
+// Copyright (c) 2026 Xora Code contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -135,7 +135,7 @@ async function filesBelow(root, directory = root) {
 }
 
 function sidecarTarget(name, version) {
-  const prefix = `WhiteNight-Code-Grok-Build-${version}-`;
+  const prefix = `Xora-Code-Grok-Build-${version}-`;
   if (!name.startsWith(prefix)) return undefined;
   if (name.endsWith(".tar.gz") || name.endsWith(".zip")) return undefined;
   const suffix = name.endsWith(".exe") ? ".exe" : "";
@@ -143,7 +143,7 @@ function sidecarTarget(name, version) {
 }
 
 function appTarget(name) {
-  if (!name.startsWith("WhiteNight Code-")) return undefined;
+  if (!name.startsWith("Xora Code-")) return undefined;
   if (name.endsWith(".dmg") || name.endsWith(".zip")) {
     if (name.includes("arm64")) return "darwin-arm64";
     if (name.includes("x64")) return "darwin-x64";
@@ -176,7 +176,7 @@ async function main() {
     const sidecar = sidecarTarget(basename(file.name), lock.upstream.version);
     if (sidecar) {
       if (!lock.targets[sidecar]) fail(`sidecar archive names unknown target ${sidecar}`);
-      const expectedName = `WhiteNight-Code-Grok-Build-${lock.upstream.version}-${sidecar}${lock.targets[sidecar].executableSuffix}`;
+      const expectedName = `Xora-Code-Grok-Build-${lock.upstream.version}-${sidecar}${lock.targets[sidecar].executableSuffix}`;
       if (basename(file.name) !== expectedName) {
         fail(`raw sidecar executable for ${sidecar} must be named ${expectedName}`);
       }
@@ -207,7 +207,7 @@ async function main() {
 
   const appPayload = {
     schemaVersion: 1,
-    product: "whitenight-code",
+    product: "xora-code",
     sequence: options.sequence,
     channel: "stable",
     version: options.appVersion,
@@ -216,7 +216,7 @@ async function main() {
   };
   const sidecarPayload = {
     schemaVersion: 1,
-    product: "whitenight-grok-sidecar",
+    product: "xora-grok-sidecar",
     sequence: options.sequence,
     channel: "stable",
     version: lock.upstream.version,
@@ -242,7 +242,7 @@ async function main() {
 
   await mkdir(options.outputDirectory, { recursive: true });
   await writeFile(
-    join(options.outputDirectory, "whitenight-code-update.json"),
+    join(options.outputDirectory, "xora-code-update.json"),
     `${JSON.stringify(signed(appPayload, appKey, process.env.APP_UPDATE_KEY_ID ?? "app-release-2026"), null, 2)}\n`,
     { encoding: "utf8", mode: 0o600 },
   );

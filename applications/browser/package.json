@@ -1,5 +1,5 @@
 {
-  "name": "@whitenight-code/browser-app",
+  "name": "@xora-code/browser-app",
   "version": "0.1.0",
   "private": true,
   "description": "An open-source, model-neutral desktop Agent IDE built on Eclipse Theia, Electron, and ACP, with first-class Grok Build integration.",
@@ -12,17 +12,19 @@
     "target": "browser",
     "frontend": {
       "config": {
-        "applicationName": "WhiteNight Code",
+        "applicationName": "Xora Code",
+        "defaultLocale": "zh-cn",
         "reloadOnReconnect": true,
         "preferences": {
           "toolbar.showToolbar": true,
-          "security.workspace.trust.enabled": true
+          "security.workspace.trust.enabled": true,
+          "window.title": "${appName}"
         }
       }
     },
     "backend": {
       "config": {
-        "configurationFolder": ".whitenight-code",
+        "configurationFolder": ".xora-code",
         "resolveSystemPlugins": false,
         "frontendConnectionTimeout": 3000
       }
@@ -57,8 +59,8 @@
     "@theia/variable-resolver": "1.73.1",
     "@theia/vsx-registry": "1.73.1",
     "@theia/workspace": "1.73.1",
-    "@whitenight-code/agent": "0.1.0",
-    "@whitenight-code/product-extension": "0.1.0",
+    "@xora-code/agent": "0.1.0",
+    "@xora-code/product-extension": "0.1.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

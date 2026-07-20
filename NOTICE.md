@@ -1,8 +1,8 @@
 # Notices
 
-WhiteNight Code is an independent open-source project.
+Xora Code is an independent open-source project.
 
-Copyright 2026 WhiteNight Code contributors.
+Copyright 2026 Xora Code contributors.
 
 The distributed application may include third-party software. Each component remains subject to its own license and notice requirements, including:
 

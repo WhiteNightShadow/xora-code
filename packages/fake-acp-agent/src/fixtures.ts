@@ -33,6 +33,17 @@ export const TOOL_CALL_FIXTURE = Object.freeze({
   status: "pending",
   locations: Object.freeze([{ path: "src/example.ts", line: 1 }]),
   rawInput: Object.freeze({ path: "src/example.ts", replacement: "export const answer = 42;\n" }),
+  _meta: Object.freeze({
+    "x.ai/tool": Object.freeze({
+      version: 1,
+      name: "search_replace",
+      kind: "edit",
+      namespace: "grok_build",
+      label: "Edit",
+      read_only: false,
+      input: Object.freeze({ path: "src/example.ts" }),
+    }),
+  }),
 });
 
 export const DIFF_FIXTURE = Object.freeze({

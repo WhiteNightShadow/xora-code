@@ -1,7 +1,7 @@
-appId: io.github.whitenightshadow.whitenightcode
-productName: WhiteNight Code
-executableName: whitenight-code
-copyright: Copyright © 2026 WhiteNight Code contributors
+appId: io.github.whitenightshadow.xoracode
+productName: Xora Code
+executableName: xora-code
+copyright: Copyright © 2026 Xora Code contributors
 electronDist: ../../node_modules/electron/dist
 electronVersion: 39.8.7
 asar: true
@@ -21,15 +21,19 @@ files:
   - scripts
   - package.json
   - "!**/node_modules/**"
+  # Production source maps are retained by CI/build outputs, but are not
+  # needed at runtime. Keeping them out of app.asar substantially reduces the
+  # amount of data the OS, code signer and Electron must inspect on cold start.
+  - "!**/*.map"
 extraResources:
   - from: ../../plugins
     to: app/plugins
   - from: ../../resources/sidecars/grok
     to: sidecars/grok
   - from: ../../LICENSE
-    to: legal/WhiteNight-Code-LICENSE
+    to: legal/Xora-Code-LICENSE
   - from: ../../NOTICE.md
-    to: legal/WhiteNight-Code-NOTICE.md
+    to: legal/Xora-Code-NOTICE.md
   - from: ../../THIRD-PARTY-NOTICES.md
     to: legal/THIRD-PARTY-NOTICES.md
   - from: ../../resources/legal
@@ -41,21 +45,25 @@ extraResources:
   - from: ../../build/grok/acp-initialize-fixture.json
     to: update/acp-initialize-fixture.json
 win:
+  icon: resources/icon.png
   target:
     - nsis
 mac:
+  icon: resources/icon.png
   category: public.app-category.developer-tools
   darkModeSupport: true
   hardenedRuntime: true
   protocols:
-    - name: WhiteNight Code
+    - name: Xora Code
       schemes:
-        - whitenight-code
+        - xora-code
   target:
     - dmg
     - zip
 linux:
+  icon: resources/icon.png
   category: Development
+  maintainer: Xora Code contributors <WhiteNightShadow@users.noreply.github.com>
   mimeTypes:
     - inode/directory
   target:

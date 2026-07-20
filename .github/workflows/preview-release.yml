@@ -1,0 +1,240 @@
+name: Unsigned Preview Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-native-preview:
+    name: ${{ matrix.name }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64 preview — DMG + ZIP
+            runner: macos-15
+            platform: mac
+            arch: arm64
+            grokTarget: darwin-arm64
+          - name: macOS x64 preview — DMG + ZIP
+            runner: macos-15-intel
+            platform: mac
+            arch: x64
+            grokTarget: darwin-x64
+          - name: Windows x64 preview — NSIS
+            runner: windows-2025
+            platform: windows
+            arch: x64
+            grokTarget: win32-x64
+          - name: Linux x64 preview — AppImage + deb
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            grokTarget: linux-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 210
+
+    steps:
+      - name: Check out the selected preview commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: yarn
+
+      - name: Activate Yarn Classic 1.22.22
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          test "$(yarn --version)" = "1.22.22"
+
+      - name: Install JavaScript dependencies
+        run: yarn install --frozen-lockfile --non-interactive
+
+      - name: Set up pinned Rust 1.92.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+
+      - name: Cache pinned Grok Build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/dotslash*
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/xora-preview-grok-${{ matrix.grokTarget }}/target
+          key: preview-grok-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/grok/sidecar.lock.json') }}
+
+      - name: Install Grok Build's pinned DotSlash prerequisite
+        shell: bash
+        run: |
+          if ! command -v dotslash >/dev/null 2>&1; then
+            cargo install dotslash --locked --version 0.5.7
+          fi
+          dotslash --version | grep -F 0.5.7
+
+      - name: Install pinned protoc for Windows
+        if: runner.os == 'Windows'
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the exact pinned Grok source on the native runner
+        run: >-
+          node build/grok/build-sidecar.mjs
+          --work-dir "${{ runner.temp }}/xora-preview-grok-${{ matrix.grokTarget }}"
+          --target "${{ matrix.grokTarget }}"
+          --stage-dir resources/sidecars/grok
+
+      - name: Release-blocking Grok ACP, authentication, and process-cleanup smoke test
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok.exe
+          else
+            node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok
+          fi
+
+      - name: Verify pinned unsigned sidecar metadata
+        run: >-
+          node build/grok/release-metadata.mjs --verify
+          --stage-dir resources/sidecars/grok
+          --target "${{ matrix.grokTarget }}"
+
+      - name: Build all workspaces
+        run: yarn build
+
+      - name: Run ACP, fake-Agent, runtime, UI, and security tests
+        run: yarn test
+
+      - name: Run Grok metadata and release safety tests
+        run: node --test build/grok/test/*.test.mjs build/grok/test/*.test.ts
+
+      - name: Run the explicit unsigned-preview sidecar verifier
+        run: yarn workspace @xora-code/electron-app verify:sidecar:preview
+
+      - name: Build native unsigned preview installers
+        run: >-
+          yarn workspace @xora-code/electron-app package:preview:installers
+          --platform "${{ matrix.platform }}"
+          --arch "${{ matrix.arch }}"
+
+      - name: Upload immutable native preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xora-preview-${{ matrix.grokTarget }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: applications/electron/dist/preview-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-preview:
+    name: Publish GitHub prerelease
+    needs: build-native-preview
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out release notes from the preview commit
+        uses: actions/checkout@v4
+
+      - name: Download all native preview artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: xora-preview-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: preview-files
+          merge-multiple: true
+
+      - name: Derive immutable preview identity
+        id: metadata
+        shell: bash
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          short_sha="${GITHUB_SHA:0:12}"
+          tag="preview-v${version}-${short_sha}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the complete flat preview asset set
+        env:
+          PREVIEW_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const files = fs.readdirSync('preview-files').sort();
+          const forbidden = files.filter(name => /(?:app-update\.json|grok-sidecar-update\.json|SHA256SUMS\.asc|\.(?:asc|sig))$/iu.test(name));
+          if (forbidden.length) throw new Error(`Forbidden formal-release assets: ${forbidden.join(', ')}`);
+          const expected = [
+            [/mac-arm64\.dmg$/u, 'macOS arm64 DMG'],
+            [/mac-arm64\.zip$/u, 'macOS arm64 ZIP'],
+            [/mac-x64\.dmg$/u, 'macOS x64 DMG'],
+            [/mac-x64\.zip$/u, 'macOS x64 ZIP'],
+            [/win-x64\.exe$/u, 'Windows x64 NSIS'],
+            [/linux-x86_64\.AppImage$/u, 'Linux x64 AppImage'],
+            [/linux-amd64\.deb$/u, 'Linux x64 deb']
+          ];
+          for (const [pattern, label] of expected) {
+            if (!files.some(name => pattern.test(name))) throw new Error(`Missing ${label}`);
+          }
+          for (const target of ['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64']) {
+            if (!files.includes(`SHA256SUMS-${target}.txt`)) throw new Error(`Missing checksum set for ${target}`);
+            if (!files.includes(`Xora-Code-${process.env.PREVIEW_VERSION}-${target}-PREVIEW.json`)) throw new Error(`Missing preview provenance for ${target}`);
+          }
+          NODE
+
+      - name: Render explicit unsigned-preview notes
+        env:
+          PREVIEW_VERSION: ${{ steps.metadata.outputs.version }}
+          PREVIEW_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = process.env.RUNNER_TEMP + '/xora-preview-notes.md';
+          const values = {
+            VERSION: process.env.PREVIEW_VERSION,
+            FULL_SHA: process.env.GITHUB_SHA,
+            TAG: process.env.PREVIEW_TAG,
+            RUN_URL: `https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+          };
+          let notes = fs.readFileSync('.github/PREVIEW-RELEASE-NOTES.md', 'utf8');
+          for (const [name, value] of Object.entries(values)) notes = notes.replaceAll(`{{${name}}}`, value);
+          if (/{{[A-Z_]+}}/u.test(notes)) throw new Error('Preview notes contain unresolved placeholders.');
+          fs.writeFileSync(path, notes);
+          NODE
+
+      - name: Create immutable non-latest GitHub prerelease
+        env:
+          PREVIEW_TAG: ${{ steps.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          if gh release view "$PREVIEW_TAG" >/dev/null 2>&1; then
+            echo "Preview release $PREVIEW_TAG already exists; refusing to replace its assets." >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$PREVIEW_TAG" >/dev/null 2>&1; then
+            echo "Preview tag $PREVIEW_TAG already exists without this immutable release; refusing to reuse it." >&2
+            exit 1
+          fi
+          gh release create "$PREVIEW_TAG" preview-files/* \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --latest=false \
+            --title "Xora Code ${{ steps.metadata.outputs.version }} Preview (${{ steps.metadata.outputs.short_sha }})" \
+            --notes-file "$RUNNER_TEMP/xora-preview-notes.md"

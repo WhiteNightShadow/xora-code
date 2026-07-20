@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Check out WhiteNight Code
+      - name: Check out Xora Code
         uses: actions/checkout@v4
 
       - name: Set up Node.js 24
@@ -64,7 +64,7 @@ jobs:
             ~/.cargo/bin/dotslash*
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.temp }}/whitenight-grok-${{ matrix.grokTarget }}/target
+            ${{ runner.temp }}/xora-grok-${{ matrix.grokTarget }}/target
           key: grok-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/grok/sidecar.lock.json') }}
 
       - name: Install Grok Build's DotSlash prerequisite
@@ -85,7 +85,7 @@ jobs:
       - name: Build the exact pinned Grok source on the native runner
         run: >-
           node build/grok/build-sidecar.mjs
-          --work-dir "${{ runner.temp }}/whitenight-grok-${{ matrix.grokTarget }}"
+          --work-dir "${{ runner.temp }}/xora-grok-${{ matrix.grokTarget }}"
           --target "${{ matrix.grokTarget }}"
           --stage-dir resources/sidecars/grok
 
@@ -112,6 +112,17 @@ jobs:
 
       - name: Run sidecar metadata and release manifest safety tests
         run: node --test build/grok/test/*.test.mjs build/grok/test/*.test.ts
+
+      - name: Package the native Electron preview
+        run: yarn package:electron:preview
+
+      - name: Upload the native Electron preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: xora-code-${{ matrix.grokTarget }}-${{ github.sha }}
+          path: applications/electron/dist/**
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload the audited native sidecar
         uses: actions/upload-artifact@v4

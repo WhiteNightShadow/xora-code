@@ -1,8 +1,8 @@
 {
-  "name": "@whitenight-code/product-extension",
+  "name": "@xora-code/product-extension",
   "version": "0.1.0",
   "private": true,
-  "description": "WhiteNight Code product branding and welcome experience",
+  "description": "Xora Code product branding and welcome experience",
   "license": "Apache-2.0",
   "keywords": [
     "theia-extension"
@@ -13,13 +13,20 @@
   ],
   "theiaExtensions": [
     {
-      "frontend": "lib/browser/whitenight-product-frontend-module"
+      "frontendPreload": "lib/browser/xora-product-preload-module",
+      "frontend": "lib/browser/xora-product-frontend-module",
+      "electronMain": "lib/electron-main/xora-electron-main-module"
     }
   ],
   "dependencies": {
-    "@theia/core": "1.73.1"
+    "@theia/application-package": "1.73.1",
+    "@theia/core": "1.73.1",
+    "@theia/navigator": "1.73.1",
+    "@theia/workspace": "1.73.1",
+    "@xora-code/agent": "0.1.0"
   },
   "devDependencies": {
+    "@types/node": "18.19.39",
     "@types/react": "18.3.18",
     "rimraf": "6.0.1",
     "typescript": "5.9.3"
@@ -29,7 +36,7 @@
     "clean": "rimraf lib *.tsbuildinfo",
     "compile": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test",
+    "test": "yarn build && node --test test/*.test.cjs",
     "watch": "tsc -p tsconfig.json --watch --preserveWatchOutput"
   }
 }

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Copyright (c) 2026 WhiteNight Code contributors.
+// Copyright (c) 2026 Xora Code contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeSidecarReleaseMetadata } from "./release-metadata.mjs";
@@ -149,6 +149,10 @@ function main() {
   if (target.executableSuffix === "") chmodSync(stagedBinary, 0o755);
 
   const noticesDirectory = join(stageDirectory, "notices");
+  // The stage directory can be reused by local and CI builds. Remove notices
+  // from a previous product name/version so renamed or retired legal files can
+  // never leak into a newly packaged sidecar.
+  rmSync(noticesDirectory, { recursive: true, force: true });
   mkdirSync(noticesDirectory, { recursive: true });
   const legalRoot = join(repositoryRoot, "resources/legal/grok-build");
   const auditedUpstreamNotices = [
@@ -167,8 +171,8 @@ function main() {
     }
   }
   const notices = [
-    [join(repositoryRoot, "LICENSE"), "WHITENIGHT-CODE-LICENSE"],
-    [join(repositoryRoot, "NOTICE.md"), "WHITENIGHT-CODE-NOTICE.md"],
+    [join(repositoryRoot, "LICENSE"), "XORA-CODE-LICENSE"],
+    [join(repositoryRoot, "NOTICE.md"), "XORA-CODE-NOTICE.md"],
     [join(repositoryRoot, "THIRD-PARTY-NOTICES.md"), "THIRD-PARTY-NOTICES.md"],
     [join(sourceDirectory, "LICENSE"), "GROK-BUILD-LICENSE"],
     [join(sourceDirectory, "THIRD-PARTY-NOTICES"), "GROK-BUILD-THIRD-PARTY-NOTICES"],

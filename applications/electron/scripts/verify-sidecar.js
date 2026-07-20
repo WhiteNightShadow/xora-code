@@ -1,4 +1,4 @@
-// Copyright (c) 2026 WhiteNight Code contributors.
+// Copyright (c) 2026 Xora Code contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 'use strict';
@@ -14,6 +14,7 @@ const SIDECAR_ROOT = path.join(ROOT, 'resources', 'sidecars', 'grok');
 const LOCK_PATH = path.join(ROOT, 'build', 'grok', 'sidecar.lock.json');
 const LEGAL_ROOT = path.join(ROOT, 'resources', 'legal', 'grok-build');
 const allowMissing = process.argv.includes('--allow-missing');
+const allowUnsignedPreview = process.argv.includes('--allow-unsigned-preview');
 const executableName = process.platform === 'win32' ? 'grok.exe' : 'grok';
 const executablePath = path.join(SIDECAR_ROOT, executableName);
 
@@ -63,7 +64,7 @@ async function main() {
     const actualSha256 = crypto.createHash('sha256').update(fs.readFileSync(executablePath)).digest('hex');
     assert(actualSha256 === release.sha256, `Grok Build checksum mismatch: expected ${release.sha256}, received ${actualSha256}`);
 
-    verifyPlatformSignature(executablePath);
+    verifyPlatformSignature(executablePath, allowUnsignedPreview);
     const version = spawnSync(executablePath, ['--version'], { encoding: 'utf8', timeout: 10_000, windowsHide: true, shell: false });
     assert(version.status === 0, `grok --version failed: ${(version.stderr || version.error?.message || '').trim()}`);
     assert(`${version.stdout}\n${version.stderr}`.includes(lock.upstream.version), `grok --version did not report ${lock.upstream.version}.`);
@@ -103,7 +104,10 @@ function assertReleaseIdentity(release, lock, targetName) {
     assert(release.cargoProfile === lock.toolchain.cargoProfile, 'Sidecar release metadata Cargo profile mismatch.');
 }
 
-function verifyPlatformSignature(binary) {
+function verifyPlatformSignature(binary, allowUnsigned = false) {
+    // Native CI previews are deliberately unsigned. This explicit flag is
+    // never used by the formal package/release path, which remains fail-closed.
+    if (allowUnsigned) return;
     if (process.platform === 'darwin') {
         const result = spawnSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', binary], { encoding: 'utf8', timeout: 15_000 });
         assert(result.status === 0, `The Grok sidecar has no valid macOS code signature: ${result.stderr.trim()}`);
@@ -156,7 +160,7 @@ function smokeAcpInitialize(binary, lockedArgs) {
             jsonrpc: '2.0', id: 'verify-initialize', method: 'initialize', params: {
                 protocolVersion: 1,
                 clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-                clientInfo: { name: 'WhiteNight Code release verifier', version: '0.1.0' }
+                clientInfo: { name: 'Xora Code release verifier', version: '0.1.0' }
             }
         })}\n`);
     });

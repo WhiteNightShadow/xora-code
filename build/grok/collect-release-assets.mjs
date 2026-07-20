@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright (c) 2026 WhiteNight Code contributors.
+// Copyright (c) 2026 Xora Code contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { copyFile, lstat, mkdir, readdir } from "node:fs/promises";

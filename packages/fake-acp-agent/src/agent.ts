@@ -184,7 +184,7 @@ export class FakeAcpAgent {
         mcpCapabilities: { http: true, sse: true },
         sessionCapabilities: {},
       },
-      agentInfo: { name: "grok-desktop-fake-acp-agent", title: "Fake Grok Build", version: FAKE_AGENT_VERSION },
+      agentInfo: { name: "xora-code-fake-acp-agent", title: "Fake Grok Build", version: FAKE_AGENT_VERSION },
       authMethods: AUTH_METHODS_FIXTURE,
       _meta: {
         grokShell: true,

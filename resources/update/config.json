@@ -2,6 +2,6 @@
   "schemaVersion": 1,
   "enabled": true,
   "channel": "stable",
-  "manifestUrl": "https://github.com/WhiteNightShadow/whitenight-code/releases/latest/download/grok-sidecar-update.json",
+  "manifestUrl": "https://github.com/WhiteNightShadow/xora-code/releases/latest/download/grok-sidecar-update.json",
   "homeCompatEpoch": 1
 }

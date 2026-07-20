@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Copyright (c) 2026 WhiteNight Code contributors.
+// Copyright (c) 2026 Xora Code contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -66,6 +67,9 @@ async function main() {
   const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
   const home = await mkdtemp(join(tmpdir(), "whitenight-grok-smoke-"));
   const workspace = join(home, "workspace");
+  const debugFile = process.env.XORA_SIDECAR_SMOKE_DEBUG === "1"
+    ? join(home, "grok-debug.log")
+    : undefined;
   await mkdir(workspace, { recursive: true });
 
   const version = spawnSync(binary, ["--version"], { encoding: "utf8", windowsHide: true });
@@ -73,7 +77,32 @@ async function main() {
     fail(`--version did not report ${lock.upstream.version}`);
   }
 
-  const child = spawn(binary, lock.runtime.args.map((value) => (value === "<root>" ? workspace : value)), {
+  // The smoke test validates the local ACP contract, not availability of the
+  // public model service. Grok eagerly fetches /models before it reads the
+  // initialize request, which can otherwise turn an offline runner into a
+  // pair of 30-second network timeouts. Keep that prefetch deterministic and
+  // confined to loopback.
+  const modelServer = createServer((request, response) => {
+    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    response.setHeader("connection", "close");
+    if (request.method === "GET" && pathname.endsWith("/models")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"object":"list","data":[]}');
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end('{"error":{"message":"not available in the ACP smoke test"}}');
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    modelServer.once("error", rejectListen);
+    modelServer.listen(0, "127.0.0.1", resolveListen);
+  });
+  const modelAddress = modelServer.address();
+  if (!modelAddress || typeof modelAddress === "string") fail("could not start the loopback model fixture");
+
+  const runtimeArgs = lock.runtime.args.map((value) => (value === "<root>" ? workspace : value));
+  if (debugFile) runtimeArgs.push("--debug", "--debug-file", debugFile);
+  const child = spawn(binary, runtimeArgs, {
     detached: process.platform !== "win32",
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
@@ -87,6 +116,7 @@ async function main() {
       XDG_CONFIG_HOME: join(home, ".config"),
       XDG_CACHE_HOME: join(home, ".cache"),
       XAI_API_KEY: fakeApiKey,
+      GROK_XAI_API_BASE_URL: `http://127.0.0.1:${modelAddress.port}/v1`,
       DISABLE_TELEMETRY: "1",
       NO_COLOR: "1",
     },
@@ -97,12 +127,19 @@ async function main() {
   child.stderr.on("data", (chunk) => {
     stderr = `${stderr}${chunk}`.slice(-16_384).split(fakeApiKey).join("[REDACTED]");
   });
+  const pending = new Map();
   const exit = new Promise((resolveExit, rejectExit) => {
     child.once("error", rejectExit);
-    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+    child.once("exit", (code, signal) => {
+      const reason = new Error(
+        `sidecar exited before completing ACP requests (code ${code ?? "none"}, signal ${signal ?? "none"})`,
+      );
+      for (const request of pending.values()) request.reject(reason);
+      pending.clear();
+      resolveExit({ code, signal });
+    });
   });
 
-  const pending = new Map();
   let nextId = 0;
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   lines.on("line", (line) => {
@@ -150,7 +187,7 @@ async function main() {
           skipGitStatus: true,
           skipProjectLayout: true,
         },
-        clientType: "whitenight-code-release-smoke",
+        clientType: "xora-code-release-smoke",
         clientVersion: fixture.clientInfo?.version ?? "0.1.0",
       },
     }), 45_000, "initialize");
@@ -166,7 +203,18 @@ async function main() {
     }), 30_000, "authenticate");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    fail(`${message}${stderr ? `; stderr: ${stderr}` : ""}`);
+    let debug = "";
+    if (debugFile) {
+      try {
+        debug = (await readFile(debugFile, "utf8"))
+          .slice(-16_384)
+          .split(fakeApiKey)
+          .join("[REDACTED]");
+      } catch {
+        // The sidecar can fail before creating its debug log.
+      }
+    }
+    fail(`${message}${stderr ? `; stderr: ${stderr}` : ""}${debug ? `; debug: ${debug}` : ""}`);
   } finally {
     lines.close();
     try {
@@ -176,6 +224,8 @@ async function main() {
     }
     killProcessTree(child);
     await withTimeout(exit, 15_000, "process-tree cleanup");
+    modelServer.closeAllConnections();
+    await new Promise((resolveClose) => modelServer.close(() => resolveClose()));
     await rm(home, { recursive: true, force: true });
   }
 

@@ -4,6 +4,9 @@ src-gen/
 dist/
 coverage/
 .nyc_output/
+.playwright-cli/
+output/playwright/
+output/releases/
 *.tsbuildinfo
 *.log
 .DS_Store
@@ -19,6 +22,8 @@ plugins/*
 
 # Local product state
 .theia/
+.xora-code/
+# Pre-Xora local state can be copied during the compatibility migration.
 .whitenight-code/
 
 # Electron packaging output

@@ -1,4 +1,4 @@
-# `@grok-desktop/fake-acp-agent`
+# `@xora-code/fake-acp-agent`
 
 A deterministic ACP v1 agent for desktop integration tests. It speaks one
 JSON-RPC 2.0 object per stdin/stdout line and never writes diagnostics to

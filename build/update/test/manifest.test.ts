@@ -14,7 +14,7 @@ import {
 function payload(): SidecarManifestPayload {
   return {
     schemaVersion: 1,
-    product: "whitenight-grok-sidecar",
+    product: "xora-grok-sidecar",
     sequence: 7,
     channel: "stable",
     version: "0.2.102",
