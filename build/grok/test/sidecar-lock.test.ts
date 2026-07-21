@@ -12,6 +12,13 @@ describe("Grok sidecar lock", () => {
     assert.equal(lock.toolchain.dotslash, "0.5.7");
     assert.equal(lock.toolchain.protoc, "29.3");
     assert.equal(lock.toolchain.cargoPackage, "xai-grok-pager-bin");
+    assert.deepEqual(lock.bundledTools.ripgrep, {
+      package: "ripgrep",
+      version: "15.0.0",
+      binary: "rg",
+      source: "crates.io",
+      features: ["pcre2"],
+    });
     assert.equal(lock.runtime.packagedBinaryName, "grok");
     assert.deepEqual(lock.runtime.args, [
       "--no-auto-update",
@@ -40,6 +47,15 @@ describe("Grok sidecar lock", () => {
         cargoProfile: "release-dist",
         cargoPackage: "xai-grok-pager-bin",
         cargoBinary: "xai-grok-pager",
+      },
+      bundledTools: {
+        ripgrep: {
+          package: "ripgrep",
+          version: "15.0.0",
+          binary: "rg",
+          source: "crates.io",
+          features: ["pcre2"],
+        },
       },
       runtime: {
         packagedBinaryName: "grok",

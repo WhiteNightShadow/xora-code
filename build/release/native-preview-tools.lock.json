@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "node": {
+    "version": "24.13.0",
+    "targets": {
+      "linux-x64": {
+        "url": "https://nodejs.org/dist/v24.13.0/node-v24.13.0-linux-x64.tar.xz",
+        "sha256": "e798599612f4bb71333a3397ab0d095fd62214e115aea45aa858a145fc72d67e",
+        "size": 30768936,
+        "archive": "node-v24.13.0-linux-x64.tar.xz",
+        "directory": "node-v24.13.0-linux-x64"
+      },
+      "win32-x64": {
+        "url": "https://nodejs.org/dist/v24.13.0/node-v24.13.0-win-x64.zip",
+        "sha256": "ca2742695be8de44027d71b3f53a4bdb36009b95575fe1ae6f7f0b5ce091cb88",
+        "size": 36363905,
+        "archive": "node-v24.13.0-win-x64.zip",
+        "directory": "node-v24.13.0-win-x64"
+      }
+    }
+  },
+  "yarn": "1.22.22",
+  "rust": "1.92.0",
+  "dotslash": "0.5.7",
+  "protoc": {
+    "version": "29.3",
+    "targets": {
+      "linux-x64": {
+        "url": "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip",
+        "sha256": "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a",
+        "size": 3288836,
+        "archive": "protoc-29.3-linux-x86_64.zip"
+      },
+      "win32-x64": {
+        "url": "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip",
+        "sha256": "57ea59e9f551ad8d71ffaa9b5cfbe0ca1f4e720972a1db7ec2d12ab44bff9383",
+        "size": 3188624,
+        "archive": "protoc-29.3-win64.zip"
+      }
+    }
+  }
+}

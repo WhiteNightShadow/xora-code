@@ -24,21 +24,25 @@ jobs:
             platform: mac
             arch: arm64
             grokTarget: darwin-arm64
+            packagedRoot: mac-arm64
           - name: macOS x64 preview — DMG + ZIP
             runner: macos-15-intel
             platform: mac
             arch: x64
             grokTarget: darwin-x64
+            packagedRoot: mac
           - name: Windows x64 preview — NSIS
             runner: windows-2025
             platform: windows
             arch: x64
             grokTarget: win32-x64
+            packagedRoot: win-unpacked
           - name: Linux x64 preview — AppImage + deb
             runner: ubuntu-24.04
             platform: linux
             arch: x64
             grokTarget: linux-x64
+            packagedRoot: linux-unpacked
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 210
 
@@ -132,6 +136,14 @@ jobs:
           --platform "${{ matrix.platform }}"
           --arch "${{ matrix.arch }}"
 
+      - name: Generate the target CycloneDX SBOM
+        run: >-
+          yarn sbom:preview --
+          --target "${{ matrix.grokTarget }}"
+          --cache-dir "${{ runner.tool_cache }}/xora-code/syft"
+          --output-dir applications/electron/dist/preview-assets
+          --source-dir "applications/electron/dist/${{ matrix.packagedRoot }}"
+
       - name: Upload immutable native preview artifact
         uses: actions/upload-artifact@v4
         with:
@@ -158,8 +170,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: xora-preview-*-${{ github.run_id }}-${{ github.run_attempt }}
-          path: preview-files
-          merge-multiple: true
+          path: preview-targets
+          merge-multiple: false
 
       - name: Derive immutable preview identity
         id: metadata
@@ -172,32 +184,20 @@ jobs:
           echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Validate the complete flat preview asset set
-        env:
-          PREVIEW_VERSION: ${{ steps.metadata.outputs.version }}
+      - name: Verify each native asset set and stage the flat release payload
+        shell: bash
         run: |
-          node - <<'NODE'
-          const fs = require('node:fs');
-          const files = fs.readdirSync('preview-files').sort();
-          const forbidden = files.filter(name => /(?:app-update\.json|grok-sidecar-update\.json|SHA256SUMS\.asc|\.(?:asc|sig))$/iu.test(name));
-          if (forbidden.length) throw new Error(`Forbidden formal-release assets: ${forbidden.join(', ')}`);
-          const expected = [
-            [/mac-arm64\.dmg$/u, 'macOS arm64 DMG'],
-            [/mac-arm64\.zip$/u, 'macOS arm64 ZIP'],
-            [/mac-x64\.dmg$/u, 'macOS x64 DMG'],
-            [/mac-x64\.zip$/u, 'macOS x64 ZIP'],
-            [/win-x64\.exe$/u, 'Windows x64 NSIS'],
-            [/linux-x86_64\.AppImage$/u, 'Linux x64 AppImage'],
-            [/linux-amd64\.deb$/u, 'Linux x64 deb']
-          ];
-          for (const [pattern, label] of expected) {
-            if (!files.some(name => pattern.test(name))) throw new Error(`Missing ${label}`);
-          }
-          for (const target of ['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64']) {
-            if (!files.includes(`SHA256SUMS-${target}.txt`)) throw new Error(`Missing checksum set for ${target}`);
-            if (!files.includes(`Xora-Code-${process.env.PREVIEW_VERSION}-${target}-PREVIEW.json`)) throw new Error(`Missing preview provenance for ${target}`);
-          }
-          NODE
+          set -euo pipefail
+          mkdir preview-files
+          for target in darwin-arm64 darwin-x64 win32-x64 linux-x64; do
+            assets_dir="preview-targets/xora-preview-${target}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test -d "$assets_dir"
+            node build/sbom/verify-preview-assets.mjs \
+              --target "$target" \
+              --commit "$GITHUB_SHA" \
+              --assets-dir "$assets_dir"
+            cp "$assets_dir"/* preview-files/
+          done
 
       - name: Render explicit unsigned-preview notes
         env:

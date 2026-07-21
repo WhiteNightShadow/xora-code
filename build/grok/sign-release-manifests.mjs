@@ -232,6 +232,15 @@ async function main() {
       commit: lock.upstream.commit,
       sourceRevision: lock.upstream.sourceRevision,
     },
+    bundledTools: {
+      ripgrep: {
+        package: lock.bundledTools.ripgrep.package,
+        version: lock.bundledTools.ripgrep.version,
+        source: lock.bundledTools.ripgrep.source,
+        features: lock.bundledTools.ripgrep.features,
+        lockedSourceBuild: true,
+      },
+    },
     acp: {
       transport: lock.runtime.transport,
       command: lock.runtime.args,

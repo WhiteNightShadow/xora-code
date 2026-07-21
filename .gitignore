@@ -11,6 +11,46 @@ output/releases/
 *.log
 .DS_Store
 
+# Local environment files, credentials, and signing material
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.secret
+*.token
+auth.json
+credentials.json
+secrets.json
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.csr
+*.crt
+*.cer
+*.der
+*.gpg
+*.kbx
+*.mobileprovision
+*.provisionprofile
+
+# Local authentication and session state
+.auth/
+.codex/
+.grok/
+playwright/.auth/
+storage-state*.json
+cookies*.json
+*.session
+*.session.json
+*.session.jsonl
+*.session.lock
+session-*.jsonl
+*.history.jsonl
+
 # Generated Theia build configuration and native-module staging
 .browser_modules/
 applications/*/esbuild.mjs
@@ -27,6 +67,7 @@ plugins/*
 .whitenight-code/
 
 # Electron packaging output
+applications/electron/generated-legal/
 applications/electron/release/
 applications/electron/dist/
 

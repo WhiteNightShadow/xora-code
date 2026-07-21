@@ -23,6 +23,15 @@ function releaseFor(targetName) {
     rustTarget: lock.targets[targetName].rustTarget,
     cargoPackage: lock.toolchain.cargoPackage,
     cargoProfile: lock.toolchain.cargoProfile,
+    bundledTools: {
+      ripgrep: {
+        package: lock.bundledTools.ripgrep.package,
+        version: lock.bundledTools.ripgrep.version,
+        source: lock.bundledTools.ripgrep.source,
+        features: lock.bundledTools.ripgrep.features,
+        lockedSourceBuild: true,
+      },
+    },
   };
 }
 
@@ -45,6 +54,7 @@ test("formal verifier accepts only release metadata for the current locked build
     ["rustTarget", lock.targets["darwin-x64"].rustTarget],
     ["cargoPackage", "unexpected-package"],
     ["cargoProfile", "release"],
+    ["bundledTools", { ripgrep: { package: "ripgrep", version: "14.1.1", source: "crates.io", features: ["pcre2"], lockedSourceBuild: true } }],
   ]) {
     assert.throws(
       () => assertReleaseIdentity({ ...release, [field]: value }, lock, expectedTarget),

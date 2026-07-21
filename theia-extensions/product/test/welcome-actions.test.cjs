@@ -7,11 +7,9 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
-    BuiltInProviderIds,
     WelcomeCommandIds,
     WELCOME_WORKSPACE_ACTIONS,
-    shouldShowWelcome,
-    xaiCredentialStatus
+    shouldShowWelcome
 } = require('../lib/browser/xora-welcome-actions');
 
 test('中文开始页提供 Agent 与项目入口', () => {
@@ -29,25 +27,17 @@ test('Xora Code 使用统一的命令与欢迎页标识', () => {
     assert.doesNotMatch(source, /WhiteNight Code|whitenight-code/);
 });
 
-test('内建 xAI 密钥状态使用中文且不暴露密钥', () => {
-    assert.equal(BuiltInProviderIds.xaiApiKey, 'xai-api-key');
-    assert.equal(xaiCredentialStatus(true), '已安全保存 API Key');
-    assert.equal(xaiCredentialStatus(false), '尚未配置 API Key');
-    assert.equal(xaiCredentialStatus(undefined), '密钥状态暂不可用');
-});
-
 test('仅空窗口显示开始页', () => {
     assert.equal(shouldShowWelcome(0), true);
     assert.equal(shouldShowWelcome(1), false);
     assert.equal(shouldShowWelcome(3), false);
 });
 
-test('保存首次 xAI 密钥后将 xAI 设为当前模型服务', () => {
+test('开始页只提供 Grok 订阅与自定义模型入口', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/xora-welcome-widget.tsx'), 'utf8');
-    const saveIndex = source.indexOf('await this.agentHostService.saveProvider(provider, apiKey)');
-    const selectIndex = source.indexOf('await this.agentHostService.selectProvider(provider.id)', saveIndex);
-    assert.notEqual(saveIndex, -1);
-    assert.ok(selectIndex > saveIndex);
+    assert.match(source, /Grok 订阅/);
+    assert.match(source, /自定义 API 与模型/);
+    assert.doesNotMatch(source, /renderXaiApiKey|xora-xai-api-key|输入 API Key/);
 });
 
 test('带项目启动不在布局关键路径等待文件树聚焦', () => {

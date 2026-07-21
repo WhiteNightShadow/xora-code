@@ -32,7 +32,8 @@
     "start:browser": "yarn workspace @xora-code/browser-app start",
     "start:electron": "yarn workspace @xora-code/electron-app start",
     "package:electron": "yarn workspace @xora-code/electron-app package",
-    "package:electron:preview": "yarn workspace @xora-code/electron-app package:preview"
+    "package:electron:preview": "yarn workspace @xora-code/electron-app package:preview",
+    "sbom:preview": "node build/sbom/generate-preview-sbom.mjs"
   },
   "devDependencies": {
     "lerna": "9.0.7",

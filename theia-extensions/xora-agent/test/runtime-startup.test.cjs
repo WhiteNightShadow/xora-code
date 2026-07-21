@@ -152,6 +152,62 @@ test('a project prewarm retries a transient crash and becomes ready without edit
     }
 });
 
+test('workspace attachment starts Agent standby before the Agent widget needs user input', async () => {
+    widgetClass();
+    const { WorkspaceTrustGuard } = require('../lib/browser/workspace-trust-guard');
+    const guard = Object.create(WorkspaceTrustGuard.prototype);
+    const calls = [];
+    const snapshot = {
+        phase: 'stopped',
+        workspaceRoot: '/fixture',
+        workspaceAttached: true,
+        workspaceTrusted: false,
+        providerId: 'xora-relay',
+        models: [],
+        sessions: [],
+        permissionMode: 'request-approval'
+    };
+    guard.model = { snapshot };
+    guard.workspaceTrustService = { getWorkspaceTrust: async () => false };
+    guard.agentHost = {
+        setWorkspaceRoot: async root => {
+            calls.push(['root', root]);
+            return snapshot;
+        },
+        synchronizeWorkspaceTrust: async request => {
+            calls.push(['attach', request]);
+            return snapshot;
+        },
+        listProviders: async () => {
+            calls.push(['providers']);
+            return [{
+                id: 'xora-relay',
+                name: 'Relay',
+                kind: 'custom',
+                credentialConfigured: true
+            }];
+        },
+        startRuntime: async request => {
+            calls.push(['start', request]);
+            return { ...snapshot, phase: 'ready' };
+        }
+    };
+    guard.lastSynchronizationSignature = undefined;
+    guard.agentStandbyKey = undefined;
+
+    const roots = [{ resource: { path: { toString: () => '/fixture' } } }];
+    await guard.synchronize(roots, false);
+    await flushAsyncWork();
+
+    assert.deepEqual(calls, [
+        ['root', '/fixture'],
+        ['attach', { workspaceRoots: ['/fixture'], trusted: false }],
+        ['providers'],
+        ['start', { workspaceRoot: '/fixture', providerId: 'xora-relay' }]
+    ]);
+    assert.equal(guard.agentStandbyKey, undefined);
+});
+
 test('desktop ACP initialize uses cold-start hints and a release-grade timeout', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/electron-main/grok-agent-host-service.ts'), 'utf8');
     const callStart = source.indexOf("acp.request<InitializeResponse>('initialize'");

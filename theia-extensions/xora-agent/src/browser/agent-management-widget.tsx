@@ -6,6 +6,7 @@ import URI from '@theia/core/lib/common/uri';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import { URI as VSCodeURI } from '@theia/core/shared/vscode-uri';
 import { AgentHostService, ComponentUpdateStatus, ManagementRequest, ManagementResult, ProviderProfile, ProviderProtocol, RuntimeSnapshot } from '../common/agent-protocol';
+import { friendlyAgentErrorMessage } from './agent-error-labels';
 import {
     AgentManagementTab,
     componentChannelLabel,
@@ -372,6 +373,10 @@ export class AgentManagementWidget extends ReactWidget {
     }
 
     protected renderProviders(): React.ReactNode {
+        // The original built-in xAI credential slot remains readable in the
+        // Electron backend solely for upgrades and old sessions. New product
+        // UI exposes one clear API path: ordinary custom model services.
+        const visibleProviders = this.providers.filter(provider => provider.kind !== 'xai-api-key');
         return <div className='xora-provider-list'>
             <article className='xora-card xora-current-provider-card'>
                 <div className='xora-current-provider-copy'>
@@ -385,11 +390,11 @@ export class AgentManagementWidget extends ReactWidget {
                         disabled={this.loading || !this.runtimeSnapshot}
                         value={this.runtimeSnapshot?.providerId ?? 'grok-subscription'}
                         onChange={event => void this.selectProvider(event.currentTarget.value)}>
-                        {this.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                        {visibleProviders.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
                     </select>
                 </label>
             </article>
-            {this.providers.map(provider => this.renderProvider(provider))}
+            {visibleProviders.map(provider => this.renderProvider(provider))}
             <details className='xora-card xora-provider-form'>
                 <summary>添加自定义 API 服务</summary>
                 <form onSubmit={event => this.addProvider(event)}>
@@ -407,7 +412,7 @@ export class AgentManagementWidget extends ReactWidget {
                         <span>启用服务端联网搜索（仅 Responses）</span>
                     </label>
                     <label>API 密钥<input required name='apiKey' type='password' autoComplete='off' /></label>
-                    <button className='theia-button main' type='submit'>保存模型服务</button>
+                    <button className='theia-button main' type='submit'>保存并使用</button>
                 </form>
             </details>
             {this.componentUpdate ? <details className='xora-card xora-provider-form'>
@@ -462,91 +467,7 @@ export class AgentManagementWidget extends ReactWidget {
                 </div>
             </article>;
         }
-        if (provider.kind === 'xai-api-key') {
-            const models = this.discoveredModels.get(provider.id);
-            return <article key={provider.id} className='xora-card xora-provider-card'>
-                <div>
-                    <strong>{provider.name}</strong>
-                    <span className={`xora-status-badge ${provider.credentialConfigured ? 'enabled' : 'disabled'}`}>
-                        {credentialStatusLabel(provider.credentialConfigured)}
-                    </span>
-                </div>
-                <p>可使用 xAI 官方 API，也可填写兼容接口的 Grok 中转站。</p>
-                <form className='xora-provider-edit-form xora-xai-provider-form' onSubmit={event => this.saveXaiProvider(event, provider)}>
-                    <label className='xora-provider-field-wide'>Base URL
-                        <input
-                            required
-                            name='baseUrl'
-                            type='url'
-                            defaultValue={provider.baseUrl ?? 'https://api.x.ai/v1'}
-                            placeholder='https://api.x.ai/v1' />
-                    </label>
-                    <label>协议
-                        <select required name='protocol' defaultValue={provider.protocol ?? 'openai-responses'}>
-                            <option value='openai-responses'>OpenAI Responses</option>
-                            <option value='openai-chat-completions'>OpenAI Chat Completions</option>
-                            <option value='anthropic-messages'>Anthropic Messages</option>
-                        </select>
-                    </label>
-                    <label>上下文窗口
-                        <input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 200000} />
-                    </label>
-                    <label className='xora-provider-checkbox'>
-                        <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch === true} />
-                        <span>启用服务端联网搜索（仅 Responses）</span>
-                    </label>
-                    <label className='xora-provider-field-wide'>模型 ID
-                        <input
-                            required
-                            name='model'
-                            list={`xora-provider-models-${provider.id}`}
-                            defaultValue={provider.model ?? ''}
-                            placeholder='例如 grok-4'
-                            autoComplete='off' />
-                        <datalist id={`xora-provider-models-${provider.id}`}>
-                            {models?.map(model => <option key={model} value={model} />)}
-                        </datalist>
-                    </label>
-                    <label className='xora-provider-field-wide'>API 密钥{provider.credentialConfigured ? '（可留空）' : ''}
-                        <input
-                            required={!provider.credentialConfigured}
-                            name='apiKey'
-                            type='password'
-                            autoComplete='off'
-                            placeholder={provider.credentialConfigured ? '留空则保持当前密钥' : '输入 API 密钥'} />
-                    </label>
-                    <p className='xora-provider-security-note xora-provider-field-wide'>
-                        <span className='codicon codicon-shield' aria-hidden='true' />
-                        <span>使用中转站时，密钥、提示词和 Agent 读取的项目内容会发送给该服务，请仅使用可信地址。修改 Base URL 时需重新输入密钥；密钥由 Electron 凭据保险库保存，不会回显。</span>
-                    </p>
-                    {models ? <p className='xora-provider-models xora-provider-field-wide'>
-                        {models.length > 0
-                            ? `已获取 ${models.length} 个模型，可从“模型 ID”列表选择，也可继续手动输入。`
-                            : '服务没有返回模型列表，请手动输入模型 ID。'}
-                    </p> : undefined}
-                    <div className='xora-provider-card-actions xora-provider-edit-actions'>
-                        <button className='theia-button main' disabled={this.loading} type='submit'>
-                            保存并使用
-                        </button>
-                        <button
-                            className='theia-button secondary'
-                            disabled={this.loading || !provider.credentialConfigured}
-                            title={provider.credentialConfigured ? '从当前已保存的地址获取模型' : '请先保存地址和 API 密钥'}
-                            type='button'
-                            onClick={() => this.discoverModels(provider.id)}>
-                            获取模型
-                        </button>
-                        <button
-                            className='theia-button secondary'
-                            disabled={this.loading || !provider.credentialConfigured}
-                            type='button'
-                            onClick={() => this.clearProviderCredential(provider)}>
-                            清除密钥
-                        </button>
-                    </div>
-                </form>
-            </article>;
-        }
+        if (provider.kind === 'xai-api-key') return undefined;
         return this.renderCustomProvider(provider);
     }
 
@@ -583,7 +504,7 @@ export class AgentManagementWidget extends ReactWidget {
                 <p className='xora-provider-edit-hint'>修改 Base URL 时必须重新输入 API 密钥；密钥只会发送给 Electron 凭据保险库且不会回显。</p>
                 {models?.length ? <p className='xora-provider-models'>可用模型：{models.join(', ')}</p> : undefined}
                 <div className='xora-provider-card-actions xora-provider-edit-actions'>
-                    <button className='theia-button main' disabled={this.loading} type='submit'>保存修改</button>
+                    <button className='theia-button main' disabled={this.loading} type='submit'>保存并使用</button>
                     <button className='theia-button secondary' disabled={this.loading} type='button' onClick={() => this.discoverModels(provider.id)}>获取模型</button>
                     <button
                         className='theia-button secondary'
@@ -909,10 +830,17 @@ export class AgentManagementWidget extends ReactWidget {
         try {
             await this.service.saveProvider(provider, String(form.get('apiKey')));
             formElement.reset();
+            try {
+                await this.service.selectProvider(provider.id);
+            } catch (error) {
+                await this.refresh();
+                this.messages.warn(`模型服务“${provider.name}”已保存，但当前无法切换：${friendlyAgentErrorMessage(error)}`);
+                return;
+            }
             await this.refresh();
-            this.messages.info(`已保存模型服务“${provider.name}”。`);
+            this.messages.info(`已保存并启用模型服务“${provider.name}”。`);
         } catch (error) {
-            this.messages.error(`无法保存模型服务：${error instanceof Error ? error.message : String(error)}`);
+            this.messages.error(`无法保存模型服务：${friendlyAgentErrorMessage(error)}`);
         }
     }
 
@@ -925,7 +853,7 @@ export class AgentManagementWidget extends ReactWidget {
             await this.service.selectProvider(providerId);
             this.messages.info(`已将“${providerName}”设为当前模型服务。`);
         } catch (error) {
-            this.messages.error(`无法切换模型服务：${error instanceof Error ? error.message : String(error)}`);
+            this.messages.error(`无法切换模型服务：${friendlyAgentErrorMessage(error)}`);
         } finally {
             this.loading = false;
             await this.refresh();
@@ -952,10 +880,17 @@ export class AgentManagementWidget extends ReactWidget {
             await this.service.saveProvider(provider, optionalCredential(form.get('apiKey')));
             const password = formElement.elements.namedItem('apiKey');
             if (password instanceof HTMLInputElement) password.value = '';
+            try {
+                await this.service.selectProvider(provider.id);
+            } catch (error) {
+                await this.refresh();
+                this.messages.warn(`模型服务“${provider.name}”已更新，但当前无法切换：${friendlyAgentErrorMessage(error)}`);
+                return;
+            }
             await this.refresh();
-            this.messages.info(`已更新模型服务“${provider.name}”。`);
+            this.messages.info(`已更新并启用模型服务“${provider.name}”。`);
         } catch (error) {
-            this.messages.error(`无法更新模型服务：${error instanceof Error ? error.message : String(error)}`);
+            this.messages.error(`无法更新模型服务：${friendlyAgentErrorMessage(error)}`);
         }
     }
 
@@ -970,42 +905,6 @@ export class AgentManagementWidget extends ReactWidget {
             this.messages.info(`已删除模型服务“${provider.name}”。`);
         } catch (error) {
             this.messages.error(`无法删除模型服务：${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
-    protected async saveXaiProvider(
-        event: React.FormEvent<HTMLFormElement>,
-        existing: Extract<ProviderProfile, { kind: 'xai-api-key' }>
-    ): Promise<void> {
-        event.preventDefault();
-        const formElement = event.currentTarget;
-        const form = new FormData(formElement);
-        const provider: ProviderProfile = {
-            id: existing.id,
-            name: existing.name,
-            kind: 'xai-api-key',
-            protocol: String(form.get('protocol')) as ProviderProtocol,
-            baseUrl: String(form.get('baseUrl') ?? ''),
-            model: String(form.get('model') ?? ''),
-            contextWindow: Number(form.get('contextWindow')),
-            backendSearch: form.get('backendSearch') === 'on',
-            secretRef: existing.secretRef,
-            managed: true
-        };
-        try {
-            await this.service.saveProvider(provider, optionalCredential(form.get('apiKey')));
-            const switchedProvider = this.runtimeSnapshot?.providerId !== existing.id;
-            if (switchedProvider) {
-                await this.service.selectProvider(existing.id);
-            }
-            const password = formElement.elements.namedItem('apiKey');
-            if (password instanceof HTMLInputElement) password.value = '';
-            await this.refresh();
-            this.messages.info(switchedProvider
-                ? 'xAI API 服务已保存并设为当前模型服务。'
-                : 'xAI API 服务设置已保存。');
-        } catch (error) {
-            this.messages.error(`无法保存 xAI API 服务：${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
@@ -1070,7 +969,7 @@ export class AgentManagementWidget extends ReactWidget {
             this.update();
             this.messages.info(models.length ? `已获取 ${models.length} 个可用模型。` : '服务没有返回可用模型，请手动输入模型 ID。');
         } catch (error) {
-            this.messages.error(`无法获取模型：${error instanceof Error ? error.message : String(error)}`);
+            this.messages.error(`无法获取模型：${friendlyAgentErrorMessage(error)}`);
         }
     }
 

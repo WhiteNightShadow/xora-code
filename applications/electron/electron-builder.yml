@@ -11,6 +11,7 @@ asarUnpack:
   - "**/lib/prebuilds/**"
 nodeGypRebuild: false
 npmRebuild: false
+afterPack: ./scripts/sanitize-after-pack.js
 directories:
   buildResources: resources
   output: dist
@@ -36,6 +37,8 @@ extraResources:
     to: legal/Xora-Code-NOTICE.md
   - from: ../../THIRD-PARTY-NOTICES.md
     to: legal/THIRD-PARTY-NOTICES.md
+  - from: generated-legal
+    to: legal/dependencies
   - from: ../../resources/legal
     to: legal/upstream
   - from: ../../resources/update

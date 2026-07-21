@@ -5,8 +5,11 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { assertNoBuildPathLeaks } = require('./packaged-path-sanitizer');
+const { spawnYarnSync } = require('./spawn-yarn');
 
 const applicationRoot = path.resolve(__dirname, '..');
 const repositoryRoot = path.resolve(applicationRoot, '..', '..');
@@ -71,16 +74,87 @@ function previewEnvironment(environment = process.env) {
     return result;
 }
 
-function run(file, args, environment) {
-    const result = spawnSync(file, args, {
+function runYarn(args, environment) {
+    const result = spawnYarnSync(args, {
         cwd: applicationRoot,
         env: environment,
         encoding: 'utf8',
         stdio: 'inherit',
+        windowsHide: true
+    });
+    if (result.status !== 0) fail(`yarn ${args.join(' ')} failed with status ${result.status ?? 'unknown'}`);
+}
+
+function runNative(file, args, timeout = 10 * 60_000) {
+    const result = spawnSync(file, args, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout,
         windowsHide: true,
         shell: false
     });
-    if (result.status !== 0) fail(`${file} ${args.join(' ')} failed with status ${result.status ?? 'unknown'}`);
+    if (!result || result.status !== 0) {
+        fail(`${path.basename(file)} failed with status ${result?.status ?? 'unknown'}`);
+    }
+    return `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+}
+
+function applicationBundle(directory) {
+    const bundles = fs.readdirSync(directory, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && entry.name.endsWith('.app'))
+        .map(entry => path.join(directory, entry.name));
+    if (bundles.length !== 1) fail(`expected one packaged macOS application, found ${bundles.length}`);
+    return bundles[0];
+}
+
+function macApplicationOutputDirectory(directory, arch) {
+    // electron-builder omits the architecture suffix for its default x64
+    // output and uses `mac-arm64` for arm64. Do not guess `mac-x64`: that
+    // directory is never produced by the pinned builder and would make the
+    // Intel preview fail only after the expensive native build completed.
+    return path.join(directory, arch === 'x64' ? 'mac' : `mac-${arch}`);
+}
+
+function createMacPreviewDmg(directory, target, runner = runNative) {
+    if (process.platform !== 'darwin') fail('the preview DMG must be created on macOS');
+    const applicationPackage = JSON.parse(fs.readFileSync(path.join(applicationRoot, 'package.json'), 'utf8'));
+    const app = applicationBundle(macApplicationOutputDirectory(directory, target.arch));
+    const artifact = path.join(directory, `Xora Code-${applicationPackage.version}-mac-${target.arch}.dmg`);
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-preview-dmg-'));
+    const writableImage = path.join(temporary, 'staging.dmg');
+    const mountpoint = path.join(temporary, 'volume');
+    let attached = false;
+    try {
+        fs.mkdirSync(mountpoint);
+        runner('/usr/bin/hdiutil', [
+            'create', '-srcfolder', app, '-volname', `Xora Code ${applicationPackage.version} ${target.arch}`,
+            '-anyowners', '-nospotlight', '-format', 'UDRW', '-fs', 'APFS', writableImage
+        ]);
+        runner('/usr/bin/hdiutil', [
+            'attach', '-readwrite', '-noverify', '-noautoopen', '-nobrowse',
+            '-mountpoint', mountpoint, writableImage
+        ]);
+        attached = true;
+        fs.symlinkSync('/Applications', path.join(mountpoint, 'Applications'));
+        runner('/bin/sync', []);
+        runner('/usr/bin/hdiutil', ['detach', mountpoint]);
+        attached = false;
+        fs.rmSync(artifact, { force: true });
+        runner('/usr/bin/hdiutil', [
+            'convert', writableImage, '-ov', '-format', 'UDZO',
+            '-imagekey', 'zlib-level=9', '-o', artifact
+        ]);
+        runner('/usr/bin/hdiutil', ['verify', artifact]);
+        if (!fs.statSync(artifact).isFile() || fs.statSync(artifact).size === 0) fail('hdiutil produced an empty DMG');
+        return artifact;
+    } finally {
+        if (attached) {
+            spawnSync('/usr/bin/hdiutil', ['detach', '-force', mountpoint], {
+                encoding: 'utf8', stdio: 'ignore', timeout: 120_000, windowsHide: true, shell: false
+            });
+        }
+        fs.rmSync(temporary, { recursive: true, force: true });
+    }
 }
 
 function hasExtension(name, extension) {
@@ -112,10 +186,9 @@ function stagePreviewAssets(directory, outputDirectory, targetName, target, meta
         fs.copyFileSync(path.join(directory, name), path.join(outputDirectory, name), fs.constants.COPYFILE_EXCL);
     }
 
-    const checksums = selected.map(name => `${sha256(path.join(outputDirectory, name))}  ${name}`).join('\n');
-    fs.writeFileSync(path.join(outputDirectory, `SHA256SUMS-${targetName}.txt`), `${checksums}\n`, { flag: 'wx' });
     const applicationPackage = JSON.parse(fs.readFileSync(path.join(applicationRoot, 'package.json'), 'utf8'));
-    fs.writeFileSync(path.join(outputDirectory, `Xora-Code-${applicationPackage.version}-${targetName}-PREVIEW.json`), `${JSON.stringify({
+    const provenanceName = `Xora-Code-${applicationPackage.version}-${targetName}-PREVIEW.json`;
+    fs.writeFileSync(path.join(outputDirectory, provenanceName), `${JSON.stringify({
         schemaVersion: 1,
         product: 'xora-code',
         version: applicationPackage.version,
@@ -125,6 +198,10 @@ function stagePreviewAssets(directory, outputDirectory, targetName, target, meta
         productionSigned: false,
         signature: target.signature
     }, null, 2)}\n`, { flag: 'wx' });
+
+    const checksummed = [...selected, provenanceName].sort((left, right) => left.localeCompare(right));
+    const checksums = checksummed.map(name => `${sha256(path.join(outputDirectory, name))}  ${name}`).join('\n');
+    fs.writeFileSync(path.join(outputDirectory, `SHA256SUMS-${targetName}.txt`), `${checksums}\n`, { flag: 'wx' });
     return selected;
 }
 
@@ -157,22 +234,42 @@ function assertWindowsInstallersUnsigned(directory) {
     }
 }
 
+function assertFinalExecutableArtifacts(directory, target) {
+    const selected = selectArtifacts(directory, target);
+    const scanned = [];
+    for (const name of selected) {
+        scanned.push(...assertNoBuildPathLeaks(path.join(directory, name)));
+    }
+    return scanned;
+}
+
 function packagePreview(targetName, target) {
     assertNative(targetName, target);
     const environment = previewEnvironment();
-    const yarn = process.platform === 'win32' ? 'yarn.cmd' : 'yarn';
-    run(yarn, ['clean:dist'], environment);
-    run(yarn, ['build:prod'], environment);
+    runYarn(['clean:dist'], environment);
+    runYarn(['build:prod'], environment);
 
-    const builder = ['electron-builder', ...target.builder, '--publish', 'never'];
-    if (target.platform === 'mac') {
-        builder.push(
-            '--config.mac.identity=null',
-            '--config.mac.notarize=false',
-            '--config.afterPack=./scripts/preview-after-pack.js'
-        );
+    // The native hdiutil call can take longer than dmg-builder's retry window
+    // for this large application. Build the signed ZIP/app with electron-builder,
+    // then create and verify the preview DMG synchronously with a ten-minute
+    // native timeout. This also prevents ZIP compression and APFS creation from
+    // competing for I/O.
+    const builderPlans = target.platform === 'mac'
+        ? [['--mac', 'zip', `--${target.arch}`]]
+        : [target.builder];
+    for (const plan of builderPlans) {
+        const builder = ['electron-builder', ...plan, '--publish', 'never'];
+        if (target.platform === 'mac') {
+            builder.push(
+                '--config.mac.identity=null',
+                '--config.mac.notarize=false',
+                '--config.afterPack=./scripts/preview-after-pack.js'
+            );
+        }
+        runYarn(builder, environment);
     }
-    run(yarn, builder, environment);
+    if (target.platform === 'mac') createMacPreviewDmg(distRoot, target);
+    assertFinalExecutableArtifacts(distRoot, target);
     if (target.platform === 'windows') assertWindowsInstallersUnsigned(distRoot);
     return stagePreviewAssets(distRoot, previewAssetsRoot, targetName, target);
 }
@@ -181,6 +278,9 @@ module.exports = {
     FORBIDDEN_RELEASE_ASSET,
     SIGNING_ENVIRONMENT,
     TARGETS,
+    createMacPreviewDmg,
+    macApplicationOutputDirectory,
+    assertFinalExecutableArtifacts,
     assertWindowsInstallersUnsigned,
     options,
     previewEnvironment,

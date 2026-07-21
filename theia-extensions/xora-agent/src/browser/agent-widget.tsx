@@ -38,9 +38,17 @@ import {
     toolMatchesActivityFilter
 } from './agent-display-helpers';
 import { OPEN_AGENT_SETTINGS_COMMAND } from './agent-entry-commands';
+import { friendlyAgentErrorMessage } from './agent-error-labels';
 import { shouldSubmitPromptOnEnter } from './agent-input-helpers';
 import { grokSubscriptionAuthStatus } from './agent-management-labels';
 import { AgentMarkdown } from './agent-markdown';
+import {
+    agentModelChoiceGroups,
+    decodeAgentModelChoice,
+    PROVIDER_DEFAULT_MODEL_CHOICE_ID,
+    providerCatalogModelId,
+    selectedAgentModelChoice
+} from './agent-model-options';
 import { runtimePhaseLabel, toolStatusLabel, transcriptRoleLabel } from './agent-ui-labels';
 import { AgentViewModel, TranscriptEntry } from './agent-view-model';
 import { WorkspaceTrustGuard } from './workspace-trust-guard';
@@ -56,6 +64,10 @@ interface PromptSubmission {
     sessionId?: string;
     readonly attachments: PromptImageAttachment[];
     readonly draftAttachmentIds?: string[];
+    /** Set only after Electron has accepted and published this exact user
+     * turn. Until then the conversation renders a lightweight local bubble so
+     * cold session creation never looks like a missed click. */
+    userEventReceived?: boolean;
 }
 
 interface RetryablePrompt extends PromptSubmission {
@@ -100,6 +112,13 @@ const RUNTIME_PREWARM_DELAY_MS = 0;
 const RUNTIME_PREWARM_RETRY_DELAY_MS = 350;
 const RUNTIME_PREWARM_MAX_ATTEMPTS = 2;
 
+function sessionProviderLabel(providerId: string, selectedProviderId: string): string {
+    if (providerId === selectedProviderId) return '当前模型服务';
+    if (providerId === 'grok-subscription') return 'Grok 订阅';
+    if (providerId === 'xai-api-key') return '历史模型服务';
+    return '历史自定义服务';
+}
+
 @injectable()
 export class XoraAgentWidget extends ReactWidget {
     static readonly ID = 'xora-code-agent';
@@ -133,6 +152,10 @@ export class XoraAgentWidget extends ReactWidget {
     protected providers: ProviderProfile[] = [];
     protected roots: string[] = [];
     protected submission: PromptSubmission | undefined;
+    /** Covers the asynchronous Provider refresh before a PromptSubmission is
+     * created. Without this guard, two quick Enter presses can both cross the
+     * refresh boundary and submit the same draft. */
+    protected sendPreparationInFlight = false;
     protected retryablePrompt: RetryablePrompt | undefined;
     protected readonly cancelRequested = new Set<string>();
     protected readonly permissionDecisions = new Set<string>();
@@ -154,6 +177,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected readonly diffDisclosure = new Map<string, boolean>();
     protected newSessionModel: string | undefined;
     protected modelOptionsLoading = false;
+    protected providerRefreshInFlight: Promise<void> | undefined;
     protected permissionModeChanging = false;
     protected imeComposing = false;
     protected imeCompositionJustEnded = false;
@@ -245,7 +269,9 @@ export class XoraAgentWidget extends ReactWidget {
             && this.runtimePrewarmAttempts <= RUNTIME_PREWARM_MAX_ATTEMPTS
             && ['starting', 'initializing', 'crashed'].includes(snapshot.phase);
         const active = snapshot.sessions.find(session => session.appSessionId === snapshot.activeSessionId);
-        const selectedModel = this.selectedModelValue(snapshot, active);
+        const modelChoiceGroups = agentModelChoiceGroups(this.providers, snapshot, active);
+        const modelChoiceCount = modelChoiceGroups.reduce((count, group) => count + group.choices.length, 0);
+        const selectedModel = selectedAgentModelChoice(modelChoiceGroups, snapshot, active, this.newSessionModel);
         const permissionMode = snapshot.permissionMode;
         const contextSummary = summarizeAgentContext(snapshot, this.model.transcript);
         const pendingPermissions = this.model.transcript.filter(entry =>
@@ -272,8 +298,13 @@ export class XoraAgentWidget extends ReactWidget {
             ? '当前 Grok Build 版本不支持图片输入。图片已保留，请移除或更新运行时后再发送。'
             : undefined;
         const composerImageError = this.imageError ?? imageCapabilityError;
-        const composerHasContent = !!this.prompt.trim() || this.draftImages.length > 0;
         const composerGate = this.composerGate(snapshot);
+        const sendInFlight = !!this.submission || this.sendPreparationInFlight;
+        const pendingSubmission = this.agentPaneView === 'conversation'
+            && this.submission
+            && !this.submission.userEventReceived
+            ? this.submission
+            : undefined;
         return <div className='xora-agent-root' onKeyDown={event => this.handleRootKeyDown(event)}>
             <header className='xora-agent-header'>
                 <div className='xora-agent-heading'>
@@ -286,7 +317,7 @@ export class XoraAgentWidget extends ReactWidget {
                             <span className={`xora-runtime-dot xora-runtime-${recoveringRuntime ? 'starting' : snapshot.phase}`} />
                             <span className='xora-agent-runtime-label'>{this.sessionLoading
                                     ? '正在恢复会话'
-                                    : this.submission && active?.status !== 'running'
+                                    : sendInFlight && active?.status !== 'running'
                                         ? ['starting', 'initializing', 'draining', 'updating'].includes(snapshot.phase)
                                             ? '正在连接，随后发送'
                                             : '正在准备任务'
@@ -314,7 +345,7 @@ export class XoraAgentWidget extends ReactWidget {
                         className='xora-agent-icon-button'
                         aria-label='新建 Agent 会话'
                         title='新建会话'
-                        disabled={!!this.submission || this.sessionLoading}
+                        disabled={sendInFlight || this.sessionLoading}
                         onClick={() => this.startNewSession()}>
                         <span className='codicon codicon-add' />
                     </button>
@@ -342,9 +373,9 @@ export class XoraAgentWidget extends ReactWidget {
                 aria-busy={this.sessionLoading}
                 ref={node => { this.transcriptNode = node; }}
                 onScroll={event => this.onTranscriptScroll(event.currentTarget)}>
-                {this.agentPaneView === 'conversation' && this.model.transcript.length === 0
+                {this.agentPaneView === 'conversation' && this.model.transcript.length === 0 && !pendingSubmission
                     ? this.renderEmpty()
-                    : renderedTranscript.length === 0
+                    : renderedTranscript.length === 0 && !pendingSubmission
                         ? this.renderPaneEmpty()
                         : <>
                             {hiddenTranscriptCount ? <div className='xora-history-window-notice' role='status'>
@@ -352,6 +383,7 @@ export class XoraAgentWidget extends ReactWidget {
                             </div> : undefined}
                             {this.agentPaneView === 'changes' ? this.renderChangesOverview(renderedTranscript) : undefined}
                             {this.renderTranscript(renderedTranscript)}
+                            {pendingSubmission ? this.renderPendingSubmission(pendingSubmission) : undefined}
                     </>}
                 {snapshot.message ? this.renderRuntimeNotice(snapshot.message) : undefined}
                 {this.retryablePrompt ? this.renderRetry(this.retryablePrompt) : undefined}
@@ -447,9 +479,11 @@ export class XoraAgentWidget extends ReactWidget {
                                 <span className='codicon codicon-symbol-misc' />
                                 <select
                                     aria-label='Agent 模型'
-                                    title={snapshot.models.length === 0 ? '点击加载当前服务提供的模型' : undefined}
+                                    title={modelChoiceCount === 0
+                                        ? '点击加载当前服务提供的模型'
+                                        : '选择当前模型服务提供的模型'}
                                     disabled={active?.status === 'running'
-                                        || !!this.submission
+                                        || sendInFlight
                                         || this.sessionLoading
                                         || this.modelOptionsLoading
                                         || snapshot.phase === 'starting'
@@ -458,19 +492,19 @@ export class XoraAgentWidget extends ReactWidget {
                                         || snapshot.phase === 'updating'}
                                     value={selectedModel}
                                     onMouseDown={event => {
-                                        if (snapshot.models.length === 0) {
-                                            event.preventDefault();
+                                        if (this.currentProviderNeedsModelLoad(snapshot)) {
+                                            if (modelChoiceCount === 0) event.preventDefault();
                                             void this.loadModelOptions();
                                         }
                                     }}
                                     onKeyDown={event => {
-                                        if (snapshot.models.length === 0 && ['Enter', ' ', 'ArrowDown'].includes(event.key)) {
-                                            event.preventDefault();
+                                        if (this.currentProviderNeedsModelLoad(snapshot) && ['Enter', ' ', 'ArrowDown'].includes(event.key)) {
+                                            if (modelChoiceCount === 0) event.preventDefault();
                                             void this.loadModelOptions();
                                         }
                                     }}
                                     onChange={event => this.selectModel(active, event.currentTarget.value)}>
-                                    {this.renderModelOptions(snapshot, active)}
+                                    {this.renderModelOptions(modelChoiceGroups)}
                                 </select>
                             </label>
                             <label
@@ -481,7 +515,7 @@ export class XoraAgentWidget extends ReactWidget {
                                 <span className='codicon codicon-shield' />
                                 <select
                                     aria-label='Agent 全局权限'
-                                    disabled={active?.status === 'running' || !!this.submission || this.sessionLoading || this.permissionModeChanging}
+                                    disabled={active?.status === 'running' || sendInFlight || this.sessionLoading || this.permissionModeChanging}
                                     value={permissionMode}
                                     onChange={event => void this.selectPermissionMode(event.currentTarget.value as AgentPermissionMode)}>
                                     <option value='request-approval'>请求审批</option>
@@ -526,10 +560,14 @@ export class XoraAgentWidget extends ReactWidget {
                             <span className={`codicon ${this.cancelRequested.has(active.appSessionId) ? 'codicon-loading codicon-modifier-spin' : 'codicon-debug-stop'}`} />
                         </button>
                         : <button
-                            ref={node => { this.composerSubmitButton = node; }}
+                            ref={node => {
+                                this.composerSubmitButton = node;
+                                if (node) this.syncComposerSubmitButton();
+                            }}
                             className='xora-composer-submit'
-                            aria-label={this.submission ? '正在发送任务' : '发送任务'}
-                            title={this.submission
+                            type='button'
+                            aria-label={sendInFlight ? '正在发送任务' : '发送任务'}
+                            title={sendInFlight
                                 ? '正在发送…'
                                 : composerImageError
                                     ? composerImageError
@@ -538,14 +576,22 @@ export class XoraAgentWidget extends ReactWidget {
                                     : this.imageReadsInFlight
                                         ? '正在读取图片…'
                                         : '发送任务'}
-                            disabled={!composerHasContent
-                                || !!this.submission
+                            // Prompt text is intentionally kept outside React
+                            // state for CJK IME stability. React must therefore
+                            // not retain a stale `disabled=true` prop merely
+                            // because the last full render saw an empty prompt;
+                            // its synthetic event layer would swallow clicks
+                            // even after syncComposerSubmitButton enabled the
+                            // native DOM node. Lifecycle gates stay declarative,
+                            // while content availability is synchronized by the
+                            // ref and native textarea change path.
+                            disabled={sendInFlight
                                 || !!composerGate
                                 || this.sessionLoading
                                 || this.imageReadsInFlight > 0
                                 || !!imageCapabilityError}
                             onClick={() => this.send()}>
-                            <span className={`codicon ${this.submission ? 'codicon-loading codicon-modifier-spin' : 'codicon-send'}`} />
+                            <span className={`codicon ${sendInFlight ? 'codicon-loading codicon-modifier-spin' : 'codicon-send'}`} />
                         </button>}
                     </div>
                     {composerImageError ? <div className='xora-composer-image-error' role='alert'>
@@ -1011,6 +1057,9 @@ export class XoraAgentWidget extends ReactWidget {
         const providerId = this.model.snapshot.providerId;
         if (this.observedProviderId !== undefined && providerId !== this.observedProviderId) {
             this.newSessionModel = undefined;
+            if (this.providers.length > 0 && !this.providers.some(provider => provider.id === providerId)) {
+                void this.refreshProviders();
+            }
         }
         this.observedProviderId = providerId;
         const current = this.imageDraftContextKey();
@@ -1051,8 +1100,11 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected renderHistoryPopover(): React.ReactNode {
         const snapshot = this.model.snapshot;
-        const sessions = snapshot.sessions.filter(session =>
-            session.workspaceRoot === snapshot.workspaceRoot && session.providerId === snapshot.providerId);
+        // Provider/model selection is application-wide, but history belongs to
+        // the project. Older conversations remain visible and are rebound to
+        // the current Provider when opened; selecting history never switches
+        // application credentials back to its original Provider.
+        const sessions = snapshot.sessions.filter(session => session.workspaceRoot === snapshot.workspaceRoot);
         return <section className='xora-agent-popover xora-session-popover' role='dialog' aria-label='会话历史'>
             <header className='xora-popover-header'>
                 <div>
@@ -1084,7 +1136,9 @@ export class XoraAgentWidget extends ReactWidget {
                         <span className={`xora-session-status-dot xora-session-status-${session.status}`} />
                         <span className='xora-session-item-copy'>
                             <strong title={session.title}>{session.title || '未命名会话'}</strong>
-                            <span>{sessionStatusLabel(session.status)} · {sessionRelativeTime(session.updatedAt)}</span>
+                            <span>
+                                {sessionStatusLabel(session.status)} · {sessionProviderLabel(session.providerId, snapshot.providerId)} · {sessionRelativeTime(session.updatedAt)}
+                            </span>
                         </span>
                         {active ? <span className='codicon codicon-check' aria-label='当前会话' /> : undefined}
                     </button>;
@@ -1199,31 +1253,22 @@ export class XoraAgentWidget extends ReactWidget {
         else this.closePopover();
     }
 
-    protected selectedModelValue(snapshot: RuntimeSnapshot, active: SessionRecord | undefined): string {
-        const providerDefault = this.providers.find(provider => provider.id === snapshot.providerId)?.model;
-        const selected = active
-            ? snapshot.selectedModel ?? active.model ?? snapshot.models[0]?.id ?? ''
-            : this.newSessionModel ?? snapshot.selectedModel ?? providerDefault ?? snapshot.models[0]?.id ?? '';
-        if (!selected) return '';
-        return snapshot.models.find(model => model.id === selected
-            || this.normalizedModelKey(model.id) === this.normalizedModelKey(selected)
-            || this.normalizedModelKey(model.name) === this.normalizedModelKey(selected))?.id ?? selected;
+    protected currentProviderNeedsModelLoad(snapshot: RuntimeSnapshot): boolean {
+        const provider = this.providers.find(candidate => candidate.id === snapshot.providerId);
+        return snapshot.models.length === 0 && !providerCatalogModelId(provider ?? {
+            id: snapshot.providerId,
+            name: snapshot.providerId,
+            kind: 'grok-subscription'
+        });
     }
 
-    protected normalizedModelKey(value: string): string {
-        return value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, '');
-    }
-
-    protected renderModelOptions(snapshot: RuntimeSnapshot, active: SessionRecord | undefined): React.ReactNode {
-        const selected = this.selectedModelValue(snapshot, active);
-        const selectedIsKnown = snapshot.models.some(model => model.id === selected);
-        return <>
-            {selected && !selectedIsKnown ? <option value={selected}>{selected}</option> : undefined}
-            {!selected && snapshot.models.length === 0
-                ? <option value=''>{this.modelOptionsLoading ? '正在加载模型…' : '选择模型…'}</option>
-                : undefined}
-            {snapshot.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
-        </>;
+    protected renderModelOptions(groups: ReturnType<typeof agentModelChoiceGroups>): React.ReactNode {
+        if (groups.length === 0) {
+            return <option value=''>{this.modelOptionsLoading ? '正在加载模型…' : '选择模型…'}</option>;
+        }
+        return groups.map(group => <optgroup key={group.providerId} label={group.providerName}>
+            {group.choices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </optgroup>);
     }
 
     protected formatContextWindow(value: number): string {
@@ -1310,7 +1355,7 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected scheduleRuntimePrewarm(): void {
-        if (!this.runtimePrewarmRequested || this.submission || this.sessionLoading) return;
+        if (!this.runtimePrewarmRequested || this.submission || this.sessionLoading || this.modelOptionsLoading) return;
         const snapshot = this.model.snapshot;
         if (snapshot.phase === 'ready' || snapshot.phase === 'auth-required') {
             this.runtimePrewarmRequested = false;
@@ -1499,7 +1544,7 @@ export class XoraAgentWidget extends ReactWidget {
         try {
             await Promise.all([this.model.refresh(), this.refreshProviders()]);
         } catch (error) {
-            this.messages.error(`无法刷新 Agent：${error instanceof Error ? error.message : String(error)}`);
+            this.messages.error(`无法刷新 Agent：${friendlyAgentErrorMessage(error)}`);
         }
     }
 
@@ -1510,7 +1555,7 @@ export class XoraAgentWidget extends ReactWidget {
             this.resetToNewSession('Agent 主目录已切换，未发送的图片已清除。');
             this.requestRuntimePrewarm(true);
         } catch (error) {
-            this.messages.error(error instanceof Error ? error.message : String(error));
+            this.messages.error(friendlyAgentErrorMessage(error));
         } finally {
             this.update();
         }
@@ -1518,17 +1563,37 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected async selectModel(session: SessionRecord | undefined, modelId: string): Promise<void> {
         if (this.sessionLoading) return;
+        const decoded = decodeAgentModelChoice(modelId);
+        const selection = decoded ?? { providerId: this.model.snapshot.providerId, modelId };
+        // Provider/credential selection belongs to Settings. A stale DOM event
+        // from before another window changed the global service is ignored;
+        // the composer never switches credentials itself.
+        if (selection.modelId === PROVIDER_DEFAULT_MODEL_CHOICE_ID) {
+            this.newSessionModel = this.model.snapshot.selectedModel;
+            this.requestRuntimePrewarm(true);
+            this.update();
+            return;
+        }
+        if (selection.providerId !== this.model.snapshot.providerId) {
+            this.messages.info('模型服务已变化，请在设置中确认当前服务后重新选择模型。');
+            await this.model.refresh().catch(() => undefined);
+            return;
+        }
+        modelId = selection.modelId;
         if (!session) {
             if (!modelId) return;
             // Apply immediately so the composer remains responsive even when
             // another window briefly holds the preferences file lock.
+            const previousModel = this.newSessionModel ?? this.model.snapshot.selectedModel;
             this.newSessionModel = modelId;
             this.update();
             try {
                 await this.service.selectDefaultModel(this.model.snapshot.providerId, modelId);
                 await this.model.refresh();
             } catch (error) {
-                this.messages.error(`无法保存默认模型：${error instanceof Error ? error.message : String(error)}`);
+                this.newSessionModel = previousModel;
+                this.messages.error(`无法保存默认模型：${friendlyAgentErrorMessage(error)}`);
+                await this.model.refresh().catch(() => undefined);
             } finally {
                 this.update();
             }
@@ -1538,7 +1603,7 @@ export class XoraAgentWidget extends ReactWidget {
             await this.service.selectModel(session.appSessionId, modelId);
             await this.model.refresh();
         } catch (error) {
-            this.messages.error(`无法切换模型：${error instanceof Error ? error.message : String(error)}`);
+            this.messages.error(`无法切换模型：${friendlyAgentErrorMessage(error)}`);
             await this.model.refresh().catch(() => undefined);
         }
     }
@@ -1590,7 +1655,7 @@ export class XoraAgentWidget extends ReactWidget {
             }
         } catch (error) {
             if (contextIsCurrent()) {
-                this.messages.error(`无法加载模型：${error instanceof Error ? error.message : String(error)}`);
+                this.messages.error(`无法加载模型：${friendlyAgentErrorMessage(error)}`);
             }
         } finally {
             this.modelOptionsLoading = false;
@@ -2085,8 +2150,22 @@ export class XoraAgentWidget extends ReactWidget {
         </article>;
     }
 
+    protected renderPendingSubmission(submission: PromptSubmission): React.ReactNode {
+        return <article className='xora-message xora-message-user xora-message-pending' aria-label='任务已接收，正在发送'>
+            {submission.text ? <div className='xora-message-text'>{submission.text}</div> : undefined}
+            {submission.attachments.length ? <div className='xora-pending-attachment-count'>
+                <span className='codicon codicon-file-media' />
+                {submission.attachments.length} 张图片
+            </div> : undefined}
+            <div className='xora-pending-send-state' role='status'>
+                <span className='codicon codicon-loading codicon-modifier-spin' />
+                正在发送
+            </div>
+        </article>;
+    }
+
     protected async send(retry?: PromptSubmission): Promise<void> {
-        if (this.submission || this.sessionLoading || (!retry && this.imageReadsInFlight > 0)) {
+        if (this.submission || this.sendPreparationInFlight || this.sessionLoading || (!retry && this.imageReadsInFlight > 0)) {
             return;
         }
         if (retry && !this.isSubmissionContextCurrent(retry)) {
@@ -2095,24 +2174,69 @@ export class XoraAgentWidget extends ReactWidget {
             this.update();
             return;
         }
+        // Freeze exactly what the user submitted before waiting for the
+        // backend's latest application-wide Provider. Text or images added
+        // while that refresh is pending remain as the next draft.
+        this.sendPreparationInFlight = true;
+        const draftTextAtStart = this.prompt;
+        const preparedText = retry?.text.trim() ?? draftTextAtStart.trim();
+        const preparedDraftImages = retry ? [] : [...this.draftImages];
+        const preparationContextKey = this.imageDraftContextKey();
+        const preparationGeneration = this.agentContextGeneration;
+        this.update();
+        // Settings and Agent snapshots cross the Electron boundary
+        // asynchronously. Resolve the application-wide Provider in the
+        // backend lifecycle queue before binding this prompt to a context, so
+        // delete A -> create/select B -> immediate Send can never submit A.
+        if (!retry) {
+            try {
+                await this.model.refresh();
+            } catch (error) {
+                this.sendPreparationInFlight = false;
+                this.update();
+                this.messages.error(`无法同步当前模型服务：${friendlyAgentErrorMessage(error)}`);
+                return;
+            }
+        }
+        // A Provider/session switch during refresh deliberately clears image
+        // drafts. Never rebind the local pre-refresh copy to the new service;
+        // retain the text and require the user to attach images again.
+        if (!retry && preparedDraftImages.length > 0
+            && (preparationGeneration !== this.agentContextGeneration
+                || preparationContextKey !== this.imageDraftContextKey())) {
+            this.sendPreparationInFlight = false;
+            this.update();
+            this.messages.info('模型或会话已变化，文字草稿已保留；请在当前会话中重新添加图片。');
+            return;
+        }
+        if (this.submission || this.sessionLoading || (!retry && this.imageReadsInFlight > 0)) {
+            this.sendPreparationInFlight = false;
+            this.update();
+            return;
+        }
         const contextSnapshot = this.model.snapshot;
         const composerGate = this.composerGate(contextSnapshot);
         if (composerGate) {
+            this.sendPreparationInFlight = false;
+            this.update();
             this.messages.info(`${composerGate.message}。当前输入已作为草稿保留。`);
             return;
         }
         const workspaceRoot = contextSnapshot.workspaceRoot ?? this.roots?.[0] ?? '';
         const providerId = contextSnapshot.providerId;
         const sourceSessionId = contextSnapshot.activeSessionId;
-        const draftTextAtStart = this.prompt;
-        const text = retry?.text.trim() ?? draftTextAtStart.trim();
-        const draftImages = retry ? [] : [...this.draftImages];
+        const text = preparedText;
+        const draftImages = preparedDraftImages;
         const attachments = retry?.attachments ?? draftImages.map(image => ({
             mimeType: image.mimeType,
             data: image.data,
             ...(image.name ? { name: image.name } : {})
         }));
-        if (!text && !attachments.length) return;
+        if (!text && !attachments.length) {
+            this.sendPreparationInFlight = false;
+            this.update();
+            return;
+        }
         const submission: PromptSubmission = {
             text,
             contextKey: this.agentContextKey(workspaceRoot, providerId, sourceSessionId),
@@ -2129,6 +2253,7 @@ export class XoraAgentWidget extends ReactWidget {
         this.runtimePrewarmRequested = false;
         this.cancelRuntimePrewarmTimer();
         this.submission = submission;
+        this.sendPreparationInFlight = false;
         this.retryablePrompt = undefined;
         this.imageError = undefined;
         this.stickToBottom = true;
@@ -2154,13 +2279,19 @@ export class XoraAgentWidget extends ReactWidget {
                 await this.model.refresh();
                 runtime = this.model.snapshot;
             }
-            const runtimeNeedsStart = runtime.phase !== 'ready' && runtime.phase !== 'auth-required';
             // Runtime initialization is read-only with respect to the project.
-            // Overlap it with Save All, but never create/load a session or send
-            // the prompt until saving has completed successfully.
-            const runtimePromise = runtimeNeedsStart
-                ? this.service.startRuntime({ workspaceRoot: root, providerId: submission.providerId })
-                : Promise.resolve(runtime);
+            // Always pass through startRuntime before creating/loading a
+            // session, even when the last renderer snapshot says `ready`.
+            // The backend fast-path makes a coherent ready runtime free, while
+            // a Provider epoch or workspace change is restarted atomically.
+            // This closes the settings -> prewarm -> first-send race without
+            // ever exposing credentials to the renderer. The backend also
+            // preserves a coherent auth-required process, so this call does
+            // not restart a pending login merely to validate its authority.
+            const runtimePromise = this.service.startRuntime({
+                workspaceRoot: root,
+                providerId: submission.providerId
+            });
             const [, preparedRuntime] = await Promise.all([
                 this.commandService.executeCommand(CommonCommands.SAVE_ALL.id),
                 runtimePromise
@@ -2235,7 +2366,7 @@ export class XoraAgentWidget extends ReactWidget {
             // A late failure from an old project/provider/session must never
             // recreate its retry card (and image payload) in the new context.
             if (!this.isSubmissionContextCurrent(submission)) return;
-            const message = error instanceof Error ? error.message : String(error);
+            const message = friendlyAgentErrorMessage(error);
             const cancelled = (submission.sessionId ? this.cancelRequested.has(submission.sessionId) : false)
                 || this.isCancellationError(error);
             if (!cancelled && promptConsumed) {
@@ -2283,12 +2414,18 @@ export class XoraAgentWidget extends ReactWidget {
             return;
         }
         const submission = this.submission;
+        if (event.kind === 'text-delta' && event.role === 'user' && submission
+            && submission.sessionId === event.sessionId) {
+            submission.userEventReceived = true;
+            this.update();
+            return;
+        }
         if (event.kind !== 'error' || !event.recoverable || !submission) return;
         if (!this.isSubmissionContextCurrent(submission)) return;
         if (event.sessionId && submission.sessionId && event.sessionId !== submission.sessionId) return;
         if ((submission.sessionId && this.cancelRequested.has(submission.sessionId))
             || this.isCancellationMessage(event.code, event.message)) return;
-        this.retryablePrompt = { ...submission, message: event.message };
+        this.retryablePrompt = { ...submission, message: friendlyAgentErrorMessage(event.message) };
         this.update();
     }
 
@@ -2311,7 +2448,16 @@ export class XoraAgentWidget extends ReactWidget {
             return;
         }
         const originContextKey = this.imageDraftContextKey();
-        const targetContextKey = this.agentContextKey(session.workspaceRoot, session.providerId, session.appSessionId);
+        // A historical record may belong to an older Provider. Its local
+        // transcript is still selected in the current application context;
+        // the backend safely attaches a fresh ACP session without replaying
+        // the old prompts. Using session.providerId here caused the restore to
+        // abort before that migration could run.
+        const targetContextKey = this.agentContextKey(
+            session.workspaceRoot,
+            this.model.snapshot.providerId,
+            session.appSessionId
+        );
         this.invalidateAgentContext('会话已切换，未发送的图片已清除。');
         const generation = this.sessionLoadGeneration;
         this.openPopover = undefined;
@@ -2346,7 +2492,7 @@ export class XoraAgentWidget extends ReactWidget {
             this.model.updateSession(loaded);
         } catch (error) {
             if (generation !== this.sessionLoadGeneration) return;
-            this.messages.error(`无法恢复会话：${error instanceof Error ? error.message : String(error)}`);
+            this.messages.error(`无法恢复会话：${friendlyAgentErrorMessage(error)}`);
         } finally {
             if (generation === this.sessionLoadGeneration) {
                 this.sessionLoading = false;
@@ -2375,7 +2521,7 @@ export class XoraAgentWidget extends ReactWidget {
             : provider?.kind === 'xai-api-key'
                 ? provider.model
                     ? `是否允许 Agent 使用已加密保存的凭据连接 ${provider.baseUrl ?? '当前 API 服务'}？相同配置后续不再提示。`
-                    : '首次使用 xAI API 密钥需要确认。Grok Build 认证可能更新共用的 ~/.grok 认证状态；相同配置后续不再提示。'
+                    : '首次恢复旧版 API 服务需要确认。建议在设置中迁移到自定义模型服务；相同配置后续不再提示。'
                 : `是否使用“${provider?.name ?? '当前服务'}”已配置的凭据继续？只有当前服务的凭据会注入 Agent 进程，相同配置后续不再提示。`;
         const choice = await this.messages.warn(warning, '继续');
         if (contextIsCurrent && !contextIsCurrent()) return false;
@@ -2394,12 +2540,21 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async refreshProviders(): Promise<void> {
+        if (this.providerRefreshInFlight) return this.providerRefreshInFlight;
+        const refresh = (async (): Promise<void> => {
+            try {
+                this.providers = await this.service.listProviders();
+                this.requestRuntimePrewarm(true);
+                this.update();
+            } catch (error) {
+                this.messages.error(`无法加载模型服务：${friendlyAgentErrorMessage(error)}`);
+            }
+        })();
+        this.providerRefreshInFlight = refresh;
         try {
-            this.providers = await this.service.listProviders();
-            this.requestRuntimePrewarm(true);
-            this.update();
-        } catch (error) {
-            this.messages.error(`无法加载模型服务：${error instanceof Error ? error.message : String(error)}`);
+            await refresh;
+        } finally {
+            if (this.providerRefreshInFlight === refresh) this.providerRefreshInFlight = undefined;
         }
     }
 

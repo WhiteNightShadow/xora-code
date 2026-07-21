@@ -545,32 +545,6 @@ textarea.theia-input {
     gap: 8px;
 }
 
-.xora-code-welcome__key-form {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-}
-
-.xora-code-welcome__key-form label {
-    color: var(--theia-descriptionForeground);
-    font-size: 11px;
-}
-
-.xora-code-welcome__key-form input {
-    box-sizing: border-box;
-    width: 100%;
-    padding: 6px 8px;
-    border: 1px solid var(--theia-input-border, var(--theia-widget-border));
-    border-radius: 5px;
-    color: var(--theia-input-foreground);
-    background: var(--theia-input-background);
-}
-
-.xora-code-welcome__key-form input:focus {
-    border-color: var(--theia-focusBorder);
-    outline: none;
-}
-
 .xora-code-welcome__error {
     margin-bottom: 12px;
     padding: 10px 12px;

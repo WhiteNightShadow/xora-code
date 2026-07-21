@@ -29,6 +29,12 @@ export type ProviderProtocol =
     | 'openai-chat-completions'
     | 'anthropic-messages';
 
+/** Grok catalog id used for the managed xAI/compatible-relay profile. */
+export const XAI_MANAGED_MODEL_ID = 'xora-xai-api';
+
+/** Renderer-only choice used to switch Providers before ACP advertises models. */
+export const PROVIDER_DEFAULT_MODEL_CHOICE_ID = '__xora_provider_default__';
+
 interface ProviderProfileBase {
     id: string;
     name: string;
@@ -115,6 +121,8 @@ export interface SessionRecord {
     title: string;
     workspaceRoot: string;
     providerId: string;
+    /** Non-secret generation binding this ACP session to one Provider identity/configuration. */
+    providerRuntimeEpoch?: string;
     model?: string;
     sidecarVersion?: string;
     createdAt: string;
@@ -123,6 +131,13 @@ export interface SessionRecord {
 }
 
 export interface RuntimeSnapshot {
+    /**
+     * Monotonic sequence assigned by the Electron host. Snapshot events and
+     * RPC results use different asynchronous channels, so the renderer must
+     * ignore an older sequence that arrives after a newer Provider/session
+     * state. Optional only for compatibility with older test/fake clients.
+     */
+    revision?: number;
     phase: RuntimePhase;
     workspaceRoot?: string;
     /** The selected Agent root belongs to the roots currently open in this Theia window. */

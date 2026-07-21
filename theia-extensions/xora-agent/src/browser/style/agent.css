@@ -1364,6 +1364,26 @@ form.xora-provider-form,
     display: none;
 }
 
+.xora-message-pending {
+    opacity: .82;
+}
+
+.xora-pending-send-state,
+.xora-pending-attachment-count {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 5px;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    line-height: 14px;
+}
+
+.xora-pending-send-state .codicon,
+.xora-pending-attachment-count .codicon {
+    font-size: 11px;
+}
+
 .xora-message-text {
     overflow-wrap: anywhere;
     line-height: 1.58;
@@ -2775,8 +2795,7 @@ form.xora-provider-form,
     margin-top: 10px;
 }
 
-.xora-provider-field-wide,
-.xora-xai-provider-form .xora-provider-field-wide {
+.xora-provider-field-wide {
     grid-column: 1 / -1;
 }
 

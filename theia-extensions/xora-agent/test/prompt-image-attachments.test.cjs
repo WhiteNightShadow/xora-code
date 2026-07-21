@@ -43,6 +43,7 @@ function hostHarness(imageCapability) {
     host.requireReady = () => acp;
     host.sessions = {
         get: id => id === session.appSessionId ? { ...session } : undefined,
+        list: () => [{ ...session }],
         update: (id, patch) => {
             assert.equal(id, session.appSessionId);
             Object.assign(session, patch);
@@ -52,6 +53,16 @@ function hostHarness(imageCapability) {
     };
     host.workspaceRoot = session.workspaceRoot;
     host.providerId = session.providerId;
+    host.runtimeProviderEpoch = 'legacy-v1';
+    host.providers = {
+        selectedProviderId: () => session.providerId,
+        runtimeEpoch: () => 'legacy-v1',
+        get: id => id === session.providerId
+            ? { id, name: 'Grok 订阅', kind: 'grok-subscription' }
+            : undefined,
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
     host.activeSessionId = session.appSessionId;
     host.loadedSessionIds = new Set([session.appSessionId]);
     host.activePrompts = new Map();

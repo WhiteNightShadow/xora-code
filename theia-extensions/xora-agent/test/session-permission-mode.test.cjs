@@ -16,6 +16,7 @@ function record(root, id = 'app-session') {
         title: id,
         workspaceRoot: root,
         providerId: 'grok-subscription',
+        providerRuntimeEpoch: 'provider-epoch',
         sidecarVersion: '0.2.102',
         createdAt: '2026-07-19T00:00:00.000Z',
         updatedAt: '2026-07-19T00:00:00.000Z',
@@ -35,6 +36,7 @@ function hostHarness(root) {
     host.activeSessionId = session.appSessionId;
     host.workspaceRoot = root;
     host.providerId = session.providerId;
+    host.runtimeProviderEpoch = session.providerRuntimeEpoch;
     host.sidecarVersion = session.sidecarVersion;
     host.phase = 'ready';
     host.loadedSessionIds = new Set([session.appSessionId]);
@@ -43,6 +45,10 @@ function hostHarness(root) {
     host.pendingPermissions = new Map();
     host.currentSecrets = [];
     host.models = [];
+    host.providers = {
+        selectedProviderId: () => session.providerId,
+        runtimeEpoch: () => session.providerRuntimeEpoch
+    };
     let permissionMode = 'request-approval';
     host.security = {
         agentPermissionMode: () => permissionMode,
@@ -112,6 +118,59 @@ test('permission mode changes are broadcast to every other Agent window', () => 
     manager.services = new Set([source, peer]);
     manager.broadcastPermissionMode(source);
     assert.equal(notifications, 1);
+});
+
+test('Provider runtime invalidations preserve exact identity and exclude the source window', () => {
+    const manager = Object.create(AgentHostManager.prototype);
+    const received = [];
+    const source = { notifyProviderRuntimeInvalidated: () => received.push('source') };
+    const peer = { notifyProviderRuntimeInvalidated: change => received.push(change) };
+    manager.services = new Set([source, peer]);
+    const change = {
+        providerId: 'xora-relay',
+        reason: 'credential-cleared',
+        invalidateSession: true
+    };
+
+    manager.broadcastProviderRuntimeInvalidation(source, change);
+
+    assert.deepEqual(received, [change]);
+});
+
+test('subscription authentication is application-wide, pre-isolates peers, and rejects overlap', async () => {
+    const manager = Object.create(AgentHostManager.prototype);
+    const timeline = [];
+    let releaseFirst;
+    const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+    const source = {};
+    const peer = {
+        prepareSubscriptionAuthenticationMutation: async () => timeline.push('peer-isolated')
+    };
+    manager.services = new Set([source, peer]);
+    manager.providers = {
+        rotateRuntimeEpoch: providerId => timeline.push(`epoch:${providerId}`)
+    };
+    manager.subscriptionAuthenticationMutationActive = false;
+
+    const first = manager.coordinateSubscriptionAuthentication(source, async () => {
+        timeline.push('first-operation');
+        await firstGate;
+        return 'done';
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    await assert.rejects(
+        manager.coordinateSubscriptionAuthentication(peer, async () => timeline.push('unexpected-operation')),
+        /另一个窗口正在更新/
+    );
+    releaseFirst();
+
+    assert.equal(await first, 'done');
+    assert.deepEqual(timeline, [
+        'epoch:grok-subscription',
+        'peer-isolated',
+        'first-operation'
+    ]);
+    assert.equal(manager.subscriptionAuthenticationMutationActive, false);
 });
 
 test('full access is application-wide while ACP approval remains backend-owned and allow-once', async () => {
@@ -187,6 +246,54 @@ test('global full access never bypasses active-session or workspace-trust checks
             { outcome: { outcome: 'cancelled' } }
         );
         assert.equal((await host.setPermissionMode('full-access')).permissionMode, 'full-access');
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('permission approval is cancelled when Provider identity no longer matches the session runtime', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-permission-provider-epoch-'));
+    try {
+        for (const mismatch of [
+            { name: 'runtime epoch', runtimeEpoch: 'other-runtime', registryEpoch: 'session-epoch', globalProvider: 'grok-subscription' },
+            { name: 'registry epoch', runtimeEpoch: 'session-epoch', registryEpoch: 'rotated-epoch', globalProvider: 'grok-subscription' },
+            { name: 'global Provider', runtimeEpoch: 'session-epoch', registryEpoch: 'session-epoch', globalProvider: 'xai-api-key' }
+        ]) {
+            const { host, session } = hostHarness(root);
+            session.providerRuntimeEpoch = 'session-epoch';
+            host.runtimeProviderEpoch = mismatch.runtimeEpoch;
+            host.providers = {
+                selectedProviderId: () => mismatch.globalProvider,
+                runtimeEpoch: () => mismatch.registryEpoch
+            };
+            await host.setPermissionMode('full-access');
+
+            assert.deepEqual(
+                await host.handlePermissionRequest(permissionParams(session)),
+                { outcome: { outcome: 'cancelled' } },
+                `${mismatch.name} must not auto-allow a tool`
+            );
+        }
+
+        const { host, session, emitted } = hostHarness(root);
+        session.providerRuntimeEpoch = 'session-epoch';
+        host.runtimeProviderEpoch = 'session-epoch';
+        let registryEpoch = 'session-epoch';
+        host.providers = {
+            selectedProviderId: () => 'grok-subscription',
+            runtimeEpoch: () => registryEpoch
+        };
+        const response = host.handlePermissionRequest(permissionParams(session));
+        const event = emitted.find(candidate => candidate.kind === 'permission-request');
+        assert.ok(event);
+
+        registryEpoch = 'rotated-epoch';
+        await host.respondPermission({ requestId: event.requestId, outcome: 'allow-once' });
+        assert.deepEqual(
+            await response,
+            { outcome: { outcome: 'cancelled' } },
+            'a delayed manual approval must not allow a tool after credential rotation'
+        );
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
     }

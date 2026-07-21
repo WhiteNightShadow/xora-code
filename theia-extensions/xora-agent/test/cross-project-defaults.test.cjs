@@ -75,12 +75,15 @@ test('repeated ACP authentication status does not rewrite Provider metadata', ()
     assert.equal(current().subscriptionAuthState.status, 'unauthenticated');
 });
 
-test('an advertised model catalogue replaces a stale cross-project default', () => {
+test('an advertised model catalogue cannot replace an explicit cross-project default', () => {
     const host = Object.create(GrokAgentHostService.prototype);
     let saved;
     host.providerId = 'grok-subscription';
     host.models = [];
     host.providers = {
+        get: id => id === 'grok-subscription'
+            ? { id, name: 'Grok 订阅', kind: 'grok-subscription' }
+            : undefined,
         preferredModelId: () => 'retired-model',
         selectPreferredModel: (_providerId, modelId) => { saved = modelId; }
     };
@@ -95,9 +98,9 @@ test('an advertised model catalogue replaces a stale cross-project default', () 
         ]
     });
 
-    assert.equal(host.selectedModel, 'current-model');
+    assert.equal(host.selectedModel, 'retired-model');
     assert.equal(host.models[0].contextWindow, 1_000_000);
-    assert.equal(saved, 'current-model');
+    assert.equal(saved, undefined);
 });
 
 test('model metadata accepts only a positive safe integer context window', () => {
@@ -105,6 +108,9 @@ test('model metadata accepts only a positive safe integer context window', () =>
     host.providerId = 'grok-subscription';
     host.models = [];
     host.providers = {
+        get: id => id === 'grok-subscription'
+            ? { id, name: 'Grok 订阅', kind: 'grok-subscription' }
+            : undefined,
         preferredModelId: () => undefined,
         selectPreferredModel: () => undefined
     };
@@ -135,12 +141,17 @@ test('production wiring keeps Provider/model/auth hints global but trust and MCP
     assert.match(provider, /subscriptionAuthState\?: SubscriptionAuthState/);
     assert.match(host, /this\.providerId = this\.providers\.selectedProviderId\(\)/);
     assert.match(host, /this\.selectedModel = this\.defaultModelId\(this\.providerId\)/);
-    assert.match(host, /sessions\.list\(\)\.find\(session => session\.providerId === providerId/);
+    assert.doesNotMatch(host, /sessions\.list\(\)\.find\(session => session\.providerId === providerId/,
+        'historical session models must never seed the application-wide default');
     assert.match(host, /this\.models\.some\(model => model\.id === request\.model\)/,
         'a stale preference must not be sent to session/new');
     assert.match(host, /this\.models\.some\(model => model\.id === this\.selectedModel\)/,
         'a stale runtime default must not be sent to session/new');
-    assert.match(host, /preferredIsStale/);
+    assert.doesNotMatch(host, /preferredIsStale/,
+        'a runtime catalogue must not replace an explicit application-wide preference');
+    assert.match(host, /this\.selectedModel = preferred/);
+    assert.match(host, /providerAllowsCatalogModel\(this\.providerId, state\.currentModelId\)/,
+        'a model advertised by ACP must still belong to the selected Provider');
     assert.match(host, /selectDefaultModel\(providerId: string, modelId: string\)/);
     assert.match(protocol, /selectDefaultModel\(providerId: string, modelId: string\): Promise<RuntimeSnapshot>/);
     assert.match(manager, /providers\.invalidateSubscriptionAuthStatus\(\)/);

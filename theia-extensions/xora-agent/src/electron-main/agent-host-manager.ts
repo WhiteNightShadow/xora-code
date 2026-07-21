@@ -4,7 +4,7 @@ import { FSWatcher, mkdirSync, watch } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { AgentHostClient } from '../common/agent-protocol';
-import { GrokAgentHostService } from './grok-agent-host-service';
+import { GrokAgentHostService, ProviderRuntimeInvalidation } from './grok-agent-host-service';
 import { ProviderRegistry } from './provider-registry';
 import { SecretVault } from './secret-vault';
 import { WorkspaceSecurityStore } from './workspace-security';
@@ -20,7 +20,14 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
     protected grokHomeWatcher: FSWatcher | undefined;
     protected grokHomeNotification: NodeJS.Timeout | undefined;
     protected grokAuthenticationNotificationPending = false;
-    protected lastManagedSubscriptionAuthChangeAt = 0;
+    protected grokManagedAuthenticationNotificationPending = false;
+    /** Sticky for one managed transaction, even after the normal UI debounce flushes. */
+    protected grokManagedAuthenticationEventsObserved = false;
+    protected readonly grokHomeNotificationDelayMs = 200;
+    protected readonly subscriptionAuthenticationDrainQuietMs = 250;
+    protected subscriptionAuthenticationDrainTimer: NodeJS.Timeout | undefined;
+    protected subscriptionAuthenticationDrainResolve: (() => void) | undefined;
+    protected subscriptionAuthenticationMutationActive = false;
 
     onStart(_application: ElectronMainApplication): void {
         const grokHome = join(homedir(), '.grok');
@@ -30,29 +37,7 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
         try {
             mkdirSync(grokHome, { recursive: true, mode: 0o700 });
             this.grokHomeWatcher = watch(grokHome, { persistent: false }, (_event, filename) => {
-                const name = filename?.toString();
-                if (name && !/(?:^|[/\\])(config\.toml|[^/\\]*(?:auth|oauth|credential)[^/\\]*)$/iu.test(name)) {
-                    return;
-                }
-                if (!name || /(?:^|[/\\])[^/\\]*(?:auth|oauth|credential)[^/\\]*$/iu.test(name)) {
-                    this.grokAuthenticationNotificationPending = true;
-                }
-                if (this.grokHomeNotification) {
-                    clearTimeout(this.grokHomeNotification);
-                }
-                this.grokHomeNotification = setTimeout(() => {
-                    this.grokHomeNotification = undefined;
-                    const authenticationChanged = this.grokAuthenticationNotificationPending
-                        && Date.now() - this.lastManagedSubscriptionAuthChangeAt > 1_500;
-                    this.grokAuthenticationNotificationPending = false;
-                    if (authenticationChanged) {
-                        try { this.providers.invalidateSubscriptionAuthStatus(); } catch { /* next ACP initialize remains authoritative */ }
-                    }
-                    for (const service of this.services) {
-                        service.notifySharedGrokStateChanged(authenticationChanged);
-                    }
-                }, 200);
-                this.grokHomeNotification.unref();
+                this.observeGrokHomeChange(filename?.toString());
             });
         } catch {
             // Read-only homes are diagnosed by the first operation that needs
@@ -73,10 +58,11 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
         service = new GrokAgentHostService(
             this.providers,
             this.security,
-            () => this.broadcastAuthentication(service),
+            change => this.broadcastProviderRuntimeInvalidation(service, change),
             () => this.broadcastProviderDefaults(service),
             () => this.broadcastPermissionMode(service),
             status => this.broadcastSubscriptionAuthStatus(service, status),
+            operation => this.coordinateSubscriptionAuthentication(service, operation),
             this.updates,
             () => ![...this.services].some(candidate => candidate.runtimeActive)
         );
@@ -99,6 +85,13 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
             clearTimeout(this.grokHomeNotification);
             this.grokHomeNotification = undefined;
         }
+        if (this.subscriptionAuthenticationDrainTimer) {
+            clearTimeout(this.subscriptionAuthenticationDrainTimer);
+            this.subscriptionAuthenticationDrainTimer = undefined;
+        }
+        const resolveDrain = this.subscriptionAuthenticationDrainResolve;
+        this.subscriptionAuthenticationDrainResolve = undefined;
+        resolveDrain?.();
         this.grokHomeWatcher?.close();
         this.grokHomeWatcher = undefined;
         for (const service of [...this.services]) {
@@ -107,12 +100,139 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
         }
     }
 
-    protected broadcastAuthentication(source: GrokAgentHostService): void {
+    protected broadcastProviderRuntimeInvalidation(
+        source: GrokAgentHostService,
+        change: ProviderRuntimeInvalidation
+    ): void {
         for (const service of this.services) {
             if (service !== source) {
-                service.notifyAuthenticationChanged();
+                try { service.notifyProviderRuntimeInvalidated(change); } catch { /* isolate peer notification failures */ }
             }
         }
+    }
+
+    protected async coordinateSubscriptionAuthentication<T>(
+        source: GrokAgentHostService,
+        operation: () => Promise<T>
+    ): Promise<T> {
+        if (this.subscriptionAuthenticationMutationActive) {
+            throw new Error('另一个窗口正在更新 Grok 订阅登录，请等待其完成。');
+        }
+        this.subscriptionAuthenticationMutationActive = true;
+        this.grokManagedAuthenticationNotificationPending = false;
+        this.grokManagedAuthenticationEventsObserved = false;
+        try {
+            // Rotate before any shared auth mutation. Even a failed login or
+            // app crash leaves every previous ACP session durably incompatible.
+            this.providers.rotateRuntimeEpoch('grok-subscription');
+            for (const service of this.services) {
+                if (service !== source) await service.prepareSubscriptionAuthenticationMutation();
+            }
+            return await operation();
+        } finally {
+            // fs.watch delivery is asynchronous. Keep the transaction open for
+            // one debounce-sized quiet window so writes made by this operation
+            // are classified and drained before its RPC can return. Otherwise a
+            // late self-notification could rotate the freshly-created epoch and
+            // retire a session created immediately after login/logout.
+            await this.drainManagedSubscriptionAuthenticationNotifications();
+            this.subscriptionAuthenticationMutationActive = false;
+        }
+    }
+
+    /**
+     * Observe only filenames supplied by fs.watch. Authentication contents are
+     * never opened or read. Events are attributed when they arrive, rather than
+     * when their debounce fires, so a managed mutation cannot later masquerade
+     * as an external authentication change.
+     */
+    protected observeGrokHomeChange(name: string | undefined): void {
+        if (name && !/(?:^|[/\\])(config\.toml|[^/\\]*(?:auth|oauth|credential)[^/\\]*)$/iu.test(name)) {
+            return;
+        }
+        const authenticationChanged = !name
+            || /(?:^|[/\\])[^/\\]*(?:auth|oauth|credential)[^/\\]*$/iu.test(name);
+        if (authenticationChanged) {
+            if (this.subscriptionAuthenticationMutationActive) {
+                this.grokManagedAuthenticationNotificationPending = true;
+                this.grokManagedAuthenticationEventsObserved = true;
+                this.restartSubscriptionAuthenticationDrainQuietPeriod();
+            } else {
+                this.grokAuthenticationNotificationPending = true;
+            }
+        }
+        if (this.grokHomeNotification) clearTimeout(this.grokHomeNotification);
+        this.grokHomeNotification = setTimeout(
+            () => this.flushGrokHomeNotification(),
+            this.grokHomeNotificationDelayMs
+        );
+        this.grokHomeNotification.unref();
+    }
+
+    protected flushGrokHomeNotification(): void {
+        this.grokHomeNotification = undefined;
+        const authenticationChanged = this.grokAuthenticationNotificationPending;
+        this.grokAuthenticationNotificationPending = false;
+        // A managed event was already covered by the coordinator's pre-rotation.
+        // Clearing it here is the drain; it must not invalidate auth or sessions.
+        this.grokManagedAuthenticationNotificationPending = false;
+        if (authenticationChanged) {
+            try { this.providers.invalidateSubscriptionAuthStatus(); } catch { /* next ACP initialize remains authoritative */ }
+            try { this.providers.rotateRuntimeEpoch('grok-subscription'); } catch { /* read-only retirement remains the fallback */ }
+        }
+        for (const service of this.services) {
+            if (authenticationChanged) {
+                service.notifyProviderRuntimeInvalidated({
+                    providerId: 'grok-subscription',
+                    reason: 'subscription-auth',
+                    invalidateSession: true
+                });
+            }
+            service.notifySharedGrokStateChanged(authenticationChanged);
+        }
+    }
+
+    protected async drainManagedSubscriptionAuthenticationNotifications(): Promise<void> {
+        // onStart installs the watcher before any window can authenticate. The
+        // guard keeps isolated manager fixtures and shutdown paths instantaneous.
+        if (!this.grokHomeWatcher) {
+            if (this.grokManagedAuthenticationNotificationPending && this.grokHomeNotification) {
+                clearTimeout(this.grokHomeNotification);
+                this.flushGrokHomeNotification();
+            }
+            return;
+        }
+        await new Promise<void>(resolve => {
+            this.subscriptionAuthenticationDrainResolve = resolve;
+            this.restartSubscriptionAuthenticationDrainQuietPeriod();
+        });
+        if (this.grokHomeNotification) {
+            clearTimeout(this.grokHomeNotification);
+            this.flushGrokHomeNotification();
+        }
+        this.grokManagedAuthenticationNotificationPending = false;
+        if (this.grokManagedAuthenticationEventsObserved) {
+            // Fold every auth-file write observed during the managed mutation
+            // into one final epoch. This also safely accounts for an external
+            // CLI write that happened concurrently and could not be
+            // distinguished by filename alone. The RPC has not returned yet,
+            // so no new session can be retired by this final rotation.
+            this.providers.rotateRuntimeEpoch('grok-subscription');
+            this.grokManagedAuthenticationEventsObserved = false;
+        }
+    }
+
+    protected restartSubscriptionAuthenticationDrainQuietPeriod(): void {
+        if (!this.subscriptionAuthenticationDrainResolve) return;
+        if (this.subscriptionAuthenticationDrainTimer) {
+            clearTimeout(this.subscriptionAuthenticationDrainTimer);
+        }
+        this.subscriptionAuthenticationDrainTimer = setTimeout(() => {
+            this.subscriptionAuthenticationDrainTimer = undefined;
+            const resolve = this.subscriptionAuthenticationDrainResolve;
+            this.subscriptionAuthenticationDrainResolve = undefined;
+            resolve?.();
+        }, this.subscriptionAuthenticationDrainQuietMs);
     }
 
     protected broadcastProviderDefaults(source: GrokAgentHostService): void {
@@ -131,7 +251,6 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
         source: GrokAgentHostService,
         status: 'authenticated' | 'unauthenticated'
     ): void {
-        this.lastManagedSubscriptionAuthChangeAt = Date.now();
         for (const service of this.services) {
             if (service !== source) service.notifySubscriptionAuthStatusChanged(status);
         }

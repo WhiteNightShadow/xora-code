@@ -49,7 +49,9 @@ const SESSION_STATUS_LABELS: Record<SessionRecord['status'], string> = {
     completed: '已完成',
     cancelled: '已取消',
     failed: '失败',
-    'read-only': '只读'
+    // Legacy/invalidation state: opening or sending transparently attaches a
+    // fresh ACP session while retaining the local transcript.
+    'read-only': '可继续'
 };
 
 interface ToolPresentation {

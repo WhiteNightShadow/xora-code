@@ -86,34 +86,17 @@ test('management data loads on first reveal and coalesces duplicate refreshes', 
     assert.match(source, /onActivateRequest[\s\S]*void this\.refresh\(\)/);
 });
 
-test('built-in xAI settings expose relay configuration and never echo a saved API key', () => {
+test('built-in xAI settings are absent while custom API configuration remains complete', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
-    const start = source.indexOf("if (provider.kind === 'xai-api-key')");
-    const end = source.indexOf('return this.renderCustomProvider(provider);', start);
-    const xaiCard = source.slice(start, end);
-
-    assert.ok(start >= 0 && end > start);
-    assert.match(xaiCard, /name='baseUrl'[^>]*type='url'/);
-    assert.match(xaiCard, /name='protocol'/);
-    assert.match(xaiCard, /value='openai-responses'/);
-    assert.match(xaiCard, /value='openai-chat-completions'/);
-    assert.match(xaiCard, /value='anthropic-messages'/);
-    assert.match(xaiCard, /name='model'/);
-    assert.match(xaiCard, /name='contextWindow'[^>]*type='number'/);
-    assert.match(xaiCard, /name='contextWindow'[^>]*step='1'/);
-    assert.doesNotMatch(xaiCard, /name='contextWindow'[^>]*step='1024'/);
-    assert.match(xaiCard, /name='backendSearch'[^>]*type='checkbox'/);
-    assert.match(xaiCard, /name='apiKey'[^>]*type='password'/);
-    assert.doesNotMatch(xaiCard, /required\s+name='apiKey'/);
-    assert.doesNotMatch(xaiCard, /value=\{[^}]*apiKey/);
-    assert.doesNotMatch(xaiCard, /defaultValue=\{[^}]*apiKey/);
-    assert.match(xaiCard, /留空则保持当前密钥/);
-    assert.match(xaiCard, /this\.discoverModels\(provider\.id\)/);
-    assert.match(xaiCard, /保存并使用/);
-    assert.match(xaiCard, /中转|第三方服务|项目内容/);
-    assert.match(source, /saveXaiProvider\(event, provider\)/);
+    assert.match(source, /visibleProviders = this\.providers\.filter\(provider => provider\.kind !== 'xai-api-key'\)/);
+    assert.match(source, /if \(provider\.kind === 'xai-api-key'\) return undefined/);
+    assert.doesNotMatch(source, /saveXaiProvider/);
+    assert.doesNotMatch(source, /xora-xai-provider-form/);
+    assert.match(source, /添加自定义 API 服务/);
+    assert.match(source, /name='baseUrl'[^>]*type='url'/);
+    assert.match(source, /name='apiKey'[^>]*type='password'/);
     assert.match(source, /service\.saveProvider\(provider, optionalCredential\(form\.get\('apiKey'\)\)\)/);
-    assert.match(source, /await this\.service\.selectProvider\(existing\.id\)/);
+    assert.match(source, /await this\.service\.selectProvider\(provider\.id\)/);
 });
 
 test('model service selection lives in settings and uses the shared backend switch', () => {
@@ -123,6 +106,24 @@ test('model service selection lives in settings and uses the shared backend swit
     assert.match(source, /value=\{this\.runtimeSnapshot\?\.providerId \?\? 'grok-subscription'\}/);
     assert.match(source, /await this\.service\.selectProvider\(providerId\)/);
     assert.match(source, /已将“\$\{providerName\}”设为当前模型服务/);
+    assert.doesNotMatch(agentSource, /aria-label='Agent 服务'/);
+});
+
+test('custom API profiles use save-and-use semantics without adding a second Agent service control', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
+    const agentSource = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
+    const add = source.slice(source.indexOf('protected async addProvider('), source.indexOf('protected async selectProvider(', source.indexOf('protected async addProvider(')));
+    const save = source.slice(source.indexOf('protected async saveCustomProvider('), source.indexOf('protected async removeProvider(', source.indexOf('protected async saveCustomProvider(')));
+
+    assert.match(source, /<button className='theia-button main' type='submit'>保存并使用<\/button>/);
+    assert.match(add, /await this\.service\.saveProvider\(provider,/);
+    assert.match(add, /await this\.service\.selectProvider\(provider\.id\)/);
+    assert.ok(add.indexOf('saveProvider(provider') < add.indexOf('selectProvider(provider.id)'));
+    assert.match(save, /await this\.service\.saveProvider\(provider,/);
+    assert.match(save, /await this\.service\.selectProvider\(provider\.id\)/);
+    assert.ok(save.indexOf('saveProvider(provider') < save.indexOf('selectProvider(provider.id)'));
+    assert.match(source, /已保存并启用模型服务/);
+    assert.match(source, /已更新并启用模型服务/);
     assert.doesNotMatch(agentSource, /aria-label='Agent 服务'/);
 });
 

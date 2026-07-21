@@ -3,7 +3,7 @@ import { CommandContribution, CommandRegistry, DisposableCollection, MessageServ
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import { WorkspaceTrustService } from '@theia/workspace/lib/browser/workspace-trust-service';
-import { AgentHostService } from '../common/agent-protocol';
+import { AgentHostService, RuntimeSnapshot } from '../common/agent-protocol';
 import { AgentViewModel } from './agent-view-model';
 
 const EXECUTABLE_COMMANDS = [
@@ -45,6 +45,10 @@ export class WorkspaceTrustGuard implements FrontendApplicationContribution, Com
     protected readonly toDispose = new DisposableCollection();
     protected synchronizationTail: Promise<void> = Promise.resolve();
     protected lastSynchronizationSignature: string | undefined;
+    /** Starts ACP standby as soon as workspace attachment is authoritative,
+     * before the comparatively heavy Agent widget has finished mounting and
+     * loading its own metadata. The key coalesces trust/workspace events. */
+    protected agentStandbyKey: string | undefined;
 
     onStart(_app: FrontendApplication): void {
         this.toDispose.push(this.workspaceService.onWorkspaceChanged(roots => {
@@ -92,8 +96,9 @@ export class WorkspaceTrustGuard implements FrontendApplicationContribution, Com
             }
             await this.agentHost.setWorkspaceRoot(root);
             const trusted = await this.workspaceTrustService.getWorkspaceTrust();
-            await this.agentHost.synchronizeWorkspaceTrust({ workspaceRoots: paths, trusted });
+            const snapshot = await this.agentHost.synchronizeWorkspaceTrust({ workspaceRoots: paths, trusted });
             this.lastSynchronizationSignature = this.synchronizationSignature(paths, root, trusted);
+            this.requestAgentStandby(snapshot);
         });
     }
 
@@ -113,8 +118,9 @@ export class WorkspaceTrustGuard implements FrontendApplicationContribution, Com
         await this.agentHost.setWorkspaceRoot(root);
         // Empty windows never acquire executable Agent capabilities even when
         // Theia is configured to trust empty windows.
-        await this.agentHost.synchronizeWorkspaceTrust({ workspaceRoots: paths, trusted: effectiveTrust });
+        const snapshot = await this.agentHost.synchronizeWorkspaceTrust({ workspaceRoots: paths, trusted: effectiveTrust });
         this.lastSynchronizationSignature = signature;
+        this.requestAgentStandby(snapshot);
     }
 
     protected async synchronizeTrust(trusted: boolean): Promise<void> {
@@ -134,6 +140,36 @@ export class WorkspaceTrustGuard implements FrontendApplicationContribution, Com
         const result = this.synchronizationTail.then(operation);
         this.synchronizationTail = result.then(() => undefined, () => undefined);
         return result;
+    }
+
+    protected requestAgentStandby(snapshot: RuntimeSnapshot): void {
+        const root = snapshot.workspaceRoot;
+        if (!root || !snapshot.workspaceAttached
+            || snapshot.phase === 'ready'
+            || snapshot.phase === 'auth-required'
+            || snapshot.phase === 'starting'
+            || snapshot.phase === 'initializing') {
+            return;
+        }
+        const key = `${root}\0${snapshot.providerId}`;
+        if (this.agentStandbyKey === key) return;
+        this.agentStandbyKey = key;
+        void this.prewarmAgent(root, snapshot.providerId, key);
+    }
+
+    protected async prewarmAgent(root: string, providerId: string, key: string): Promise<void> {
+        try {
+            const providers = await this.agentHost.listProviders();
+            if (this.agentStandbyKey !== key) return;
+            const provider = providers.find(candidate => candidate.id === providerId);
+            if (!provider || (provider.kind !== 'grok-subscription' && provider.credentialConfigured !== true)) return;
+            await this.agentHost.startRuntime({ workspaceRoot: root, providerId });
+        } catch {
+            // Standby is best-effort. The host publishes a safe runtime state,
+            // and the Agent widget owns the bounded visible recovery path.
+        } finally {
+            if (this.agentStandbyKey === key) this.agentStandbyKey = undefined;
+        }
     }
 
     protected reportSynchronizationError(error: unknown): void {

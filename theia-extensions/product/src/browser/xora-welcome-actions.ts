@@ -8,11 +8,6 @@ export const WelcomeCommandIds = {
     focusExplorer: 'workbench.files.action.focusFilesExplorer'
 } as const;
 
-export const BuiltInProviderIds = {
-    grokSubscription: 'grok-subscription',
-    xaiApiKey: 'xai-api-key'
-} as const;
-
 export interface WelcomeAction {
     readonly id: string;
     readonly title: string;
@@ -47,14 +42,4 @@ export const WELCOME_WORKSPACE_ACTIONS: readonly WelcomeAction[] = [
 
 export function shouldShowWelcome(workspaceRootCount: number): boolean {
     return workspaceRootCount === 0;
-}
-
-export function xaiCredentialStatus(configured: boolean | undefined): string {
-    if (configured === true) {
-        return '已安全保存 API Key';
-    }
-    if (configured === false) {
-        return '尚未配置 API Key';
-    }
-    return '密钥状态暂不可用';
 }

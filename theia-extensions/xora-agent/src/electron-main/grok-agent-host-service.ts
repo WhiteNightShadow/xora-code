@@ -24,15 +24,17 @@ import {
     ManagementResult,
     PermissionDecision,
     PermissionRequestEvent,
+    PROVIDER_DEFAULT_MODEL_CHOICE_ID,
     PromptRequest,
     ProviderProfile,
     RuntimeSnapshot,
     SessionRecord,
     StartRuntimeRequest,
     SynchronizeWorkspaceTrustRequest,
-    ToolCallEvent
+    ToolCallEvent,
+    XAI_MANAGED_MODEL_ID
 } from '../common/agent-protocol';
-import { ProviderRegistry, XAI_MANAGED_MODEL_ID } from './provider-registry';
+import { ProviderRegistry } from './provider-registry';
 import { validatePromptImageAttachments } from './prompt-image-attachments';
 import { providerModelsEndpoint, requestProviderJson } from './provider-network';
 import { mergeMcpManagementResults } from './mcp-management';
@@ -70,6 +72,13 @@ interface PendingAssistantTextDelta {
     event: AgentTextEvent;
     persist: boolean;
     timer: NodeJS.Timeout;
+}
+
+/** Electron-main-only notification; never crosses the renderer RPC boundary. */
+export interface ProviderRuntimeInvalidation {
+    providerId: string;
+    reason: 'configuration' | 'credential-cleared' | 'subscription-auth' | 'provider-deleted';
+    invalidateSession: boolean;
 }
 
 interface InitializeResponse {
@@ -138,6 +147,8 @@ export class GrokAgentHostService implements AgentHostService {
     protected capabilities: AgentCapabilities | undefined;
     protected models: AgentModelOption[] = [];
     protected selectedModel: string | undefined;
+    /** Epoch captured atomically with the credentials used to spawn this sidecar. */
+    protected runtimeProviderEpoch: string | undefined;
     protected sidecarVersion: string | undefined;
     protected supportsAdditionalDirectories = false;
     protected intentionalStop = false;
@@ -152,15 +163,23 @@ export class GrokAgentHostService implements AgentHostService {
     /** Canonical roots currently attached to this Theia window, independent of trust. */
     protected readonly attachedWorkspaceRoots = new Set<string>();
     protected lifecycleTail: Promise<void> = Promise.resolve();
+    /** Coalesces application-wide Provider/model changes from peer windows. */
+    protected providerDefaultsRefreshPending = false;
+    protected providerDefaultsRefreshScheduled = false;
+    /** Incremented synchronously when a peer changes global defaults. */
+    protected providerDefaultsGeneration = 0;
+    /** Serializes snapshots across event and RPC delivery paths. */
+    protected snapshotRevision = 0;
     protected disposed = false;
 
     constructor(
         protected readonly providers: ProviderRegistry,
         protected readonly security: WorkspaceSecurityStore,
-        protected readonly onAuthenticationChanged: () => void,
+        protected readonly onProviderRuntimeInvalidated: (change: ProviderRuntimeInvalidation) => void,
         protected readonly onProviderDefaultsChanged: () => void,
         protected readonly onPermissionModeChanged: () => void,
         protected readonly onSubscriptionAuthStatusChanged: (status: 'authenticated' | 'unauthenticated') => void,
+        protected readonly withSubscriptionAuthMutation: <T>(operation: () => Promise<T>) => Promise<T>,
         protected readonly updates: SidecarUpdateCoordinator,
         protected readonly canApplyUpdate: () => boolean
     ) {
@@ -190,7 +209,20 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async getSnapshot(): Promise<RuntimeSnapshot> {
-        return this.snapshot();
+        // Renderer events are intentionally asynchronous. A settings window
+        // can therefore delete/recreate a Provider and persist the new global
+        // selection a few milliseconds before an Agent widget receives the
+        // corresponding snapshot event. Reconcile that harmless idle gap on
+        // every explicit snapshot read, before the renderer freezes a prompt
+        // submission around an obsolete Provider id.
+        if (this.activePrompts.size > 0 || this.disposed) return this.snapshot();
+        return this.withLifecycle(async () => {
+            if (this.activePrompts.size === 0
+                && this.providers.selectedProviderId() !== this.providerId) {
+                await this.applyProviderDefaultsLocked();
+            }
+            return this.snapshot();
+        });
     }
 
     async setWorkspaceRoot(workspaceRoot: string | undefined): Promise<RuntimeSnapshot> {
@@ -282,12 +314,24 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.attachedWorkspaceRoots.has(root)) {
             throw new Error('The selected Agent root is not attached to the current Theia workspace.');
         }
-        const requestedProvider = this.providers.get(request.providerId);
+        // Distinguish a delayed renderer snapshot from corrupt/missing global
+        // metadata. The former is recoverable before any ACP session or prompt
+        // exists and should never be reported as a lost saved Provider.
+        const globallySelectedProvider = this.providers.selectedProviderId();
+        if (request.providerId !== globallySelectedProvider) {
+            throw new Error('STALE_PROVIDER_SELECTION: The application-wide model service changed before runtime start.');
+        }
+        const requestedProvider = this.providers.get(globallySelectedProvider);
         if (!requestedProvider) {
-            throw new Error('The selected Provider no longer exists.');
+            throw new Error('The globally selected Provider no longer exists.');
         }
         let provider: ProviderProfile = requestedProvider;
-        if (this.acp && this.workspaceRoot === root && this.providerId === provider.id && this.phase === 'ready') {
+        const requestedProviderEpoch = this.providers.runtimeEpoch(provider.id);
+        if (this.acp
+            && this.workspaceRoot === root
+            && this.providerId === provider.id
+            && (this.phase === 'ready' || this.phase === 'auth-required')
+            && this.runtimeProviderEpoch === requestedProviderEpoch) {
             return this.snapshot();
         }
         if (this.acp || this.supervisor.running) {
@@ -296,6 +340,7 @@ export class GrokAgentHostService implements AgentHostService {
 
         const generation = ++this.runtimeGeneration;
         this.loadedSessionIds.clear();
+        this.runtimeProviderEpoch = undefined;
         this.workspaceRoot = root;
         this.providerId = provider.id;
         this.selectedModel = this.defaultModelId(provider.id);
@@ -313,59 +358,91 @@ export class GrokAgentHostService implements AgentHostService {
                 // Trust-state failures are fail-closed for project MCP, but
                 // they do not prevent the transport from waiting for input.
             }
-            const initialized = await this.providers.withProviderEnvironmentAsync(provider.id, async (providerEnvironment, currentProvider) => {
+            // Capture the Provider epoch under the same writer lock as the
+            // credential/TOML snapshot and process spawn. The lock is released
+            // immediately after spawn; ACP initialize may legitimately wait on
+            // the network and must not block settings in another window.
+            const launch = this.providers.withProviderEnvironment(provider.id, (providerEnvironment, currentProvider, runtimeEpoch) => {
                 provider = currentProvider;
                 const environment = {
                     ...projectMcpEnvironment,
                     ...providerEnvironment
                 };
-                this.currentSecrets = [...new Set(Object.values(environment).filter((value): value is string => typeof value === 'string' && value.length > 0))];
-                const launch = this.supervisor.launch(root, environment);
-                this.sidecarVersion = launch.version;
-                const acp = new AcpClient({
-                    write: createNodeWritableSink(launch.process.stdin),
-                    defaultTimeoutMs: 30_000,
-                    maxLineBytes: 8 * 1024 * 1024,
-                    maxPendingRequests: 128
-                });
-                this.acp = acp;
-                this.bindAcp(acp);
-                launch.process.once('error', error => this.runtimeFailed(error, generation));
-                launch.process.once('exit', (code, signal) => {
-                    if (!this.intentionalStop) {
-                        this.runtimeFailed(new Error(`Grok sidecar exited (${signal ?? code ?? 'unknown'}).`), generation);
-                    }
-                });
-                this.consumeTask = acp.consume(launch.process.stdout).catch(error => {
-                    if (!this.intentionalStop) {
-                        this.runtimeFailed(error, generation);
-                    }
-                });
-
-                this.phase = 'initializing';
-                this.emitSnapshot();
-                return acp.request<InitializeResponse>('initialize', {
-                    protocolVersion: 1,
-                    clientCapabilities: {
-                        fs: { readTextFile: false, writeTextFile: false },
-                        terminal: false
-                    },
-                    clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.1.0' },
-                    _meta: {
-                        startupHints: {
-                            nonInteractive: true,
-                            skipGitStatus: true,
-                            skipProjectLayout: true
-                        },
-                        clientType: 'xora-code-desktop',
-                        clientVersion: '0.1.0'
-                    }
-                }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
+                // Only credentials belong in the exact-value redaction set.
+                // The launch environment also contains safe routing values
+                // such as GROK_WEB_SEARCH_MODEL=<custom provider id>. Treating
+                // every environment value as a secret rewrites providerId and
+                // selectedModel to "[REDACTED]" in renderer snapshots, which
+                // leaves the Agent model selector empty even though Settings
+                // can see the custom profile and its fetched model catalogue.
+                this.currentSecrets = this.providers.redactionSecrets();
+                this.runtimeProviderEpoch = runtimeEpoch;
+                return this.supervisor.launch(root, environment);
             });
+            this.sidecarVersion = launch.version;
+            const acp = new AcpClient({
+                write: createNodeWritableSink(launch.process.stdin),
+                defaultTimeoutMs: 30_000,
+                maxLineBytes: 8 * 1024 * 1024,
+                maxPendingRequests: 128
+            });
+            this.acp = acp;
+            this.bindAcp(acp);
+            launch.process.once('error', error => this.runtimeFailed(error, generation));
+            launch.process.once('exit', (code, signal) => {
+                if (!this.intentionalStop) {
+                    this.runtimeFailed(new Error(`Grok sidecar exited (${signal ?? code ?? 'unknown'}).`), generation);
+                }
+            });
+            this.consumeTask = acp.consume(launch.process.stdout).catch(error => {
+                if (!this.intentionalStop) {
+                    this.runtimeFailed(error, generation);
+                }
+            });
+
+            this.phase = 'initializing';
+            this.emitSnapshot();
+            const initialized = await acp.request<InitializeResponse>('initialize', {
+                protocolVersion: 1,
+                clientCapabilities: {
+                    fs: { readTextFile: false, writeTextFile: false },
+                    terminal: false
+                },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.1.0' },
+                _meta: {
+                    startupHints: {
+                        nonInteractive: true,
+                        skipGitStatus: true,
+                        skipProjectLayout: true
+                    },
+                    clientType: 'xora-code-desktop',
+                    clientVersion: '0.1.0'
+                }
+            }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
                 throw new AcpCancelledError('initialize', 'initialize', 'Runtime generation changed.');
             }
-            this.acceptInitialize(initialized);
+            if (provider.id !== this.providers.selectedProviderId()
+                || this.runtimeProviderEpoch !== this.providers.runtimeEpoch(provider.id)) {
+                throw new Error('The application-wide Provider changed while the Agent runtime was starting.');
+            }
+            // Initialize can take long enough for another window to change the
+            // application-wide model. Treat the sidecar response as a
+            // catalogue/capability snapshot only; its currentModelId is not
+            // allowed to restore the model that happened to be active when
+            // initialize started.
+            this.acceptInitialize(initialized, false);
+            if (provider.id !== this.providers.selectedProviderId()
+                || this.runtimeProviderEpoch !== this.providers.runtimeEpoch(provider.id)) {
+                throw new Error('The application-wide Provider changed while the Agent runtime was initializing.');
+            }
+            const latestGlobalModel = this.defaultModelId(provider.id);
+            if (latestGlobalModel) {
+                if (this.models.length > 0 && !this.models.some(model => model.id === latestGlobalModel)) {
+                    throw new Error('The application-wide model is not advertised by this ACP runtime.');
+                }
+                this.selectedModel = latestGlobalModel;
+            }
 
             // Grok Build 0.2.102 selects its resolved default auth method as
             // part of initialize. Re-authenticating here is redundant and, for
@@ -401,7 +478,7 @@ export class GrokAgentHostService implements AgentHostService {
                     this.publishSubscriptionAuthStatus('unauthenticated');
                     this.emitSnapshot('当前 Grok 订阅需要完成一次认证。');
                 } else if (provider.kind === 'xai-api-key') {
-                    this.emitSnapshot('当前 xAI API 服务需要完成一次认证。');
+                    this.emitSnapshot('当前旧版 API 服务需要完成一次认证。');
                 } else {
                     this.emitSnapshot(`“${provider.name}”需要完成一次认证。`);
                 }
@@ -425,6 +502,7 @@ export class GrokAgentHostService implements AgentHostService {
             await this.consumeTask?.catch(() => undefined);
             this.consumeTask = undefined;
             this.phase = 'crashed';
+            this.runtimeProviderEpoch = undefined;
             this.emitError('RUNTIME_START_FAILED', error, true);
             this.emitSnapshot(this.redactError(error));
             this.currentSecrets = [];
@@ -471,19 +549,29 @@ export class GrokAgentHostService implements AgentHostService {
         this.models = [];
         this.selectedModel = this.defaultModelId(this.providerId);
         this.sidecarVersion = undefined;
+        this.runtimeProviderEpoch = undefined;
         this.currentSecrets = [];
         this.emitSnapshot();
     }
 
     async authenticate(methodId: string, sharedStateConfirmed = false): Promise<AuthenticationResult> {
+        return this.withLifecycle(() => this.authenticateLocked(methodId, sharedStateConfirmed));
+    }
+
+    protected async authenticateLocked(methodId: string, sharedStateConfirmed: boolean): Promise<AuthenticationResult> {
         if (this.phase !== 'auth-required') {
             throw new Error('The current runtime is not waiting for authentication.');
+        }
+        const authenticatingProviderId = this.providerId;
+        const authenticatingRuntimeEpoch = this.runtimeProviderEpoch;
+        if (!this.providerAuthorityIsCurrent(authenticatingProviderId, authenticatingRuntimeEpoch)) {
+            throw new Error('The model service changed before authentication. Restart the Agent runtime.');
         }
         const acp = this.requireAcp();
         if (!this.capabilities?.authMethods.some(method => method.id === methodId)) {
             throw new Error('The sidecar did not advertise this authentication method.');
         }
-        const provider = this.providers.get(this.providerId);
+        const provider = this.providers.get(authenticatingProviderId);
         const compatible = provider?.kind === 'grok-subscription'
             ? methodId !== 'xai.api_key'
                 && (methodId === 'grok.com' || methodId === this.capabilities.defaultAuthMethodId)
@@ -491,13 +579,35 @@ export class GrokAgentHostService implements AgentHostService {
         if (!compatible) {
             throw new Error('The authentication method is incompatible with the selected Provider.');
         }
-        const confirmationRequired = this.providers.authenticationConfirmationRequired(this.providerId);
+        const confirmationRequired = this.providers.authenticationConfirmationRequired(authenticatingProviderId);
         if (confirmationRequired && !sharedStateConfirmed) {
             return { status: 'confirmation-required' };
         }
-        await acp.request('authenticate', { methodId }, { timeoutMs: 5 * 60_000 });
+        const authenticate = async (): Promise<void> => {
+            if (provider?.kind === 'grok-subscription') {
+                this.isolateProviderSessions('grok-subscription');
+            }
+            await acp.request('authenticate', { methodId }, { timeoutMs: 5 * 60_000 });
+        };
+        if (provider?.kind === 'grok-subscription') {
+            await this.withSubscriptionAuthMutation(authenticate);
+            // The manager drains and folds all auth-file notifications before
+            // returning. Bind this already-authenticated sidecar to that final
+            // epoch so sessions created immediately afterwards are valid.
+            this.runtimeProviderEpoch = this.providers.runtimeEpoch('grok-subscription');
+        } else {
+            await authenticate();
+        }
+        const finalRuntimeEpoch = provider?.kind === 'grok-subscription'
+            ? this.runtimeProviderEpoch
+            : authenticatingRuntimeEpoch;
+        if (!this.providerAuthorityIsCurrent(authenticatingProviderId, finalRuntimeEpoch)) {
+            await this.stopRuntimeLocked(0);
+            this.notifyProviderDefaultsChanged();
+            throw new Error('The model service changed during authentication. Restart the Agent runtime.');
+        }
         if (confirmationRequired) {
-            this.providers.rememberAuthenticationConfirmation(this.providerId);
+            this.providers.rememberAuthenticationConfirmation(authenticatingProviderId);
         }
         this.phase = 'ready';
         if (provider?.kind === 'grok-subscription') {
@@ -513,16 +623,46 @@ export class GrokAgentHostService implements AgentHostService {
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
         const activationGeneration = ++this.sessionLoadGeneration;
+        // Peer-window Provider/model notifications can arrive while ACP is
+        // creating the session. The generation is sampled again at the last
+        // authority check so an earlier refresh that saw no active session
+        // cannot leave this new one attached to stale defaults.
+        const requestedDefaultsGeneration = this.providerDefaultsGeneration;
+        let reconciledDefaultsGeneration = requestedDefaultsGeneration;
         const acp = this.requireReady();
+        const runtimeProviderEpoch = this.runtimeProviderEpoch;
+        if (!runtimeProviderEpoch) {
+            throw new Error('The active runtime has no coherent Provider epoch. Restart the Agent runtime.');
+        }
         const root = this.security.canonicalRoot(request.workspaceRoot);
         if (root !== this.workspaceRoot || request.providerId !== this.providerId) {
             throw new Error('Restart the runtime for the selected workspace and Provider first.');
         }
+        if (request.providerId !== this.providers.selectedProviderId()) {
+            this.notifyProviderDefaultsChanged();
+            throw new Error('The application-wide model service changed. Start a new session with the selected service.');
+        }
+        if (runtimeProviderEpoch !== this.providers.runtimeEpoch(request.providerId)) {
+            throw new Error('The Provider changed after this runtime started. Restart the Agent runtime.');
+        }
+        if (request.model === PROVIDER_DEFAULT_MODEL_CHOICE_ID) {
+            throw new Error('The internal Provider default choice is not an ACP model id.');
+        }
         const provider = this.providers.get(request.providerId);
-        const requestedModel = request.model && (this.models.length === 0 || this.models.some(model => model.id === request.model))
+        const globallySelectedModel = this.defaultModelId(request.providerId);
+        if (globallySelectedModel
+            && this.models.length > 0
+            && !this.models.some(model => model.id === globallySelectedModel)) {
+            throw new Error('The application-wide model is not advertised by this ACP runtime.');
+        }
+        const requestedModel = request.model
+            && this.providerAllowsCatalogModel(request.providerId, request.model)
+            && (this.models.length === 0 || this.models.some(model => model.id === request.model))
             ? request.model
             : undefined;
         const runtimeSelectedModel = this.selectedModel
+            && this.selectedModel !== PROVIDER_DEFAULT_MODEL_CHOICE_ID
+            && this.providerAllowsCatalogModel(request.providerId, this.selectedModel)
             && (this.models.length === 0 || this.models.some(model => model.id === this.selectedModel))
             ? this.selectedModel
             : undefined;
@@ -530,7 +670,7 @@ export class GrokAgentHostService implements AgentHostService {
             ? provider.id
             : provider?.kind === 'xai-api-key' && provider.model
                 ? XAI_MANAGED_MODEL_ID
-                : requestedModel ?? runtimeSelectedModel;
+                : globallySelectedModel ?? requestedModel ?? runtimeSelectedModel;
         const meta: Record<string, unknown> = {};
         if (effectiveModel) meta.modelId = effectiveModel;
         const params: Record<string, unknown> = {
@@ -551,19 +691,98 @@ export class GrokAgentHostService implements AgentHostService {
         if (typeof result.sessionId !== 'string' || !result.sessionId) {
             throw new Error('Grok returned an invalid ACP session ID.');
         }
-        if (activationGeneration === this.sessionLoadGeneration) {
-            this.acceptModelState(modelStateFrom(result));
+        const createdModelState = modelStateFrom(result);
+        this.acceptModelState(createdModelState, false);
+        // `_meta.modelId` on session/new is only a request hint. Grok Build
+        // 0.2.102 can omit modelState while silently retaining the model/auth
+        // selected during initialize (for example an OIDC subscription after
+        // the user selected an API relay). Absence is therefore not positive
+        // confirmation. Explicitly set the application-wide catalogue alias
+        // before this session can become active.
+        let resolvedModel = typeof createdModelState?.currentModelId === 'string'
+            ? createdModelState.currentModelId
+            : effectiveModel;
+        let incompatibleWithGlobalDefaults = false;
+        let reconciledChangedDefaults = false;
+        let reconcileError: unknown;
+        const latestProvider = this.providers.selectedProviderId();
+        const latestEpoch = this.providers.runtimeEpoch(request.providerId);
+        const latestModel = latestProvider === request.providerId
+            ? this.defaultModelId(request.providerId)
+            : undefined;
+        reconciledDefaultsGeneration = this.providerDefaultsGeneration;
+        if (latestProvider !== request.providerId
+            || latestEpoch !== runtimeProviderEpoch
+            || this.runtimeProviderEpoch !== runtimeProviderEpoch) {
+            incompatibleWithGlobalDefaults = true;
+        } else if (latestModel && createdModelState?.currentModelId !== latestModel) {
+            try {
+                if (this.models.length > 0 && !this.models.some(model => model.id === latestModel)) {
+                    throw new Error('The newly selected global model is not advertised by this ACP runtime.');
+                }
+                const modelResult = await acp.request<Record<string, unknown>>('session/set_model', {
+                    sessionId: result.sessionId,
+                    modelId: latestModel
+                });
+                const confirmedModel = modelStateFrom(modelResult)?.currentModelId;
+                if (confirmedModel && confirmedModel !== latestModel) {
+                    throw new Error('The sidecar did not apply the application-wide model.');
+                }
+                resolvedModel = latestModel;
+                reconciledChangedDefaults = true;
+                reconciledDefaultsGeneration = this.providerDefaultsGeneration;
+                // A second change while set_model was in flight is not replayed
+                // against this just-created session. Preserve it as read-only
+                // and let the latest defaults create a clean successor.
+                if (this.providers.selectedProviderId() !== request.providerId
+                    || this.providers.runtimeEpoch(request.providerId) !== runtimeProviderEpoch
+                    || this.defaultModelId(request.providerId) !== resolvedModel
+                    || this.providerDefaultsGeneration !== reconciledDefaultsGeneration) {
+                    incompatibleWithGlobalDefaults = true;
+                }
+            } catch (error) {
+                incompatibleWithGlobalDefaults = true;
+                reconcileError = error;
+            }
         }
-        const record = this.sessions.create({
+        // If the defaults changed away and back while session/new was in
+        // flight, the peer refresh may already have run while there was no
+        // active session to synchronize. Do not silently activate that
+        // ambiguous session unless an explicit set_model established the
+        // final authority after the change.
+        if (!incompatibleWithGlobalDefaults
+            && requestedDefaultsGeneration !== reconciledDefaultsGeneration
+            && !reconciledChangedDefaults) {
+            incompatibleWithGlobalDefaults = true;
+        }
+        if (!incompatibleWithGlobalDefaults
+            && this.providerDefaultsGeneration !== reconciledDefaultsGeneration) {
+            incompatibleWithGlobalDefaults = true;
+        }
+        if (!incompatibleWithGlobalDefaults && activationGeneration === this.sessionLoadGeneration) {
+            this.acceptModelState(modelStateFrom(result));
+            if (resolvedModel) this.selectedModel = resolvedModel;
+        }
+        let record = this.sessions.create({
             acpSessionId: result.sessionId,
             title: request.title?.trim() || 'New Agent session',
             workspaceRoot: root,
             providerId: request.providerId,
-            model: effectiveModel,
+            providerRuntimeEpoch: runtimeProviderEpoch,
+            model: resolvedModel,
             sidecarVersion: this.sidecarVersion
         });
         this.knownSessionIds.add(record.appSessionId);
         this.acpSessionLookup.set(record.acpSessionId!, record.appSessionId);
+        if (incompatibleWithGlobalDefaults) {
+            record = this.sessions.update(record.appSessionId, { status: 'read-only' });
+            this.emit({ kind: 'session', session: record });
+            if (reconcileError) {
+                this.emitError('GLOBAL_MODEL_APPLY_FAILED', reconcileError, true, record.appSessionId);
+            }
+            this.notifyProviderDefaultsChanged();
+            return record;
+        }
         this.loadedSessionIds.add(record.appSessionId);
         if (activationGeneration === this.sessionLoadGeneration) {
             this.activeSessionId = record.appSessionId;
@@ -580,19 +799,40 @@ export class GrokAgentHostService implements AgentHostService {
         this.assistantStreamState().clear();
         const activationGeneration = ++this.sessionLoadGeneration;
         const record = this.sessions.get(appSessionId);
-        if (!record?.acpSessionId) {
-            throw new Error('This history has no recoverable ACP session.');
+        if (!record) {
+            throw new Error('Unknown Xora Code session.');
+        }
+        const globallySelectedProvider = this.providers.selectedProviderId();
+        const selectedProviderEpoch = this.providers.runtimeEpoch(globallySelectedProvider);
+        const recordEpoch = record.providerRuntimeEpoch ?? 'legacy-v1';
+        // An ACP session is credential/configuration-bound. Never load its old
+        // id under another Provider or epoch. Instead, keep the same local app
+        // session (and therefore the same JSONL transcript) while attaching a
+        // fresh, empty ACP session owned by the current application defaults.
+        // No historical prompt is replayed across this boundary.
+        if (!record.acpSessionId
+            || record.providerId !== globallySelectedProvider
+            || recordEpoch !== selectedProviderEpoch) {
+            return this.rebindHistoryToCurrentProvider(record, activationGeneration);
         }
         this.knownSessionIds.add(appSessionId);
         this.acpSessionLookup.set(record.acpSessionId, appSessionId);
+        const globallySelectedModel = this.defaultModelId(record.providerId);
         const matchingRuntime = (): boolean => !!this.acp
             && this.phase === 'ready'
             && this.workspaceRoot === record.workspaceRoot
-            && this.providerId === record.providerId;
+            && this.providerId === record.providerId
+            && this.runtimeProviderEpoch === recordEpoch
+            && recordEpoch === this.providers.runtimeEpoch(record.providerId);
         if (matchingRuntime() && this.activeSessionId === appSessionId && this.loadedSessionIds.has(appSessionId)) {
-            return record;
+            const synchronized = await this.synchronizeLoadedSessionModel(record, globallySelectedModel);
+            this.emitSnapshot();
+            return synchronized;
         }
-        if (!this.acp || this.workspaceRoot !== record.workspaceRoot || this.providerId !== record.providerId) {
+        if (!this.acp
+            || this.workspaceRoot !== record.workspaceRoot
+            || this.providerId !== record.providerId
+            || this.runtimeProviderEpoch !== recordEpoch) {
             await this.startRuntime({ workspaceRoot: record.workspaceRoot, providerId: record.providerId });
         }
         if (activationGeneration !== this.sessionLoadGeneration) {
@@ -605,9 +845,9 @@ export class GrokAgentHostService implements AgentHostService {
             }
             if (matchingRuntime() && this.loadedSessionIds.has(appSessionId)) {
                 this.activeSessionId = appSessionId;
-                if (record.model) this.selectedModel = record.model;
+                const synchronized = await this.synchronizeLoadedSessionModel(record, globallySelectedModel);
                 this.emitSnapshot();
-                return this.sessions.get(appSessionId) ?? record;
+                return synchronized;
             }
             restoreRuntimeGeneration = this.runtimeGeneration;
             this.beginSessionRestore(appSessionId);
@@ -616,16 +856,53 @@ export class GrokAgentHostService implements AgentHostService {
                     sessionId: record.acpSessionId,
                     cwd: record.workspaceRoot,
                     mcpServers: [],
-                    ...(record.model ? { _meta: { modelId: record.model } } : {})
+                    ...(globallySelectedModel ? { _meta: { modelId: globallySelectedModel } } : {})
                 }, { timeoutMs: 60_000 });
-                if (restoreRuntimeGeneration === this.runtimeGeneration) {
-                    this.loadedSessionIds.add(appSessionId);
-                }
                 if (activationGeneration !== this.sessionLoadGeneration || restoreRuntimeGeneration !== this.runtimeGeneration) {
                     return this.sessions.get(appSessionId) ?? record;
                 }
-                this.acceptModelState(modelStateFrom(result));
-                const loaded = this.sessions.update(appSessionId, { status: 'idle', sidecarVersion: this.sidecarVersion });
+                const latestProvider = this.providers.selectedProviderId();
+                const latestProviderEpoch = this.providers.runtimeEpoch(record.providerId);
+                if (latestProvider !== record.providerId
+                    || latestProviderEpoch !== recordEpoch
+                    || this.runtimeProviderEpoch !== recordEpoch) {
+                    this.notifyProviderDefaultsChanged();
+                    return this.rebindHistoryToCurrentProvider(record, activationGeneration);
+                }
+                const latestGlobalModel = this.defaultModelId(record.providerId);
+                const restoredModelState = modelStateFrom(result);
+                this.acceptModelState(restoredModelState, false);
+                // As with session/new, `_meta.modelId` is only a hint. An
+                // omitted currentModelId does not prove that a restored
+                // historical session adopted the global model.
+                if (latestGlobalModel
+                    && restoredModelState?.currentModelId !== latestGlobalModel) {
+                    if (this.models.length > 0 && !this.models.some(model => model.id === latestGlobalModel)) {
+                        throw new Error('The application-wide model is not advertised by this ACP runtime.');
+                    }
+                    await this.requireReady().request('session/set_model', {
+                        sessionId: record.acpSessionId,
+                        modelId: latestGlobalModel
+                    });
+                    if (activationGeneration !== this.sessionLoadGeneration
+                        || restoreRuntimeGeneration !== this.runtimeGeneration) {
+                        return this.sessions.get(appSessionId) ?? record;
+                    }
+                    if (this.providers.selectedProviderId() !== record.providerId
+                        || this.providers.runtimeEpoch(record.providerId) !== recordEpoch
+                        || this.defaultModelId(record.providerId) !== latestGlobalModel) {
+                        this.notifyProviderDefaultsChanged();
+                        return this.rebindHistoryToCurrentProvider(record, activationGeneration);
+                    }
+                }
+                this.loadedSessionIds.add(appSessionId);
+                const restoredModel = latestGlobalModel ?? this.selectedModel;
+                if (restoredModel) this.selectedModel = restoredModel;
+                const loaded = this.sessions.update(appSessionId, {
+                    status: 'idle',
+                    sidecarVersion: this.sidecarVersion,
+                    ...(restoredModel ? { model: restoredModel } : {})
+                });
                 this.activeSessionId = appSessionId;
                 this.emit({ kind: 'session', session: loaded });
                 this.emitSnapshot();
@@ -641,10 +918,23 @@ export class GrokAgentHostService implements AgentHostService {
             if (this.phase === 'auth-required' || this.redactError(error) === 'AUTHENTICATION_REQUIRED') {
                 throw error;
             }
-            const readOnly = this.sessions.update(appSessionId, { status: 'read-only' });
-            this.emit({ kind: 'session', session: readOnly });
-            this.emitError('SESSION_RESTORE_FAILED', new Error('The ACP session could not be restored. History remains read-only; start a new session.'), true, appSessionId);
-            throw error;
+            try {
+                // A missing/expired remote ACP session should not turn the
+                // local conversation into a dead end. Attach a fresh session
+                // to the same local history; never replay the stored prompts.
+                return await this.rebindHistoryToCurrentProvider(record, activationGeneration);
+            } catch (reconnectError) {
+                if (this.redactError(reconnectError) === 'AUTHENTICATION_REQUIRED') {
+                    throw reconnectError;
+                }
+                this.emitError(
+                    'SESSION_RESTORE_FAILED',
+                    new Error('历史内容已保留；当前模型服务恢复后可直接继续发送。'),
+                    true,
+                    appSessionId
+                );
+                throw reconnectError;
+            }
         }
     }
 
@@ -671,6 +961,23 @@ export class GrokAgentHostService implements AgentHostService {
         }
         if (record.workspaceRoot !== this.workspaceRoot || record.providerId !== this.providerId) {
             throw new Error('The active runtime does not match this session.');
+        }
+        if (record.providerId !== this.providers.selectedProviderId()) {
+            this.notifyProviderDefaultsChanged();
+            throw new Error('The application-wide model service changed. Start a new session.');
+        }
+        const recordProviderEpoch = record.providerRuntimeEpoch ?? 'legacy-v1';
+        if (this.runtimeProviderEpoch !== recordProviderEpoch
+            || recordProviderEpoch !== this.providers.runtimeEpoch(record.providerId)) {
+            const readOnly = this.sessions.update(request.sessionId, { status: 'read-only' });
+            this.emit({ kind: 'session', session: readOnly });
+            throw new Error('The Provider changed after this session was created. Start a new session.');
+        }
+        const globallySelectedModel = this.defaultModelId(record.providerId);
+        if (globallySelectedModel
+            && (record.model !== globallySelectedModel || this.selectedModel !== globallySelectedModel)) {
+            this.notifyProviderDefaultsChanged();
+            throw new Error('The application-wide model changed. Wait for this session to synchronize before sending.');
         }
         if (this.activeSessionId !== request.sessionId) {
             throw new Error('The selected conversation is no longer the active Agent session.');
@@ -742,6 +1049,9 @@ export class GrokAgentHostService implements AgentHostService {
             this.assistantStreamState().delete(request.sessionId);
             this.activePrompts.delete(request.sessionId);
             this.sessions.flushEvents(request.sessionId);
+            if (this.providerDefaultsRefreshPending) {
+                this.scheduleProviderDefaultsRefresh();
+            }
         }
     }
 
@@ -790,6 +1100,11 @@ export class GrokAgentHostService implements AgentHostService {
             pending.resolve({ outcome: { outcome: 'cancelled' } });
             throw new Error('Invalid permission decision.');
         }
+        if (!this.permissionSessionAuthorityIsCurrent(pending.appSessionId)) {
+            this.pendingPermissions.delete(decision.requestId);
+            pending.resolve({ outcome: { outcome: 'cancelled' } });
+            return;
+        }
         const requestedKind = decision.outcome === 'allow-once'
             ? 'allow_once'
             : decision.outcome === 'allow-always' ? 'allow_once' : 'reject_once';
@@ -813,42 +1128,93 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async selectModel(appSessionId: string, modelId: string): Promise<void> {
-        const record = this.sessions.get(appSessionId);
-        if (!record?.acpSessionId) {
-            throw new Error('Select a live session before choosing a model.');
+        if (modelId === PROVIDER_DEFAULT_MODEL_CHOICE_ID) {
+            throw new Error('The internal Provider default choice is not an ACP model id.');
         }
-        if (!this.models.some(model => model.id === modelId)) {
-            throw new Error('The selected model is not advertised by the ACP runtime.');
-        }
-        await this.requireReady().request('session/set_model', {
-            sessionId: record.acpSessionId,
-            modelId
-        });
-        this.selectedModel = modelId;
-        const updated = this.sessions.update(appSessionId, { model: modelId });
-        try {
+        return this.withLifecycle(async () => {
+            if (this.activePrompts.size > 0) {
+                throw new Error('请等待当前任务结束后再修改模型。');
+            }
+            const record = this.sessions.get(appSessionId);
+            if (!record?.acpSessionId || record.status === 'read-only') {
+                throw new Error('Select a live session before choosing a model.');
+            }
+            if (record.providerId !== this.providerId
+                || this.providers.selectedProviderId() !== this.providerId
+                || this.activeSessionId !== appSessionId
+                || !this.loadedSessionIds.has(appSessionId)) {
+                throw new Error('The selected conversation is not the active global Provider session.');
+            }
+            if (!this.models.some(model => model.id === modelId)) {
+                throw new Error('The selected model is not advertised by the ACP runtime.');
+            }
+            if (!this.providerAllowsCatalogModel(this.providerId, modelId)) {
+                throw new Error('The selected model does not belong to the current model service.');
+            }
+            const recordEpoch = record.providerRuntimeEpoch ?? 'legacy-v1';
+            if (this.runtimeProviderEpoch !== recordEpoch
+                || recordEpoch !== this.providers.runtimeEpoch(record.providerId)) {
+                throw new Error('The Provider changed after this session was created. Start a new session.');
+            }
+
+            // Persist first. If this fails, ACP remains untouched and every
+            // window continues to agree on the previous application default.
             this.providers.selectPreferredModel(this.providerId, modelId);
             this.onProviderDefaultsChanged();
-        } catch { /* the live session selection succeeded; retry persistence on the next choice */ }
-        this.emit({ kind: 'session', session: updated });
-        this.emitSnapshot();
+            try {
+                await this.requireReady().request('session/set_model', {
+                    sessionId: record.acpSessionId,
+                    modelId
+                });
+            } catch (error) {
+                await this.retireSessionAfterGlobalModelFailure(record, modelId, error);
+                throw error;
+            }
+            this.selectedModel = modelId;
+            const updated = this.sessions.update(appSessionId, { model: modelId });
+            this.emit({ kind: 'session', session: updated });
+            this.emitSnapshot();
+        });
     }
 
     async selectDefaultModel(providerId: string, modelId: string): Promise<RuntimeSnapshot> {
-        if (providerId !== this.providerId) {
-            throw new Error('请先切换到对应的模型服务。');
+        if (modelId === PROVIDER_DEFAULT_MODEL_CHOICE_ID) {
+            throw new Error('The internal Provider default choice cannot be saved as a model.');
         }
-        if (this.activePrompts.size > 0) {
-            throw new Error('请等待当前任务结束后再修改默认模型。');
-        }
-        if (this.models.length > 0 && !this.models.some(model => model.id === modelId)) {
-            throw new Error('所选模型不在当前运行时提供的模型列表中。');
-        }
-        this.providers.selectPreferredModel(providerId, modelId);
-        if (!this.activeSessionId) this.selectedModel = modelId;
-        this.onProviderDefaultsChanged();
-        this.emitSnapshot();
-        return this.snapshot();
+        return this.withLifecycle(async () => {
+            if (providerId !== this.providerId || providerId !== this.providers.selectedProviderId()) {
+                throw new Error('请先切换到对应的模型服务。');
+            }
+            if (this.activePrompts.size > 0) {
+                throw new Error('请等待当前任务结束后再修改默认模型。');
+            }
+            if (this.models.length > 0 && !this.models.some(model => model.id === modelId)) {
+                throw new Error('所选模型不在当前运行时提供的模型列表中。');
+            }
+            if (!this.providerAllowsCatalogModel(providerId, modelId)) {
+                throw new Error('所选模型不属于当前模型服务。');
+            }
+            this.providers.selectPreferredModel(providerId, modelId);
+            this.onProviderDefaultsChanged();
+
+            const active = this.activeSessionId ? this.sessions.get(this.activeSessionId) : undefined;
+            if (active
+                && active.status !== 'read-only'
+                && this.loadedSessionIds.has(active.appSessionId)
+                && this.phase === 'ready'
+                && this.acp) {
+                try {
+                    await this.synchronizeLoadedSessionModel(active, modelId);
+                } catch (error) {
+                    await this.retireSessionAfterGlobalModelFailure(active, modelId, error);
+                    throw error;
+                }
+            } else {
+                this.selectedModel = modelId;
+            }
+            this.emitSnapshot();
+            return this.snapshot();
+        });
     }
 
     async revertDiff(diffId: string): Promise<void> {
@@ -880,18 +1246,35 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async listProviders(): Promise<ProviderProfile[]> {
-        return this.providers.list();
+        // `xai-api-key` remains an Electron-main compatibility record for old
+        // configuration and sessions. New UI exposes only Grok subscription
+        // and ordinary custom model services.
+        return this.providers.list().filter(provider => provider.kind !== 'xai-api-key');
     }
 
     async selectProvider(providerId: string): Promise<RuntimeSnapshot> {
         return this.withLifecycle(async () => {
-            if (!this.providers.get(providerId)) {
+            const selectedProvider = this.providers.get(providerId);
+            if (!selectedProvider) {
                 throw new Error('Unknown Provider profile.');
+            }
+            if (selectedProvider.kind === 'xai-api-key') {
+                throw new Error('This legacy model service is no longer selectable. Add it as a custom model service instead.');
             }
             // Check after entering the lifecycle queue. A turn may have begun
             // while this switch was waiting behind runtime initialization.
             if (this.activePrompts.size > 0) {
                 throw new Error('Cancel or finish the current task before switching credentials.');
+            }
+            // "Save and use" always calls this method, even when a stale
+            // settings snapshot still says the Provider is selected. Make the
+            // operation safely idempotent so callers do not need to guess from
+            // renderer state and an already coherent runtime is not restarted.
+            if (providerId === this.providerId
+                && providerId === this.providers.selectedProviderId()) {
+                this.selectedModel = this.defaultModelId(providerId);
+                this.emitSnapshot();
+                return this.snapshot();
             }
             ++this.sessionLoadGeneration;
             if (this.runtimeActive || this.phase !== 'stopped') {
@@ -949,15 +1332,36 @@ export class GrokAgentHostService implements AgentHostService {
                     || previous.contextWindow !== profile.contextWindow
                     || previous.backendSearch !== profile.backendSearch);
             const invalidatesExistingRuntime = !!previous && (apiKey !== undefined || runtimeConfigurationChanged);
-            if (invalidatesExistingRuntime && profile.id === this.providerId && (this.runtimeActive || this.phase !== 'stopped')) {
+            const invalidatesCurrentProvider = invalidatesExistingRuntime && profile.id === this.providerId;
+            if (invalidatesCurrentProvider && (this.runtimeActive || this.phase !== 'stopped')) {
                 await this.stopRuntimeLocked();
             }
             const saved = this.providers.save(profile, apiKey);
+            if (invalidatesCurrentProvider) {
+                // A changed endpoint/model/key is a data-isolation boundary.
+                // Keep the old record in history, but never auto-restore that
+                // ACP session and send its context to the new configuration.
+                ++this.sessionLoadGeneration;
+                this.activeSessionId = undefined;
+                this.loadedSessionIds.clear();
+            }
+            if (invalidatesExistingRuntime) {
+                this.sessions.markProviderSessionsReadOnly(profile.id);
+            }
             if (profile.id === this.providerId && !this.activeSessionId) {
                 this.selectedModel = this.defaultModelId(profile.id);
             }
+            if (invalidatesExistingRuntime) {
+                this.onProviderRuntimeInvalidated({
+                    providerId: profile.id,
+                    reason: 'configuration',
+                    invalidateSession: true
+                });
+            }
             this.onProviderDefaultsChanged();
-            if (invalidatesExistingRuntime) this.onAuthenticationChanged();
+            if (invalidatesCurrentProvider) {
+                this.emitSnapshot('模型服务配置已更新；为保护会话隔离，已开始一个新会话。');
+            }
             return saved;
         });
     }
@@ -968,24 +1372,47 @@ export class GrokAgentHostService implements AgentHostService {
                 await this.stopRuntimeLocked();
             }
             this.providers.clearCredential(providerId);
-            this.onAuthenticationChanged();
+            this.sessions.markProviderSessionsReadOnly(providerId);
+            if (providerId === this.providerId) {
+                ++this.sessionLoadGeneration;
+                this.activeSessionId = undefined;
+                this.loadedSessionIds.clear();
+            }
+            this.onProviderRuntimeInvalidated({
+                providerId,
+                reason: 'credential-cleared',
+                invalidateSession: true
+            });
             this.emitSnapshot('Provider credential cleared. Enter a new API key before starting this Provider again.');
         });
     }
 
     async deleteProvider(providerId: string): Promise<void> {
-        if (providerId === this.providerId && this.supervisor.running) {
-            throw new Error('Stop the current runtime before deleting its Provider.');
-        }
-        this.providers.delete(providerId);
-        if (providerId === this.providerId) {
-            this.providerId = this.providers.selectedProviderId();
-            this.activeSessionId = undefined;
-            this.models = [];
-            this.selectedModel = this.defaultModelId(this.providerId);
+        return this.withLifecycle(async () => {
+            if (this.activePrompts.size > 0 && providerId === this.providerId) {
+                throw new Error('请等待当前任务结束后再删除模型服务。');
+            }
+            if (providerId === this.providerId && (this.runtimeActive || this.phase !== 'stopped')) {
+                await this.stopRuntimeLocked();
+            }
+            this.sessions.markProviderSessionsReadOnly(providerId);
+            this.providers.delete(providerId);
+            if (providerId === this.providerId) {
+                ++this.sessionLoadGeneration;
+                this.providerId = this.providers.selectedProviderId();
+                this.activeSessionId = undefined;
+                this.loadedSessionIds.clear();
+                this.models = [];
+                this.selectedModel = this.defaultModelId(this.providerId);
+            }
+            this.onProviderRuntimeInvalidated({
+                providerId,
+                reason: 'provider-deleted',
+                invalidateSession: true
+            });
             this.onProviderDefaultsChanged();
             this.emitSnapshot('当前模型服务已被删除，已切换回 Grok 订阅。');
-        }
+        });
     }
 
     async loginGrokSubscription(): Promise<ManagementResult> {
@@ -1003,27 +1430,30 @@ export class GrokAgentHostService implements AgentHostService {
             if (confirmation.response !== 0) {
                 return { ok: false, error: '已取消 Grok 订阅登录。' };
             }
-            if (this.runtimeActive || this.phase !== 'stopped') {
-                await this.stopRuntimeLocked();
-            }
             try {
-                const result = await this.runCli(['login', '--oauth'], false, {
-                    cwd: this.authenticationWorkingDirectory(),
-                    injectedEnvironment: {},
-                    timeoutMs: 5 * 60_000,
-                    exposeOutput: false,
-                    failureMessage: 'Grok 登录未完成，请重试或检查浏览器中的登录流程。'
+                const result = await this.withSubscriptionAuthMutation(async () => {
+                    if (this.runtimeActive || this.phase !== 'stopped') {
+                        await this.stopRuntimeLocked();
+                    }
+                    this.isolateProviderSessions('grok-subscription');
+                    return this.runCli(['login', '--oauth'], false, {
+                        cwd: this.authenticationWorkingDirectory(),
+                        injectedEnvironment: {},
+                        timeoutMs: 5 * 60_000,
+                        exposeOutput: false,
+                        failureMessage: 'Grok 登录未完成，请重试或检查浏览器中的登录流程。'
+                    });
                 });
                 if (result.ok) {
                     this.providers.selectProvider('grok-subscription');
                     this.providers.rememberAuthenticationConfirmation('grok-subscription');
                     this.providerId = 'grok-subscription';
                     this.activeSessionId = undefined;
+                    this.loadedSessionIds.clear();
                     this.models = [];
                     this.selectedModel = this.defaultModelId(this.providerId);
                     this.publishSubscriptionAuthStatus('authenticated');
                     this.onProviderDefaultsChanged();
-                    this.onAuthenticationChanged();
                     this.emitSnapshot('Grok 订阅登录完成。');
                 }
                 return result;
@@ -1048,21 +1478,23 @@ export class GrokAgentHostService implements AgentHostService {
             if (confirmation.response !== 0) {
                 return { ok: false, error: '已取消退出登录。' };
             }
-            if (this.runtimeActive || this.phase !== 'stopped') {
-                await this.stopRuntimeLocked();
-            }
             try {
-                const result = await this.runCli(['logout'], false, {
-                    cwd: this.authenticationWorkingDirectory(),
-                    injectedEnvironment: {},
-                    timeoutMs: 30_000,
-                    exposeOutput: false,
-                    failureMessage: 'Grok 退出登录失败，请稍后重试。'
+                const result = await this.withSubscriptionAuthMutation(async () => {
+                    if (this.runtimeActive || this.phase !== 'stopped') {
+                        await this.stopRuntimeLocked();
+                    }
+                    this.isolateProviderSessions('grok-subscription');
+                    return this.runCli(['logout'], false, {
+                        cwd: this.authenticationWorkingDirectory(),
+                        injectedEnvironment: {},
+                        timeoutMs: 30_000,
+                        exposeOutput: false,
+                        failureMessage: 'Grok 退出登录失败，请稍后重试。'
+                    });
                 });
                 if (result.ok) {
                     this.providers.clearAuthenticationConfirmation('grok-subscription');
                     this.publishSubscriptionAuthStatus('unauthenticated');
-                    this.onAuthenticationChanged();
                     this.emitSnapshot('已退出共享的 Grok 订阅登录。');
                 }
                 return result;
@@ -1212,25 +1644,118 @@ export class GrokAgentHostService implements AgentHostService {
         this.supervisor.stopSync();
         this.sessions.dispose();
         this.currentSecrets = [];
+        this.runtimeProviderEpoch = undefined;
     }
 
-    notifyAuthenticationChanged(): void {
-        this.grokSubscriptionAuthStatus = this.providers.subscriptionAuthStatus();
-        if (!this.runtimeActive && this.phase === 'stopped') {
-            this.emitSnapshot('Agent 登录或凭据已在其他窗口中更新。');
-            return;
+    notifyProviderRuntimeInvalidated(change: ProviderRuntimeInvalidation): void {
+        if (change.providerId === 'grok-subscription') {
+            this.grokSubscriptionAuthStatus = this.providers.subscriptionAuthStatus();
         }
-        void this.stopRuntime()
-            .then(() => this.emitSnapshot('Agent 登录或凭据已在其他窗口中更新；当前运行已安全停止。'))
-            .catch(error => this.emitError('AUTH_STATE_REFRESH_FAILED', error, true));
+        void this.withLifecycle(async () => {
+            if (change.invalidateSession) {
+                this.sessions.markProviderSessionsReadOnly(change.providerId);
+            }
+            // Provider identity is checked inside the lifecycle queue so a
+            // concurrent local switch cannot make this event affect the wrong
+            // credentials or session.
+            if (this.providerId !== change.providerId) return;
+            if (this.runtimeActive || this.phase !== 'stopped') {
+                await this.stopRuntimeLocked();
+            }
+            ++this.sessionLoadGeneration;
+            this.activeSessionId = undefined;
+            this.loadedSessionIds.clear();
+            if (change.reason === 'provider-deleted') {
+                this.providerId = this.providers.selectedProviderId();
+                this.models = [];
+            }
+            this.selectedModel = this.defaultModelId(this.providerId);
+            this.emitSnapshot('此模型服务已在其他窗口更新；旧会话已隔离，请开始新会话。');
+        }).catch(error => this.emitError('AUTH_STATE_REFRESH_FAILED', error, true));
+    }
+
+    async prepareSubscriptionAuthenticationMutation(): Promise<void> {
+        return this.withLifecycle(async () => {
+            if (this.providerId === 'grok-subscription' && (this.runtimeActive || this.phase !== 'stopped')) {
+                await this.stopRuntimeLocked();
+            }
+            this.isolateProviderSessions('grok-subscription');
+            this.emitSnapshot('Grok 订阅认证即将在其他窗口更新；旧会话已隔离。');
+        });
     }
 
     notifyProviderDefaultsChanged(): void {
-        if (!this.runtimeActive && !this.activeSessionId) {
-            this.providerId = this.providers.selectedProviderId();
-            this.selectedModel = this.defaultModelId(this.providerId);
+        ++this.providerDefaultsGeneration;
+        this.providerDefaultsRefreshPending = true;
+        if (this.activePrompts.size > 0) {
+            this.emitSnapshot('其他窗口更新了模型；当前任务结束后会自动同步。');
+            return;
         }
-        this.emitSnapshot('其他窗口更新了默认模型服务或模型。');
+        this.scheduleProviderDefaultsRefresh();
+    }
+
+    /** Serializes peer-window defaults with runtime lifecycle operations while
+     * allowing an already running turn to finish without cancellation. */
+    protected scheduleProviderDefaultsRefresh(): void {
+        if (this.disposed || this.providerDefaultsRefreshScheduled || this.activePrompts.size > 0) return;
+        this.providerDefaultsRefreshScheduled = true;
+        void this.withLifecycle(async () => {
+            if (!this.providerDefaultsRefreshPending || this.activePrompts.size > 0) return;
+            this.providerDefaultsRefreshPending = false;
+            await this.applyProviderDefaultsLocked();
+        }).catch(error => {
+            this.emitError('PROVIDER_DEFAULTS_REFRESH_FAILED', error, true);
+        }).finally(() => {
+            this.providerDefaultsRefreshScheduled = false;
+            if (this.providerDefaultsRefreshPending && this.activePrompts.size === 0) {
+                this.scheduleProviderDefaultsRefresh();
+            }
+        });
+    }
+
+    protected async applyProviderDefaultsLocked(): Promise<void> {
+        // Re-read only after entering the lifecycle queue. Several rapid
+        // changes collapse into the latest durable application preference.
+        if (this.activePrompts.size > 0) {
+            this.providerDefaultsRefreshPending = true;
+            return;
+        }
+        const globallySelectedProvider = this.providers.selectedProviderId();
+        const globallySelectedModel = this.defaultModelId(globallySelectedProvider);
+        if (globallySelectedProvider !== this.providerId) {
+            if (this.runtimeActive || this.phase !== 'stopped') {
+                await this.stopRuntimeLocked();
+            }
+            ++this.sessionLoadGeneration;
+            this.providerId = globallySelectedProvider;
+            this.activeSessionId = undefined;
+            this.loadedSessionIds.clear();
+            this.models = [];
+            this.selectedModel = globallySelectedModel;
+            this.emitSnapshot('已同步应用的模型服务；历史内容不会改变当前模型。');
+            return;
+        }
+
+        const active = this.activeSessionId ? this.sessions.get(this.activeSessionId) : undefined;
+        if (active
+            && active.status !== 'read-only'
+            && this.loadedSessionIds.has(active.appSessionId)
+            && this.phase === 'ready'
+            && this.acp
+            && globallySelectedModel) {
+            try {
+                await this.synchronizeLoadedSessionModel(active, globallySelectedModel);
+            } catch (error) {
+                // Never keep an idle session silently attached to a different
+                // model. A clean new session is safer than sending the next
+                // prompt with stale runtime state.
+                await this.retireSessionAfterGlobalModelFailure(active, globallySelectedModel, error);
+                return;
+            }
+        } else {
+            this.selectedModel = globallySelectedModel;
+        }
+        this.emitSnapshot('已同步应用的默认模型。');
     }
 
     notifyPermissionModeChanged(): void {
@@ -1261,7 +1786,20 @@ export class GrokAgentHostService implements AgentHostService {
         acp.onNotification('session/update', params => this.acceptSessionUpdate(params));
         acp.onNotification('_x.ai/model_state_updated', params => {
             const record = asRecord(params);
-            this.acceptModelState(asRecord(record?.modelState) as ModelState | undefined);
+            const state = asRecord(record?.modelState) as ModelState | undefined;
+            const preferred = this.defaultModelId(this.providerId);
+            // Grok can publish a historical session's model while session/load
+            // is replaying. Treat notifications as descriptive catalog/runtime
+            // state: they can bootstrap a missing preference, but can never
+            // replace an explicit application-wide selection.
+            this.acceptModelState(state);
+            if (preferred && typeof state?.currentModelId === 'string'
+                && state.currentModelId !== preferred) {
+                // Re-apply the durable preference after the current turn (or
+                // immediately while idle). If ACP cannot apply it, the session
+                // is retired rather than sending a prompt to the wrong model.
+                this.notifyProviderDefaultsChanged();
+            }
         });
         acp.onNotification('*', (params, method) => {
             if (method === 'session/update' || method === '_x.ai/model_state_updated') {
@@ -1283,7 +1821,7 @@ export class GrokAgentHostService implements AgentHostService {
         acp.onError(error => this.emitError('ACP_PROTOCOL_WARNING', error, true));
     }
 
-    protected acceptInitialize(response: InitializeResponse): void {
+    protected acceptInitialize(response: InitializeResponse, emitSnapshot = true): void {
         const agentCapabilities = asRecord(response.agentCapabilities);
         const prompt = asRecord(agentCapabilities?.promptCapabilities);
         const mcp = asRecord(agentCapabilities?.mcpCapabilities);
@@ -1312,15 +1850,22 @@ export class GrokAgentHostService implements AgentHostService {
         if (version) {
             this.sidecarVersion = version;
         }
-        this.acceptModelState(modelStateFrom(response));
+        // Preserve an existing application preference even when a historical
+        // ACP session (or an initialize response created before a switch)
+        // reports another current model. A missing preference may still be
+        // initialized from the sidecar's first authoritative catalogue.
+        this.acceptModelState(modelStateFrom(response), emitSnapshot);
     }
 
-    protected acceptModelState(state: ModelState | undefined): void {
+    protected acceptModelState(
+        state: ModelState | undefined,
+        emitSnapshot = true
+    ): void {
         if (!state) {
             return;
         }
         if (Array.isArray(state.availableModels)) {
-            this.models = state.availableModels.flatMap(candidate => {
+            const advertisedModels = state.availableModels.flatMap(candidate => {
                 const id = asString(candidate.modelId) ?? asString(candidate.id);
                 if (!id) {
                     return [];
@@ -1337,20 +1882,49 @@ export class GrokAgentHostService implements AgentHostService {
                         ?? asPositiveSafeInteger(candidate.contextWindow)
                 }];
             });
-        }
-        if (typeof state.currentModelId === 'string') {
-            this.selectedModel = state.currentModelId;
-            const preferred = this.providers.preferredModelId(this.providerId);
-            const preferredIsStale = !!preferred && this.models.length > 0
-                && !this.models.some(model => model.id === preferred);
-            if (!preferred || preferredIsStale) {
-                try {
-                    this.providers.selectPreferredModel(this.providerId, state.currentModelId);
-                    this.onProviderDefaultsChanged();
-                } catch { /* model state remains usable in this runtime */ }
+            if ((this.restoringSessionCounts?.size ?? 0) > 0) {
+                // Grok can publish a session-scoped catalogue while replaying
+                // history. Merge it into the initialize-time runtime catalogue
+                // instead of hiding the user's globally selected model and
+                // needlessly forcing this conversation onto a fresh session.
+                const merged = new Map(this.models.map(model => [model.id, model]));
+                for (const model of advertisedModels) merged.set(model.id, model);
+                this.models = [...merged.values()];
+            } else {
+                this.models = advertisedModels;
             }
         }
-        this.emitSnapshot();
+        if (typeof state.currentModelId === 'string') {
+            const provider = this.providers.get(this.providerId);
+            const fixedCatalogModel = provider?.kind === 'custom' && provider.model
+                ? provider.id
+                : provider?.kind === 'xai-api-key' && provider.model
+                    ? XAI_MANAGED_MODEL_ID
+                    : undefined;
+            let preferred = fixedCatalogModel ?? this.providers.preferredModelId(this.providerId);
+            if (preferred && !this.providerAllowsCatalogModel(this.providerId, preferred)) {
+                preferred = undefined;
+            }
+            if (!fixedCatalogModel && !preferred) {
+                const safeCurrentModel = this.providerAllowsCatalogModel(this.providerId, state.currentModelId)
+                    ? state.currentModelId
+                    : this.models.find(model => this.providerAllowsCatalogModel(this.providerId, model.id))?.id;
+                try {
+                    if (safeCurrentModel) {
+                        this.providers.selectPreferredModel(this.providerId, safeCurrentModel);
+                        this.onProviderDefaultsChanged();
+                        preferred = safeCurrentModel;
+                    }
+                } catch { /* model state remains usable in this runtime */ }
+            }
+            // Session and model-state reports are descriptive. Once an
+            // application preference exists, even a catalogue that omits it
+            // cannot silently rewrite that preference to a historical model.
+            // The lifecycle reconciler will either set it explicitly or
+            // retire the incompatible session.
+            this.selectedModel = preferred;
+        }
+        if (emitSnapshot) this.emitSnapshot();
     }
 
     protected beginSessionRestore(appSessionId: string): void {
@@ -1651,6 +2225,7 @@ export class GrokAgentHostService implements AgentHostService {
             || session.workspaceRoot !== this.workspaceRoot
             || session.providerId !== this.providerId
             || !this.loadedSessionIds.has(appSessionId)
+            || !this.permissionSessionAuthorityIsCurrent(appSessionId)
             || !workspaceTrusted) {
             return { outcome: { outcome: 'cancelled' } };
         }
@@ -1713,12 +2288,51 @@ export class GrokAgentHostService implements AgentHostService {
         });
     }
 
+    /** Provider identity/configuration must still match the exact environment
+     * captured when this sidecar was launched. A transaction marker makes
+     * ProviderRegistry.runtimeEpoch return a fail-closed sentinel, so this also
+     * blocks old processes before a peer notification reaches this window. */
+    protected providerAuthorityIsCurrent(providerId: string, runtimeEpoch: string | undefined): boolean {
+        if (!runtimeEpoch || providerId !== this.providerId) return false;
+        try {
+            return providerId === this.providers.selectedProviderId()
+                && runtimeEpoch === this.runtimeProviderEpoch
+                && runtimeEpoch === this.providers.runtimeEpoch(providerId);
+        } catch {
+            return false;
+        }
+    }
+
+    /** Permission decisions are privileged continuations of an existing turn.
+     * Revalidate the durable session epoch at both request and response time;
+     * stale credentials may cancel work but can never approve more work. */
+    protected permissionSessionAuthorityIsCurrent(appSessionId: string): boolean {
+        const session = this.sessions.get(appSessionId);
+        if (!session || session.status === 'read-only'
+            || session.providerId !== this.providerId
+            || this.activeSessionId !== appSessionId
+            || !this.loadedSessionIds.has(appSessionId)) {
+            return false;
+        }
+        return this.providerAuthorityIsCurrent(
+            session.providerId,
+            session.providerRuntimeEpoch ?? 'legacy-v1'
+        );
+    }
+
     protected snapshot(message?: string): RuntimeSnapshot {
+        // Focused unit harnesses create this class from its prototype. Recover
+        // safely from an uninitialised field while production instances keep a
+        // strict per-window monotonic sequence.
+        this.snapshotRevision = Number.isSafeInteger(this.snapshotRevision)
+            ? this.snapshotRevision + 1
+            : 1;
         let workspaceTrusted = false;
         if (this.workspaceRoot) {
             try { workspaceTrusted = this.isWorkspaceTrusted(this.workspaceRoot); } catch { /* fail closed */ }
         }
         return {
+            revision: this.snapshotRevision,
             phase: this.phase,
             workspaceRoot: this.workspaceRoot,
             workspaceAttached: !!this.workspaceRoot && this.attachedWorkspaceRoots.has(this.workspaceRoot),
@@ -1727,7 +2341,11 @@ export class GrokAgentHostService implements AgentHostService {
             grokSubscriptionAuthStatus: this.grokSubscriptionAuthStatus,
             sidecarVersion: this.sidecarVersion,
             capabilities: this.capabilities,
-            models: this.models.map(model => ({ ...model })),
+            // Never send the retired xAI catalog alias across the Electron IPC
+            // boundary, even if an older Grok process still advertises it.
+            models: this.models
+                .filter(model => model.id !== XAI_MANAGED_MODEL_ID)
+                .map(model => ({ ...model })),
             selectedModel: this.selectedModel,
             sessions: this.sessions.list(),
             activeSessionId: this.activeSessionId,
@@ -1740,15 +2358,225 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected defaultModelId(providerId: string): string | undefined {
+        const provider = this.providers.get(providerId);
+        // API profiles are exposed to ACP through local catalog aliases. The
+        // profile.model field is the upstream relay id and is never a valid
+        // substitute for that alias at the ACP boundary.
+        if (provider?.kind === 'custom' && provider.model) return provider.id;
+        if (provider?.kind === 'xai-api-key' && provider.model) return XAI_MANAGED_MODEL_ID;
         const configured = this.providers.preferredModelId(providerId);
-        if (configured) return configured;
-        // One-time upgrade path for builds that stored a model only on the
-        // session record. The repository is already sorted newest-first and
-        // no workspace trust or project configuration crosses this boundary.
-        const recent = this.sessions.list().find(session => session.providerId === providerId && !!session.model)?.model;
-        if (!recent) return undefined;
-        try { this.providers.selectPreferredModel(providerId, recent); } catch { /* keep the in-memory fallback */ }
-        return recent;
+        if (configured
+            && configured !== PROVIDER_DEFAULT_MODEL_CHOICE_ID
+            && this.providerAllowsCatalogModel(providerId, configured)) return configured;
+        // SessionRecord.model is descriptive history only. In particular, an
+        // old conversation must never become the default merely because it is
+        // the newest record in a project. When no preference exists the next
+        // ACP initialize response establishes one explicitly.
+        return undefined;
+    }
+
+    /** Model ids in Grok's process-wide catalog are not credential-neutral.
+     * A custom Provider owns exactly its generated local alias; subscription
+     * may use ordinary Grok models but never another Provider's alias. */
+    protected providerAllowsCatalogModel(providerId: string, modelId: string): boolean {
+        if (!modelId || modelId === XAI_MANAGED_MODEL_ID) return false;
+        const provider = this.providers.get(providerId);
+        if (!provider || provider.kind === 'xai-api-key') return false;
+        if (provider.kind === 'custom') return modelId === provider.id;
+        // ProviderRegistry always exposes list() in production. A few focused
+        // host-service tests deliberately inject only get()/preferredModelId(),
+        // so keep the ownership check usable with those minimal test doubles.
+        const providers = typeof this.providers.list === 'function' ? this.providers.list() : [];
+        return !providers.some(candidate =>
+            candidate.kind === 'custom' && candidate.id === modelId);
+    }
+
+    /**
+     * Moves a locally persisted conversation onto the application-wide
+     * Provider/model without exposing its previous ACP session to the new
+     * credentials. The app session id and JSONL log stay unchanged, so the UI
+     * remains one continuous history, but the sidecar receives only a fresh
+     * `session/new`; old prompts are deliberately not replayed.
+     */
+    protected async rebindHistoryToCurrentProvider(
+        record: SessionRecord,
+        activationGeneration: number
+    ): Promise<SessionRecord> {
+        const providerId = this.providers.selectedProviderId();
+        const root = this.security.canonicalRoot(record.workspaceRoot);
+        const requestedEpoch = this.providers.runtimeEpoch(providerId);
+        if (!this.acp
+            || this.phase === 'crashed'
+            || this.workspaceRoot !== root
+            || this.providerId !== providerId
+            || this.runtimeProviderEpoch !== requestedEpoch) {
+            await this.startRuntime({ workspaceRoot: root, providerId });
+        }
+        if (activationGeneration !== this.sessionLoadGeneration) {
+            return this.sessions.get(record.appSessionId) ?? record;
+        }
+        if (this.phase === 'auth-required') {
+            throw new Error('AUTHENTICATION_REQUIRED');
+        }
+        const acp = this.requireReady();
+        const runtimeGeneration = this.runtimeGeneration;
+        const runtimeEpoch = this.runtimeProviderEpoch;
+        if (!this.providerAuthorityIsCurrent(providerId, runtimeEpoch)) {
+            throw new Error('The application-wide model service changed while the conversation was reconnecting.');
+        }
+        const selectedModel = this.defaultModelId(providerId);
+        if (selectedModel
+            && this.models.length > 0
+            && !this.models.some(model => model.id === selectedModel)) {
+            throw new Error('The application-wide model is not advertised by this ACP runtime.');
+        }
+        const result = await acp.request<Record<string, unknown>>('session/new', {
+            cwd: root,
+            mcpServers: [],
+            ...(selectedModel ? { _meta: { modelId: selectedModel } } : {})
+        }, { timeoutMs: 30_000 });
+        if (typeof result.sessionId !== 'string' || !result.sessionId) {
+            throw new Error('Grok returned an invalid ACP session ID.');
+        }
+        if (activationGeneration !== this.sessionLoadGeneration
+            || runtimeGeneration !== this.runtimeGeneration) {
+            return this.sessions.get(record.appSessionId) ?? record;
+        }
+
+        const createdModelState = modelStateFrom(result);
+        this.acceptModelState(createdModelState, false);
+        let resolvedModel = typeof createdModelState?.currentModelId === 'string'
+            ? createdModelState.currentModelId
+            : selectedModel;
+        const latestModel = this.defaultModelId(providerId);
+        // session/new's modelId is a hint, not confirmation. Grok 0.2.102 can
+        // omit modelState while retaining the initialize-time OIDC model, so
+        // an absent currentModelId must also be followed by an explicit
+        // session/set_model to the selected Provider catalogue alias.
+        if (latestModel && createdModelState?.currentModelId !== latestModel) {
+            if (this.models.length > 0 && !this.models.some(model => model.id === latestModel)) {
+                throw new Error('The application-wide model is not advertised by this ACP runtime.');
+            }
+            const modelResult = await acp.request<Record<string, unknown>>('session/set_model', {
+                sessionId: result.sessionId,
+                modelId: latestModel
+            });
+            const confirmedModel = modelStateFrom(modelResult)?.currentModelId;
+            if (confirmedModel && confirmedModel !== latestModel) {
+                throw new Error('The sidecar did not apply the application-wide model.');
+            }
+            resolvedModel = latestModel;
+        }
+        if (activationGeneration !== this.sessionLoadGeneration
+            || runtimeGeneration !== this.runtimeGeneration) {
+            return this.sessions.get(record.appSessionId) ?? record;
+        }
+        if (!this.providerAuthorityIsCurrent(providerId, runtimeEpoch)
+            || this.defaultModelId(providerId) !== latestModel) {
+            throw new Error('The application-wide model service changed while the conversation was reconnecting.');
+        }
+
+        if (record.acpSessionId && this.acpSessionLookup.get(record.acpSessionId) === record.appSessionId) {
+            this.acpSessionLookup.delete(record.acpSessionId);
+        }
+        const rebound = this.sessions.update(record.appSessionId, {
+            acpSessionId: result.sessionId,
+            providerId,
+            providerRuntimeEpoch: runtimeEpoch,
+            model: resolvedModel,
+            sidecarVersion: this.sidecarVersion,
+            status: 'idle'
+        });
+        this.knownSessionIds.add(record.appSessionId);
+        this.acpSessionLookup.set(result.sessionId, record.appSessionId);
+        this.loadedSessionIds.add(record.appSessionId);
+        this.activeSessionId = record.appSessionId;
+        if (resolvedModel) this.selectedModel = resolvedModel;
+        this.contextStates().delete(record.appSessionId);
+        this.contextEventHighwaters?.delete(record.appSessionId);
+        this.emit({ kind: 'session', session: rebound });
+        this.publishContextState(record.appSessionId, {
+            compactionStatus: 'idle',
+            compactionCount: 0,
+            ...(resolvedModel ? {
+                modelId: resolvedModel,
+                contextWindow: this.modelContextWindow(resolvedModel)
+            } : {})
+        });
+        this.emitSnapshot();
+        return rebound;
+    }
+
+    /** Applies the application-wide model to an ACP session that is already
+     * hydrated in this sidecar. Historical SessionRecord.model is descriptive
+     * only and can never become a new default. */
+    protected async synchronizeLoadedSessionModel(
+        record: SessionRecord,
+        globallySelectedModel: string | undefined
+    ): Promise<SessionRecord> {
+        if (!globallySelectedModel) return record;
+        if (record.providerId !== this.providerId || !record.acpSessionId) {
+            throw new Error('The active runtime does not match this session.');
+        }
+        const recordEpoch = record.providerRuntimeEpoch ?? 'legacy-v1';
+        if (this.runtimeProviderEpoch !== recordEpoch
+            || recordEpoch !== this.providers.runtimeEpoch(record.providerId)) {
+            throw new Error('The Provider changed after this session was created.');
+        }
+        if (record.model !== globallySelectedModel) {
+            if (this.activePrompts.size > 0) {
+                throw new Error('请等待当前任务结束后再同步全局模型。');
+            }
+            if (this.models.length > 0 && !this.models.some(model => model.id === globallySelectedModel)) {
+                throw new Error('The application-wide model is not advertised by this ACP runtime.');
+            }
+            await this.requireReady().request('session/set_model', {
+                sessionId: record.acpSessionId,
+                modelId: globallySelectedModel
+            });
+            // Another window may have selected a different global model while
+            // the ACP request was pending. Never publish the old request as
+            // the session's current model in that case.
+            if (this.providers.selectedProviderId() !== record.providerId
+                || this.providers.runtimeEpoch(record.providerId) !== recordEpoch
+                || this.runtimeProviderEpoch !== recordEpoch
+                || this.defaultModelId(record.providerId) !== globallySelectedModel) {
+                throw new Error('The application-wide model changed while this session was synchronizing.');
+            }
+            const updated = this.sessions.update(record.appSessionId, { model: globallySelectedModel });
+            this.selectedModel = globallySelectedModel;
+            this.emit({ kind: 'session', session: updated });
+            return updated;
+        }
+        this.selectedModel = globallySelectedModel;
+        return record;
+    }
+
+    protected async retireSessionAfterGlobalModelFailure(
+        record: SessionRecord,
+        globallySelectedModel: string,
+        error: unknown
+    ): Promise<void> {
+        if (this.runtimeActive || this.phase !== 'stopped') {
+            await this.stopRuntimeLocked();
+        }
+        ++this.sessionLoadGeneration;
+        this.activeSessionId = undefined;
+        this.loadedSessionIds.clear();
+        this.selectedModel = globallySelectedModel;
+        const readOnly = this.sessions.update(record.appSessionId, { status: 'read-only' });
+        this.emit({ kind: 'session', session: readOnly });
+        this.emitError('GLOBAL_MODEL_APPLY_FAILED', error, true, record.appSessionId);
+        this.emitSnapshot('全局模型已保存，但旧会话无法安全切换，已保留为只读历史。');
+    }
+
+    protected isolateProviderSessions(providerId: string): void {
+        this.sessions.markProviderSessionsReadOnly(providerId);
+        if (this.providerId !== providerId) return;
+        ++this.sessionLoadGeneration;
+        this.activeSessionId = undefined;
+        this.loadedSessionIds.clear();
+        this.selectedModel = this.defaultModelId(providerId);
     }
 
     protected emitSnapshot(message?: string): void {
@@ -1853,6 +2681,7 @@ export class GrokAgentHostService implements AgentHostService {
         this.loadedSessionIds.clear();
         this.acp?.close(error);
         this.acp = undefined;
+        this.runtimeProviderEpoch = undefined;
         void this.supervisor.stop(0);
         for (const [appSessionId, prompt] of this.activePrompts) {
             void prompt.cancel(error).catch(() => undefined);
@@ -1990,6 +2819,7 @@ export class GrokAgentHostService implements AgentHostService {
         this.activePrompts.clear();
         this.acp?.close(new Error('Theia revoked workspace trust.'));
         this.acp = undefined;
+        this.runtimeProviderEpoch = undefined;
         if (this.managementChild) {
             this.supervisor.terminateProcessTree(this.managementChild, true);
             this.managementChild = undefined;

@@ -6,6 +6,16 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import {
+  assertCargoBuildPlan,
+  assertNativeBinaryArchitecture,
+  assertNoEmbeddedBuildPaths,
+  assertRipgrepInstallPlan,
+  assertRipgrepVersion,
+  createCargoBuildPlan,
+  createRipgrepInstallPlan,
+  createRustPathRemaps,
+} from "../build-sidecar.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const signScript = join(repositoryRoot, "build/grok/sign-release-manifests.mjs");
@@ -59,6 +69,201 @@ test("sidecar staging removes stale renamed notices before packaging", async () 
   assert.ok(cleanup >= 0 && copy > cleanup, "notice cleanup must run before the audited notice copy");
   assert.match(source, /XORA-CODE-LICENSE/u);
   assert.doesNotMatch(source, /\[join\(repositoryRoot, "LICENSE"\), "WHITENIGHT-CODE-LICENSE"\]/u);
+});
+
+test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and stripped", () => {
+  const lock = {
+    toolchain: { cargoPackage: "xai-grok-pager-bin", cargoProfile: "release-dist" },
+    bundledTools: { ripgrep: { package: "ripgrep", version: "15.0.0", binary: "rg", source: "crates.io", features: ["pcre2"] } },
+  };
+  const fixtures = [
+    {
+      workDirectory: "/private/tmp/xora build",
+      sourceDirectory: "/private/tmp/xora build/source",
+      targetDirectory: "/private/tmp/xora build/target",
+      homeDirectory: "/Users/build user",
+      cargoHome: "/Users/build user/.cargo",
+      rustupHome: "/Users/build user/.rustup",
+      ambientTargetFlags: "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+    },
+    {
+      workDirectory: String.raw`C:\runner temp\xora build`,
+      sourceDirectory: String.raw`C:\runner temp\xora build\source`,
+      targetDirectory: String.raw`C:\runner temp\xora build\target`,
+      homeDirectory: String.raw`C:\Users\builder`,
+      cargoHome: String.raw`C:\Users\builder\.cargo`,
+      rustupHome: String.raw`C:\Users\builder\.rustup`,
+      ambientTargetFlags: "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const pathRemaps = createRustPathRemaps(fixture);
+    const ripgrepInstallRoot = `${fixture.workDirectory}/ripgrep-install-pcre2`;
+    const ripgrepTargetDirectory = `${fixture.targetDirectory}/ripgrep`;
+    const bundledRipgrepPath = `${ripgrepInstallRoot}/bin/rg${fixture.workDirectory.startsWith("C:") ? ".exe" : ""}`;
+    const environment = {
+      PATH: "/fixture/bin",
+      CARGO_HOME: fixture.cargoHome,
+      RUSTFLAGS: "-Cdebuginfo=2",
+      CARGO_ENCODED_RUSTFLAGS: "ambient",
+      CARGO_BUILD_RUSTFLAGS: "ambient",
+      [fixture.ambientTargetFlags]: "ambient",
+    };
+    const ripgrepInstall = createRipgrepInstallPlan({
+      lock,
+      installRoot: ripgrepInstallRoot,
+      targetDirectory: ripgrepTargetDirectory,
+      pathRemaps,
+      environment,
+    });
+    assert.deepEqual(ripgrepInstall.args, [
+      "install", "--locked", "--force", "--version", "=15.0.0",
+      "--features", "pcre2",
+      "--root", ripgrepInstallRoot,
+      "--target-dir", ripgrepTargetDirectory,
+      "ripgrep",
+    ]);
+    assert.equal(ripgrepInstall.env.CARGO_HOME, fixture.cargoHome);
+    assert.doesNotThrow(() => assertRipgrepInstallPlan(ripgrepInstall, {
+      lock,
+      installRoot: ripgrepInstallRoot,
+      targetDirectory: ripgrepTargetDirectory,
+      pathRemaps,
+    }));
+
+    const plan = createCargoBuildPlan({
+      lock,
+      targetDirectory: fixture.targetDirectory,
+      pathRemaps,
+      bundledRipgrepPath,
+      environment,
+    });
+    assert.deepEqual(plan.args, ["build", "-p", "xai-grok-pager-bin", "--profile", "release-dist"]);
+    assert.equal(plan.env.CARGO_INCREMENTAL, "0");
+    assert.equal(plan.env.CARGO_HOME, fixture.cargoHome);
+    assert.equal(plan.env.CARGO_TARGET_DIR, fixture.targetDirectory);
+    assert.equal(plan.env.SOURCE_DATE_EPOCH, "0");
+    assert.equal(plan.env.RUSTFLAGS, undefined);
+    assert.equal(plan.env.CARGO_BUILD_RUSTFLAGS, undefined);
+    assert.equal(plan.env[fixture.ambientTargetFlags], undefined);
+    assert.equal(plan.env.GROK_SHELL_BUNDLE_RG_PATH, bundledRipgrepPath);
+    assert.equal(plan.env.GROK_TOOLS_BUNDLE_RG_PATH, bundledRipgrepPath);
+    const flags = plan.env.CARGO_ENCODED_RUSTFLAGS.split("\u001f");
+    assert.deepEqual(
+      flags.slice(0, pathRemaps.length),
+      pathRemaps.map(({ from, to }) => `--remap-path-prefix=${from}=${to}`),
+    );
+    assert.deepEqual(flags.slice(-2), ["-Cdebuginfo=0", "-Cstrip=symbols"]);
+    assert.doesNotThrow(() => assertCargoBuildPlan(plan, {
+      lock,
+      targetDirectory: fixture.targetDirectory,
+      pathRemaps,
+      bundledRipgrepPath,
+    }));
+
+    const weakened = {
+      ...plan,
+      env: { ...plan.env, CARGO_ENCODED_RUSTFLAGS: flags.slice(0, -1).join("\u001f") },
+    };
+    assert.throws(
+      () => assertCargoBuildPlan(weakened, {
+        lock,
+        targetDirectory: fixture.targetDirectory,
+        pathRemaps,
+        bundledRipgrepPath,
+      }),
+      /path remapping and symbol stripping/u,
+    );
+
+    const splitBundle = {
+      ...plan,
+      env: { ...plan.env, GROK_TOOLS_BUNDLE_RG_PATH: `${bundledRipgrepPath}.other` },
+    };
+    assert.throws(
+      () => assertCargoBuildPlan(splitBundle, {
+        lock,
+        targetDirectory: fixture.targetDirectory,
+        pathRemaps,
+        bundledRipgrepPath,
+      }),
+      /same audited ripgrep binary/u,
+    );
+  }
+});
+
+test("source-built ripgrep version and native architecture checks fail closed", async (context) => {
+  assert.doesNotThrow(() => assertRipgrepVersion("ripgrep 15.0.0\nfeatures:+pcre2", "15.0.0"));
+  assert.throws(() => assertRipgrepVersion("ripgrep 15.0.1", "15.0.0"), /expected 15\.0\.0/u);
+
+  const root = await mkdtemp(join(tmpdir(), "xora-ripgrep-arch-test-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const fixtures = [
+    ["linux-x64", "x86_64-unknown-linux-gnu", (() => {
+      const bytes = Buffer.alloc(64);
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1]).copy(bytes);
+      bytes.writeUInt16LE(0x3e, 18);
+      return bytes;
+    })()],
+    ["linux-arm64", "aarch64-unknown-linux-gnu", (() => {
+      const bytes = Buffer.alloc(64);
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1]).copy(bytes);
+      bytes.writeUInt16LE(0xb7, 18);
+      return bytes;
+    })()],
+    ["mac-arm64", "aarch64-apple-darwin", (() => {
+      const bytes = Buffer.alloc(32);
+      bytes.writeUInt32LE(0xfeedfacf, 0);
+      bytes.writeUInt32LE(0x0100000c, 4);
+      return bytes;
+    })()],
+    ["mac-x64", "x86_64-apple-darwin", (() => {
+      const bytes = Buffer.alloc(32);
+      bytes.writeUInt32LE(0xfeedfacf, 0);
+      bytes.writeUInt32LE(0x01000007, 4);
+      return bytes;
+    })()],
+    ["windows-x64.exe", "x86_64-pc-windows-msvc", (() => {
+      const bytes = Buffer.alloc(256);
+      bytes.write("MZ", 0, "ascii");
+      bytes.writeUInt32LE(0x80, 0x3c);
+      bytes.writeUInt32LE(0x00004550, 0x80);
+      bytes.writeUInt16LE(0x8664, 0x84);
+      return bytes;
+    })()],
+  ];
+  for (const [name, rustTarget, bytes] of fixtures) {
+    const binary = join(root, name);
+    await writeFile(binary, bytes);
+    assert.doesNotThrow(() => assertNativeBinaryArchitecture(binary, { rustTarget }));
+  }
+  assert.throws(
+    () => assertNativeBinaryArchitecture(join(root, "mac-arm64"), { rustTarget: "x86_64-apple-darwin" }),
+    /expected x86_64-apple-darwin/u,
+  );
+});
+
+test("sidecar build rejects binaries containing ASCII or UTF-16 build roots", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "xora-sidecar-path-test-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const binary = join(root, "grok-fixture");
+  const pathRemaps = createRustPathRemaps({
+    workDirectory: "/private/tmp/xora-build",
+    sourceDirectory: "/private/tmp/xora-build/source",
+    targetDirectory: "/private/tmp/xora-build/target",
+    homeDirectory: String.raw`C:\Users\builder`,
+    cargoHome: String.raw`C:\Users\builder\.cargo`,
+    rustupHome: String.raw`C:\Users\builder\.rustup`,
+  });
+
+  await writeFile(binary, Buffer.from("debug path: /private/tmp/xora-build/source/main.rs", "utf8"));
+  assert.throws(() => assertNoEmbeddedBuildPaths(binary, pathRemaps), /unremapped source directory/u);
+
+  await writeFile(binary, Buffer.from(String.raw`C:\Users\builder\.cargo\registry`, "utf16le"));
+  assert.throws(() => assertNoEmbeddedBuildPaths(binary, pathRemaps), /unremapped Cargo home/u);
+
+  await writeFile(binary, Buffer.from("sanitized:/xora-build/source/main.rs", "utf8"));
+  assert.doesNotThrow(() => assertNoEmbeddedBuildPaths(binary, pathRemaps));
 });
 
 test("ACP smoke keeps eager model discovery on a loopback fixture", async (context) => {
@@ -148,6 +353,13 @@ test("release manifests use independent Ed25519 signatures and complete target m
   const sidecarManifest = JSON.parse(await readFile(join(assets, "grok-sidecar-update.json"), "utf8"));
   assert.equal(appManifest.payload.sequence, 42);
   assert.equal(sidecarManifest.payload.upstream.commit, "98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce");
+  assert.deepEqual(sidecarManifest.payload.bundledTools.ripgrep, {
+    package: "ripgrep",
+    version: "15.0.0",
+    source: "crates.io",
+    features: ["pcre2"],
+    lockedSourceBuild: true,
+  });
   assert.deepEqual(Object.keys(sidecarManifest.payload.artifacts).sort(), [
     "darwin-arm64", "darwin-x64", "linux-x64", "win32-x64",
   ]);

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "tool": "syft",
+  "version": "1.48.0",
+  "maximumArchiveBytes": 268435456,
+  "targets": {
+    "darwin-arm64": {
+      "archive": "tar.gz",
+      "binary": "syft",
+      "fileName": "syft_1.48.0_darwin_arm64.tar.gz",
+      "url": "https://github.com/anchore/syft/releases/download/v1.48.0/syft_1.48.0_darwin_arm64.tar.gz",
+      "sha256": "fef3e6d5df336a0a4c3e421e503119d1e221cf82a3ef5e426a791fcd81667e87"
+    },
+    "darwin-x64": {
+      "archive": "tar.gz",
+      "binary": "syft",
+      "fileName": "syft_1.48.0_darwin_amd64.tar.gz",
+      "url": "https://github.com/anchore/syft/releases/download/v1.48.0/syft_1.48.0_darwin_amd64.tar.gz",
+      "sha256": "dc7b2135fa5591003596df4ddb3408f499b68174f5e7dc1c77a373b753463182"
+    },
+    "linux-x64": {
+      "archive": "tar.gz",
+      "binary": "syft",
+      "fileName": "syft_1.48.0_linux_amd64.tar.gz",
+      "url": "https://github.com/anchore/syft/releases/download/v1.48.0/syft_1.48.0_linux_amd64.tar.gz",
+      "sha256": "6cef9a7f37220d9067eaf9cfaaa2fce986e9f320a8d42cbc36658c99af78ea04"
+    },
+    "win32-x64": {
+      "archive": "zip",
+      "binary": "syft.exe",
+      "fileName": "syft_1.48.0_windows_amd64.zip",
+      "url": "https://github.com/anchore/syft/releases/download/v1.48.0/syft_1.48.0_windows_amd64.zip",
+      "sha256": "b46cb02a47c5b76a1656958757d62ac07d0cb7de35f92e8a7e02d450cbb53097"
+    }
+  }
+}

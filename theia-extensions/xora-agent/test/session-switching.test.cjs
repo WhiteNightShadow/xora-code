@@ -4,6 +4,10 @@ const { performance } = require('node:perf_hooks');
 const test = require('node:test');
 
 const { AgentViewModel } = require('../lib/browser/agent-view-model');
+const {
+    encodeAgentModelChoice,
+    PROVIDER_DEFAULT_MODEL_CHOICE_ID
+} = require('../lib/browser/agent-model-options');
 const { GrokAgentHostService } = require('../lib/electron-main/grok-agent-host-service');
 
 function session(appSessionId, status = 'idle', overrides = {}) {
@@ -58,11 +62,21 @@ function hostHarness() {
 
     host.sessions = {
         get: id => records.get(id),
+        list: () => [...records.values()],
         update: (id, patch) => {
             const updated = { ...records.get(id), ...patch };
             records.set(id, updated);
             return updated;
         }
+    };
+    host.providers = {
+        runtimeEpoch: () => 'legacy-v1',
+        selectedProviderId: () => 'grok-subscription',
+        preferredModelId: () => undefined,
+        get: id => id === 'grok-subscription'
+            ? { id, name: 'Grok 订阅', kind: 'grok-subscription' }
+            : undefined,
+        selectPreferredModel: () => undefined
     };
     host.knownSessionIds = new Set();
     host.acpSessionLookup = new Map();
@@ -70,6 +84,7 @@ function hostHarness() {
     host.restoringSessionCounts = new Map();
     host.sessionLoadGeneration = 0;
     host.runtimeGeneration = 1;
+    host.runtimeProviderEpoch = 'legacy-v1';
     host.acp = {
         request: (method, params) => {
             const completion = deferred();
@@ -154,6 +169,60 @@ test('an inactive session status update does not steal the active selection', ()
     assert.deepEqual(model.transcript.map(entry => entry.text), ['History B']);
 });
 
+test('a stale runtime snapshot cannot clear a locally created session before its first prompt', () => {
+    const model = new AgentViewModel();
+    const created = session('created', 'idle', {
+        providerId: 'xora-relay',
+        model: 'xora-relay'
+    });
+    const initial = {
+        ...runtimeSnapshot('/fixture', [], undefined),
+        revision: 2,
+        providerId: 'xora-relay',
+        models: [{ id: 'xora-relay', name: 'Relay' }],
+        selectedModel: 'xora-relay'
+    };
+    model.accept({ kind: 'snapshot', snapshot: initial });
+    model.setSession(created);
+
+    // Event and RPC responses travel independently. An older Provider A
+    // event must not overwrite the newer Provider B RPC result.
+    model.accept({
+        kind: 'snapshot',
+        snapshot: {
+            ...runtimeSnapshot('/fixture', [], undefined),
+            revision: 1,
+            providerId: 'grok-subscription'
+        }
+    });
+    assert.equal(model.snapshot.providerId, 'xora-relay');
+
+    // This snapshot was emitted before session/new completed, but can arrive
+    // after its RPC result and the renderer's setSession(created).
+    model.accept({ kind: 'snapshot', snapshot: initial });
+
+    assert.equal(model.snapshot.activeSessionId, created.appSessionId);
+    assert.equal(model.snapshot.sessions[0].appSessionId, created.appSessionId);
+    model.accept({ kind: 'text-delta', sessionId: created.appSessionId, role: 'user', text: 'hello' });
+    assert.deepEqual(model.transcript.map(entry => entry.text), ['hello']);
+
+    // Compatibility snapshots without a revision still cannot erase a local
+    // session by crossing Provider identity.
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...runtimeSnapshot('/fixture', [], undefined), providerId: 'grok-subscription' }
+    });
+    assert.equal(model.snapshot.providerId, 'xora-relay');
+    assert.equal(model.snapshot.activeSessionId, created.appSessionId);
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...initial, revision: 3, workspaceRoot: '/another-project', sessions: [] }
+    });
+    assert.equal(model.snapshot.activeSessionId, undefined, 'a real workspace boundary still clears the local selection');
+    assert.equal(model.transcript.length, 0);
+});
+
 test('late events from an inactive session cannot contaminate the visible transcript', () => {
     const model = new AgentViewModel();
     model.snapshot.sessions = [session('a', 'completed'), session('b', 'idle')];
@@ -230,6 +299,40 @@ test('the first active snapshot discards events raced from another session', () 
         }
     });
     assert.equal(model.transcript.length, 0);
+});
+
+test('explicit old-Provider history stays visible while Electron rebinds it to the global Provider', () => {
+    const model = new AgentViewModel();
+    const historical = session('old-provider-visible', 'completed', {
+        providerId: 'old-relay',
+        model: 'old-model'
+    });
+    model.snapshot = runtimeSnapshot('/fixture', [historical], undefined);
+    model.showSessionHistory(historical, [
+        { kind: 'text-delta', sessionId: historical.appSessionId, role: 'assistant', text: '保留的历史内容' }
+    ]);
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: runtimeSnapshot('/fixture', [historical], undefined)
+    });
+
+    assert.equal(model.snapshot.providerId, 'grok-subscription');
+    assert.equal(model.snapshot.activeSessionId, historical.appSessionId);
+    assert.deepEqual(model.transcript.map(entry => entry.text), ['保留的历史内容']);
+
+    const rebound = {
+        ...historical,
+        providerId: 'grok-subscription',
+        providerRuntimeEpoch: 'subscription-epoch',
+        model: 'grok',
+        status: 'idle'
+    };
+    model.accept({ kind: 'session', session: rebound });
+
+    assert.equal(model.snapshot.activeSessionId, historical.appSessionId);
+    assert.equal(model.snapshot.sessions.find(item => item.appSessionId === historical.appSessionId).providerId, 'grok-subscription');
+    assert.deepEqual(model.transcript.map(entry => entry.text), ['保留的历史内容']);
 });
 
 test('workspace activation keeps history but pins a clean page across A-B-A and same-root reopen', () => {
@@ -580,7 +683,7 @@ test('Provider switching waits for lifecycle work and rechecks an active turn', 
     let selected = false;
     host.lifecycleTail = Promise.resolve();
     host.providers = {
-        get: id => ({ id, name: id, kind: id === 'grok-subscription' ? 'grok-subscription' : 'xai-api-key' }),
+        get: id => ({ id, name: id, kind: id === 'grok-subscription' ? 'grok-subscription' : 'custom' }),
         selectProvider: () => { selected = true; }
     };
     host.activePrompts = new Map();
@@ -600,7 +703,7 @@ test('Provider switching waits for lifecycle work and rechecks an active turn', 
 
     const starting = host.startRuntime({ workspaceRoot: '/fixture', providerId: 'grok-subscription' });
     await new Promise(resolve => setImmediate(resolve));
-    const switching = host.selectProvider('xai-api-key');
+    const switching = host.selectProvider('xora-relay');
     host.activePrompts.set('turn', {});
     startGate.resolve();
 
@@ -608,6 +711,720 @@ test('Provider switching waits for lifecycle work and rechecks an active turn', 
     await assert.rejects(switching, /Cancel or finish the current task/);
     assert.equal(selected, false);
     assert.equal(host.providerId, 'grok-subscription');
+});
+
+test('editing the current API profile preserves history but cannot auto-restore it against a new endpoint', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let profile = {
+        id: 'xora-relay',
+        name: 'Relay',
+        kind: 'custom',
+        protocol: 'openai-responses',
+        baseUrl: 'https://old.example.invalid/v1',
+        model: 'grok-4.5',
+        secretRef: 'provider:xora-relay',
+        credentialConfigured: true
+    };
+    const messages = [];
+    host.lifecycleTail = Promise.resolve();
+    host.providers = {
+        get: id => id === profile.id ? profile : undefined,
+        save: next => {
+            profile = { ...next, credentialConfigured: true };
+            return profile;
+        }
+    };
+    host.providerId = profile.id;
+    host.phase = 'stopped';
+    host.acp = undefined;
+    host.supervisor = { running: false };
+    host.activeSessionId = 'historical-session';
+    host.sessionLoadGeneration = 4;
+    host.loadedSessionIds = new Set(['historical-session']);
+    host.sessions = { markProviderSessionsReadOnly: () => [], list: () => [] };
+    host.models = [];
+    host.onProviderDefaultsChanged = () => undefined;
+    const invalidations = [];
+    host.onProviderRuntimeInvalidated = change => invalidations.push(change);
+    host.emitSnapshot = message => messages.push(message);
+
+    await host.saveProvider({ ...profile, baseUrl: 'https://new.example.invalid/v1' });
+
+    assert.equal(host.activeSessionId, undefined);
+    assert.equal(host.sessionLoadGeneration, 5);
+    assert.deepEqual([...host.loadedSessionIds], []);
+    assert.equal(host.selectedModel, profile.id);
+    assert.match(messages.at(-1), /会话隔离.*新会话/);
+    assert.deepEqual(invalidations, [{
+        providerId: profile.id,
+        reason: 'configuration',
+        invalidateSession: true
+    }]);
+});
+
+test('a Provider invalidation clears matching stopped peers but never touches another Provider', async () => {
+    const createPeer = providerId => {
+        const host = Object.create(GrokAgentHostService.prototype);
+        host.lifecycleTail = Promise.resolve();
+        host.providerId = providerId;
+        host.phase = 'stopped';
+        host.supervisor = { running: false };
+        host.acp = undefined;
+        host.managementChild = undefined;
+        host.activeSessionId = 'old-session';
+        host.loadedSessionIds = new Set(['old-session']);
+        host.sessionLoadGeneration = 8;
+        host.providers = {
+            get: id => ({
+                id,
+                name: id,
+                kind: id === 'xora-relay' ? 'custom' : 'grok-subscription',
+                model: id === 'xora-relay' ? 'grok-4.5' : undefined
+            }),
+            preferredModelId: () => undefined,
+            subscriptionAuthStatus: () => 'unknown'
+        };
+        host.sessions = { list: () => [], markProviderSessionsReadOnly: () => [] };
+        host.emitSnapshot = () => undefined;
+        host.emitError = (_code, error) => { throw error; };
+        return host;
+    };
+    const matching = createPeer('xora-relay');
+    const unrelated = createPeer('grok-subscription');
+    const change = { providerId: 'xora-relay', reason: 'configuration', invalidateSession: true };
+
+    matching.notifyProviderRuntimeInvalidated(change);
+    unrelated.notifyProviderRuntimeInvalidated(change);
+    await Promise.all([matching.lifecycleTail, unrelated.lifecycleTail]);
+
+    assert.equal(matching.activeSessionId, undefined);
+    assert.deepEqual([...matching.loadedSessionIds], []);
+    assert.equal(matching.sessionLoadGeneration, 9);
+    assert.equal(unrelated.activeSessionId, 'old-session');
+    assert.deepEqual([...unrelated.loadedSessionIds], ['old-session']);
+    assert.equal(unrelated.sessionLoadGeneration, 8);
+});
+
+test('an idle window adopts a globally selected Provider even when it has an old active history', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let stops = 0;
+    host.lifecycleTail = Promise.resolve();
+    host.providerId = 'old-relay';
+    host.selectedModel = 'old-relay';
+    host.phase = 'ready';
+    host.acp = {};
+    host.supervisor = { running: false };
+    host.managementChild = undefined;
+    host.activePrompts = new Map();
+    host.activeSessionId = 'old-history';
+    host.loadedSessionIds = new Set(['old-history']);
+    host.sessionLoadGeneration = 6;
+    host.models = [{ id: 'old-relay', name: 'Old relay' }];
+    host.sessions = { list: () => [session('old-history', 'idle', { providerId: 'old-relay' })] };
+    host.providers = {
+        selectedProviderId: () => 'new-relay',
+        get: id => ({ id, name: id, kind: 'custom', model: 'grok-4.5' }),
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.stopRuntimeLocked = async () => {
+        stops += 1;
+        host.acp = undefined;
+        host.phase = 'stopped';
+    };
+    host.emitSnapshot = () => undefined;
+    host.emitError = (_code, error) => { throw error; };
+
+    host.notifyProviderDefaultsChanged();
+    await host.lifecycleTail;
+
+    assert.equal(stops, 1);
+    assert.equal(host.providerId, 'new-relay');
+    assert.equal(host.selectedModel, 'new-relay');
+    assert.equal(host.activeSessionId, undefined);
+    assert.deepEqual([...host.loadedSessionIds], []);
+    assert.ok(host.sessionLoadGeneration > 6, 'stale session activations must be invalidated');
+});
+
+test('an idle loaded session adopts the globally preferred model for its current Provider', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let record = session('idle-session', 'idle', {
+        providerId: 'grok-subscription',
+        model: 'old-model'
+    });
+    const requests = [];
+    host.lifecycleTail = Promise.resolve();
+    host.providerId = 'grok-subscription';
+    host.selectedModel = 'old-model';
+    host.phase = 'ready';
+    host.runtimeProviderEpoch = 'legacy-v1';
+    host.supervisor = { running: false };
+    host.managementChild = undefined;
+    host.activePrompts = new Map();
+    host.activeSessionId = record.appSessionId;
+    host.loadedSessionIds = new Set([record.appSessionId]);
+    host.sessionLoadGeneration = 4;
+    host.models = [
+        { id: 'old-model', name: 'Old model' },
+        { id: 'new-model', name: 'New model' }
+    ];
+    host.sessions = {
+        get: id => id === record.appSessionId ? record : undefined,
+        list: () => [record],
+        update: (_id, patch) => (record = { ...record, ...patch })
+    };
+    host.providers = {
+        selectedProviderId: () => 'grok-subscription',
+        get: id => ({ id, name: 'Grok 订阅', kind: 'grok-subscription' }),
+        preferredModelId: () => 'new-model',
+        runtimeEpoch: () => 'legacy-v1',
+        selectPreferredModel: () => undefined
+    };
+    host.acp = {
+        request: async (method, params) => {
+            requests.push({ method, params });
+            return {};
+        }
+    };
+    host.emitSnapshot = () => undefined;
+    host.emitError = (_code, error) => { throw error; };
+
+    host.notifyProviderDefaultsChanged();
+    await host.lifecycleTail;
+
+    assert.deepEqual(requests, [{
+        method: 'session/set_model',
+        params: { sessionId: record.acpSessionId, modelId: 'new-model' }
+    }]);
+    assert.equal(host.providerId, 'grok-subscription');
+    assert.equal(host.selectedModel, 'new-model');
+    assert.equal(host.activeSessionId, record.appSessionId);
+    assert.equal(record.model, 'new-model');
+});
+
+test('a global Provider switch waits for the active turn and applies immediately after it finishes', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let record = session('running-session', 'idle', {
+        providerId: 'old-relay',
+        model: 'old-relay'
+    });
+    const promptGate = deferred();
+    let stops = 0;
+    host.lifecycleTail = Promise.resolve();
+    host.providerId = 'old-relay';
+    host.selectedModel = 'old-relay';
+    host.workspaceRoot = '/fixture';
+    host.phase = 'ready';
+    host.runtimeProviderEpoch = 'legacy-v1';
+    host.supervisor = { running: false };
+    host.managementChild = undefined;
+    host.activeSessionId = record.appSessionId;
+    host.loadedSessionIds = new Set([record.appSessionId]);
+    host.activePrompts = new Map();
+    host.sessionLoadGeneration = 2;
+    host.models = [{ id: 'old-relay', name: 'Old relay' }];
+    host.capabilities = { prompt: { image: false } };
+    host.sessions = {
+        get: id => id === record.appSessionId ? record : undefined,
+        list: () => [record],
+        update: (_id, patch) => (record = { ...record, ...patch }),
+        flushEvents: () => undefined
+    };
+    let globallySelectedProvider = 'old-relay';
+    host.providers = {
+        selectedProviderId: () => globallySelectedProvider,
+        get: id => ({ id, name: id, kind: 'custom', model: 'grok-4.5' }),
+        preferredModelId: () => undefined,
+        runtimeEpoch: () => 'legacy-v1',
+        selectPreferredModel: () => undefined
+    };
+    host.acp = {
+        startRequest: () => ({
+            promise: promptGate.promise,
+            cancel: async () => undefined
+        })
+    };
+    host.stopRuntimeLocked = async () => {
+        stops += 1;
+        host.acp = undefined;
+        host.phase = 'stopped';
+    };
+    host.flushAssistantTextDeltas = () => undefined;
+    host.assistantStreamState = () => new Set();
+    host.acceptPromptContextFallback = () => undefined;
+    host.emit = () => undefined;
+    host.emitSnapshot = () => undefined;
+    host.emitError = (_code, error) => { throw error; };
+
+    const sending = host.sendPrompt({ sessionId: record.appSessionId, text: '继续任务' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(host.activePrompts.size, 1);
+
+    globallySelectedProvider = 'new-relay';
+    host.notifyProviderDefaultsChanged();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stops, 0, 'an active turn must not be interrupted');
+    assert.equal(host.providerId, 'old-relay');
+
+    promptGate.resolve({ stopReason: 'end_turn' });
+    await sending;
+    await new Promise(resolve => setImmediate(resolve));
+    await host.lifecycleTail;
+
+    assert.equal(stops, 1);
+    assert.equal(host.providerId, 'new-relay');
+    assert.equal(host.selectedModel, 'new-relay');
+    assert.equal(host.activeSessionId, undefined);
+});
+
+test('a Provider epoch mismatch rebinds local history to a fresh ACP session without replaying prompts', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let record = session('epoch-old', 'idle', {
+        providerId: 'xora-relay',
+        providerRuntimeEpoch: 'old-provider-epoch'
+    });
+    const emitted = [];
+    const requests = [];
+    let runtimeStarts = 0;
+    host.sessionLoadGeneration = 0;
+    host.runtimeGeneration = 2;
+    host.runtimeProviderEpoch = 'new-provider-epoch';
+    host.providerId = 'xora-relay';
+    host.workspaceRoot = '/fixture';
+    host.phase = 'ready';
+    host.sidecarVersion = '0.2.102';
+    host.models = [{ id: 'xora-relay', name: 'Relay' }];
+    host.selectedModel = 'xora-relay';
+    host.sessions = {
+        get: id => id === record.appSessionId ? record : undefined,
+        update: (_id, patch) => (record = { ...record, ...patch }),
+        list: () => [record]
+    };
+    host.providers = {
+        selectedProviderId: () => 'xora-relay',
+        runtimeEpoch: () => 'new-provider-epoch',
+        get: id => ({ id, name: 'Relay', kind: 'custom', model: 'grok-4.5' }),
+        preferredModelId: () => 'xora-relay'
+    };
+    host.security = { canonicalRoot: value => value };
+    host.knownSessionIds = new Set();
+    host.acpSessionLookup = new Map([[record.acpSessionId, record.appSessionId]]);
+    host.loadedSessionIds = new Set();
+    host.flushAssistantTextDeltas = () => undefined;
+    host.assistantStreamState = () => new Set();
+    host.startRuntime = async () => { runtimeStarts += 1; };
+    host.acp = {
+        request: async (method, params) => {
+            requests.push({ method, params });
+            assert.notEqual(method, 'session/load');
+            return { sessionId: 'acp-rebound' };
+        }
+    };
+    host.acceptModelState = () => undefined;
+    host.emit = event => emitted.push(event);
+    host.emitSnapshot = () => undefined;
+
+    const loaded = await host.loadSession(record.appSessionId);
+
+    assert.equal(runtimeStarts, 0, 'the already-current runtime should be reused');
+    assert.deepEqual(requests.map(request => request.method), ['session/new', 'session/set_model']);
+    assert.equal(requests[0].params.cwd, '/fixture');
+    assert.equal(JSON.stringify(requests[0].params).includes('old-provider-epoch'), false);
+    assert.equal(loaded.status, 'idle');
+    assert.equal(record.providerRuntimeEpoch, 'new-provider-epoch');
+    assert.equal(record.acpSessionId, 'acp-rebound');
+    assert.equal(host.activeSessionId, record.appSessionId);
+    assert.equal(emitted.find(event => event.kind === 'session').session.status, 'idle');
+});
+
+test('session/new preserves the launch epoch when another window rotates the Provider while ACP is pending', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    const newSessionGate = deferred();
+    let currentEpoch = 'launch-epoch';
+    let record;
+    let loadRequests = 0;
+    let defaultsRefreshes = 0;
+    const provider = {
+        id: 'grok-subscription',
+        name: 'Grok 订阅',
+        kind: 'grok-subscription'
+    };
+
+    // This is the same coherent callback shape used by startRuntime: the
+    // environment, Provider profile and epoch are captured under one lock.
+    const launchSnapshot = {
+        environment: { FIXTURE_PROVIDER_KEY: 'redacted-fixture' },
+        provider,
+        runtimeEpoch: currentEpoch
+    };
+    host.runtimeProviderEpoch = launchSnapshot.runtimeEpoch;
+    host.phase = 'ready';
+    host.workspaceRoot = '/fixture';
+    host.providerId = provider.id;
+    host.models = [];
+    host.selectedModel = undefined;
+    host.sidecarVersion = '0.2.102';
+    host.supportsAdditionalDirectories = false;
+    host.sessionLoadGeneration = 0;
+    host.security = { canonicalRoot: value => value };
+    host.providers = {
+        selectedProviderId: () => provider.id,
+        runtimeEpoch: () => currentEpoch,
+        get: id => id === provider.id ? provider : undefined,
+        preferredModelId: () => undefined
+    };
+    host.acp = {
+        request: (method, params) => {
+            if (method === 'session/new') {
+                assert.equal(params.cwd, '/fixture');
+                return newSessionGate.promise;
+            }
+            if (method === 'session/load') loadRequests += 1;
+            return Promise.resolve({});
+        }
+    };
+    host.sessions = {
+        create: input => (record = session('epoch-race', 'idle', {
+            ...input,
+            appSessionId: 'epoch-race',
+            createdAt: '2026-07-21T00:00:00.000Z',
+            updatedAt: '2026-07-21T00:00:00.000Z'
+        })),
+        get: id => id === record?.appSessionId ? record : undefined,
+        list: () => record ? [record] : [],
+        update: (_id, patch) => (record = { ...record, ...patch })
+    };
+    host.knownSessionIds = new Set();
+    host.acpSessionLookup = new Map();
+    host.loadedSessionIds = new Set();
+    host.flushAssistantTextDeltas = () => undefined;
+    host.assistantStreamState = () => new Set();
+    host.acceptModelState = () => undefined;
+    host.defaultModelId = () => undefined;
+    host.emit = () => undefined;
+    host.emitSnapshot = () => undefined;
+    host.notifyProviderDefaultsChanged = () => { defaultsRefreshes += 1; };
+
+    const creating = host.createSession({
+        workspaceRoot: '/fixture',
+        providerId: provider.id,
+        title: 'Epoch race'
+    });
+    await new Promise(resolve => setImmediate(resolve));
+
+    // A different window updates the credential/endpoint while session/new is
+    // in flight. The response belongs to the old process and old epoch.
+    currentEpoch = 'rotated-by-peer';
+    newSessionGate.resolve({ sessionId: 'acp-epoch-race' });
+    const created = await creating;
+
+    assert.equal(created.providerRuntimeEpoch, 'launch-epoch');
+    assert.equal(created.status, 'read-only');
+    assert.equal(record.providerRuntimeEpoch, 'launch-epoch');
+    assert.equal(record.status, 'read-only');
+    assert.equal(defaultsRefreshes, 1);
+    assert.equal(host.activeSessionId, undefined);
+
+    // The stale result is never activated. A later explicit continuation is
+    // covered by the rebind tests below and must use session/new, not this id.
+    assert.equal(loadRequests, 0);
+});
+
+test('startRuntime ready fast-path is valid only while the captured Provider epoch still matches', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let currentEpoch = 'ready-epoch';
+    let stops = 0;
+    let launchAttempts = 0;
+    const provider = {
+        id: 'grok-subscription',
+        name: 'Grok 订阅',
+        kind: 'grok-subscription'
+    };
+    host.disposed = false;
+    host.workspaceRoot = '/fixture';
+    host.attachedWorkspaceRoots = new Set(['/fixture']);
+    host.security = { canonicalRoot: value => value };
+    host.providers = {
+        get: id => id === provider.id ? provider : undefined,
+        selectedProviderId: () => provider.id,
+        runtimeEpoch: () => currentEpoch,
+        preferredModelId: () => undefined,
+        mcpEnvironment: () => ({}),
+        withProviderEnvironment: () => {
+            launchAttempts += 1;
+            throw new Error('fixture relaunch reached');
+        }
+    };
+    host.providerId = provider.id;
+    host.runtimeProviderEpoch = 'ready-epoch';
+    host.phase = 'ready';
+    host.acp = {};
+    host.supervisor = {
+        running: false,
+        stop: async () => undefined
+    };
+    host.loadedSessionIds = new Set();
+    host.runtimeGeneration = 1;
+    host.currentSecrets = [];
+    host.isWorkspaceTrusted = () => false;
+    host.defaultModelId = () => undefined;
+    host.emitSnapshot = () => undefined;
+    host.snapshot = () => ({
+        phase: host.phase,
+        providerId: host.providerId,
+        workspaceRoot: host.workspaceRoot
+    });
+    host.stopRuntimeLocked = async () => {
+        stops += 1;
+        host.acp = undefined;
+        host.phase = 'stopped';
+    };
+
+    const fast = await host.startRuntimeLocked({
+        workspaceRoot: '/fixture',
+        providerId: provider.id
+    });
+    assert.equal(fast.phase, 'ready');
+    assert.equal(stops, 0);
+    assert.equal(launchAttempts, 0);
+
+    host.phase = 'auth-required';
+    const authRequired = await host.startRuntimeLocked({
+        workspaceRoot: '/fixture',
+        providerId: provider.id
+    });
+    assert.equal(authRequired.phase, 'auth-required');
+    assert.equal(stops, 0);
+    assert.equal(launchAttempts, 0);
+
+    currentEpoch = 'rotated-epoch';
+    await assert.rejects(
+        host.startRuntimeLocked({ workspaceRoot: '/fixture', providerId: provider.id }),
+        /fixture relaunch reached/
+    );
+    assert.equal(stops, 1);
+    assert.equal(launchAttempts, 1);
+    assert.equal(host.runtimeProviderEpoch, undefined);
+});
+
+test('opening history from an old Provider keeps the global Provider and attaches a fresh current ACP session', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let record = session('old-provider-history', 'idle', {
+        providerId: 'old-relay',
+        providerRuntimeEpoch: 'old-relay-current-epoch',
+        model: 'old-relay'
+    });
+    let runtimeStarts = 0;
+    const acpRequests = [];
+    const emitted = [];
+    host.sessionLoadGeneration = 0;
+    host.providerId = 'current-relay';
+    host.selectedModel = 'current-relay';
+    host.workspaceRoot = '/fixture';
+    host.phase = 'ready';
+    host.runtimeGeneration = 1;
+    host.sidecarVersion = '0.2.102';
+    host.runtimeProviderEpoch = 'current-relay-epoch';
+    host.models = [{ id: 'current-relay', name: 'Current relay' }];
+    host.sessions = {
+        get: id => id === record.appSessionId ? record : undefined,
+        list: () => [record],
+        update: (_id, patch) => (record = { ...record, ...patch })
+    };
+    host.providers = {
+        selectedProviderId: () => 'current-relay',
+        runtimeEpoch: providerId => providerId === 'old-relay'
+            ? 'old-relay-current-epoch'
+            : 'current-relay-epoch',
+        get: id => ({ id, name: id, kind: 'custom', model: 'grok-4.5' }),
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.security = { canonicalRoot: value => value };
+    host.flushAssistantTextDeltas = () => undefined;
+    host.assistantStreamState = () => new Set();
+    host.knownSessionIds = new Set();
+    host.acpSessionLookup = new Map();
+    host.loadedSessionIds = new Set();
+    host.restoringSessionCounts = new Map();
+    host.startRuntime = async request => {
+        runtimeStarts += 1;
+        host.providerId = request.providerId;
+        host.workspaceRoot = request.workspaceRoot;
+        host.phase = 'ready';
+    };
+    host.acp = {
+        request: async (method, params) => {
+            acpRequests.push({ method, params });
+            return { sessionId: 'acp-current-relay' };
+        }
+    };
+    host.acceptModelState = () => undefined;
+    host.emit = event => emitted.push(event);
+    host.emitSnapshot = () => undefined;
+
+    const loaded = await host.loadSession(record.appSessionId);
+
+    assert.equal(loaded.status, 'idle');
+    assert.equal(record.status, 'idle');
+    assert.equal(record.providerId, 'current-relay');
+    assert.equal(record.providerRuntimeEpoch, 'current-relay-epoch');
+    assert.equal(record.acpSessionId, 'acp-current-relay');
+    assert.equal(host.providerId, 'current-relay');
+    assert.equal(host.selectedModel, 'current-relay');
+    assert.equal(runtimeStarts, 0);
+    assert.deepEqual(acpRequests.map(request => request.method), ['session/new', 'session/set_model']);
+    assert.equal(acpRequests[0].params._meta.modelId, 'current-relay');
+    assert.equal(JSON.stringify(acpRequests[0].params).includes('acp-old-provider-history'), false);
+    assert.equal(emitted.find(event => event.kind === 'session').session.appSessionId, record.appSessionId);
+});
+
+test('restoring same-Provider history uses the current global model instead of the historical model', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let record = session('same-provider-history', 'idle', {
+        providerId: 'grok-subscription',
+        providerRuntimeEpoch: 'subscription-epoch',
+        model: 'historical-model'
+    });
+    const requests = [];
+    host.sessionLoadGeneration = 0;
+    host.runtimeGeneration = 3;
+    host.providerId = 'grok-subscription';
+    host.selectedModel = 'current-global-model';
+    host.workspaceRoot = '/fixture';
+    host.phase = 'ready';
+    host.sidecarVersion = '0.2.102';
+    host.runtimeProviderEpoch = 'subscription-epoch';
+    host.models = [
+        { id: 'historical-model', name: 'Historical model' },
+        { id: 'current-global-model', name: 'Current global model' }
+    ];
+    host.sessions = {
+        get: id => id === record.appSessionId ? record : undefined,
+        list: () => [record],
+        update: (_id, patch) => (record = { ...record, ...patch })
+    };
+    host.providers = {
+        selectedProviderId: () => 'grok-subscription',
+        runtimeEpoch: () => 'subscription-epoch',
+        get: id => ({ id, name: 'Grok 订阅', kind: 'grok-subscription' }),
+        preferredModelId: () => 'current-global-model',
+        selectPreferredModel: () => undefined
+    };
+    host.knownSessionIds = new Set();
+    host.acpSessionLookup = new Map();
+    host.loadedSessionIds = new Set();
+    host.restoringSessionCounts = new Map();
+    host.flushAssistantTextDeltas = () => undefined;
+    host.assistantStreamState = () => new Set();
+    host.acceptModelState = () => undefined;
+    host.emit = () => undefined;
+    host.emitSnapshot = () => undefined;
+    host.acp = {
+        request: async (method, params) => {
+            requests.push({ method, params });
+            return {};
+        }
+    };
+
+    const loaded = await host.loadSession(record.appSessionId);
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].method, 'session/load');
+    assert.equal(requests[0].params._meta.modelId, 'current-global-model');
+    assert.deepEqual(requests[1], {
+        method: 'session/set_model',
+        params: { sessionId: record.acpSessionId, modelId: 'current-global-model' }
+    });
+    assert.equal(loaded.model, 'current-global-model');
+    assert.equal(record.model, 'current-global-model');
+    assert.equal(host.selectedModel, 'current-global-model');
+});
+
+test('legacy read-only history becomes live through session/new and never retries the retired ACP id', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    let record = session('retired', 'read-only', {
+        providerId: 'xora-relay',
+        providerRuntimeEpoch: 'retired-epoch'
+    });
+    const requests = [];
+    host.sessionLoadGeneration = 0;
+    host.runtimeGeneration = 1;
+    host.runtimeProviderEpoch = 'current-epoch';
+    host.providerId = 'xora-relay';
+    host.workspaceRoot = '/fixture';
+    host.phase = 'ready';
+    host.sidecarVersion = '0.2.102';
+    host.models = [{ id: 'xora-relay', name: 'Relay' }];
+    host.sessions = {
+        get: () => record,
+        update: (_id, patch) => (record = { ...record, ...patch }),
+        list: () => [record]
+    };
+    host.providers = {
+        selectedProviderId: () => 'xora-relay',
+        runtimeEpoch: () => 'current-epoch',
+        get: id => ({ id, name: 'Relay', kind: 'custom', model: 'grok-4.5' }),
+        preferredModelId: () => 'xora-relay'
+    };
+    host.security = { canonicalRoot: value => value };
+    host.knownSessionIds = new Set();
+    host.acpSessionLookup = new Map([[record.acpSessionId, record.appSessionId]]);
+    host.loadedSessionIds = new Set();
+    host.flushAssistantTextDeltas = () => undefined;
+    host.assistantStreamState = () => new Set();
+    host.acceptModelState = () => undefined;
+    host.emit = () => undefined;
+    host.emitSnapshot = () => undefined;
+    host.acp = {
+        request: async (method, params) => {
+            requests.push({ method, params });
+            return { sessionId: 'acp-live-again' };
+        }
+    };
+
+    const loaded = await host.loadSession(record.appSessionId);
+
+    assert.equal(loaded.status, 'idle');
+    assert.equal(loaded.acpSessionId, 'acp-live-again');
+    assert.deepEqual(requests.map(request => request.method), ['session/new', 'session/set_model']);
+    assert.equal(JSON.stringify(requests[0].params).includes('acp-retired'), false);
+});
+
+test('deleting a Provider invalidates a matching peer and switches it to the persisted fallback', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.lifecycleTail = Promise.resolve();
+    host.providerId = 'xora-deleted';
+    host.phase = 'stopped';
+    host.supervisor = { running: false };
+    host.acp = undefined;
+    host.managementChild = undefined;
+    host.activeSessionId = 'old-session';
+    host.loadedSessionIds = new Set(['old-session']);
+    host.sessionLoadGeneration = 2;
+    host.models = [{ id: 'xora-deleted', name: 'Deleted' }];
+    host.sessions = { markProviderSessionsReadOnly: () => [], list: () => [] };
+    host.providers = {
+        subscriptionAuthStatus: () => 'unknown',
+        selectedProviderId: () => 'grok-subscription',
+        get: id => id === 'grok-subscription'
+            ? { id, name: 'Grok 订阅', kind: 'grok-subscription' }
+            : undefined,
+        preferredModelId: () => undefined
+    };
+    host.emitSnapshot = () => undefined;
+    host.emitError = (_code, error) => { throw error; };
+
+    host.notifyProviderRuntimeInvalidated({
+        providerId: 'xora-deleted',
+        reason: 'provider-deleted',
+        invalidateSession: true
+    });
+    await host.lifecycleTail;
+
+    assert.equal(host.providerId, 'grok-subscription');
+    assert.equal(host.activeSessionId, undefined);
+    assert.deepEqual(host.models, []);
 });
 
 test('a new session can load ACP models before its first prompt', async () => {
@@ -643,7 +1460,8 @@ test('a new session can load ACP models before its first prompt', async () => {
         startRuntime: async () => {
             timeline.push('start');
             return { ...widget.model.snapshot, phase: 'ready' };
-        }
+        },
+        selectDefaultModel: async () => undefined
     };
     widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
     widget.update = () => undefined;
@@ -651,9 +1469,170 @@ test('a new session can load ACP models before its first prompt', async () => {
     await widget.loadModelOptions();
     await widget.selectModel(undefined, 'grok-fixture');
 
-    assert.deepEqual(timeline, ['start', 'refresh']);
+    assert.deepEqual(timeline, ['start', 'refresh', 'refresh']);
     assert.equal(widget.modelOptionsLoading, false);
     assert.equal(widget.newSessionModel, 'grok-fixture');
+});
+
+test('a stale cross-Provider model event is ignored because service switching belongs to Settings', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const timeline = [];
+    widget.modelOptionsLoading = false;
+    widget.sessionLoading = false;
+    widget.submission = undefined;
+    widget.providers = [
+        {
+            id: 'xai-api-key',
+            name: 'xAI / Grok API',
+            kind: 'xai-api-key',
+            protocol: 'openai-responses',
+            model: 'grok-4.5',
+            secretRef: 'provider:xai-api-key',
+            credentialConfigured: true
+        },
+        {
+            id: 'xora-relay',
+            name: '横迪AI',
+            kind: 'custom',
+            protocol: 'openai-responses',
+            baseUrl: 'https://relay.example.invalid/v1',
+            model: 'grok-4.5',
+            secretRef: 'provider:xora-relay',
+            credentialConfigured: true
+        }
+    ];
+    widget.model = {
+        snapshot: {
+            phase: 'ready',
+            workspaceRoot: '/fixture',
+            workspaceAttached: true,
+            workspaceTrusted: true,
+            providerId: 'xai-api-key',
+            models: [{ id: 'xora-xai-api', name: 'xAI / Grok API' }],
+            sessions: [],
+            permissionMode: 'request-approval'
+        },
+        refresh: async () => timeline.push('refresh-snapshot')
+    };
+    widget.service = {
+        selectProvider: async providerId => timeline.push(`select-provider:${providerId}`),
+        selectDefaultModel: async () => timeline.push('unexpected-default-model')
+    };
+    widget.refreshProviders = async () => timeline.push('refresh-providers');
+    widget.resetToNewSession = () => timeline.push('reset-session');
+    widget.requestRuntimePrewarm = () => timeline.push('prewarm');
+    widget.messages = {
+        info: message => timeline.push(`info:${message}`),
+        error: message => timeline.push(`error:${message}`)
+    };
+    widget.update = () => undefined;
+
+    await widget.selectModel(undefined, encodeAgentModelChoice('xora-relay', 'xora-relay'));
+
+    assert.deepEqual(timeline, [
+        'info:模型服务已变化，请在设置中确认当前服务后重新选择模型。',
+        'refresh-snapshot'
+    ]);
+    assert.equal(widget.newSessionModel, undefined);
+    assert.equal(widget.modelOptionsLoading, false);
+});
+
+test('a failed default-model write rolls the optimistic new-session selector back', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    widget.sessionLoading = false;
+    widget.newSessionModel = 'grok-old';
+    widget.model = {
+        snapshot: { providerId: 'grok-subscription', selectedModel: 'grok-old' },
+        refresh: async () => undefined
+    };
+    widget.service = {
+        selectDefaultModel: async () => { throw new Error('fixture lock'); }
+    };
+    widget.messages = { error: () => undefined };
+    widget.update = () => undefined;
+
+    await widget.selectModel(undefined, encodeAgentModelChoice('grok-subscription', 'grok-new'));
+
+    assert.equal(widget.newSessionModel, 'grok-old');
+});
+
+test('a stale Provider-default DOM choice is consumed locally and never persisted as an ACP model', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const timeline = [];
+    widget.sessionLoading = false;
+    widget.model = {
+        snapshot: {
+            providerId: 'grok-subscription',
+            selectedModel: 'grok-runtime-default'
+        }
+    };
+    widget.service = {
+        selectDefaultModel: async () => timeline.push('unexpected-default-model'),
+        selectProvider: async () => timeline.push('unexpected-provider-switch')
+    };
+    widget.requestRuntimePrewarm = () => timeline.push('prewarm');
+    widget.update = () => timeline.push('update');
+
+    await widget.selectModel(undefined, encodeAgentModelChoice(
+        'grok-subscription',
+        PROVIDER_DEFAULT_MODEL_CHOICE_ID
+    ));
+
+    assert.deepEqual(timeline, ['prewarm', 'update']);
+    assert.equal(widget.newSessionModel, 'grok-runtime-default');
+});
+
+test('Electron backend rejects the renderer Provider-default choice even before ACP advertises models', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.providerId = 'grok-subscription';
+    host.activePrompts = new Map();
+    host.models = [];
+
+    await assert.rejects(
+        host.selectDefaultModel('grok-subscription', PROVIDER_DEFAULT_MODEL_CHOICE_ID),
+        /internal Provider default choice/
+    );
+});
+
+test('Electron backend rejects catalog aliases owned by another or retired Provider', async () => {
+    const relay = {
+        id: 'xora-relay',
+        name: 'Relay',
+        kind: 'custom',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.5',
+        secretRef: 'provider:xora-relay'
+    };
+    const other = { ...relay, id: 'xora-other', name: 'Other', secretRef: 'provider:xora-other' };
+    const subscription = { id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription' };
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.lifecycleTail = Promise.resolve();
+    host.activePrompts = new Map();
+    host.providerId = relay.id;
+    host.models = [
+        { id: relay.id, name: relay.name },
+        { id: other.id, name: other.name },
+        { id: 'xora-xai-api', name: 'xAI / Grok API' }
+    ];
+    host.providers = {
+        selectedProviderId: () => host.providerId,
+        get: id => [relay, other, subscription].find(provider => provider.id === id),
+        list: () => [subscription, relay, other],
+        selectPreferredModel: () => assert.fail('foreign aliases must not be persisted')
+    };
+
+    await assert.rejects(
+        host.selectDefaultModel(relay.id, other.id),
+        /不属于当前模型服务/
+    );
+    await assert.rejects(
+        host.selectDefaultModel(relay.id, 'xora-xai-api'),
+        /不属于当前模型服务/
+    );
 });
 
 test('opening an attached project prewarms an untrusted runtime once without waiting for input', async () => {
@@ -827,6 +1806,7 @@ test('the first send from a workspace fresh page creates a session instead of lo
     widget.textarea = null;
     widget.model = {
         snapshot,
+        refresh: async () => undefined,
         startNewSession: () => { snapshot.activeSessionId = undefined; },
         setSession: selected => {
             snapshot.sessions.unshift(selected);
@@ -837,6 +1817,10 @@ test('the first send from a workspace fresh page creates a session instead of lo
         executeCommand: async () => { timeline.push('save-all'); }
     };
     widget.service = {
+        startRuntime: async request => {
+            timeline.push(`runtime:${request.workspaceRoot}:${request.providerId}`);
+            return snapshot;
+        },
         createSession: async () => {
             timeline.push('session/new');
             return created;
@@ -858,9 +1842,73 @@ test('the first send from a workspace fresh page creates a session instead of lo
 
     await widget.send();
 
-    assert.deepEqual(timeline, ['save-all', 'session/new', 'session/prompt:created']);
+    assert.deepEqual(timeline, [
+        'runtime:/fixture:grok-subscription',
+        'save-all',
+        'session/new',
+        'session/prompt:created'
+    ]);
     assert.equal(snapshot.activeSessionId, 'created');
     assert.equal(snapshot.sessions.some(candidate => candidate.appSessionId === 'prior'), true);
+});
+
+test('a Provider switch during send preparation never carries old draft images into the new service', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const timeline = [];
+    const notices = [];
+    const snapshot = runtimeSnapshot('/fixture', [], undefined);
+
+    widget.prompt = '解释图片';
+    widget.draftImages = [{
+        id: 'image-a',
+        mimeType: 'image/png',
+        data: 'iVBORw0KGgo=',
+        name: '旧服务图片.png',
+        previewUrl: 'blob:fixture'
+    }];
+    widget.imageReadsInFlight = 0;
+    widget.submission = undefined;
+    widget.sendPreparationInFlight = false;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 4;
+    widget.roots = ['/fixture'];
+    widget.model = {
+        snapshot,
+        refresh: async () => {
+            timeline.push('refresh');
+            snapshot.providerId = 'xora-relay';
+            snapshot.models = [{ id: 'xora-relay', name: 'Relay' }];
+            snapshot.selectedModel = 'xora-relay';
+            // Mirrors reconcileAgentContext invalidating Provider A drafts.
+            widget.agentContextGeneration += 1;
+            widget.draftImages = [];
+        }
+    };
+    widget.service = {
+        startRuntime: async () => {
+            timeline.push('runtime');
+            return snapshot;
+        },
+        createSession: async () => {
+            timeline.push('session/new');
+            return session('created');
+        },
+        sendPrompt: async () => timeline.push('session/prompt')
+    };
+    widget.messages = {
+        info: message => notices.push(message),
+        warn: () => undefined,
+        error: () => undefined
+    };
+    widget.update = () => undefined;
+
+    await widget.send();
+
+    assert.deepEqual(timeline, ['refresh']);
+    assert.equal(widget.prompt, '解释图片', 'text remains as a draft in the new Provider');
+    assert.equal(widget.submission, undefined);
+    assert.match(notices.join('\n'), /重新添加图片/);
 });
 
 test('cached local history becomes visible before ACP session restore completes', async () => {

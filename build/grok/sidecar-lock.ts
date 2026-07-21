@@ -22,6 +22,15 @@ export interface GrokSidecarLock {
     cargoPackage: string;
     cargoBinary: string;
   };
+  bundledTools: {
+    ripgrep: {
+      package: "ripgrep";
+      version: string;
+      binary: "rg";
+      source: "crates.io";
+      features: readonly ["pcre2"];
+    };
+  };
   runtime: {
     packagedBinaryName: string;
     args: string[];
@@ -77,6 +86,19 @@ export function validateGrokSidecarLock(input: unknown): GrokSidecarLock {
   if (!VERSION_PATTERN.test(rust)) throw new Error("toolchain.rust must be an exact version");
   if (!VERSION_PATTERN.test(dotslash)) throw new Error("toolchain.dotslash must be an exact version");
   if (!PROTOC_VERSION_PATTERN.test(protoc)) throw new Error("toolchain.protoc must be an exact major.minor version");
+
+  const bundledTools = asRecord(root.bundledTools, "$lock.bundledTools");
+  const ripgrep = asRecord(bundledTools.ripgrep, "$lock.bundledTools.ripgrep");
+  const ripgrepVersion = stringField(ripgrep, "version", "$lock.bundledTools.ripgrep");
+  if (ripgrep.package !== "ripgrep" || ripgrep.binary !== "rg" || ripgrep.source !== "crates.io") {
+    throw new Error("bundled ripgrep must be the crates.io ripgrep package and rg binary");
+  }
+  if (!VERSION_PATTERN.test(ripgrepVersion)) {
+    throw new Error("bundledTools.ripgrep.version must be an exact version");
+  }
+  if (!Array.isArray(ripgrep.features) || ripgrep.features.length !== 1 || ripgrep.features[0] !== "pcre2") {
+    throw new Error("bundledTools.ripgrep.features must be exactly [\"pcre2\"]");
+  }
 
   const runtime = asRecord(root.runtime, "$lock.runtime");
   const packagedBinaryName = stringField(runtime, "packagedBinaryName", "$lock.runtime");
@@ -135,6 +157,15 @@ export function validateGrokSidecarLock(input: unknown): GrokSidecarLock {
       license: "Apache-2.0",
     },
     toolchain: { rust, dotslash, protoc, cargoProfile, cargoPackage, cargoBinary },
+    bundledTools: {
+      ripgrep: {
+        package: "ripgrep",
+        version: ripgrepVersion,
+        binary: "rg",
+        source: "crates.io",
+        features: ["pcre2"],
+      },
+    },
     runtime: {
       packagedBinaryName,
       args,

@@ -38,6 +38,7 @@ export class FakeAgentHostService implements AgentHostService {
     protected configuredCredentials = new Set<string>();
     protected preferredModels = new Map<string, string>([['grok-subscription', 'grok']]);
     protected snapshot: RuntimeSnapshot = {
+        revision: 0,
         phase: 'stopped',
         workspaceAttached: false,
         workspaceTrusted: false,
@@ -565,6 +566,7 @@ export class FakeAgentHostService implements AgentHostService {
     }
 
     protected publishSnapshot(): RuntimeSnapshot {
+        this.snapshot.revision = (this.snapshot.revision ?? 0) + 1;
         const snapshot = this.cloneSnapshot();
         this.client?.onAgentEvent({ kind: 'snapshot', snapshot });
         return snapshot;

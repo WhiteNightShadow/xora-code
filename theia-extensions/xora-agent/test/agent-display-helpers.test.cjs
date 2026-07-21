@@ -148,7 +148,7 @@ test('legacy tool records remain categorized without exposing sensitive commands
 test('session status and relative update labels stay compact and localized', () => {
     const now = Date.parse('2026-07-19T12:00:00.000Z');
     assert.equal(sessionStatusLabel('running'), '进行中');
-    assert.equal(sessionStatusLabel('read-only'), '只读');
+    assert.equal(sessionStatusLabel('read-only'), '可继续');
     assert.equal(sessionRelativeTime('2026-07-19T11:59:40.000Z', now), '刚刚');
     assert.equal(sessionRelativeTime('2026-07-19T11:42:00.000Z', now), '18 分钟前');
     assert.equal(sessionRelativeTime('2026-07-19T09:00:00.000Z', now), '3 小时前');

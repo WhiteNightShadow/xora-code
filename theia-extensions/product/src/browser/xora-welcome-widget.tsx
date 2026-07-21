@@ -6,13 +6,11 @@ import { CommandService, MessageService } from '@theia/core/lib/common';
 import { Message } from '@theia/core/shared/@lumino/messaging';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import React from '@theia/core/shared/react';
-import { AgentHostService, ManagementResult, ProviderProfile } from '@xora-code/agent/lib/common/agent-protocol';
+import { AgentHostService, ManagementResult } from '@xora-code/agent/lib/common/agent-protocol';
 import {
-    BuiltInProviderIds,
     WelcomeAction,
     WelcomeCommandIds,
-    WELCOME_WORKSPACE_ACTIONS,
-    xaiCredentialStatus
+    WELCOME_WORKSPACE_ACTIONS
 } from './xora-welcome-actions';
 
 @injectable()
@@ -29,7 +27,6 @@ export class XoraWelcomeWidget extends ReactWidget {
     @inject(AgentHostService)
     protected readonly agentHostService!: AgentHostService;
 
-    protected providers: ProviderProfile[] = [];
     protected providerBusy = false;
     protected providerError: string | undefined;
 
@@ -42,7 +39,6 @@ export class XoraWelcomeWidget extends ReactWidget {
         this.addClass('xora-code-welcome');
         this.node.tabIndex = 0;
         this.update();
-        void this.refreshProviders();
     }
 
     protected override onActivateRequest(message: Message): void {
@@ -65,13 +61,12 @@ export class XoraWelcomeWidget extends ReactWidget {
                         <span>1</span>
                         <div>
                             <h2 id='xora-connect-agent'>连接 Agent</h2>
-                            <p>可以现在完成登录或填写密钥，之后也能随时在 Agent 设置中修改。</p>
+                            <p>可以现在登录 Grok，或前往 Agent 设置添加自定义模型服务。</p>
                         </div>
                     </div>
                     {this.providerError ? <div className='xora-code-welcome__error' role='alert'>{this.providerError}</div> : undefined}
                     <div className='xora-code-welcome__provider-grid'>
                         {this.renderGrokLogin()}
-                        {this.renderXaiApiKey()}
                         <article className='xora-code-welcome__provider-card'>
                             <div>
                                 <span className='xora-code-welcome__provider-kicker'>兼容接口</span>
@@ -156,59 +151,11 @@ export class XoraWelcomeWidget extends ReactWidget {
         );
     }
 
-    protected renderXaiApiKey(): React.ReactNode {
-        const provider = this.providers.find(candidate => candidate.id === BuiltInProviderIds.xaiApiKey);
-        return (
-            <article className='xora-code-welcome__provider-card'>
-                <div>
-                    <span className='xora-code-welcome__provider-kicker'>xAI API</span>
-                    <h3>输入 API Key</h3>
-                    <p>{xaiCredentialStatus(provider?.credentialConfigured)}</p>
-                </div>
-                <form className='xora-code-welcome__key-form' onSubmit={event => this.saveXaiApiKey(event)}>
-                    <label htmlFor='xora-xai-api-key'>API Key</label>
-                    <input
-                        id='xora-xai-api-key'
-                        name='apiKey'
-                        type='password'
-                        required
-                        disabled={this.providerBusy || !provider}
-                        autoComplete='off'
-                        spellCheck={false}
-                        placeholder='xai-…'
-                    />
-                    <div className='xora-code-welcome__provider-actions'>
-                        <button className='theia-button main' type='submit' disabled={this.providerBusy || !provider}>保存密钥</button>
-                        {provider?.credentialConfigured ? <button
-                            className='theia-button secondary'
-                            type='button'
-                            disabled={this.providerBusy}
-                            onClick={() => this.clearXaiApiKey()}
-                        >
-                            清除密钥
-                        </button> : undefined}
-                    </div>
-                </form>
-            </article>
-        );
-    }
-
     protected executeCommand(commandId: string, title: string): void {
         void this.commandService.executeCommand(commandId).catch(error => {
             const detail = error instanceof Error ? error.message : String(error);
             this.messageService.error(`无法执行“${title}”：${detail}`);
         });
-    }
-
-    protected async refreshProviders(): Promise<void> {
-        try {
-            this.providers = await this.agentHostService.listProviders();
-            this.providerError = undefined;
-        } catch (error) {
-            this.providerError = `无法读取 Agent 配置：${this.errorMessage(error)}`;
-        } finally {
-            this.update();
-        }
     }
 
     protected async loginGrok(): Promise<void> {
@@ -227,35 +174,6 @@ export class XoraWelcomeWidget extends ReactWidget {
         );
     }
 
-    protected async saveXaiApiKey(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-        event.preventDefault();
-        const form = event.currentTarget;
-        const provider = this.providers.find(candidate => candidate.id === BuiltInProviderIds.xaiApiKey);
-        const apiKey = String(new FormData(form).get('apiKey') ?? '').trim();
-        if (!provider || !apiKey) {
-            this.providerError = provider ? '请输入有效的 xAI API Key。' : 'xAI Provider 尚未就绪，请稍后重试。';
-            this.update();
-            return;
-        }
-        await this.runProviderAction(
-            async () => {
-                await this.agentHostService.saveProvider(provider, apiKey);
-                await this.agentHostService.selectProvider(provider.id);
-                form.reset();
-            },
-            'xAI API Key 已安全保存，并已设为当前模型服务。',
-            '无法保存 xAI API Key'
-        );
-    }
-
-    protected async clearXaiApiKey(): Promise<void> {
-        await this.runProviderAction(
-            () => this.agentHostService.clearProviderCredential(BuiltInProviderIds.xaiApiKey),
-            '已清除 xAI API Key。',
-            '无法清除 xAI API Key'
-        );
-    }
-
     protected async runProviderAction(action: () => Promise<void | ManagementResult>, success: string, failure: string): Promise<void> {
         this.providerBusy = true;
         this.providerError = undefined;
@@ -266,7 +184,6 @@ export class XoraWelcomeWidget extends ReactWidget {
                 throw new Error(result.error ?? '操作未完成。');
             }
             this.messageService.info(success);
-            await this.refreshProviders();
         } catch (error) {
             this.providerError = `${failure}：${this.errorMessage(error)}`;
         } finally {

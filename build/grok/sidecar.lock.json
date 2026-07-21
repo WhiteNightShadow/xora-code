@@ -15,6 +15,15 @@
     "cargoPackage": "xai-grok-pager-bin",
     "cargoBinary": "xai-grok-pager"
   },
+  "bundledTools": {
+    "ripgrep": {
+      "package": "ripgrep",
+      "version": "15.0.0",
+      "binary": "rg",
+      "source": "crates.io",
+      "features": ["pcre2"]
+    }
+  },
   "runtime": {
     "packagedBinaryName": "grok",
     "args": ["--no-auto-update", "--cwd", "<root>", "agent", "--no-leader", "stdio"],

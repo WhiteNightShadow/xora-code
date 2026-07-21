@@ -8,6 +8,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const {
+    assertNativeAfterPackContext,
+    assertNoBuildPathLeaks,
+    installSourceBuiltRipgrep,
+    stripNativeAddons
+} = require('./packaged-path-sanitizer');
 
 function fail(message) {
     throw new Error(`Unsigned preview ad-hoc signing refused: ${message}`);
@@ -49,9 +55,13 @@ function applicationBundle(appOutDir) {
  * refreshed. Formal release.yml never references this hook.
  */
 async function previewAfterPack(context) {
-    if (context.electronPlatformName !== 'darwin' || process.platform !== 'darwin') {
+    const { platform, root } = assertNativeAfterPackContext(context);
+    if (platform !== 'darwin') {
         fail('this hook may only run for a native macOS preview build');
     }
+
+    const ripgrep = installSourceBuiltRipgrep(root, platform);
+    const stripResult = stripNativeAddons(root, platform);
 
     const bundle = applicationBundle(context.appOutDir);
     const sidecarRoot = path.join(bundle, 'Contents', 'Resources', 'sidecars', 'grok');
@@ -82,6 +92,8 @@ async function previewAfterPack(context) {
             fail('the macOS preview must be ad-hoc signed without a Developer ID team');
         }
         if (sha256(sidecar) !== release.sha256) fail('ad-hoc signing invalidated the audited Grok release hash');
+        const scanned = assertNoBuildPathLeaks(bundle);
+        process.stdout.write(`Installed source-built ripgrep ${ripgrep.version}, sanitized ${stripResult.stripped.length} native addon(s), and scanned ${scanned.length} packaged executable payload(s).\n`);
     } finally {
         fs.rmSync(backupDirectory, { recursive: true, force: true });
     }

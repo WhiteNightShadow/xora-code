@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { parse as parseToml } from 'smol-toml';
-import { ProviderProfile, ProviderProtocol } from '../common/agent-protocol';
+import { ProviderProfile, ProviderProtocol, XAI_MANAGED_MODEL_ID } from '../common/agent-protocol';
 import { normalizeProviderBaseUrl } from './provider-network';
 import { SecretVault } from './secret-vault';
 
@@ -17,9 +17,13 @@ const LEGACY_BLOCK_START = '# >>> WhiteNight Code managed providers >>>';
 const LEGACY_BLOCK_END = '# <<< WhiteNight Code managed providers <<<';
 const PROFILE_ID = /^(?:xora|wnc)-[a-z0-9][a-z0-9-]{0,48}$/;
 const XAI_OFFICIAL_BASE_URL = 'https://api.x.ai/v1';
-export const XAI_MANAGED_MODEL_ID = 'xora-xai-api';
+export { XAI_MANAGED_MODEL_ID } from '../common/agent-protocol';
 const XAI_MANAGED_ENVIRONMENT = 'XORA_CODE_XAI_API_KEY';
 const AUTHENTICATION_CONSENT_POLICY_VERSION = 1;
+// This value can never be persisted as a valid runtime epoch. Its only purpose
+// is to force ready-runtime and session comparisons to fail while a durable
+// Provider transaction marker exists.
+const PROVIDER_UPDATE_BLOCKED_RUNTIME_EPOCH = 'provider-update-blocked';
 
 interface XaiApiSettings {
     protocol: ProviderProtocol;
@@ -52,6 +56,8 @@ interface ProviderFile {
     authenticationConsents?: Record<string, AuthenticationConsent>;
     /** User-level defaults shared by every project/window. Model IDs are not credentials. */
     preferredModels?: Record<string, string>;
+    /** Non-secret UUID generations used to prevent ACP sessions crossing credentials/endpoints. */
+    runtimeEpochs?: Record<string, string>;
     /** Last known Grok result. Runtime initialization remains authoritative. */
     subscriptionAuthState?: SubscriptionAuthState;
     /** Prevents a legacy confirmation record from being reused after invalidation. */
@@ -103,6 +109,31 @@ export class ProviderRegistry {
                 // an unavailable lock or failed recovery cannot expose a key.
             }
         }
+        // The built-in xAI credential slot was removed from the product UI in
+        // v0.1. Keep its metadata and encrypted key for old session/history
+        // compatibility, but never leave an invisible service as the active
+        // application-wide default after an upgrade.
+        try {
+            this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
+                const file = this.readMetadata();
+                if (file.selectedProviderId === 'xai-api-key') {
+                    file.selectedProviderId = 'grok-subscription';
+                    this.writeMetadata(file);
+                }
+                // Remove the retired catalog alias from Xora's managed TOML
+                // block on upgrade. Keep xaiApi metadata and its encrypted
+                // credential untouched so old local history remains readable,
+                // but Grok ACP must no longer advertise `xora-xai-api` to new
+                // runtimes.
+                if (file.xaiApi && !fs.existsSync(this.providerUpdatePath)) {
+                    this.rewriteManagedBlock(file);
+                }
+            });
+        } catch {
+            // selectedProviderId() also fails closed to Grok subscription, so
+            // a temporarily unavailable lock cannot reactivate the hidden
+            // legacy service.
+        }
     }
 
     list(): ProviderProfile[] {
@@ -126,7 +157,7 @@ export class ProviderRegistry {
     selectedProviderId(): string {
         const file = this.readMetadata();
         const selected = file.selectedProviderId;
-        if (typeof selected === 'string' && (selected === 'grok-subscription' || selected === 'xai-api-key'
+        if (typeof selected === 'string' && (selected === 'grok-subscription'
             || file.providers.some(profile => profile.id === selected))) {
             return selected;
         }
@@ -136,7 +167,10 @@ export class ProviderRegistry {
     selectProvider(id: string): void {
         this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
             const file = this.readMetadata();
-            const exists = id === 'grok-subscription' || id === 'xai-api-key'
+            if (id === 'xai-api-key') {
+                throw new Error('旧版 xAI / Grok API 服务已停用，请将其重新添加为自定义模型服务。');
+            }
+            const exists = id === 'grok-subscription'
                 || file.providers.some(profile => profile.id === id);
             if (!exists) {
                 throw new Error('所选模型服务已不存在。');
@@ -165,6 +199,27 @@ export class ProviderRegistry {
             if (file.preferredModels[providerId] === model) return;
             file.preferredModels[providerId] = model;
             this.writeMetadata(file);
+        });
+    }
+
+    runtimeEpoch(providerId: string): string {
+        const file = this.readMetadata();
+        const profile = this.profileFromFile(file, providerId);
+        if (profile?.kind !== 'grok-subscription' && this.isProviderUpdateBlocked(providerId)) {
+            return PROVIDER_UPDATE_BLOCKED_RUNTIME_EPOCH;
+        }
+        return file.runtimeEpochs?.[providerId] ?? 'legacy-v1';
+    }
+
+    rotateRuntimeEpoch(providerId: string): string {
+        return this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
+            const file = this.readMetadata();
+            if (!this.profileFromFile(file, providerId)) {
+                throw new Error('The selected Provider no longer exists.');
+            }
+            const epoch = this.rotateRuntimeEpochUnlocked(file, providerId);
+            this.writeMetadata(file);
+            return epoch;
         });
     }
 
@@ -282,6 +337,7 @@ export class ProviderRegistry {
             }
             if (credential || !sameXaiSettings(previous, settings)) {
                 this.clearAuthenticationConsentUnlocked(file, input.id);
+                this.rotateRuntimeEpochUnlocked(file, input.id);
             }
             this.commitProviderUpdate(previousFile, file, input.id, 'provider:xai-api-key', credential);
             return {
@@ -312,6 +368,7 @@ export class ProviderRegistry {
         }
         if (credential || !sameProviderConfiguration(previous, profile)) {
             this.clearAuthenticationConsentUnlocked(file, profile.id);
+            this.rotateRuntimeEpochUnlocked(file, profile.id);
         }
         this.commitProviderUpdate(previousFile, file, profile.id, profile.secretRef!, credential);
         return { ...profile, credentialConfigured: !!this.vault.get(profile.secretRef!) };
@@ -416,6 +473,12 @@ export class ProviderRegistry {
         // it is the only crash-safe recovery that cannot cross endpoints.
         this.vault.delete(marker.secretRef);
         const file = this.readMetadata();
+        // The transaction may have stopped before or after its first epoch
+        // write. Rotate once more after the uncertain credential is gone, and
+        // persist that boundary before unblocking any runtime.
+        this.clearAuthenticationConsentUnlocked(file, marker.providerId);
+        this.rotateRuntimeEpochUnlocked(file, marker.providerId);
+        this.writeMetadata(file);
         this.rewriteManagedBlock(file);
         this.clearProviderUpdateMarker();
     }
@@ -464,7 +527,9 @@ export class ProviderRegistry {
 
     clearCredential(id: string): void {
         this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
-            const profile = this.get(id);
+            this.recoverInterruptedProviderUpdateUnlocked();
+            const file = this.readMetadata();
+            const profile = this.profileFromFile(file, id);
             if (!profile) {
                 throw new Error('The selected Provider no longer exists.');
             }
@@ -474,11 +539,21 @@ export class ProviderRegistry {
             // The reference is derived from Electron-main-owned metadata. A
             // renderer can select a Provider ID but can never nominate an
             // arbitrary vault entry for deletion.
-            this.vault.delete(profile.secretRef ?? `provider:${profile.id}`);
-            const file = this.readMetadata();
-            if (this.clearAuthenticationConsentUnlocked(file, id)) {
-                this.writeMetadata(file);
-            }
+            const secretRef = profile.secretRef ?? `provider:${profile.id}`;
+            this.writeProviderUpdateMarker({
+                schemaVersion: 1,
+                providerId: profile.id,
+                secretRef,
+                startedAt: new Date().toISOString()
+            });
+            // Persist the invalidating epoch before touching the credential.
+            // If deletion or marker cleanup fails, runtimeEpoch/environment/
+            // credential all continue to fail closed on the durable marker.
+            this.clearAuthenticationConsentUnlocked(file, id);
+            this.rotateRuntimeEpochUnlocked(file, id);
+            this.writeMetadata(file);
+            this.vault.delete(secretRef);
+            this.clearProviderUpdateMarker();
         });
     }
 
@@ -497,6 +572,7 @@ export class ProviderRegistry {
             file.selectedProviderId = 'grok-subscription';
         }
         if (file.preferredModels) delete file.preferredModels[id];
+        if (file.runtimeEpochs) delete file.runtimeEpochs[id];
         this.clearAuthenticationConsentUnlocked(file, id);
         if (profile?.secretRef) {
             this.vault.delete(profile.secretRef);
@@ -550,38 +626,30 @@ export class ProviderRegistry {
      */
     withProviderEnvironment<T>(
         profileId: string,
-        operation: (environment: NodeJS.ProcessEnv, profile: ProviderProfile) => T
+        operation: (environment: NodeJS.ProcessEnv, profile: ProviderProfile, runtimeEpoch: string) => T
     ): T {
-        if (profileId === 'grok-subscription') {
-            const profile = this.get(profileId);
-            if (!profile) throw new Error(`Unknown provider profile: ${profileId}`);
-            return operation({}, profile);
-        }
         return this.withFileLock(
             this.metadataLockPath,
             'Another Xora Code process is updating Providers. Please retry.',
             () => {
                 const snapshot = this.providerEnvironmentSnapshotUnlocked(profileId);
-                return operation(snapshot.environment, snapshot.profile);
+                const runtimeEpoch = this.readMetadata().runtimeEpochs?.[profileId] ?? 'legacy-v1';
+                return operation(snapshot.environment, snapshot.profile, runtimeEpoch);
             }
         );
     }
 
     async withProviderEnvironmentAsync<T>(
         profileId: string,
-        operation: (environment: NodeJS.ProcessEnv, profile: ProviderProfile) => Promise<T>
+        operation: (environment: NodeJS.ProcessEnv, profile: ProviderProfile, runtimeEpoch: string) => Promise<T>
     ): Promise<T> {
-        if (profileId === 'grok-subscription') {
-            const profile = this.get(profileId);
-            if (!profile) throw new Error(`Unknown provider profile: ${profileId}`);
-            return operation({}, profile);
-        }
         return this.withFileLockAsync(
             this.metadataLockPath,
             'Another Xora Code process is updating Providers. Please retry.',
             async () => {
                 const snapshot = this.providerEnvironmentSnapshotUnlocked(profileId);
-                return operation(snapshot.environment, snapshot.profile);
+                const runtimeEpoch = this.readMetadata().runtimeEpochs?.[profileId] ?? 'legacy-v1';
+                return operation(snapshot.environment, snapshot.profile, runtimeEpoch);
             }
         );
     }
@@ -911,10 +979,9 @@ export class ProviderRegistry {
             const before = this.readGrokConfig();
             this.assertToml(before);
             const originalHash = crypto.createHash('sha256').update(before).digest('hex');
-            const profiles: ProviderProfile[] = [
-                ...file.providers,
-                ...(file.xaiApi ? [this.xaiProfile(file)] : [])
-            ];
+            // The retired built-in xAI slot is metadata-only compatibility.
+            // Only ordinary custom Providers belong in the live Grok catalog.
+            const profiles: ProviderProfile[] = [...file.providers];
             const block = [
                 BLOCK_START,
                 ...profiles.sort((a, b) => a.id.localeCompare(b.id)).map(profile => this.managedToml(profile)),
@@ -1158,6 +1225,16 @@ export class ProviderRegistry {
                         }
                     }
                 }
+                const runtimeEpochs: Record<string, string> = {};
+                if (file.runtimeEpochs && typeof file.runtimeEpochs === 'object') {
+                    for (const [id, value] of Object.entries(file.runtimeEpochs).slice(0, 128)) {
+                        if ((id === 'grok-subscription' || id === 'xai-api-key' || PROFILE_ID.test(id))
+                            && typeof value === 'string'
+                            && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+                            runtimeEpochs[id] = value;
+                        }
+                    }
+                }
                 let subscriptionAuthState: SubscriptionAuthState | undefined;
                 const authState = file.subscriptionAuthState;
                 if (authState && (authState.status === 'authenticated' || authState.status === 'unauthenticated')
@@ -1171,6 +1248,7 @@ export class ProviderRegistry {
                     ...(xaiApi ? { xaiApi } : {}),
                     ...(Object.keys(authenticationConsents).length ? { authenticationConsents } : {}),
                     ...(Object.keys(preferredModels).length ? { preferredModels } : {}),
+                    ...(Object.keys(runtimeEpochs).length ? { runtimeEpochs } : {}),
                     ...(subscriptionAuthState ? { subscriptionAuthState } : {}),
                     ...(file.subscriptionAuthMigrationComplete === true ? { subscriptionAuthMigrationComplete: true } : {})
                 };
@@ -1181,6 +1259,13 @@ export class ProviderRegistry {
             }
         }
         return { schemaVersion: 1, providers: [] };
+    }
+
+    protected rotateRuntimeEpochUnlocked(file: ProviderFile, providerId: string): string {
+        const epoch = crypto.randomUUID();
+        file.runtimeEpochs = file.runtimeEpochs ?? {};
+        file.runtimeEpochs[providerId] = epoch;
+        return epoch;
     }
 
     protected readMcpCredentials(): McpCredentialFile {

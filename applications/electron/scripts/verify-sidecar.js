@@ -102,6 +102,14 @@ function assertReleaseIdentity(release, lock, targetName) {
     assert(release.rustTarget === target.rustTarget, `Sidecar release metadata Rust target mismatch: expected ${target.rustTarget}.`);
     assert(release.cargoPackage === lock.toolchain.cargoPackage, 'Sidecar release metadata Cargo package mismatch.');
     assert(release.cargoProfile === lock.toolchain.cargoProfile, 'Sidecar release metadata Cargo profile mismatch.');
+    assert(
+        release.bundledTools?.ripgrep?.package === lock.bundledTools?.ripgrep?.package &&
+        release.bundledTools?.ripgrep?.version === lock.bundledTools?.ripgrep?.version &&
+        release.bundledTools?.ripgrep?.source === lock.bundledTools?.ripgrep?.source &&
+        JSON.stringify(release.bundledTools?.ripgrep?.features) === JSON.stringify(lock.bundledTools?.ripgrep?.features) &&
+        release.bundledTools?.ripgrep?.lockedSourceBuild === true,
+        'Sidecar release metadata bundled ripgrep identity mismatch.'
+    );
 }
 
 function verifyPlatformSignature(binary, allowUnsigned = false) {

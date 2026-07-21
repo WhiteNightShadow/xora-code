@@ -1,7 +1,7 @@
 <div align="center">
   <img src="applications/electron/resources/icons/1024x1024.png" width="112" alt="Xora Code 图标" />
   <h1>Xora Code</h1>
-  <p><strong>开源的桌面 Grok 编程 Agent 客户端</strong></p>
+  <p><strong>开源、模型中立的桌面编程 Agent IDE</strong></p>
   <p>
     基于 Eclipse Theia、Electron、ACP 与 Grok Build，<br />
     把项目理解、代码修改、终端执行与可审查的 Agent 工作流放进同一个桌面工作台。
@@ -19,6 +19,7 @@
     <a href="#快速开始">快速开始</a> ·
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
+    <a href="#v010-release-notes">v0.1.0 Release Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
     <a href="#参与项目">参与项目</a>
   </p>
@@ -51,8 +52,8 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 | **活动与变更审阅** | 按文件、搜索、终端、网络、Skill、MCP、Plugin 分类查看操作；支持打开差异和基于文件哈希的安全撤销。 |
 | **权限模式** | 默认逐项请求审批，也可开启完全访问；模式由应用级设置统一管理并持久化到本机，所有项目、会话和窗口保持一致。 |
 | **会话与本地历史** | 每次打开或重新打开项目都会进入干净的新会话页；历史事件以脱敏 JSONL 保存在本地，可由用户手动恢复，崩溃后不会自动重放任务。 |
-| **原生上下文压缩** | 集成 Grok Build 0.2.102 的自动上下文压缩机制；上游默认在 85% 阈值触发（可由 Grok 配置覆盖），界面仅展示 Runtime 提供的真实 Token 元数据和压缩状态，不按字符数推算。 |
-| **Grok 订阅与 API** | 支持 Grok 订阅登录、xAI API Key、可编辑 Base URL、模型 ID 和上下文窗口，也可连接可信的 Grok 中转服务。 |
+| **原生上下文压缩** | 复用 Grok Build 0.2.102 的自动上下文压缩机制；界面仅展示 Runtime 提供的真实 Token 元数据和压缩状态，不在桌面端按字符数推算。 |
+| **Grok 订阅与自定义模型** | 支持 Grok 订阅登录，以及可编辑 Base URL、API Key、模型 ID 和上下文窗口的自定义模型服务。 |
 | **兼容模型服务** | 自定义 Provider 支持 OpenAI Responses、OpenAI Chat Completions 与 Anthropic Messages 协议，所有模型仍通过 Grok Build 运行。 |
 | **图片上下文** | 可以选择或粘贴 PNG、JPEG、WebP 图片；仅在当前 ACP Runtime 明确声明图片能力时发送。 |
 | **Skills / MCP / Plugins（Preview）** | 通过“Xora Code 面板右上角齿轮 → Agent 设置”进入，支持 Skill 启停与 `SKILL.md`、MCP 配置与诊断、Plugin/Marketplace 安全安装流程；兼容来源汇总仍在完善。 |
@@ -60,7 +61,7 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 ## 使用方式
 
 1. **打开项目**：选择单个文件夹或多根工作区，并确认 Agent 的主工作目录。每次打开都会从新会话页开始；需要继续旧任务时，可从本地历史手动恢复。
-2. **连接模型**：在设置中登录 Grok 订阅，或配置 xAI API、自定义 Base URL 和模型。
+2. **连接模型**：在设置中登录 Grok 订阅，或添加带 Base URL、API Key 和模型 ID 的自定义模型服务。
 3. **描述任务**：在右侧 Xora Code 面板输入目标，审阅计划、工具活动、权限请求和最终 Diff。
 
 发送任务前，Xora Code 会先执行 Save All。若文件无法保存，任务不会开始，避免 Agent 读取到与编辑器不一致的磁盘状态。
@@ -70,7 +71,7 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 | 方式 | 适用场景 | 说明 |
 | --- | --- | --- |
 | **Grok 订阅** | 已使用 Grok CLI / Grok Build 的用户 | 浏览器登录和退出完全交给 Grok Build，并与本机 `~/.grok` 共享状态。 |
-| **xAI API / Grok 中转** | 使用 API Key、官方接口或可信中转站 | 可修改 Base URL、API Key、协议、模型 ID 与上下文窗口。 |
+| **自定义模型服务** | 使用 API Key、官方接口或可信中转站 | 可修改 Base URL、API Key、协议、模型 ID 与上下文窗口。 |
 | **自定义 Provider** | 使用兼容服务或内部网关 | 支持 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages。 |
 
 API Key 使用 Electron `safeStorage` 保存，不会回显到页面、日志或 Theia 设置。Linux 检测到不安全的密钥存储后仅允许当前会话使用。
@@ -84,7 +85,7 @@ flowchart LR
     Main["Electron 主进程<br/>AgentHost · PolicyEngine · SecretVault"]
     ACP["ACP Client<br/>JSON-RPC over stdio"]
     Grok["固定版本 Grok Build Sidecar"]
-    Model["Grok 订阅 / xAI API<br/>兼容模型服务"]
+    Model["Grok 订阅 / 自定义模型服务"]
     Ext["Skills · MCP · Plugins"]
     Local["safeStorage · 脱敏 JSONL<br/>Workspace Trust"]
 
@@ -111,7 +112,7 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 ## 安全与权限
 
 - Electron 主进程独占 Grok Build 进程管理、密钥读取和最终权限裁决，renderer 不能直接启动程序或批准敏感操作。
-- 项目默认受限；只有用户确认信任后，Agent、终端、MCP、Hooks 和可执行 Plugins 才能运行。
+- 项目默认受限；未信任项目可以初始化 Agent 待机连接，但不能执行 Agent 工具、终端、任务、MCP、Hooks 或可执行 Plugins，撤销信任会中断正在进行的可执行 Agent 活动。
 - `允许一次` 不会持久化；持久规则会绑定工作区、工具、路径或命令、MCP Server、sidecar 版本和有效期。
 - 请求审批 / 完全访问是应用级偏好，会跨项目、会话、窗口和应用重启保持一致；renderer 不能随会话请求篡改该模式。
 - 完全访问不等于绕过安全边界：Electron backend 仍会检查 Workspace Trust、当前 ACP 会话、工作区路径与符号链接边界，也不会把 sidecar 更新解释为更宽松的授权。
@@ -129,7 +130,7 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - Plan、工具活动、权限审批、Diff、安全撤销和图片输入
 - 应用级持久权限模式，以及低延迟首片段流式输出
 - Grok Build 原生自动上下文压缩、真实 Token 占用与压缩状态展示
-- Grok 订阅、xAI API、自定义 Base URL、Provider 与模型选择
+- Grok 订阅、自定义 API 服务、Base URL、Provider 与模型选择
 - Skills、MCP、Plugins 的设置入口与安全管理边界
 - macOS、Windows、Linux 的构建配置和 CI 矩阵
 
@@ -141,13 +142,44 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 
 > Preview 构建不代表稳定版或生产就绪版本。登录状态由 Grok Build 与共享的 `~/.grok` 管理；Xora Code 会在启动时读取实际认证状态，而不会以“自动恢复旧会话”代替明确的新会话体验。
 
+## v0.1.0 Release Notes
+
+`v0.1.0` 是 Xora Code 的首个 Alpha / Preview 源码基线，重点是打通可审查的桌面 Agent 主流程，并建立后续正式发行所需的安全与工程边界。
+
+> [!NOTE]
+> 本节描述仓库中 `0.1.0` 的已实现范围，不代表已发布正式稳定版。具体 Preview 安装包应以对应 GitHub Prerelease 中记录的源码提交、构建链接和 SHA-256 校验信息为准。
+
+### 版本亮点
+
+- **桌面编码工作台**：基于 Eclipse Theia 与 Electron 集成项目树、Monaco 编辑器、搜索、Diff、终端、任务和 SCM，并提供固定的 Xora Code Agent 面板。
+- **Grok Build + ACP**：由 Electron 主进程托管固定版本的 Grok Build sidecar，支持 ACP 初始化、认证、新建/加载会话、流式任务、取消、Plan、工具活动与权限请求。
+- **模型接入**：支持 Grok 订阅和自定义 Provider；自定义服务可配置 Base URL、API Key、模型 ID、上下文窗口，以及 OpenAI Responses、OpenAI Chat Completions 或 Anthropic Messages 协议。
+- **可审查的 Agent 体验**：首个 Assistant 文本片段优先呈现，后续高频片段批量刷新；文件、搜索、终端、网络与扩展活动分类展示，并可查看 Diff、执行哈希保护的安全撤销。
+- **本地会话与上下文**：默认从干净的新会话页开始，可手动恢复脱敏后的本地历史；支持 Runtime 原生 Token/压缩状态和能力受控的 PNG、JPEG、WebP 图片输入。
+- **扩展管理预览**：提供 Skills 启停、MCP 配置与诊断，以及要求固定提交和明确确认的 Plugin / Marketplace 安装入口。
+- **安全边界**：密钥由 Electron `safeStorage` 管理，权限在主进程最终裁决；Workspace Trust、路径与符号链接边界、Provider 网络访问、日志脱敏和会话身份均采用 fail-closed 检查。
+- **可复现工程基线**：固定 Node.js、Yarn、Theia、Electron、Grok Build 与 Rust 版本，并提供 ACP、Runtime、UI、安全、sidecar 和发行脚本测试。
+
+### 构建与发行准备
+
+- Preview CI 在原生 Runner 上构建 macOS arm64/x64、Windows x64 和 Linux x64 产物，并为每个平台重新构建、校验和 smoke test 固定的 Grok Build sidecar。
+- Preview 以不可覆盖的 GitHub Prerelease 发布，不会标记为 Latest，也不会生成正式更新清单或签名文件。
+- 正式 Release 工作流已包含平台签名、公证、SBOM、第三方 notices 和 Ed25519 更新清单门禁；缺少任一必需凭据时会拒绝发布。
+
+### 已知限制
+
+- 当前仍是 Alpha：Preview 产物没有完整平台签名，不适合生产环境或高风险项目。
+- Grok 原生配置与 Claude / Cursor 兼容来源的 MCP 汇总，以及 Skills / MCP / Plugins 的运行期无中断刷新仍在完善。
+- 仓库内尚未提供 sidecar 更新信任所需的 Ed25519 公钥；平台签名与更新签名私钥必须由发布环境单独提供。在这些门禁实际通过前，签名组件更新和正式 Release 都不可用。
+- Browser 目标仅用于 Fake Agent、契约测试和前端调试，不是可替代 Electron 桌面应用的产品版本。
+
 ## 发行通道
 
 Xora Code 将试用构建与正式分发严格分开，避免未签名产物被误认为稳定版本：
 
 | 通道 | 平台与产物 | 发布策略 |
 | --- | --- | --- |
-| **Preview / Alpha** | macOS arm64/x64：DMG + ZIP；Windows x64：NSIS；Linux x64：AppImage + deb | 在对应平台的原生 GitHub Runner 上构建，发布为 **Prerelease**，不标记为 **Latest**。当前产物未经完整平台签名，仅供开发与测试。 |
+| **Preview / Alpha** | macOS arm64/x64：DMG + ZIP；Windows x64：NSIS；Linux x64：AppImage + deb | 在对应平台的原生 Runner 或专用原生构建机上构建，附带目标平台 CycloneDX SBOM、构建来源与 SHA-256，发布为 **Prerelease**，不标记为 **Latest**。当前产物未经完整平台签名，仅供开发与测试。 |
 | **正式 Release** | 同一桌面平台矩阵，并携带经过校验的 Grok Build sidecar、许可证、notices 与 SBOM | 工作流保持 fail-closed；只有 Apple、Windows、Linux GPG、应用更新与 sidecar 更新签名凭据全部就绪，并通过平台签名、公证及发布验收后才会开放。 |
 
 Preview 页面会明确标注版本和提交，不会覆盖正式版更新通道。请在安装前核对 Release 说明与校验信息，并自行评估 Alpha 软件风险。
@@ -206,6 +238,18 @@ yarn package:electron:preview
 # 当前平台正式安装包；会严格校验固定 Grok sidecar
 yarn package:electron
 ```
+
+原生 Preview 安装包生成后，使用锁定的 Anchore Syft 1.48.0 生成目标平台 CycloneDX SBOM，并将其摘要合并进该平台的校验文件：
+
+```bash
+yarn sbom:preview -- \
+  --target darwin-arm64 \
+  --cache-dir /absolute/path/to/pinned-tool-cache \
+  --output-dir applications/electron/dist/preview-assets \
+  --source-dir applications/electron/dist/mac-arm64
+```
+
+支持的目标为 `darwin-arm64`、`darwin-x64`、`linux-x64` 和 `win32-x64`。`--source-dir` 必须指向 electron-builder 生成的 unpacked 应用目录；生成器会校验其中的 `app.asar`、sidecar 与法律文件，扫描实际 payload，并与该提交的锁定依赖树合并。后者是保守清单：会包含构建依赖，以覆盖 Syft 无法从 ASAR 和 stripped Rust 二进制识别的依赖，而不会把仅有少量文件条目的 payload 扫描冒充完整分发 SBOM。工具资产 URL 与 SHA-256 固定在 [`build/sbom/syft.lock.json`](build/sbom/syft.lock.json)，下载、解包、版本检查和 Syft 执行均不经过动态 Shell。
 
 <details>
 <summary><strong>构建固定版本的 Grok Build Sidecar</strong></summary>

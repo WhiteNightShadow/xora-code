@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeSidecarReleaseMetadata } from "./release-metadata.mjs";
@@ -11,9 +13,229 @@ import { writeSidecarReleaseMetadata } from "./release-metadata.mjs";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "../..");
 const lockPath = join(scriptDirectory, "sidecar.lock.json");
+const encodedRustFlagSeparator = "\u001f";
+const requiredRustCodegenFlags = ["-Cdebuginfo=0", "-Cstrip=symbols"];
 
 function fail(message) {
   throw new Error(`Grok sidecar build refused: ${message}`);
+}
+
+export function createRustPathRemaps({
+  workDirectory,
+  sourceDirectory,
+  targetDirectory,
+  homeDirectory,
+  cargoHome,
+  rustupHome,
+}) {
+  const candidates = [
+    ["source directory", sourceDirectory, "/xora-build/source"],
+    ["target directory", targetDirectory, "/xora-build/target"],
+    ["work directory", workDirectory, "/xora-build"],
+    ["Cargo home", cargoHome, "/xora-cache/cargo"],
+    ["Rustup home", rustupHome, "/xora-cache/rustup"],
+    ["home directory", homeDirectory, "/xora-home"],
+  ];
+  const seen = new Set();
+  return candidates.flatMap(([label, from, to]) => {
+    if (typeof from !== "string" || from.length < 3 || seen.has(from)) return [];
+    seen.add(from);
+    return [{ label, from, to }];
+  });
+}
+
+function rustFlagsFor(pathRemaps) {
+  return [
+    ...pathRemaps.map(({ from, to }) => `--remap-path-prefix=${from}=${to}`),
+    ...requiredRustCodegenFlags,
+  ];
+}
+
+function cargoEnvironment({ targetDirectory, pathRemaps, environment }) {
+  const env = {
+    ...environment,
+    CARGO_INCREMENTAL: "0",
+    CARGO_TARGET_DIR: targetDirectory,
+    SOURCE_DATE_EPOCH: "0",
+    CARGO_ENCODED_RUSTFLAGS: rustFlagsFor(pathRemaps).join(encodedRustFlagSeparator),
+  };
+  // CARGO_ENCODED_RUSTFLAGS is the single audited source of rustc flags. Drop
+  // ambient alternatives so local shells and CI runners cannot weaken the
+  // path-remap or symbol-stripping policy.
+  delete env.RUSTFLAGS;
+  delete env.CARGO_BUILD_RUSTFLAGS;
+  for (const name of Object.keys(env)) {
+    if (/^CARGO_TARGET_.*_RUSTFLAGS$/u.test(name)) delete env[name];
+  }
+  return env;
+}
+
+export function createRipgrepInstallPlan({
+  lock,
+  installRoot,
+  targetDirectory,
+  pathRemaps,
+  environment = process.env,
+}) {
+  const ripgrep = lock.bundledTools.ripgrep;
+  return {
+    file: "cargo",
+    args: [
+      "install",
+      "--locked",
+      "--force",
+      "--version",
+      `=${ripgrep.version}`,
+      "--features",
+      ripgrep.features.join(","),
+      "--root",
+      installRoot,
+      "--target-dir",
+      targetDirectory,
+      ripgrep.package,
+    ],
+    env: cargoEnvironment({ targetDirectory, pathRemaps, environment }),
+  };
+}
+
+export function assertRipgrepInstallPlan(plan, { lock, installRoot, targetDirectory, pathRemaps }) {
+  const ripgrep = lock.bundledTools.ripgrep;
+  const expectedArgs = [
+    "install",
+    "--locked",
+    "--force",
+    "--version",
+    `=${ripgrep.version}`,
+    "--features",
+    ripgrep.features.join(","),
+    "--root",
+    installRoot,
+    "--target-dir",
+    targetDirectory,
+    ripgrep.package,
+  ];
+  if (plan.file !== "cargo" || JSON.stringify(plan.args) !== JSON.stringify(expectedArgs)) {
+    fail("ripgrep Cargo install command differs from the audited locked source build");
+  }
+  assertCargoEnvironment(plan.env, { targetDirectory, pathRemaps });
+}
+
+export function createCargoBuildPlan({
+  lock,
+  targetDirectory,
+  pathRemaps,
+  bundledRipgrepPath,
+  environment = process.env,
+}) {
+  const env = cargoEnvironment({ targetDirectory, pathRemaps, environment });
+  if (bundledRipgrepPath !== undefined) {
+    env.GROK_SHELL_BUNDLE_RG_PATH = bundledRipgrepPath;
+    env.GROK_TOOLS_BUNDLE_RG_PATH = bundledRipgrepPath;
+  }
+  return {
+    file: "cargo",
+    args: ["build", "-p", lock.toolchain.cargoPackage, "--profile", lock.toolchain.cargoProfile],
+    env,
+  };
+}
+
+function assertCargoEnvironment(env, { targetDirectory, pathRemaps }) {
+  if (
+    env.CARGO_INCREMENTAL !== "0" ||
+    env.CARGO_TARGET_DIR !== targetDirectory ||
+    env.SOURCE_DATE_EPOCH !== "0"
+  ) {
+    fail("Cargo reproducibility environment is incomplete");
+  }
+  const expectedRustFlags = rustFlagsFor(pathRemaps);
+  const actualRustFlags = env.CARGO_ENCODED_RUSTFLAGS?.split(encodedRustFlagSeparator) ?? [];
+  if (JSON.stringify(actualRustFlags) !== JSON.stringify(expectedRustFlags)) {
+    fail("encoded Rust flags must exactly enforce path remapping and symbol stripping");
+  }
+  if (
+    env.RUSTFLAGS !== undefined ||
+    env.CARGO_BUILD_RUSTFLAGS !== undefined ||
+    Object.keys(env).some((name) => /^CARGO_TARGET_.*_RUSTFLAGS$/u.test(name))
+  ) {
+    fail("ambient Rust flags must not override the audited build policy");
+  }
+}
+
+export function assertCargoBuildPlan(plan, {
+  lock,
+  targetDirectory,
+  pathRemaps,
+  bundledRipgrepPath,
+}) {
+  const expectedArgs = ["build", "-p", lock.toolchain.cargoPackage, "--profile", lock.toolchain.cargoProfile];
+  if (plan.file !== "cargo" || JSON.stringify(plan.args) !== JSON.stringify(expectedArgs)) {
+    fail("Cargo command differs from the audited package/profile invocation");
+  }
+  assertCargoEnvironment(plan.env, { targetDirectory, pathRemaps });
+  if (
+    plan.env.GROK_SHELL_BUNDLE_RG_PATH !== bundledRipgrepPath ||
+    plan.env.GROK_TOOLS_BUNDLE_RG_PATH !== bundledRipgrepPath
+  ) {
+    fail("both Grok crates must bundle the same audited ripgrep binary");
+  }
+}
+
+function pathVariants(value) {
+  const variants = new Set([value, value.replaceAll("\\", "/"), value.replaceAll("/", "\\")]);
+  if (/^[A-Za-z]:/u.test(value)) {
+    variants.add(`${value[0].toLowerCase()}${value.slice(1)}`);
+    variants.add(`${value[0].toUpperCase()}${value.slice(1)}`);
+  }
+  return [...variants];
+}
+
+export function assertNoEmbeddedBuildPaths(binaryPath, pathRemaps) {
+  const binary = readFileSync(binaryPath);
+  for (const { label, from } of pathRemaps) {
+    for (const variant of pathVariants(from)) {
+      if (binary.includes(Buffer.from(variant, "utf8")) || binary.includes(Buffer.from(variant, "utf16le"))) {
+        fail(`staged binary still contains an unremapped ${label}`);
+      }
+    }
+  }
+}
+
+function detectedNativeArchitecture(binary) {
+  if (binary.length >= 20 && binary.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) {
+    if (binary[4] !== 2 || binary[5] !== 1) return undefined;
+    const machine = binary.readUInt16LE(18);
+    if (machine === 0x3e) return "x86_64-unknown-linux-gnu";
+    if (machine === 0xb7) return "aarch64-unknown-linux-gnu";
+    return undefined;
+  }
+  if (binary.length >= 8 && binary.readUInt32LE(0) === 0xfeedfacf) {
+    const cpu = binary.readUInt32LE(4);
+    if (cpu === 0x01000007) return "x86_64-apple-darwin";
+    if (cpu === 0x0100000c) return "aarch64-apple-darwin";
+    return undefined;
+  }
+  if (binary.length >= 0x40 && binary[0] === 0x4d && binary[1] === 0x5a) {
+    const header = binary.readUInt32LE(0x3c);
+    if (header + 6 > binary.length || binary.readUInt32LE(header) !== 0x00004550) return undefined;
+    const machine = binary.readUInt16LE(header + 4);
+    if (machine === 0x8664) return "x86_64-pc-windows-msvc";
+    if (machine === 0xaa64) return "aarch64-pc-windows-msvc";
+  }
+  return undefined;
+}
+
+export function assertNativeBinaryArchitecture(binaryPath, target) {
+  const actual = detectedNativeArchitecture(readFileSync(binaryPath));
+  if (actual !== target.rustTarget) {
+    fail(`native binary architecture is ${actual ?? "unknown"}; expected ${target.rustTarget}`);
+  }
+}
+
+export function assertRipgrepVersion(versionOutput, expectedVersion) {
+  const escaped = expectedVersion.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  if (!new RegExp(`^ripgrep ${escaped}(?:\\r?\\n|$)`, "u").test(versionOutput)) {
+    fail(`bundled ripgrep reports ${JSON.stringify(versionOutput)}; expected ${expectedVersion}`);
+  }
 }
 
 function parseArguments(argv) {
@@ -72,7 +294,16 @@ function assertExactSource(sourceDirectory, lock) {
 function checkoutExactSource(sourceDirectory, lock) {
   mkdirSync(sourceDirectory, { recursive: true });
   run("git", ["init", "--quiet"], { cwd: sourceDirectory });
-  run("git", ["remote", "add", "origin", lock.upstream.repository], { cwd: sourceDirectory });
+  let origin;
+  try {
+    origin = captured("git", ["remote", "get-url", "origin"], { cwd: sourceDirectory });
+  } catch {
+    run("git", ["remote", "add", "origin", lock.upstream.repository], { cwd: sourceDirectory });
+    origin = lock.upstream.repository;
+  }
+  if (origin !== lock.upstream.repository) {
+    fail(`existing build checkout uses an unexpected origin: ${origin}`);
+  }
   run("git", ["fetch", "--depth=1", "origin", lock.upstream.commit], { cwd: sourceDirectory });
   run("git", ["checkout", "--detach", "--quiet", "FETCH_HEAD"], { cwd: sourceDirectory });
   assertExactSource(sourceDirectory, lock);
@@ -109,30 +340,72 @@ function main() {
 
   const sourceDirectory = join(workDirectory, "source");
   const targetDirectory = join(workDirectory, "target");
+  const ripgrepInstallRoot = join(workDirectory, "ripgrep-install-pcre2");
+  const ripgrepTargetDirectory = join(targetDirectory, "ripgrep");
   mkdirSync(workDirectory, { recursive: true });
   checkoutExactSource(sourceDirectory, lock);
   assertNativeToolchain(lock, target);
 
-  const buildEnvironment = {
-    ...process.env,
-    CARGO_INCREMENTAL: "0",
-    CARGO_TARGET_DIR: targetDirectory,
-    SOURCE_DATE_EPOCH: "0",
-  };
+  const homeDirectory = homedir();
+  const pathRemaps = createRustPathRemaps({
+    workDirectory,
+    sourceDirectory,
+    targetDirectory,
+    homeDirectory,
+    cargoHome: resolve(process.env.CARGO_HOME ?? join(homeDirectory, ".cargo")),
+    rustupHome: resolve(process.env.RUSTUP_HOME ?? join(homeDirectory, ".rustup")),
+  });
+  const ripgrepInstall = createRipgrepInstallPlan({
+    lock,
+    installRoot: ripgrepInstallRoot,
+    targetDirectory: ripgrepTargetDirectory,
+    pathRemaps,
+  });
+  assertRipgrepInstallPlan(ripgrepInstall, {
+    lock,
+    installRoot: ripgrepInstallRoot,
+    targetDirectory: ripgrepTargetDirectory,
+    pathRemaps,
+  });
+  run(ripgrepInstall.file, ripgrepInstall.args, { cwd: workDirectory, env: ripgrepInstall.env });
+
+  const ripgrep = lock.bundledTools.ripgrep;
+  const ripgrepBinary = join(
+    ripgrepInstallRoot,
+    "bin",
+    `${ripgrep.binary}${target.executableSuffix}`,
+  );
+  const ripgrepStat = lstatSync(ripgrepBinary);
+  if (!ripgrepStat.isFile() || ripgrepStat.isSymbolicLink() || ripgrepStat.size === 0) {
+    fail(`Cargo did not install ${ripgrepBinary}`);
+  }
+  const reportedRipgrepVersion = captured(ripgrepBinary, ["--version"]);
+  assertRipgrepVersion(reportedRipgrepVersion, ripgrep.version);
+  assertNativeBinaryArchitecture(ripgrepBinary, target);
+  assertNoEmbeddedBuildPaths(ripgrepBinary, pathRemaps);
+
+  const cargoBuild = createCargoBuildPlan({
+    lock,
+    targetDirectory,
+    pathRemaps,
+    bundledRipgrepPath: ripgrepBinary,
+  });
+  assertCargoBuildPlan(cargoBuild, {
+    lock,
+    targetDirectory,
+    pathRemaps,
+    bundledRipgrepPath: ripgrepBinary,
+  });
   if (process.platform === "win32") {
     const protoc = captured("where.exe", ["protoc.exe"]).split(/\r?\n/u)[0];
     const protocVersion = captured(protoc, ["--version"]);
     if (protocVersion !== `libprotoc ${lock.toolchain.protoc}`) {
       fail(`Windows protoc reports ${JSON.stringify(protocVersion)}; expected libprotoc ${lock.toolchain.protoc}`);
     }
-    buildEnvironment.PROTOC = protoc;
+    cargoBuild.env.PROTOC = protoc;
   }
   // Keep this invocation aligned with the audited command in sidecar.lock.json.
-  run(
-    "cargo",
-    ["build", "-p", lock.toolchain.cargoPackage, "--profile", lock.toolchain.cargoProfile],
-    { cwd: sourceDirectory, env: buildEnvironment },
-  );
+  run(cargoBuild.file, cargoBuild.args, { cwd: sourceDirectory, env: cargoBuild.env });
 
   const sourceBinary = join(
     targetDirectory,
@@ -147,6 +420,24 @@ function main() {
   const stagedBinary = join(stageDirectory, stagedName);
   copyFileSync(sourceBinary, stagedBinary);
   if (target.executableSuffix === "") chmodSync(stagedBinary, 0o755);
+  assertNoEmbeddedBuildPaths(stagedBinary, pathRemaps);
+
+  // Theia's npm-provided ripgrep executable can retain paths from its upstream
+  // build machine. Stage the same audited source build as a packaging helper;
+  // native afterPack hooks verify it, replace Theia's copy, then remove this
+  // helper so the application does not ship a redundant executable.
+  const helperDirectory = join(stageDirectory, "packaging-tools");
+  rmSync(helperDirectory, { recursive: true, force: true });
+  mkdirSync(helperDirectory, { recursive: true });
+  const helperName = `${ripgrep.binary}${target.executableSuffix}`;
+  const helperBinary = join(helperDirectory, helperName);
+  copyFileSync(ripgrepBinary, helperBinary);
+  if (target.executableSuffix === "") chmodSync(helperBinary, 0o755);
+  assertRipgrepVersion(captured(helperBinary, ["--version"]), ripgrep.version);
+  assertNativeBinaryArchitecture(helperBinary, target);
+  assertNoEmbeddedBuildPaths(helperBinary, pathRemaps);
+  const helperHash = createHash("sha256").update(readFileSync(helperBinary)).digest("hex");
+  writeFileSync(join(helperDirectory, `${helperName}.sha256`), `${helperHash}  ${helperName}\n`, "utf8");
 
   const noticesDirectory = join(stageDirectory, "notices");
   // The stage directory can be reused by local and CI builds. Remove notices
@@ -174,6 +465,7 @@ function main() {
     [join(repositoryRoot, "LICENSE"), "XORA-CODE-LICENSE"],
     [join(repositoryRoot, "NOTICE.md"), "XORA-CODE-NOTICE.md"],
     [join(repositoryRoot, "THIRD-PARTY-NOTICES.md"), "THIRD-PARTY-NOTICES.md"],
+    [join(repositoryRoot, "resources/legal/ripgrep/RIPGREP-SOURCE-BUILD-NOTICE.md"), "RIPGREP-SOURCE-BUILD-NOTICE.md"],
     [join(sourceDirectory, "LICENSE"), "GROK-BUILD-LICENSE"],
     [join(sourceDirectory, "THIRD-PARTY-NOTICES"), "GROK-BUILD-THIRD-PARTY-NOTICES"],
     [join(sourceDirectory, "crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md"), "GROK-TOOLS-THIRD-PARTY-NOTICES.md"],
@@ -194,8 +486,10 @@ function main() {
 
   const release = writeSidecarReleaseMetadata(stageDirectory, targetName);
   process.stdout.write(
-    `${JSON.stringify({ target: targetName, binary: stagedBinary, version: reportedVersion, sha256: release.sha256, size: release.size, notices: notices.length })}\n`,
+    `${JSON.stringify({ target: targetName, binary: stagedBinary, version: reportedVersion, bundledRipgrepVersion: ripgrep.version, sha256: release.sha256, size: release.size, notices: notices.length })}\n`,
   );
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

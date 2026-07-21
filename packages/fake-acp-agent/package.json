@@ -2,6 +2,7 @@
   "name": "@xora-code/fake-acp-agent",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "commonjs",
   "description": "Deterministic ACP stdio agent for desktop integration and contract tests",
   "main": "dist/src/index.js",

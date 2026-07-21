@@ -11,6 +11,7 @@ const test = require('node:test');
 const {
     SIGNING_ENVIRONMENT,
     TARGETS,
+    assertFinalExecutableArtifacts,
     previewEnvironment,
     selectArtifacts,
     stagePreviewAssets
@@ -20,8 +21,10 @@ const repositoryRoot = path.resolve(__dirname, '..', '..', '..');
 const workflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/preview-release.yml'), 'utf8');
 const notes = fs.readFileSync(path.join(repositoryRoot, '.github/PREVIEW-RELEASE-NOTES.md'), 'utf8');
 const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'applications/electron/package.json'), 'utf8'));
+const builderConfiguration = fs.readFileSync(path.join(repositoryRoot, 'applications/electron/electron-builder.yml'), 'utf8');
 const packager = fs.readFileSync(path.join(repositoryRoot, 'applications/electron/scripts/package-preview-installers.js'), 'utf8');
 const macHook = fs.readFileSync(path.join(repositoryRoot, 'applications/electron/scripts/preview-after-pack.js'), 'utf8');
+const sanitizerHook = fs.readFileSync(path.join(repositoryRoot, 'applications/electron/scripts/sanitize-after-pack.js'), 'utf8');
 
 test('preview workflow is manual, concurrent-safe, four-target, and least-privilege', () => {
     assert.match(workflow, /^\s{2}workflow_dispatch:\s*$/mu);
@@ -57,11 +60,22 @@ test('preview packaging creates installers without formal signing or update mani
     assert.match(packager, /--config\.mac\.identity=null/u);
     assert.match(packager, /--config\.mac\.notarize=false/u);
     assert.match(packager, /--config\.afterPack=\.\/scripts\/preview-after-pack\.js/u);
+    assert.match(packager, /native hdiutil call can take longer/u);
+    assert.match(packager, /\['--mac', 'zip'/u);
+    assert.match(packager, /createMacPreviewDmg\(distRoot, target\)/u);
+    assert.match(packager, /arch === 'x64' \? 'mac' : `mac-\$\{arch\}`/u);
+    assert.match(packager, /'convert', writableImage/u);
+    assert.match(packager, /'verify', artifact/u);
     assert.match(packager, /Get-AuthenticodeSignature/u);
     assert.match(packager, /stdout\.trim\(\) !== 'NotSigned'/u);
+    assert.match(packager, /assertFinalExecutableArtifacts\(distRoot, target\)/u);
     assert.match(macHook, /--deep', '--sign', '-'/u);
     assert.match(macHook, /Signature=adhoc/u);
     assert.match(macHook, /TeamIdentifier=not set/u);
+    assert.match(macHook, /stripNativeAddons/u);
+    assert.match(macHook, /assertNoBuildPathLeaks\(bundle\)/u);
+    assert.match(builderConfiguration, /^afterPack: \.\/scripts\/sanitize-after-pack\.js$/mu);
+    assert.match(sanitizerHook, /sanitizePackagedOutput\(context\)/u);
 
     for (const forbidden of [
         'sign-release-manifests.mjs', 'verify-release-key-configuration.mjs',
@@ -82,7 +96,16 @@ test('preview publish is immutable, prerelease-only, non-latest, and explicitly 
     assert.match(notes, /ad-hoc/u);
     assert.match(notes, /没有 Authenticode/u);
     assert.match(notes, /SHA-256/u);
+    assert.match(notes, /CycloneDX JSON SBOM/u);
     assert.match(notes, /不会替代 Latest/u);
+    assert.doesNotMatch(workflow, /anchore\/sbom-action@/u);
+    assert.match(workflow, /yarn sbom:preview --/u);
+    assert.match(workflow, /build\/sbom\/syft\.lock\.json|xora-code\/syft/u);
+    assert.match(workflow, /--target "\$\{\{ matrix\.grokTarget \}\}"/u);
+    assert.match(workflow, /merge-multiple: false/u);
+    assert.match(workflow, /build\/sbom\/verify-preview-assets\.mjs/u);
+    assert.match(workflow, /for target in darwin-arm64 darwin-x64 win32-x64 linux-x64/u);
+    assert.doesNotMatch(workflow, /Missing CycloneDX SBOM for \$\{target\}/u);
 });
 
 test('packager strips signing credentials and stages only target installers plus checksums', t => {
@@ -109,8 +132,32 @@ test('packager strips signing credentials and stages only target installers plus
     const staged = fs.readdirSync(output).sort();
     assert.ok(staged.includes('SHA256SUMS-darwin-arm64.txt'));
     assert.ok(staged.includes('Xora-Code-0.1.0-darwin-arm64-PREVIEW.json'));
+    assert.match(
+        fs.readFileSync(path.join(output, 'SHA256SUMS-darwin-arm64.txt'), 'utf8'),
+        /Xora-Code-0\.1\.0-darwin-arm64-PREVIEW\.json/u
+    );
     assert.equal(staged.includes('latest-mac.yml'), false);
 
     fs.writeFileSync(path.join(dist, 'grok-sidecar-update.json'), '{}');
     assert.throws(() => selectArtifacts(dist, TARGETS['darwin-arm64']), /formal update manifests/u);
+});
+
+test('packager rejects a build path in final installer executables and redacts its value', t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-preview-final-scan-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const installer = path.join(root, 'Xora Code-0.1.0-win-x64.exe');
+    fs.writeFileSync(installer, String.raw`debug=D:\Users\private-builder\work\xora\installer.cc`);
+
+    let error;
+    try {
+        assertFinalExecutableArtifacts(root, TARGETS['win32-x64']);
+    } catch (caught) {
+        error = caught;
+    }
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /Windows user or CI build path/u);
+    assert.doesNotMatch(error.message, /private-builder|installer\.cc/u);
+
+    fs.writeFileSync(installer, 'https://docs.example.test/D:/Users/example/work/setup');
+    assert.deepEqual(assertFinalExecutableArtifacts(root, TARGETS['win32-x64']), [installer]);
 });

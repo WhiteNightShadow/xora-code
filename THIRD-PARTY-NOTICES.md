@@ -9,6 +9,7 @@ Key components include:
 - Eclipse Theia 1.73.1 and its transitive dependencies.
 - Electron 39.8.7, including Chromium and Node.js.
 - Grok Build 0.2.102 from public commit `98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce` and `SOURCE_REV=124d85bc5dc6e7805560215fcc6d5413944920e1`.
+- ripgrep 15.0.0 with its `pcre2` feature, built from the locked crates.io source with Rust 1.92.0 and used by both Grok Build and project search under its MIT/Unlicense terms.
 - `smol-toml` 1.6.1 and other npm packages recorded by `yarn.lock`.
 
 The full Grok Build `THIRD-PARTY-NOTICES`, tool crate notices, vendored `NOTICE`, and Apache-2.0 license are copied verbatim from the pinned source during the native sidecar build. A Release is blocked if any required notice or the generated CycloneDX SBOM is absent.

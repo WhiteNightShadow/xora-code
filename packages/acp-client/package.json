@@ -2,6 +2,7 @@
   "name": "@xora-code/acp-client",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "commonjs",
   "description": "Small, dependency-free ACP JSON-RPC client for newline-delimited stdio transports",
   "main": "dist/src/index.js",

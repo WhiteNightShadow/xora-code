@@ -62,6 +62,15 @@ function compute(stageDirectory, targetName) {
     rustTarget: target.rustTarget,
     cargoPackage: lock.toolchain.cargoPackage,
     cargoProfile: lock.toolchain.cargoProfile,
+    bundledTools: {
+      ripgrep: {
+        package: lock.bundledTools.ripgrep.package,
+        version: lock.bundledTools.ripgrep.version,
+        source: lock.bundledTools.ripgrep.source,
+        features: lock.bundledTools.ripgrep.features,
+        lockedSourceBuild: true,
+      },
+    },
     sha256: createHash("sha256").update(bytes).digest("hex"),
     size: binary.metadata.size,
   };

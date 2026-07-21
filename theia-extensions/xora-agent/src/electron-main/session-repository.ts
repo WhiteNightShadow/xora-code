@@ -72,6 +72,44 @@ export class AgentSessionRepository {
         });
     }
 
+    /**
+     * Permanently retires every ACP binding owned by a Provider.
+     *
+     * A Provider configuration or credential change is an isolation boundary:
+     * an ACP session created with the previous runtime identity must never be
+     * loaded under the new credentials. The local conversation stays visible
+     * and can later be rebound to a fresh ACP session without replaying stored
+     * prompts. Keep the original timestamps and index order so invalidation
+     * does not make old conversations look newly active.
+     */
+    markProviderSessionsReadOnly(providerId: string): SessionRecord[] {
+        if (!providerId.trim()) {
+            throw new Error('A Provider identifier is required to retire Agent sessions.');
+        }
+        return this.withIndexLock(() => {
+            const index = this.readIndex();
+            const matching: SessionRecord[] = [];
+            let changed = false;
+            for (let position = 0; position < index.sessions.length; position += 1) {
+                const previous = index.sessions[position];
+                if (previous.providerId !== providerId) continue;
+                const next: SessionRecord = previous.status === 'read-only'
+                    ? previous
+                    : { ...previous, status: 'read-only' };
+                if (next !== previous) {
+                    index.sessions[position] = next;
+                    changed = true;
+                }
+                matching.push({ ...next });
+            }
+            // Avoid replacing index.json on a repeated invalidation. Besides
+            // making the operation idempotent, this leaves the cache signature
+            // stable for every other Xora Code window.
+            if (changed) this.writeIndex(index);
+            return matching;
+        });
+    }
+
     get(appSessionId: string): SessionRecord | undefined {
         const record = this.readIndex().sessions.find(session => session.appSessionId === appSessionId);
         return record ? { ...record } : undefined;

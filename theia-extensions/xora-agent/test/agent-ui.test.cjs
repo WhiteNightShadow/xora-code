@@ -86,6 +86,9 @@ test('Agent composer and transcript include the interaction safeguards used by t
     assert.ok(promptChangeStart >= 0 && promptChangeEnd > promptChangeStart);
     assert.doesNotMatch(source.slice(promptChangeStart, promptChangeEnd), /this\.update\(\)|requestRuntimePrewarm/);
     assert.match(source, /syncComposerSubmitButton\(\)/);
+    assert.match(source, /this\.composerSubmitButton = node;\s*if \(node\) this\.syncComposerSubmitButton\(\);/);
+    assert.doesNotMatch(source, /disabled=\{!composerHasContent/,
+        'React must not keep a stale disabled prop after native IME input enables the send button');
     assert.match(source, /xora-agent-streaming-text/);
     assert.match(source, /今天想完成什么/);
     assert.match(source, /useSuggestion\(prompt\)/);
@@ -101,8 +104,26 @@ test('Agent composer and transcript include the interaction safeguards used by t
     assert.match(source, /!root \|\| !snapshot\.workspaceAttached/);
     assert.doesNotMatch(source, /!snapshot\.workspaceTrusted\s*\?\s*this\.renderTrust\(\)/);
     assert.match(source, /const \[, preparedRuntime\] = await Promise\.all\(/);
-    assert.match(source, /runtime\.phase !== 'ready' && runtime\.phase !== 'auth-required'/);
+    assert.match(source, /const runtimePromise = this\.service\.startRuntime\(\{[\s\S]*?workspaceRoot: root,[\s\S]*?providerId: submission\.providerId/);
+    assert.doesNotMatch(source, /runtimeNeedsStart/,
+        'Send must revalidate a renderer-ready runtime with the Electron backend');
     assert.match(source, /正在连接，随后发送/);
+    assert.match(source, /protected renderPendingSubmission\(submission: PromptSubmission\)/);
+    assert.match(source, /任务已接收，正在发送/);
+    assert.match(source, /submission\.userEventReceived = true/);
+    assert.match(source, /event\.kind === 'text-delta' && event\.role === 'user'/);
+    assert.match(source, /protected sendPreparationInFlight = false/);
+    assert.match(source, /this\.submission \|\| this\.sendPreparationInFlight \|\| this\.sessionLoading/);
+    assert.ok(
+        source.indexOf('this.sendPreparationInFlight = true;', source.indexOf('protected async send('))
+            < source.indexOf('await this.model.refresh();', source.indexOf('protected async send(')),
+        'Send must acquire its preparation mutex before refreshing the Provider snapshot'
+    );
+    assert.ok(
+        source.indexOf('const draftTextAtStart = this.prompt;', source.indexOf('protected async send('))
+            < source.indexOf('await this.model.refresh();', source.indexOf('protected async send(')),
+        'the clicked draft must be frozen before the async Provider refresh'
+    );
     assert.match(source, /closePopoverFromScrim\(event/);
     assert.match(source, /requestAnimationFrame\(\(\) => this\.textarea\?\.focus\(\)\)/);
     const textareaStart = source.indexOf("aria-label='Agent 任务输入框'");
@@ -148,7 +169,8 @@ test('image submissions and session restores stay bound to their original Agent 
     assert.match(source, /this\.authenticateRuntime\(runtime, \(\) => this\.isSubmissionContextCurrent\(submission\)\)/);
     assert.match(source, /late failure from an old project\/provider\/session/);
     assert.match(source, /this\.invalidateAgentContext\('项目已变化，未发送的图片已清除。'\)/);
-    assert.match(source, /const targetContextKey = this\.agentContextKey\(session\.workspaceRoot, session\.providerId, session\.appSessionId\)/);
+    assert.match(source, /const targetContextKey = this\.agentContextKey\([\s\S]*session\.workspaceRoot,[\s\S]*this\.model\.snapshot\.providerId,[\s\S]*session\.appSessionId/);
+    assert.doesNotMatch(source, /此历史仅供查看，请新建会话/);
     assert.match(source, /generation !== this\.sessionLoadGeneration \|\| this\.imageDraftContextKey\(\) !== targetContextKey/);
     assert.match(source, /this\.observedAgentContextKey = targetContextKey;\s*this\.model\.showSessionHistory\(session, history\)/);
     assert.ok(sendSource.indexOf('this.model.startNewSession()') < sendSource.indexOf('this.service.createSession({'));
@@ -212,7 +234,13 @@ test('Agent history, context and model controls keep the sidebar concise and tru
     assert.match(source, /计费 usage 不参与这里的计算/);
     assert.match(source, /已自动整理 \{summary\.compactionCount\} 次/);
     assert.match(source, /summarizeAgentContext\(snapshot, this\.model\.transcript\)/);
-    assert.match(source, /renderModelOptions\(snapshot, active\)/);
+    assert.match(source, /renderModelOptions\(modelChoiceGroups\)/);
+    assert.match(source, /agentModelChoiceGroups\(this\.providers, snapshot, active\)/);
+    assert.match(source, /decodeAgentModelChoice\(modelId\)/);
+    assert.doesNotMatch(source, /await this\.service\.selectProvider\(providerId\)/,
+        'the composer must not switch Provider credentials; that belongs to Settings');
+    assert.match(source, /选择当前模型服务提供的模型/);
+    assert.doesNotMatch(source, /selectDefaultModel\(providerId, catalogModelId\)/);
     assert.doesNotMatch(source, /shouldShowModelSelector\(snapshot, active\)/);
     assert.match(source, /className='xora-model-control'/);
     assert.match(source, /void this\.loadModelOptions\(\)/);

@@ -14,6 +14,7 @@ import {
 } from '../common/agent-protocol';
 import { AgentHostClientImpl } from './agent-client';
 import { isMachineToolTitle } from './agent-display-helpers';
+import { friendlyAgentErrorMessage } from './agent-error-labels';
 
 export interface TranscriptEntry {
     id: string;
@@ -63,6 +64,8 @@ export class AgentViewModel {
      * restore events from stealing the user's current selection.
      */
     protected selectedSessionOverride: string | null | undefined;
+    /** Last Electron-host sequence applied across event and RPC channels. */
+    protected appliedSnapshotRevision = -1;
 
     @postConstruct()
     protected init(): void {
@@ -129,7 +132,12 @@ export class AgentViewModel {
             this.clearPendingPermissions(event.sessionId);
         } else if (event.kind === 'error') {
             if (event.sessionId && !this.isVisibleSession(event.sessionId)) return;
-            this.transcript.push({ id: this.id('error'), kind: 'error', text: event.message, payload: event });
+            this.transcript.push({
+                id: this.id('error'),
+                kind: 'error',
+                text: friendlyAgentErrorMessage(event.message),
+                payload: event
+            });
             if (event.code === 'SIDECAR_CRASHED') {
                 this.clearPendingPermissions();
             }
@@ -337,10 +345,41 @@ export class AgentViewModel {
     }
 
     protected applySnapshot(snapshot: RuntimeSnapshot): void {
+        const incomingRevision = snapshot.revision;
+        if (Number.isSafeInteger(incomingRevision)
+            && (incomingRevision as number) < this.appliedSnapshotRevision) {
+            return;
+        }
+        const previousSnapshot = this.snapshot;
         const previousWorkspaceRoot = this.snapshot.workspaceRoot;
         const previousProviderId = this.snapshot.providerId;
+        // Electron events and RPC results travel over separate asynchronous
+        // paths. Immediately after setSession(created), an older runtime
+        // snapshot can arrive without that just-created record. There is no
+        // session-delete API, so preserve the locally selected record on the
+        // same workspace until an authoritative newer session/snapshot
+        // includes it. Otherwise the composer falls back to “new session” and
+        // silently abandons the prompt before sendPrompt is called.
+        let sessions = snapshot.sessions;
+        if (typeof this.selectedSessionOverride === 'string'
+            && !sessions.some(session => session.appSessionId === this.selectedSessionOverride)) {
+            const locallySelected = previousSnapshot.sessions.find(
+                session => session.appSessionId === this.selectedSessionOverride
+            );
+            if (locallySelected && locallySelected.workspaceRoot === snapshot.workspaceRoot) {
+                // A locally created B session cannot legitimately disappear
+                // inside a late A snapshot. This also protects compatibility
+                // clients that predate the snapshot revision field.
+                if (locallySelected.providerId !== snapshot.providerId) return;
+                sessions = [locallySelected, ...sessions];
+            }
+        }
+        if (Number.isSafeInteger(incomingRevision)) {
+            this.appliedSnapshotRevision = Math.max(this.appliedSnapshotRevision, incomingRevision as number);
+        }
         this.snapshot = {
             ...snapshot,
+            sessions,
             sessionContexts: {
                 ...(this.snapshot.sessionContexts ?? {}),
                 ...(snapshot.sessionContexts ?? {})
@@ -349,15 +388,16 @@ export class AgentViewModel {
         if (this.selectedSessionOverride === null) {
             this.snapshot.activeSessionId = undefined;
         } else if (this.selectedSessionOverride !== undefined) {
-            const selected = snapshot.sessions.find(session => session.appSessionId === this.selectedSessionOverride);
+            const selected = sessions.find(session => session.appSessionId === this.selectedSessionOverride);
             if (selected
-                && selected.workspaceRoot === snapshot.workspaceRoot
-                && selected.providerId === snapshot.providerId) {
+                && selected.workspaceRoot === snapshot.workspaceRoot) {
                 this.snapshot.activeSessionId = this.selectedSessionOverride;
             } else {
-                // A project-root or Provider change is a real isolation
-                // boundary. Pin the UI to a new session instead of falling back
-                // to a stale backend activeSessionId from an older snapshot.
+                // A project-root change is always an isolation boundary. A
+                // missing/deleted record is also cleared. An explicitly chosen
+                // history from another Provider remains visible while Electron
+                // rebinds it to the application-wide Provider; renderer state
+                // can never switch credentials or authorize the old ACP id.
                 this.selectedSessionOverride = null;
                 this.snapshot.activeSessionId = undefined;
                 this.clearTranscript();

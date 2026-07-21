@@ -107,13 +107,15 @@
   "scripts": {
     "clean": "theia clean && rimraf node_modules lib src-gen dist",
     "build": "yarn -s rebuild && theia build --app-target=electron --mode development",
-    "build:prod": "yarn -s rebuild && theia build --app-target=electron",
+    "build:prod": "node scripts/generate-third-party-licenses.js && yarn -s rebuild && theia build --app-target=electron",
+    "generate:licenses": "node scripts/generate-third-party-licenses.js",
     "rebuild": "theia rebuild:electron --cacheRoot ../..",
     "test": "node --test test/*.test.cjs",
     "start": "electron scripts/theia-electron-main.js --plugins=local-dir:../../plugins",
     "package": "yarn verify:sidecar && yarn clean:dist && yarn build:prod && electron-builder --publish never",
     "package:preview": "yarn verify:sidecar:preview && yarn clean:dist && yarn build:prod && electron-builder --dir --publish never",
     "package:preview:installers": "node scripts/package-preview-installers.js",
+    "sbom:preview": "node ../../build/sbom/generate-preview-sbom.mjs",
     "verify:sidecar": "node scripts/verify-sidecar.js",
     "verify:sidecar:preview": "node scripts/verify-sidecar.js --allow-missing --allow-unsigned-preview",
     "clean:dist": "rimraf dist"
