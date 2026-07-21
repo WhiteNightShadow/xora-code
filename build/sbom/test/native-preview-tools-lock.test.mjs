@@ -58,6 +58,11 @@ test("Windows activates the MSVC compiler and linker before cargo installs DotSl
   assert.match(windowsScript, /Get-Command link\.exe/u);
 });
 
+test("Windows resolves its sibling tool lock after PowerShell 5.1 initializes PSScriptRoot", () => {
+  assert.doesNotMatch(windowsScript, /\[string\]\$ToolLock\s*=\s*\(Join-Path\s+\$PSScriptRoot/u);
+  assert.match(windowsScript, /if \(\[string\]::IsNullOrWhiteSpace\(\$ToolLock\)\)[\s\S]*?Join-Path \$PSScriptRoot 'native-preview-tools\.lock\.json'/u);
+});
+
 test("native builders clear ambient runtime and compiler injection hooks", () => {
   for (const script of [linuxScript, windowsScript]) {
     for (const name of ["NODE_OPTIONS", "PYTHONPATH", "RUSTC_WRAPPER", "CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS"]) {

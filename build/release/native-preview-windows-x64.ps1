@@ -9,13 +9,20 @@ param(
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$ToolCache = (Join-Path $env:LOCALAPPDATA 'XoraCode\native-preview-tools'),
-    [string]$ToolLock = (Join-Path $PSScriptRoot 'native-preview-tools.lock.json')
+    [string]$ToolLock
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Windows PowerShell 5.1 evaluates parameter default expressions before it
+# initializes $PSScriptRoot. Resolve the sibling lock only after binding so a
+# normal `-File native-preview-windows-x64.ps1 ...` invocation works there.
+if ([string]::IsNullOrWhiteSpace($ToolLock)) {
+    $ToolLock = Join-Path $PSScriptRoot 'native-preview-tools.lock.json'
+}
 
 function Fail {
     param([Parameter(Mandatory = $true)][string]$Message)
