@@ -215,7 +215,7 @@ jobs:
           };
           let notes = fs.readFileSync('.github/PREVIEW-RELEASE-NOTES.md', 'utf8');
           for (const [name, value] of Object.entries(values)) notes = notes.replaceAll(`{{${name}}}`, value);
-          if (/{{[A-Z_]+}}/u.test(notes)) throw new Error('Preview notes contain unresolved placeholders.');
+          if (/\{\{[A-Z_]+\}\}/u.test(notes)) throw new Error('Preview notes contain unresolved placeholders.');
           fs.writeFileSync(path, notes);
           NODE
 

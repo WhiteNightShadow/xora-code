@@ -106,6 +106,8 @@ test('preview publish is immutable, prerelease-only, non-latest, and explicitly 
     assert.match(workflow, /build\/sbom\/verify-preview-assets\.mjs/u);
     assert.match(workflow, /for target in darwin-arm64 darwin-x64 win32-x64 linux-x64/u);
     assert.doesNotMatch(workflow, /Missing CycloneDX SBOM for \$\{target\}/u);
+    assert.match(workflow, /if \(\/\\\{\\\{\[A-Z_\]\+\\\}\\\}\/u\.test\(notes\)\)/u);
+    assert.doesNotMatch(workflow, /if \(\/\{\{\[A-Z_\]\+\}\}\/u\.test\(notes\)\)/u);
 });
 
 test('packager strips signing credentials and stages only target installers plus checksums', t => {
