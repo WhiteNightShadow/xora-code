@@ -22,7 +22,12 @@ export type AgentMarkdownTableAlignment = 'left' | 'center' | 'right' | undefine
 export interface AgentMarkdownProps {
     readonly text: string;
     readonly className?: string;
+    /** When provided, path-like tokens become clickable workspace file links. */
+    readonly onOpenPath?: (path: string) => void;
 }
+
+/** Relative or absolute source-file paths commonly emitted in Agent replies. */
+const FILE_PATH_PATTERN = /(?:(?:[A-Za-z]:)?(?:\/|\\)[\w.@%+=,-]+(?:\/|\\)[\w.@%+=,-./\\]+|[\w.-]+(?:\/[\w.-]+)+\.\w{1,12})(?::\d{1,6})?/g;
 
 interface FenceStart {
     readonly size: number;
@@ -134,9 +139,13 @@ export function parseAgentMarkdownInline(source: string): readonly AgentMarkdown
     return parseInline(source, 0);
 }
 
-function AgentMarkdownView({ text, className = 'xora-agent-markdown' }: AgentMarkdownProps): React.ReactElement {
+function AgentMarkdownView({
+    text,
+    className = 'xora-agent-markdown',
+    onOpenPath
+}: AgentMarkdownProps): React.ReactElement {
     return <div className={className}>
-        {parseAgentMarkdown(text).map((block, index) => renderBlock(block, index))}
+        {parseAgentMarkdown(text).map((block, index) => renderBlock(block, index, onOpenPath))}
     </div>;
 }
 
@@ -145,13 +154,17 @@ function AgentMarkdownView({ text, className = 'xora-agent-markdown' }: AgentMar
 export const AgentMarkdown = React.memo(AgentMarkdownView);
 AgentMarkdown.displayName = 'AgentMarkdown';
 
-function renderBlock(block: AgentMarkdownBlock, key: number): React.ReactNode {
+function renderBlock(
+    block: AgentMarkdownBlock,
+    key: number,
+    onOpenPath?: (path: string) => void
+): React.ReactNode {
     switch (block.kind) {
         case 'heading':
             return React.createElement(
                 `h${block.depth}`,
                 { key, className: 'xora-agent-markdown-heading' },
-                renderInline(block.text, `heading-${key}`)
+                renderInline(block.text, `heading-${key}`, onOpenPath)
             );
         case 'list': {
             const Tag = block.ordered ? 'ol' : 'ul';
@@ -161,7 +174,7 @@ function renderBlock(block: AgentMarkdownBlock, key: number): React.ReactNode {
             }
             return <Tag {...props} className='xora-agent-markdown-list'>
                 {block.items.map((item, itemIndex) => <li key={itemIndex}>
-                    {renderInlineWithBreaks(item, `list-${key}-${itemIndex}`)}
+                    {renderInlineWithBreaks(item, `list-${key}-${itemIndex}`, onOpenPath)}
                 </li>)}
             </Tag>;
         }
@@ -172,14 +185,14 @@ function renderBlock(block: AgentMarkdownBlock, key: number): React.ReactNode {
                         <tr>{block.headers.map((header, columnIndex) => <th
                             key={columnIndex}
                             data-align={block.alignments[columnIndex]}>
-                            {renderInlineWithBreaks(header, `table-${key}-header-${columnIndex}`)}
+                            {renderInlineWithBreaks(header, `table-${key}-header-${columnIndex}`, onOpenPath)}
                         </th>)}</tr>
                     </thead>
                     <tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>
                         {row.map((cell, columnIndex) => <td
                             key={columnIndex}
                             data-align={block.alignments[columnIndex]}>
-                            {renderInlineWithBreaks(cell, `table-${key}-${rowIndex}-${columnIndex}`)}
+                            {renderInlineWithBreaks(cell, `table-${key}-${rowIndex}-${columnIndex}`, onOpenPath)}
                         </td>)}
                     </tr>)}</tbody>
                 </table>
@@ -193,49 +206,136 @@ function renderBlock(block: AgentMarkdownBlock, key: number): React.ReactNode {
             </pre>;
         case 'paragraph':
             return <p key={key} className='xora-agent-markdown-paragraph'>
-                {renderInlineWithBreaks(block.text, `paragraph-${key}`)}
+                {renderInlineWithBreaks(block.text, `paragraph-${key}`, onOpenPath)}
             </p>;
     }
 }
 
-function renderInlineWithBreaks(source: string, keyPrefix: string): React.ReactNode[] {
+function renderInlineWithBreaks(
+    source: string,
+    keyPrefix: string,
+    onOpenPath?: (path: string) => void
+): React.ReactNode[] {
     const lines = source.split('\n');
     const result: React.ReactNode[] = [];
     lines.forEach((line, lineIndex) => {
         if (lineIndex > 0) {
             result.push(<br key={`${keyPrefix}-break-${lineIndex}`} />);
         }
-        result.push(...renderInline(line, `${keyPrefix}-line-${lineIndex}`));
+        result.push(...renderInline(line, `${keyPrefix}-line-${lineIndex}`, onOpenPath));
     });
     return result;
 }
 
-function renderInline(source: string, keyPrefix: string): React.ReactNode[] {
+function renderInline(
+    source: string,
+    keyPrefix: string,
+    onOpenPath?: (path: string) => void
+): React.ReactNode[] {
     return parseAgentMarkdownInline(source).map((segment, index) => {
         const key = `${keyPrefix}-${index}`;
         switch (segment.kind) {
             case 'strong':
-                return <strong key={key}>{renderInlineSegments(segment.children, key)}</strong>;
+                return <strong key={key}>{renderInlineSegments(segment.children, key, onOpenPath)}</strong>;
             case 'code':
-                return <code key={key} className='xora-agent-markdown-inline-code'>{segment.text}</code>;
+                return renderMaybePathCode(segment.text, key, onOpenPath);
             case 'text':
-                return <React.Fragment key={key}>{segment.text}</React.Fragment>;
+                return <React.Fragment key={key}>{renderTextWithPaths(segment.text, key, onOpenPath)}</React.Fragment>;
         }
     });
 }
 
-function renderInlineSegments(segments: readonly AgentMarkdownInline[], keyPrefix: string): React.ReactNode[] {
+function renderInlineSegments(
+    segments: readonly AgentMarkdownInline[],
+    keyPrefix: string,
+    onOpenPath?: (path: string) => void
+): React.ReactNode[] {
     return segments.map((segment, index) => {
         const key = `${keyPrefix}-${index}`;
         switch (segment.kind) {
             case 'strong':
-                return <strong key={key}>{renderInlineSegments(segment.children, key)}</strong>;
+                return <strong key={key}>{renderInlineSegments(segment.children, key, onOpenPath)}</strong>;
             case 'code':
-                return <code key={key} className='xora-agent-markdown-inline-code'>{segment.text}</code>;
+                return renderMaybePathCode(segment.text, key, onOpenPath);
             case 'text':
-                return <React.Fragment key={key}>{segment.text}</React.Fragment>;
+                return <React.Fragment key={key}>{renderTextWithPaths(segment.text, key, onOpenPath)}</React.Fragment>;
         }
     });
+}
+
+function renderMaybePathCode(
+    text: string,
+    key: string,
+    onOpenPath?: (path: string) => void
+): React.ReactNode {
+    if (onOpenPath && looksLikeFilePath(text)) {
+        const path = stripLineSuffix(text);
+        return <button
+            key={key}
+            type='button'
+            className='xora-agent-markdown-inline-code xora-file-link'
+            title={`打开 ${path}`}
+            onClick={() => onOpenPath(path)}
+            onContextMenu={event => {
+                event.preventDefault();
+                onOpenPath(path);
+            }}>
+            {text}
+        </button>;
+    }
+    return <code key={key} className='xora-agent-markdown-inline-code'>{text}</code>;
+}
+
+function renderTextWithPaths(
+    text: string,
+    keyPrefix: string,
+    onOpenPath?: (path: string) => void
+): React.ReactNode[] {
+    if (!onOpenPath || !text) {
+        return text ? [text] : [];
+    }
+    const nodes: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    FILE_PATH_PATTERN.lastIndex = 0;
+    while ((match = FILE_PATH_PATTERN.exec(text)) !== null) {
+        const raw = match[0];
+        if (!looksLikeFilePath(raw)) continue;
+        if (match.index > lastIndex) {
+            nodes.push(text.slice(lastIndex, match.index));
+        }
+        const path = stripLineSuffix(raw);
+        nodes.push(<button
+            key={`${keyPrefix}-path-${match.index}`}
+            type='button'
+            className='xora-file-link xora-file-link-inline'
+            title={`打开 ${path}`}
+            onClick={() => onOpenPath(path)}
+            onContextMenu={event => {
+                event.preventDefault();
+                onOpenPath(path);
+            }}>
+            {raw}
+        </button>);
+        lastIndex = match.index + raw.length;
+    }
+    if (lastIndex < text.length) {
+        nodes.push(text.slice(lastIndex));
+    }
+    return nodes.length ? nodes : [text];
+}
+
+function looksLikeFilePath(value: string): boolean {
+    const candidate = stripLineSuffix(value.trim());
+    if (!candidate || candidate.length > 512 || /\s/.test(candidate)) return false;
+    if (candidate.startsWith('http://') || candidate.startsWith('https://') || candidate.startsWith('mailto:')) {
+        return false;
+    }
+    return /(?:\/|\\|\.\w{1,12}$)/.test(candidate) && /[\\/]/.test(candidate);
+}
+
+function stripLineSuffix(value: string): string {
+    return value.replace(/:\d{1,6}$/, '');
 }
 
 function parseInline(source: string, depth: number): AgentMarkdownInline[] {

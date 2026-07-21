@@ -953,6 +953,56 @@ export class GrokAgentHostService implements AgentHostService {
         return history;
     }
 
+    async renameSession(appSessionId: string, title: string): Promise<SessionRecord> {
+        const record = this.sessions.get(appSessionId);
+        if (!record) {
+            throw new Error('Unknown Xora Code session.');
+        }
+        const nextTitle = title.trim().replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 120);
+        if (!nextTitle) {
+            throw new Error('会话名称不能为空。');
+        }
+        const updated = this.sessions.update(appSessionId, { title: nextTitle });
+        this.emit({ kind: 'session', session: updated });
+        if (this.activeSessionId === appSessionId) {
+            this.emitSnapshot();
+        }
+        return updated;
+    }
+
+    async deleteSession(appSessionId: string): Promise<void> {
+        const record = this.sessions.get(appSessionId);
+        if (!record) {
+            throw new Error('Unknown Xora Code session.');
+        }
+        if (record.status === 'running' || this.activePrompts.has(appSessionId)) {
+            await this.cancel(appSessionId);
+        }
+        for (const [requestId, permission] of this.pendingPermissions) {
+            if (permission.appSessionId === appSessionId) {
+                permission.resolve({ outcome: { outcome: 'cancelled' } });
+                this.pendingPermissions.delete(requestId);
+            }
+        }
+        this.flushAssistantTextDeltas(appSessionId);
+        this.assistantStreamState().delete(appSessionId);
+        this.loadedSessionIds.delete(appSessionId);
+        this.knownSessionIds.delete(appSessionId);
+        this.sessionContexts.delete(appSessionId);
+        this.contextEventHighwaters.delete(appSessionId);
+        this.restoringSessionCounts.delete(appSessionId);
+        if (record.acpSessionId) {
+            this.acpSessionLookup.delete(record.acpSessionId);
+        }
+        if (!this.sessions.delete(appSessionId)) {
+            throw new Error('Unknown Xora Code session.');
+        }
+        if (this.activeSessionId === appSessionId) {
+            this.activeSessionId = undefined;
+            this.emitSnapshot();
+        }
+    }
+
     async sendPrompt(request: PromptRequest): Promise<void> {
         const acp = this.requireReady();
         const record = this.sessions.get(request.sessionId);
@@ -979,12 +1029,12 @@ export class GrokAgentHostService implements AgentHostService {
             this.notifyProviderDefaultsChanged();
             throw new Error('The application-wide model changed. Wait for this session to synchronize before sending.');
         }
-        if (this.activeSessionId !== request.sessionId) {
-            throw new Error('The selected conversation is no longer the active Agent session.');
-        }
         if (!this.loadedSessionIds.has(request.sessionId)) {
             throw new Error('Restore the selected conversation before sending another task.');
         }
+        // Focus the session that accepted the prompt so UI/history stay aligned,
+        // without cancelling other loaded sessions that may still be running.
+        this.activeSessionId = request.sessionId;
         if (this.activePrompts.has(request.sessionId)) {
             throw new Error('This session already has a running task.');
         }
@@ -1818,7 +1868,17 @@ export class GrokAgentHostService implements AgentHostService {
             void params;
         });
         acp.onRequest('session/request_permission', params => this.handlePermissionRequest(params));
-        acp.onError(error => this.emitError('ACP_PROTOCOL_WARNING', error, true));
+        acp.onError(error => {
+            // Numeric unknown-response ids remain a real protocol warning.
+            // String lifecycle ids are already demoted in AcpClient.
+            if (error?.name === 'AcpUnknownResponseError') {
+                const requestId = (error as { requestId?: unknown }).requestId;
+                if (typeof requestId === 'string') {
+                    return;
+                }
+            }
+            this.emitError('ACP_PROTOCOL_WARNING', error, true);
+        });
     }
 
     protected acceptInitialize(response: InitializeResponse, emitSnapshot = true): void {
@@ -2219,9 +2279,10 @@ export class GrokAgentHostService implements AgentHostService {
         if (session) {
             try { workspaceTrusted = this.isWorkspaceTrusted(session.workspaceRoot); } catch { /* fail closed */ }
         }
+        // Multi-tab sessions may run concurrently. Authorize any loaded session
+        // for the current workspace/provider rather than only the focused tab.
         if (!session
             || session.acpSessionId !== acpSessionId
-            || this.activeSessionId !== appSessionId
             || session.workspaceRoot !== this.workspaceRoot
             || session.providerId !== this.providerId
             || !this.loadedSessionIds.has(appSessionId)
@@ -2729,9 +2790,43 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.workspaceRoot || !this.isWorkspaceTrusted(this.workspaceRoot)) {
             throw new Error('No trusted workspace is active.');
         }
-        const absolute = path.resolve(candidate);
-        const resolved = fs.existsSync(absolute) ? fs.realpathSync.native(absolute) : absolute;
-        const relative = path.relative(this.workspaceRoot, resolved);
+        if (!candidate || candidate.includes('\0')) {
+            throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
+        }
+        // Reject URI-like operands so they cannot be treated as relative paths.
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(candidate) && !path.isAbsolute(candidate)) {
+            throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
+        }
+        // Resolve relative Agent paths against the trusted workspace root, not
+        // Electron's process.cwd() (which is often the app install directory).
+        const absolute = path.isAbsolute(candidate)
+            ? path.normalize(candidate)
+            : path.resolve(this.workspaceRoot, candidate);
+        let existing = absolute;
+        const missing: string[] = [];
+        while (!fs.existsSync(existing)) {
+            const parent = path.dirname(existing);
+            if (parent === existing) {
+                throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
+            }
+            missing.unshift(path.basename(existing));
+            existing = parent;
+        }
+        let resolved: string;
+        try {
+            resolved = path.resolve(fs.realpathSync.native(existing), ...missing);
+        } catch {
+            throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
+        }
+        let workspaceResolved: string;
+        try {
+            workspaceResolved = fs.existsSync(this.workspaceRoot)
+                ? fs.realpathSync.native(this.workspaceRoot)
+                : path.normalize(this.workspaceRoot);
+        } catch {
+            workspaceResolved = path.normalize(this.workspaceRoot);
+        }
+        const relative = path.relative(workspaceResolved, resolved);
         if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
             throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
         }
@@ -2792,7 +2887,15 @@ export class GrokAgentHostService implements AgentHostService {
         } catch {
             return false;
         }
-        const relative = path.relative(this.workspaceRoot, resolved);
+        let workspaceResolved: string;
+        try {
+            workspaceResolved = fs.existsSync(this.workspaceRoot)
+                ? fs.realpathSync.native(this.workspaceRoot)
+                : path.normalize(this.workspaceRoot);
+        } catch {
+            workspaceResolved = path.normalize(this.workspaceRoot);
+        }
+        const relative = path.relative(workspaceResolved, resolved);
         return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
     }
 

@@ -279,7 +279,7 @@ test('Agent permission mode is explicit, application-wide and confirmed before f
 test('Agent output renders safe Markdown and groups categorized tool activity', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
     const styles = fs.readFileSync(path.join(__dirname, '../src/browser/style/agent.css'), 'utf8');
-    assert.match(source, /<AgentMarkdown text=\{entry\.text\} \/>/);
+    assert.match(source, /<AgentMarkdown[\s\S]*?text=\{entry\.text\}[\s\S]*?onOpenPath=/);
     assert.match(source, /className='xora-activity xora-tool-group'/);
     assert.match(source, /Agent 活动/);
     assert.match(source, /presentAgentTool\(tool\)/);

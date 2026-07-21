@@ -203,6 +203,10 @@ export class XoraAgentWidget extends ReactWidget {
     protected runtimePrewarmAttempts = 0;
     protected activeSessionHydrationKey: string | undefined;
     protected observedRuntimePhase: RuntimePhase | undefined;
+    /** Open multi-session tabs for the current project (order is left-to-right). */
+    protected openSessionTabs: string[] = [];
+    protected renamingSessionId: string | undefined;
+    protected renameDraft = '';
 
     @postConstruct()
     protected init(): void {
@@ -274,8 +278,11 @@ export class XoraAgentWidget extends ReactWidget {
         const selectedModel = selectedAgentModelChoice(modelChoiceGroups, snapshot, active, this.newSessionModel);
         const permissionMode = snapshot.permissionMode;
         const contextSummary = summarizeAgentContext(snapshot, this.model.transcript);
-        const pendingPermissions = this.model.transcript.filter(entry =>
-            entry.kind === 'permission' && this.model.pendingPermissions.has(entry.id));
+        const pendingPermissions = [...this.model.pendingPermissions.values()].map(permission => ({
+            id: permission.requestId,
+            kind: 'permission' as const,
+            payload: permission
+        }));
         const visibleTranscript = this.model.transcript.filter(entry => {
             if (entry.kind === 'permission') return !this.model.pendingPermissions.has(entry.id);
             // A background cold-start failure is an implementation detail while
@@ -361,6 +368,7 @@ export class XoraAgentWidget extends ReactWidget {
                     </button>
                 </div>
             </header>
+            {this.renderSessionTabs()}
             {this.renderPopover()}
             {this.renderImagePreview()}
             {this.renderConversationBar()}
@@ -1098,6 +1106,86 @@ export class XoraAgentWidget extends ReactWidget {
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     }
 
+    protected renderSessionTabs(): React.ReactNode {
+        const snapshot = this.model.snapshot;
+        const sessions = this.openSessionTabs
+            .map(id => snapshot.sessions.find(session => session.appSessionId === id))
+            .filter((session): session is SessionRecord => !!session
+                && session.workspaceRoot === snapshot.workspaceRoot);
+        if (!sessions.length && !snapshot.activeSessionId) return undefined;
+        const tabs = sessions.length
+            ? sessions
+            : snapshot.sessions.filter(session => session.appSessionId === snapshot.activeSessionId);
+        if (!tabs.length) return undefined;
+        return <div className='xora-session-tabs' role='tablist' aria-label='打开的会话'>
+            {tabs.map(session => {
+                const active = session.appSessionId === snapshot.activeSessionId;
+                const renaming = this.renamingSessionId === session.appSessionId;
+                return <div
+                    key={session.appSessionId}
+                    className={`xora-session-tab${active ? ' active' : ''}${session.status === 'running' ? ' running' : ''}`}
+                    role='tab'
+                    aria-selected={active}
+                    title={session.title || '未命名会话'}>
+                    {renaming ? <input
+                        className='xora-session-rename-input'
+                        value={this.renameDraft}
+                        autoFocus
+                        aria-label='重命名会话'
+                        onChange={event => {
+                            this.renameDraft = event.currentTarget.value;
+                            this.update();
+                        }}
+                        onBlur={() => void this.commitSessionRename(session.appSessionId)}
+                        onKeyDown={event => {
+                            if (event.key === 'Enter') {
+                                event.preventDefault();
+                                void this.commitSessionRename(session.appSessionId);
+                            } else if (event.key === 'Escape') {
+                                event.preventDefault();
+                                this.renamingSessionId = undefined;
+                                this.renameDraft = '';
+                                this.update();
+                            }
+                        }}
+                    /> : <button
+                        type='button'
+                        className='xora-session-tab-button'
+                        onClick={() => {
+                            if (!active) void this.openSession(session);
+                        }}
+                        onDoubleClick={event => {
+                            event.preventDefault();
+                            this.beginSessionRename(session);
+                        }}>
+                        <span className={`xora-session-status-dot xora-session-status-${session.status}`} />
+                        <span className='xora-session-tab-title'>{session.title || '未命名会话'}</span>
+                    </button>}
+                    <button
+                        type='button'
+                        className='xora-session-tab-close'
+                        aria-label={`关闭标签 ${session.title || '未命名会话'}`}
+                        title='关闭标签（不删除历史）'
+                        onClick={event => {
+                            event.stopPropagation();
+                            this.closeSessionTab(session.appSessionId);
+                        }}>
+                        <span className='codicon codicon-close' />
+                    </button>
+                </div>;
+            })}
+            <button
+                type='button'
+                className='xora-session-tab-add'
+                aria-label='新建会话标签'
+                title='新建会话'
+                disabled={!!this.submission || this.sessionLoading}
+                onClick={() => this.startNewSession()}>
+                <span className='codicon codicon-add' />
+            </button>
+        </div>;
+    }
+
     protected renderHistoryPopover(): React.ReactNode {
         const snapshot = this.model.snapshot;
         // Provider/model selection is application-wide, but history belongs to
@@ -1123,25 +1211,77 @@ export class XoraAgentWidget extends ReactWidget {
             <div className='xora-session-list' role='list'>
                 {sessions.length ? sessions.map(session => {
                     const active = session.appSessionId === snapshot.activeSessionId;
-                    return <button
+                    const renaming = this.renamingSessionId === session.appSessionId;
+                    return <div
                         key={session.appSessionId}
                         className={`xora-session-item${active ? ' active' : ''}`}
                         role='listitem'
-                        aria-current={active ? 'true' : undefined}
-                        disabled={!!this.submission || this.sessionLoading}
-                        onClick={() => {
-                            this.closePopover();
-                            if (!active) void this.openSession(session);
-                        }}>
+                        aria-current={active ? 'true' : undefined}>
                         <span className={`xora-session-status-dot xora-session-status-${session.status}`} />
-                        <span className='xora-session-item-copy'>
-                            <strong title={session.title}>{session.title || '未命名会话'}</strong>
-                            <span>
-                                {sessionStatusLabel(session.status)} · {sessionProviderLabel(session.providerId, snapshot.providerId)} · {sessionRelativeTime(session.updatedAt)}
+                        {renaming ? <input
+                            className='xora-session-rename-input'
+                            value={this.renameDraft}
+                            autoFocus
+                            aria-label='重命名会话'
+                            onChange={event => {
+                                this.renameDraft = event.currentTarget.value;
+                                this.update();
+                            }}
+                            onBlur={() => void this.commitSessionRename(session.appSessionId)}
+                            onKeyDown={event => {
+                                if (event.key === 'Enter') {
+                                    event.preventDefault();
+                                    void this.commitSessionRename(session.appSessionId);
+                                } else if (event.key === 'Escape') {
+                                    event.preventDefault();
+                                    this.renamingSessionId = undefined;
+                                    this.renameDraft = '';
+                                    this.update();
+                                }
+                            }}
+                        /> : <button
+                            type='button'
+                            className='xora-session-item-main'
+                            disabled={this.sessionLoading}
+                            onClick={() => {
+                                this.closePopover();
+                                this.rememberOpenSessionTab(session.appSessionId);
+                                if (!active) void this.openSession(session);
+                            }}>
+                            <span className='xora-session-item-copy'>
+                                <strong title={session.title}>{session.title || '未命名会话'}</strong>
+                                <span>
+                                    {sessionStatusLabel(session.status)} · {sessionProviderLabel(session.providerId, snapshot.providerId)} · {sessionRelativeTime(session.updatedAt)}
+                                </span>
                             </span>
+                        </button>}
+                        <span className='xora-session-item-actions'>
+                            <button
+                                type='button'
+                                className='xora-agent-icon-button'
+                                aria-label='重命名会话'
+                                title='重命名'
+                                disabled={session.status === 'running' || this.sessionLoading}
+                                onClick={event => {
+                                    event.stopPropagation();
+                                    this.beginSessionRename(session);
+                                }}>
+                                <span className='codicon codicon-edit' />
+                            </button>
+                            <button
+                                type='button'
+                                className='xora-agent-icon-button'
+                                aria-label='删除会话'
+                                title='删除会话'
+                                disabled={session.status === 'running' || this.sessionLoading}
+                                onClick={event => {
+                                    event.stopPropagation();
+                                    void this.deleteSession(session);
+                                }}>
+                                <span className='codicon codicon-trash' />
+                            </button>
                         </span>
-                        {active ? <span className='codicon codicon-check' aria-label='当前会话' /> : undefined}
-                    </button>;
+                    </div>;
                 }) : <div className='xora-session-empty'>完成第一项任务后，会话会显示在这里。</div>}
             </div>
             <footer className='xora-popover-footer'>
@@ -1950,6 +2090,23 @@ export class XoraAgentWidget extends ReactWidget {
                     <code>{tool.toolName}</code>
                     {display.readOnly ? <span className='xora-readonly-chip'>只读</span> : undefined}
                 </div>
+                {tool.locations?.length ? <div className='xora-tool-locations' role='list' aria-label='相关文件'>
+                    {tool.locations.map((location, index) => <button
+                        key={`${location.path}-${location.line ?? 0}-${index}`}
+                        type='button'
+                        className='xora-file-link'
+                        role='listitem'
+                        title={`打开 ${location.path}`}
+                        onClick={() => void this.openWorkspacePath(location.path, { line: location.line, reveal: true })}
+                        onContextMenu={event => {
+                            event.preventDefault();
+                            void this.openWorkspacePath(location.path, { line: location.line, reveal: true });
+                        }}>
+                        <span className={`codicon ${this.fileIconClass(location.path)}`} />
+                        <span>{this.fileLabel(location.path)}</span>
+                        {location.line ? <span className='xora-file-link-line'>:{location.line}</span> : undefined}
+                    </button>)}
+                </div> : undefined}
                 {tool.input !== undefined ? <details className='xora-tool-input'>
                     <summary>查看参数</summary>
                     <pre>{this.printToolInput(tool.input)}</pre>
@@ -2034,7 +2191,11 @@ export class XoraAgentWidget extends ReactWidget {
                         type='button'
                         className='xora-diff-file-link'
                         title={`打开并在项目树中定位 ${diff.path}`}
-                        onClick={() => this.openAndRevealFile(diff)}>
+                        onClick={() => this.openAndRevealFile(diff)}
+                        onContextMenu={event => {
+                            event.preventDefault();
+                            void this.openAndRevealFile(diff);
+                        }}>
                         <span className='xora-diff-file-icon' aria-hidden='true'>
                             <span className={`codicon ${this.fileIconClass(diff.path)}`} />
                         </span>
@@ -2090,7 +2251,10 @@ export class XoraAgentWidget extends ReactWidget {
                 ? entry.text
                 : this.isStreamingAssistantEntry(entry)
                     ? <div className='xora-agent-streaming-text'>{entry.text}</div>
-                    : <AgentMarkdown text={entry.text} />}</div> : undefined}
+                    : <AgentMarkdown
+                        text={entry.text}
+                        onOpenPath={filePath => void this.openWorkspacePath(filePath, { reveal: true })}
+                    />}</div> : undefined}
         </article>;
     }
 
@@ -2334,6 +2498,7 @@ export class XoraAgentWidget extends ReactWidget {
                 // sole allowed context transition instead of an external switch.
                 submission.sessionId = sessionId;
                 this.model.setSession(session);
+                this.rememberOpenSessionTab(sessionId);
                 if (!this.isSubmissionContextCurrent(submission)) return;
             } else {
                 // This is a fast no-op in the backend when the background
@@ -2442,9 +2607,103 @@ export class XoraAgentWidget extends ReactWidget {
         return /^cancel(?:led|ed)(?:\s+by\s+(?:the\s+)?user)?\.?$/i.test(message.trim());
     }
 
+    protected rememberOpenSessionTab(appSessionId: string): void {
+        if (!appSessionId) return;
+        // Tests and partial instances may not run field initializers.
+        const tabs = this.openSessionTabs ?? [];
+        if (!tabs.includes(appSessionId)) {
+            this.openSessionTabs = [...tabs, appSessionId];
+        } else {
+            this.openSessionTabs = tabs;
+        }
+    }
+
+    protected closeSessionTab(appSessionId: string): void {
+        this.openSessionTabs = (this.openSessionTabs ?? []).filter(id => id !== appSessionId);
+        if (this.model.snapshot.activeSessionId === appSessionId) {
+            const next = this.openSessionTabs
+                .map(id => this.model.snapshot.sessions.find(session => session.appSessionId === id))
+                .find((session): session is SessionRecord => !!session);
+            if (next) void this.openSession(next);
+            else this.startNewSession();
+        } else {
+            this.update();
+        }
+    }
+
+    protected beginSessionRename(session: SessionRecord): void {
+        this.renamingSessionId = session.appSessionId;
+        this.renameDraft = session.title || '';
+        this.update();
+    }
+
+    protected async commitSessionRename(appSessionId: string): Promise<void> {
+        if (this.renamingSessionId !== appSessionId) return;
+        const title = this.renameDraft.trim();
+        this.renamingSessionId = undefined;
+        this.renameDraft = '';
+        if (!title) {
+            this.update();
+            return;
+        }
+        try {
+            const updated = await this.service.renameSession(appSessionId, title);
+            this.model.updateSession(updated);
+            this.rememberOpenSessionTab(appSessionId);
+            this.update();
+        } catch (error) {
+            this.messages.error(`无法重命名会话：${friendlyAgentErrorMessage(error)}`);
+            this.update();
+        }
+    }
+
+    protected async deleteSession(session: SessionRecord): Promise<void> {
+        const label = session.title || '未命名会话';
+        const choice = await this.messages.warn(`确定删除会话“${label}”？本地历史无法恢复。`, '删除');
+        if (choice !== '删除') return;
+        try {
+            await this.service.deleteSession(session.appSessionId);
+            this.openSessionTabs = (this.openSessionTabs ?? []).filter(id => id !== session.appSessionId);
+            await this.model.refresh();
+            if (this.model.snapshot.activeSessionId === session.appSessionId
+                || !this.model.snapshot.activeSessionId) {
+                const next = this.openSessionTabs
+                    .map(id => this.model.snapshot.sessions.find(item => item.appSessionId === id))
+                    .find((item): item is SessionRecord => !!item);
+                if (next) await this.openSession(next);
+                else this.startNewSession();
+            } else {
+                this.update();
+            }
+        } catch (error) {
+            this.messages.error(`无法删除会话：${friendlyAgentErrorMessage(error)}`);
+        }
+    }
+
+    protected async openWorkspacePath(filePath: string, options?: { reveal?: boolean; line?: number }): Promise<void> {
+        const uri = this.workspaceFileUri(filePath);
+        if (!uri) {
+            this.messages.error('无法定位该文件：文件不在当前项目中。');
+            return;
+        }
+        try {
+            const target = options?.line && options.line > 0
+                ? uri.withFragment(`L${options.line}`)
+                : uri;
+            await open(this.openerService, target);
+            if (options?.reveal !== false) {
+                await this.commandService.executeCommand(FileNavigatorCommands.REVEAL_IN_NAVIGATOR.id, uri);
+            }
+        } catch (error) {
+            this.messages.error(`无法打开 ${this.fileLabel(filePath)}：${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
     protected async openSession(session: SessionRecord): Promise<void> {
+        this.rememberOpenSessionTab(session.appSessionId);
         if (this.model.snapshot.activeSessionId === session.appSessionId && !this.sessionLoading) {
             this.closePopover();
+            this.update();
             return;
         }
         const originContextKey = this.imageDraftContextKey();
@@ -2575,17 +2834,7 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async openAndRevealFile(diff: DiffEvent): Promise<void> {
-        const uri = this.workspaceFileUri(diff.path);
-        if (!uri) {
-            this.messages.error('无法定位该文件：文件不在当前项目中。');
-            return;
-        }
-        try {
-            await open(this.openerService, uri);
-            await this.commandService.executeCommand(FileNavigatorCommands.REVEAL_IN_NAVIGATOR.id, uri);
-        } catch (error) {
-            this.messages.error(`无法打开 ${this.fileLabel(diff.path)}：${error instanceof Error ? error.message : String(error)}`);
-        }
+        await this.openWorkspacePath(diff.path, { reveal: true });
     }
 
     protected async revertDiff(diff: DiffEvent): Promise<void> {

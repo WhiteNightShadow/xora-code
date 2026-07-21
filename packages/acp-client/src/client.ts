@@ -257,6 +257,22 @@ export class AcpClient {
   #handleResponse(response: JsonRpcResponse): void {
     const pending = this.#pending.get(response.id);
     if (!pending) {
+      // Grok Build / Grok CLI may emit extension lifecycle acknowledgements
+      // (for example `skills-reload` after login) as response-shaped messages
+      // whose string ids were never issued by this client. Treat those as
+      // best-effort notifications so a concurrent CLI login cannot surface as
+      // a protocol hard-failure in the desktop host.
+      if (typeof response.id === "string" && !/^\d+$/.test(response.id)) {
+        const params = "result" in response
+          ? response.result
+          : { error: (response as { error?: unknown }).error };
+        this.#handleNotification({
+          jsonrpc: "2.0",
+          method: response.id,
+          ...(params === undefined ? {} : { params }),
+        });
+        return;
+      }
       this.#emitError(new AcpUnknownResponseError(response.id));
       return;
     }

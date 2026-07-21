@@ -136,6 +136,25 @@ test("reports unknown response ids without taking down the connection", async ()
   await consuming;
 });
 
+test("promotes Grok lifecycle pseudo-responses with string ids into notifications", async () => {
+  const input = new PassThrough();
+  const errors: Error[] = [];
+  const methods: string[] = [];
+  const client = new AcpClient({ write: () => undefined, defaultTimeoutMs: 0 });
+  client.onError((error) => errors.push(error));
+  client.onNotification("skills-reload", (_params, method) => {
+    methods.push(method);
+  });
+  const consuming = client.consume(input);
+  input.write(`${JSON.stringify({ jsonrpc: "2.0", id: "skills-reload", result: { ok: true } })}\n`);
+  await tick();
+  assert.deepEqual(methods, ["skills-reload"]);
+  assert.equal(errors.length, 0);
+  assert.equal(client.closed, false);
+  input.end();
+  await consuming;
+});
+
 test("bounds inbound line size", async () => {
   const client = new AcpClient({ write: () => undefined, maxLineBytes: 8, defaultTimeoutMs: 0 });
   async function* oversized(): AsyncGenerator<Uint8Array> {

@@ -377,6 +377,10 @@ export interface AgentHostService extends RpcServer<AgentHostClient> {
     createSession(request: CreateSessionRequest): Promise<SessionRecord>;
     loadSession(appSessionId: string): Promise<SessionRecord>;
     getSessionHistory(appSessionId: string): Promise<AgentHostEvent[]>;
+    /** Renames a local session title without touching ACP history content. */
+    renameSession(appSessionId: string, title: string): Promise<SessionRecord>;
+    /** Deletes a local session index entry and its redacted history files. */
+    deleteSession(appSessionId: string): Promise<void>;
     sendPrompt(request: PromptRequest): Promise<void>;
     cancel(sessionId: string): Promise<void>;
     /** Persists one permission mode for all projects, sessions and windows. */

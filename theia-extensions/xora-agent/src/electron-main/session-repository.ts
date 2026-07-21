@@ -115,6 +115,41 @@ export class AgentSessionRepository {
         return record ? { ...record } : undefined;
     }
 
+    /**
+     * Permanently removes a session index entry and its local event/diff files.
+     * Returns false when the session id was already absent.
+     */
+    delete(appSessionId: string): boolean {
+        if (!/^[0-9a-f-]{36}$/i.test(appSessionId)) {
+            throw new Error('Unsafe session identifier.');
+        }
+        this.flushEvents(appSessionId);
+        this.pendingEvents.delete(appSessionId);
+        let removed = false;
+        this.withIndexLock(() => {
+            const index = this.readIndex();
+            const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
+            if (position < 0) return;
+            index.sessions.splice(position, 1);
+            this.writeIndex(index);
+            removed = true;
+        });
+        if (!removed) return false;
+        const historyPath = path.join(this.root, `${appSessionId}.jsonl`);
+        try {
+            fs.rmSync(historyPath, { force: true });
+        } catch {
+            // Best-effort cleanup; index removal is authoritative.
+        }
+        const diffDirectory = path.join(this.root, 'diffs', appSessionId);
+        try {
+            fs.rmSync(diffDirectory, { recursive: true, force: true });
+        } catch {
+            // Best-effort cleanup.
+        }
+        return true;
+    }
+
     appendEvent(appSessionId: string, event: AgentHostEvent): void {
         if (!/^[0-9a-f-]{36}$/i.test(appSessionId)) {
             throw new Error('Unsafe session identifier.');

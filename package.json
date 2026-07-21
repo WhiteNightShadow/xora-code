@@ -31,8 +31,11 @@
     "test": "lerna run test --stream",
     "start:browser": "yarn workspace @xora-code/browser-app start",
     "start:electron": "yarn workspace @xora-code/electron-app start",
+    "start:electron:debug": "yarn workspace @xora-code/electron-app start:debug",
     "package:electron": "yarn workspace @xora-code/electron-app package",
     "package:electron:preview": "yarn workspace @xora-code/electron-app package:preview",
+    "package:mac:preview": "yarn workspace @xora-code/electron-app package:preview",
+    "package:mac:preview:installers": "yarn workspace @xora-code/electron-app package:preview:installers:mac",
     "sbom:preview": "node build/sbom/generate-preview-sbom.mjs"
   },
   "devDependencies": {

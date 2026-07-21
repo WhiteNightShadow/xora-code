@@ -110,9 +110,12 @@ export class AgentViewModel {
                 this.transcript.push({ id: this.id('text'), kind: event.role, text: event.text, payload: event });
             }
         } else if (event.kind === 'permission-request') {
-            if (!this.isVisibleSession(event.sessionId)) return;
+            // Permission prompts must surface even for background multi-session
+            // tabs; otherwise a concurrent turn can stall forever.
             this.pendingPermissions.set(event.requestId, event);
-            this.transcript.push({ id: event.requestId, kind: 'permission', payload: event });
+            if (this.isVisibleSession(event.sessionId)) {
+                this.transcript.push({ id: event.requestId, kind: 'permission', payload: event });
+            }
         } else if (event.kind === 'tool-call') {
             if (!this.isVisibleSession(event.sessionId)) return;
             this.upsertTool(event);

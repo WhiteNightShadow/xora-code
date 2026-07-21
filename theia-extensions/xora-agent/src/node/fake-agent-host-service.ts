@@ -185,6 +185,27 @@ export class FakeAgentHostService implements AgentHostService {
         return session;
     }
 
+    async renameSession(appSessionId: string, title: string): Promise<SessionRecord> {
+        const session = this.requireSession(appSessionId);
+        const nextTitle = title.trim().slice(0, 120);
+        if (!nextTitle) throw new Error('会话名称不能为空。');
+        session.title = nextTitle;
+        session.updatedAt = new Date().toISOString();
+        this.client?.onAgentEvent({ kind: 'session', session });
+        this.publishSnapshot();
+        return session;
+    }
+
+    async deleteSession(appSessionId: string): Promise<void> {
+        const index = this.snapshot.sessions.findIndex(session => session.appSessionId === appSessionId);
+        if (index < 0) throw new Error(`Unknown session: ${appSessionId}`);
+        this.snapshot.sessions.splice(index, 1);
+        if (this.snapshot.activeSessionId === appSessionId) {
+            this.snapshot.activeSessionId = undefined;
+        }
+        this.publishSnapshot();
+    }
+
     async getSessionHistory(_appSessionId: string): Promise<AgentHostEvent[]> {
         return [];
     }
