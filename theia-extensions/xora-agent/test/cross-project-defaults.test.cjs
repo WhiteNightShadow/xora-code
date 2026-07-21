@@ -90,13 +90,38 @@ test('an advertised model catalogue replaces a stale cross-project default', () 
     host.acceptModelState({
         currentModelId: 'current-model',
         availableModels: [
-            { modelId: 'current-model', name: 'Current model' },
+            { modelId: 'current-model', name: 'Current model', _meta: { totalContextTokens: 1_000_000 } },
             { modelId: 'other-model', name: 'Other model' }
         ]
     });
 
     assert.equal(host.selectedModel, 'current-model');
+    assert.equal(host.models[0].contextWindow, 1_000_000);
     assert.equal(saved, 'current-model');
+});
+
+test('model metadata accepts only a positive safe integer context window', () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.providerId = 'grok-subscription';
+    host.models = [];
+    host.providers = {
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.onProviderDefaultsChanged = () => undefined;
+    host.emitSnapshot = () => undefined;
+
+    host.acceptModelState({
+        availableModels: [
+            { modelId: 'fraction', _meta: { totalContextTokens: 1_000_000.5 }, contextWindow: 128_000 },
+            { modelId: 'negative', _meta: { totalContextTokens: -1 } },
+            { modelId: 'legacy', contextWindow: 64_000 }
+        ]
+    });
+
+    assert.equal(host.models[0].contextWindow, 128_000);
+    assert.equal(host.models[1].contextWindow, undefined);
+    assert.equal(host.models[2].contextWindow, 64_000);
 });
 
 test('production wiring keeps Provider/model/auth hints global but trust and MCP credentials project-scoped', () => {

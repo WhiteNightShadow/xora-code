@@ -26,6 +26,7 @@ interface XaiApiSettings {
     baseUrl: string;
     model: string;
     contextWindow: number;
+    backendSearch: boolean;
 }
 
 interface AuthenticationConsent {
@@ -57,6 +58,13 @@ interface ProviderFile {
     subscriptionAuthMigrationComplete?: boolean;
 }
 
+interface ProviderUpdateMarker {
+    schemaVersion: 1;
+    providerId: string;
+    secretRef: string;
+    startedAt: string;
+}
+
 interface McpCredentialRecord {
     workspaceRoot: string;
     server: string;
@@ -73,12 +81,28 @@ export class ProviderRegistry {
     protected readonly metadataPath = path.join(app.getPath('userData'), 'providers.json');
     protected readonly mcpCredentialPath = path.join(app.getPath('userData'), 'mcp-credentials.json');
     protected readonly metadataLockPath = path.join(app.getPath('userData'), '.providers.lock');
+    protected readonly providerUpdatePath = path.join(app.getPath('userData'), '.provider-update.json');
     protected readonly grokConfigPath = path.join(os.homedir(), '.grok', 'config.toml');
     // Keep using the legacy shared lock for one compatibility epoch so Xora
     // Code and an older desktop build cannot edit ~/.grok concurrently.
     protected readonly lockPath = path.join(os.homedir(), '.grok', '.whitenight-code.lock');
 
     constructor(protected readonly vault: SecretVault) {
+        // A process may have stopped between the three atomic Provider writes.
+        // Recovery never trusts the possibly mixed credential: it clears the
+        // key first, reconciles Grok TOML from metadata, then removes the
+        // marker. Any failure leaves the marker in place and API Providers
+        // remain fail-closed until the user retries saving their settings.
+        if (fs.existsSync(this.providerUpdatePath)) {
+            try {
+                this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
+                    this.recoverInterruptedProviderUpdateUnlocked();
+                });
+            } catch {
+                // list/environment/credential consult the durable marker, so
+                // an unavailable lock or failed recovery cannot expose a key.
+            }
+        }
     }
 
     list(): ProviderProfile[] {
@@ -90,7 +114,8 @@ export class ProviderRegistry {
         ];
         return profiles.map(profile => profile.kind === 'grok-subscription' ? profile : {
             ...profile,
-            credentialConfigured: !!this.vault.get(profile.secretRef ?? `provider:${profile.id}`)
+            credentialConfigured: !this.isProviderUpdateBlocked(profile.id)
+                && !!this.vault.get(profile.secretRef ?? `provider:${profile.id}`)
         });
     }
 
@@ -222,7 +247,10 @@ export class ProviderRegistry {
     }
 
     save(input: ProviderProfile, apiKey?: string): ProviderProfile {
-        return this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => this.saveUnlocked(input, apiKey));
+        return this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
+            this.recoverInterruptedProviderUpdateUnlocked();
+            return this.saveUnlocked(input, apiKey);
+        });
     }
 
     protected saveUnlocked(input: ProviderProfile, apiKey?: string): ProviderProfile {
@@ -232,6 +260,7 @@ export class ProviderRegistry {
                 throw new Error('Built-in providers cannot be changed.');
             }
             const file = this.readMetadata();
+            const previousFile = structuredClone(file);
             const previous = file.xaiApi;
             const settings = this.validateXaiSettings(input);
             const previousBaseUrl = previous?.baseUrl ?? XAI_OFFICIAL_BASE_URL;
@@ -242,9 +271,6 @@ export class ProviderRegistry {
             }
             if (!credential && !currentCredential) {
                 throw new Error('此模型服务需要 API 密钥。');
-            }
-            if (credential) {
-                this.vault.set('provider:xai-api-key', credential);
             }
             if (settings) {
                 file.xaiApi = settings;
@@ -257,8 +283,7 @@ export class ProviderRegistry {
             if (credential || !sameXaiSettings(previous, settings)) {
                 this.clearAuthenticationConsentUnlocked(file, input.id);
             }
-            this.writeMetadata(file);
-            this.rewriteManagedBlock(file);
+            this.commitProviderUpdate(previousFile, file, input.id, 'provider:xai-api-key', credential);
             return {
                 ...this.xaiProfile(file),
                 credentialConfigured: !!this.vault.get('provider:xai-api-key')
@@ -269,6 +294,7 @@ export class ProviderRegistry {
         }
         const profile = this.validate(input);
         const file = this.readMetadata();
+        const previousFile = structuredClone(file);
         const existing = file.providers.findIndex(candidate => candidate.id === profile.id);
         const previous = existing >= 0 ? file.providers[existing] : undefined;
         if (previous?.baseUrl !== profile.baseUrl && !credential) {
@@ -281,17 +307,159 @@ export class ProviderRegistry {
         }
         file.preferredModels = file.preferredModels ?? {};
         file.preferredModels[profile.id] = profile.model!;
-        if (credential) {
-            this.vault.set(profile.secretRef!, credential);
-        } else if (!this.vault.get(profile.secretRef!)) {
+        if (!credential && !this.vault.get(profile.secretRef!)) {
             throw new Error('This provider needs an API key.');
         }
         if (credential || !sameProviderConfiguration(previous, profile)) {
             this.clearAuthenticationConsentUnlocked(file, profile.id);
         }
-        this.writeMetadata(file);
-        this.rewriteManagedBlock(file);
+        this.commitProviderUpdate(previousFile, file, profile.id, profile.secretRef!, credential);
         return { ...profile, credentialConfigured: !!this.vault.get(profile.secretRef!) };
+    }
+
+    /**
+     * Commits the three Provider stores without ever installing a new key
+     * while the old endpoint is still authoritative. Grok TOML is written
+     * first, metadata second, and the credential last. Any later failure
+     * restores the previous state; if rollback itself is incomplete, the
+     * durable marker blocks all runtime access to the uncertain credential.
+     */
+    protected commitProviderUpdate(
+        previousFile: ProviderFile,
+        nextFile: ProviderFile,
+        providerId: string,
+        secretRef: string,
+        credential?: string
+    ): void {
+        const previousCredential = this.vault.get(secretRef);
+        let markerAttempted = false;
+        let managedBlockAttempted = false;
+        let metadataAttempted = false;
+        let credentialAttempted = false;
+        try {
+            markerAttempted = true;
+            this.writeProviderUpdateMarker({
+                schemaVersion: 1,
+                providerId,
+                secretRef,
+                startedAt: new Date().toISOString()
+            });
+            managedBlockAttempted = true;
+            this.rewriteManagedBlock(nextFile);
+            metadataAttempted = true;
+            this.writeMetadata(nextFile);
+            if (credential !== undefined) {
+                credentialAttempted = true;
+                this.vault.set(secretRef, credential);
+            }
+            this.clearProviderUpdateMarker();
+        } catch (error) {
+            const rollbackErrors: unknown[] = [];
+            let credentialSafe = true;
+            if (credentialAttempted) {
+                credentialSafe = false;
+                try {
+                    if (previousCredential === undefined) this.vault.delete(secretRef);
+                    else this.vault.set(secretRef, previousCredential);
+                    credentialSafe = true;
+                } catch (rollbackError) {
+                    rollbackErrors.push(rollbackError);
+                    try {
+                        this.vault.delete(secretRef);
+                        credentialSafe = true;
+                    } catch (deleteError) {
+                        rollbackErrors.push(deleteError);
+                    }
+                }
+            }
+            // Never restore an old URL while the credential store may contain
+            // the new key. The durable marker keeps every runtime blocked and
+            // a later recovery/save can safely clear the uncertain credential.
+            if (!credentialSafe) {
+                throw new Error('模型服务保存未完成。为避免凭据与地址错配，已阻止该服务启动；请重启应用后重新保存 API 密钥。');
+            }
+            if (metadataAttempted) {
+                try {
+                    this.writeMetadata(previousFile);
+                } catch (rollbackError) {
+                    rollbackErrors.push(rollbackError);
+                }
+            }
+            if (managedBlockAttempted) {
+                try {
+                    this.rewriteManagedBlock(previousFile);
+                } catch (rollbackError) {
+                    rollbackErrors.push(rollbackError);
+                }
+            }
+            if (rollbackErrors.length > 0) {
+                if (credentialAttempted) {
+                    try { this.vault.delete(secretRef); } catch { /* the marker still blocks runtime access */ }
+                }
+                throw new Error('模型服务保存未完成。为避免凭据与地址错配，已阻止该服务启动；请重启应用后重新保存 API 密钥。');
+            }
+            if (markerAttempted) {
+                try {
+                    this.clearProviderUpdateMarker();
+                } catch {
+                    throw new Error('模型服务保存未完成。安全恢复已经完成，但事务标记无法清除；请重启应用后重试。');
+                }
+            }
+            throw error;
+        }
+    }
+
+    protected recoverInterruptedProviderUpdateUnlocked(): void {
+        const marker = this.readProviderUpdateMarker();
+        if (!marker) return;
+        // Never attempt to infer which credential rename completed. Removing
+        // it is the only crash-safe recovery that cannot cross endpoints.
+        this.vault.delete(marker.secretRef);
+        const file = this.readMetadata();
+        this.rewriteManagedBlock(file);
+        this.clearProviderUpdateMarker();
+    }
+
+    protected isProviderUpdateBlocked(providerId: string): boolean {
+        try {
+            const marker = this.readProviderUpdateMarker();
+            return !!marker && marker.providerId === providerId;
+        } catch {
+            // A corrupt marker cannot identify one safe Provider, so every API
+            // Provider fails closed until the marker is repaired or removed.
+            return true;
+        }
+    }
+
+    protected readProviderUpdateMarker(): ProviderUpdateMarker | undefined {
+        let parsed: Partial<ProviderUpdateMarker>;
+        try {
+            parsed = JSON.parse(fs.readFileSync(this.providerUpdatePath, 'utf8')) as Partial<ProviderUpdateMarker>;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+            throw new Error('Unable to read the Provider update transaction marker.');
+        }
+        const providerId = parsed.providerId;
+        const expectedProvider = providerId === 'xai-api-key' || (typeof providerId === 'string' && PROFILE_ID.test(providerId));
+        if (parsed.schemaVersion !== 1 || !expectedProvider
+            || parsed.secretRef !== `provider:${providerId}`
+            || typeof parsed.startedAt !== 'string' || Number.isNaN(Date.parse(parsed.startedAt))) {
+            throw new Error('Invalid Provider update transaction marker.');
+        }
+        return parsed as ProviderUpdateMarker;
+    }
+
+    protected writeProviderUpdateMarker(marker: ProviderUpdateMarker): void {
+        this.atomicWrite(this.providerUpdatePath, `${JSON.stringify(marker, undefined, 2)}\n`, 0o600);
+    }
+
+    protected clearProviderUpdateMarker(): void {
+        try {
+            fs.unlinkSync(this.providerUpdatePath);
+            fsyncDirectory(path.dirname(this.providerUpdatePath));
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
     }
 
     clearCredential(id: string): void {
@@ -372,12 +540,72 @@ export class ProviderRegistry {
     }
 
     environment(profileId: string): NodeJS.ProcessEnv {
+        return this.withProviderEnvironment(profileId, environment => environment);
+    }
+
+    /**
+     * Keeps the Provider writer lock through a synchronous consumer such as
+     * child-process spawn, so another window cannot change Grok TOML between
+     * the coherent credential snapshot and launch.
+     */
+    withProviderEnvironment<T>(
+        profileId: string,
+        operation: (environment: NodeJS.ProcessEnv, profile: ProviderProfile) => T
+    ): T {
+        if (profileId === 'grok-subscription') {
+            const profile = this.get(profileId);
+            if (!profile) throw new Error(`Unknown provider profile: ${profileId}`);
+            return operation({}, profile);
+        }
+        return this.withFileLock(
+            this.metadataLockPath,
+            'Another Xora Code process is updating Providers. Please retry.',
+            () => {
+                const snapshot = this.providerEnvironmentSnapshotUnlocked(profileId);
+                return operation(snapshot.environment, snapshot.profile);
+            }
+        );
+    }
+
+    async withProviderEnvironmentAsync<T>(
+        profileId: string,
+        operation: (environment: NodeJS.ProcessEnv, profile: ProviderProfile) => Promise<T>
+    ): Promise<T> {
+        if (profileId === 'grok-subscription') {
+            const profile = this.get(profileId);
+            if (!profile) throw new Error(`Unknown provider profile: ${profileId}`);
+            return operation({}, profile);
+        }
+        return this.withFileLockAsync(
+            this.metadataLockPath,
+            'Another Xora Code process is updating Providers. Please retry.',
+            async () => {
+                const snapshot = this.providerEnvironmentSnapshotUnlocked(profileId);
+                return operation(snapshot.environment, snapshot.profile);
+            }
+        );
+    }
+
+    providerCredentialSnapshot(profileId: string): { profile: ProviderProfile; credential: string } {
+        return this.withFileLock(
+            this.metadataLockPath,
+            'Another Xora Code process is updating Providers. Please retry.',
+            () => this.providerCredentialSnapshotUnlocked(profileId)
+        );
+    }
+
+    protected providerEnvironmentSnapshotUnlocked(
+        profileId: string
+    ): { profile: ProviderProfile; environment: NodeJS.ProcessEnv } {
         const profile = this.get(profileId);
         if (!profile) {
             throw new Error(`Unknown provider profile: ${profileId}`);
         }
         if (profile.kind === 'grok-subscription') {
-            return {};
+            return { profile, environment: {} };
+        }
+        if (this.isProviderUpdateBlocked(profile.id)) {
+            throw new Error('此模型服务的配置更新尚未安全完成，已阻止启动。请重启应用后重新保存 API 密钥。');
         }
         const secretRef = profile.secretRef ?? `provider:${profile.id}`;
         const key = this.vault.get(secretRef);
@@ -389,25 +617,53 @@ export class ProviderRegistry {
             // flow. An explicitly configured endpoint is isolated behind a
             // model-scoped variable so a relay key is never treated as shared
             // Grok authentication state.
-            return profile.model
+            const environment: NodeJS.ProcessEnv = profile.model
                 ? { [XAI_MANAGED_ENVIRONMENT]: key }
                 : { XAI_API_KEY: key };
+            if (profile.model && profile.backendSearch === true) {
+                // Grok resolves the web-search sampler independently from the
+                // active ACP model. A process-scoped pin keeps it on this
+                // relay profile without changing the user's shared [models]
+                // defaults or affecting an external Grok CLI.
+                environment.GROK_WEB_SEARCH_MODEL = XAI_MANAGED_MODEL_ID;
+            }
+            return { profile: { ...profile }, environment };
         }
         const environmentName = this.environmentName(profile.id);
         // A copied pre-Xora TOML block can still reference the legacy
         // environment variable until the next managed configuration write.
-        return {
+        const environment: NodeJS.ProcessEnv = {
             [environmentName]: key,
             [this.legacyEnvironmentName(profile.id)]: key
         };
+        if (profile.backendSearch === true) {
+            environment.GROK_WEB_SEARCH_MODEL = profile.id;
+        }
+        return { profile: { ...profile }, environment };
     }
 
     credential(profileId: string): string | undefined {
-        const profile = this.get(profileId);
-        if (!profile || profile.kind === 'grok-subscription') {
+        if (profileId === 'grok-subscription') return undefined;
+        try {
+            return this.providerCredentialSnapshot(profileId).credential;
+        } catch {
             return undefined;
         }
-        return this.vault.get(profile.secretRef ?? `provider:${profile.id}`);
+    }
+
+    protected providerCredentialSnapshotUnlocked(profileId: string): { profile: ProviderProfile; credential: string } {
+        const profile = this.get(profileId);
+        if (!profile || profile.kind === 'grok-subscription') {
+            throw new Error(`Unknown API provider profile: ${profileId}`);
+        }
+        if (this.isProviderUpdateBlocked(profile.id)) {
+            throw new Error('此模型服务的配置更新尚未安全完成，已阻止读取密钥。');
+        }
+        const credential = this.vault.get(profile.secretRef ?? `provider:${profile.id}`);
+        if (!credential) {
+            throw new Error(`No credential is available for ${profile.name}.`);
+        }
+        return { profile: { ...profile }, credential };
     }
 
     mcpEnvironment(workspaceRoot: string): NodeJS.ProcessEnv {
@@ -522,6 +778,9 @@ export class ProviderRegistry {
         if (!protocols.includes(input.protocol)) {
             throw new Error('Unsupported custom provider protocol.');
         }
+        if (input.backendSearch === true && input.protocol !== 'openai-responses') {
+            throw new Error('服务端联网搜索仅支持 OpenAI Responses 协议。');
+        }
         if (!input.baseUrl || !input.model) {
             throw new Error('Base URL and model ID are required.');
         }
@@ -538,6 +797,7 @@ export class ProviderRegistry {
             baseUrl,
             model: this.validateModelId(input.model),
             contextWindow,
+            backendSearch: input.backendSearch === true,
             // Secret references are derived exclusively by Electron main. A
             // renderer must never alias another Provider's vault entry.
             secretRef: `provider:${input.id}`,
@@ -550,6 +810,9 @@ export class ProviderRegistry {
         const protocol = input.protocol ?? 'openai-responses';
         if (!protocols.includes(protocol)) {
             throw new Error('不支持所选 API 协议。');
+        }
+        if (input.backendSearch === true && protocol !== 'openai-responses') {
+            throw new Error('服务端联网搜索仅支持 OpenAI Responses 协议。');
         }
         const baseUrl = normalizeProviderBaseUrl(input.baseUrl?.trim() || XAI_OFFICIAL_BASE_URL);
         const model = input.model?.trim() ?? '';
@@ -570,7 +833,8 @@ export class ProviderRegistry {
             protocol,
             baseUrl,
             model: this.validateModelId(model),
-            contextWindow
+            contextWindow,
+            backendSearch: input.backendSearch === true
         };
     }
 
@@ -591,7 +855,8 @@ export class ProviderRegistry {
             baseUrl: file.xaiApi?.baseUrl ?? XAI_OFFICIAL_BASE_URL,
             ...(file.xaiApi ? {
                 model: file.xaiApi.model,
-                contextWindow: file.xaiApi.contextWindow
+                contextWindow: file.xaiApi.contextWindow,
+                backendSearch: file.xaiApi.backendSearch
             } : {}),
             secretRef: 'provider:xai-api-key',
             managed: true
@@ -629,7 +894,8 @@ export class ProviderRegistry {
             `base_url = ${JSON.stringify(profile.baseUrl)}`,
             `name = ${JSON.stringify(profile.name)}`,
             `api_backend = ${JSON.stringify(backend)}`,
-            `context_window = ${profile.contextWindow ?? 200_000}`
+            `context_window = ${profile.contextWindow ?? 200_000}`,
+            `supports_backend_search = ${profile.backendSearch === true}`
         ];
         if (profile.protocol === 'anthropic-messages') {
             lines.push(`extra_headers = { "x-api-key" = "\${${env}}", "anthropic-version" = "2023-06-01" }`);
@@ -716,6 +982,49 @@ export class ProviderRegistry {
             fs.writeFileSync(descriptor, `${process.pid}\n`);
             fs.fsyncSync(descriptor);
             return operation();
+        } finally {
+            fs.closeSync(descriptor);
+            try { fs.unlinkSync(lockPath); } catch { /* already removed */ }
+        }
+    }
+
+    protected async withFileLockAsync<T>(
+        lockPath: string,
+        busyMessage: string,
+        operation: () => Promise<T>
+    ): Promise<T> {
+        fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+        let descriptor: number;
+        try {
+            descriptor = fs.openSync(lockPath, 'wx', 0o600);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+                const stat = fs.statSync(lockPath);
+                if (Date.now() - stat.mtimeMs > 30_000) {
+                    fs.unlinkSync(lockPath);
+                    descriptor = fs.openSync(lockPath, 'wx', 0o600);
+                } else {
+                    throw new Error(busyMessage);
+                }
+            } else {
+                throw error;
+            }
+        }
+        try {
+            fs.writeFileSync(descriptor, `${process.pid}\n`);
+            fs.fsyncSync(descriptor);
+            const heartbeat = setInterval(() => {
+                try {
+                    const now = new Date();
+                    fs.futimesSync(descriptor, now, now);
+                } catch { /* lock cleanup remains authoritative */ }
+            }, 5_000);
+            heartbeat.unref();
+            try {
+                return await operation();
+            } finally {
+                clearInterval(heartbeat);
+            }
         } finally {
             fs.closeSync(descriptor);
             try { fs.unlinkSync(lockPath); } catch { /* already removed */ }
@@ -811,7 +1120,8 @@ export class ProviderRegistry {
                     if (!candidate || typeof candidate !== 'object'
                         || typeof candidate.baseUrl !== 'string'
                         || typeof candidate.model !== 'string'
-                        || typeof candidate.contextWindow !== 'number') {
+                        || typeof candidate.contextWindow !== 'number'
+                        || (candidate.backendSearch !== undefined && typeof candidate.backendSearch !== 'boolean')) {
                         throw new Error('Invalid xAI API settings.');
                     }
                     xaiApi = this.validateXaiSettings({
@@ -822,6 +1132,7 @@ export class ProviderRegistry {
                         baseUrl: candidate.baseUrl,
                         model: candidate.model,
                         contextWindow: candidate.contextWindow,
+                        backendSearch: candidate.backendSearch === true,
                         secretRef: 'provider:xai-api-key',
                         managed: true
                     });
@@ -935,7 +1246,8 @@ function sameXaiSettings(left: XaiApiSettings | undefined, right: XaiApiSettings
     return left?.protocol === right?.protocol
         && left?.baseUrl === right?.baseUrl
         && left?.model === right?.model
-        && left?.contextWindow === right?.contextWindow;
+        && left?.contextWindow === right?.contextWindow
+        && left?.backendSearch === right?.backendSearch;
 }
 
 function sameProviderConfiguration(left: ProviderProfile | undefined, right: ProviderProfile): boolean {
@@ -944,7 +1256,8 @@ function sameProviderConfiguration(left: ProviderProfile | undefined, right: Pro
         && left.protocol === right.protocol
         && left.baseUrl === right.baseUrl
         && left.model === right.model
-        && left.contextWindow === right.contextWindow;
+        && left.contextWindow === right.contextWindow
+        && left.backendSearch === right.backendSearch;
 }
 
 function fsyncDirectory(directory: string): void {

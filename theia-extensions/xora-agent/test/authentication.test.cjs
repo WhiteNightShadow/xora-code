@@ -4,6 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { FakeAgentHostService } = require('../lib/node/fake-agent-host-service');
+const { ProviderRegistry } = require('../lib/electron-main/provider-registry');
 
 test('credential RPC exposes only configured state and can clear a Provider secret', async () => {
     const service = new FakeAgentHostService();
@@ -67,16 +68,18 @@ test('built-in xAI Provider retains relay URL, protocol, model and context witho
     const xai = (await service.listProviders()).find(provider => provider.id === 'xai-api-key');
     const saved = await service.saveProvider({
         ...xai,
-        protocol: 'openai-chat-completions',
+        protocol: 'openai-responses',
         baseUrl: 'https://relay.example.invalid/v1',
         model: 'grok-relay-model',
-        contextWindow: 262_144
+        contextWindow: 1_000_000,
+        backendSearch: true
     }, 'relay-secret-that-must-not-cross-rpc');
 
-    assert.equal(saved.protocol, 'openai-chat-completions');
+    assert.equal(saved.protocol, 'openai-responses');
     assert.equal(saved.baseUrl, 'https://relay.example.invalid/v1');
     assert.equal(saved.model, 'grok-relay-model');
-    assert.equal(saved.contextWindow, 262_144);
+    assert.equal(saved.contextWindow, 1_000_000);
+    assert.equal(saved.backendSearch, true);
     assert.equal(saved.credentialConfigured, true);
     assert.doesNotMatch(JSON.stringify(saved), /relay-secret/);
 
@@ -87,13 +90,15 @@ test('built-in xAI Provider retains relay URL, protocol, model and context witho
             baseUrl: listed.baseUrl,
             model: listed.model,
             contextWindow: listed.contextWindow,
+            backendSearch: listed.backendSearch,
             credentialConfigured: listed.credentialConfigured
         },
         {
-            protocol: 'openai-chat-completions',
+            protocol: 'openai-responses',
             baseUrl: 'https://relay.example.invalid/v1',
             model: 'grok-relay-model',
-            contextWindow: 262_144,
+            contextWindow: 1_000_000,
+            backendSearch: true,
             credentialConfigured: true
         }
     );
@@ -114,13 +119,374 @@ test('configured xAI relays use a secret-free managed Grok model and profile-sco
     assert.match(managedToml, /profile\.kind === 'xai-api-key' \? XAI_MANAGED_MODEL_ID : profile\.id/);
     assert.match(managedToml, /profile\.kind === 'xai-api-key' \? XAI_MANAGED_ENVIRONMENT : this\.environmentName\(profile\.id\)/);
     assert.match(managedToml, /env_key =/);
+    assert.match(managedToml, /supports_backend_search =/);
     assert.match(managedToml, /extra_headers = \{ "x-api-key" =/);
     assert.doesNotMatch(managedToml, /vault\.get|credential\(|secretRef/);
     assert.match(source, /\.\.\.\(file\.xaiApi \? \[this\.xaiProfile\(file\)\] : \[\]\)/);
     assert.match(host, /provider\?\.kind === 'xai-api-key' && provider\.model\s*\? XAI_MANAGED_MODEL_ID/);
-    assert.match(host, /provider\.kind === 'grok-subscription' \|\| !provider\.baseUrl/);
+    assert.match(host, /if \(providerId === 'grok-subscription'\)/);
+    assert.match(host, /if \(!provider\.baseUrl\)/);
     assert.match(host, /provider\.protocol === 'anthropic-messages'[\s\S]*headers\['x-api-key'\] = credential/);
     assert.match(host, /headers\.authorization = `Bearer \$\{credential\}`/);
+    assert.match(host, /providerCredentialSnapshot\(providerId\)/);
+    assert.match(host, /withProviderEnvironmentAsync\(provider\.id,[\s\S]*supervisor\.launch\(root, environment\)/);
+});
+
+test('managed Grok relay TOML preserves a one-million-token Responses profile exactly', () => {
+    const registry = Object.create(ProviderRegistry.prototype);
+    const toml = registry.managedToml({
+        id: 'xai-api-key',
+        name: 'xAI / Grok API',
+        kind: 'xai-api-key',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.5',
+        contextWindow: 1_000_000,
+        backendSearch: true,
+        secretRef: 'provider:xai-api-key',
+        managed: true
+    });
+
+    assert.match(toml, /^\[model\."xora-xai-api"\]/m);
+    assert.match(toml, /^model = "grok-4\.5"$/m);
+    assert.match(toml, /^base_url = "https:\/\/relay\.example\.invalid\/v1"$/m);
+    assert.match(toml, /^api_backend = "responses"$/m);
+    assert.match(toml, /^context_window = 1000000$/m);
+    assert.match(toml, /^supports_backend_search = true$/m);
+    assert.match(toml, /^env_key = "XORA_CODE_XAI_API_KEY"$/m);
+    assert.doesNotMatch(toml, /relay-secret|api_key\s*=/i);
+});
+
+test('backend search fails closed for non-Responses API profiles', () => {
+    const registry = Object.create(ProviderRegistry.prototype);
+    assert.throws(() => registry.validateXaiSettings({
+        id: 'xai-api-key',
+        name: 'xAI / Grok API',
+        kind: 'xai-api-key',
+        protocol: 'openai-chat-completions',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.5',
+        contextWindow: 1_000_000,
+        backendSearch: true,
+        secretRef: 'provider:xai-api-key',
+        managed: true
+    }), /仅支持 OpenAI Responses/);
+});
+
+test('backend-search relays pin Grok web search to the current process-scoped model', () => {
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.metadataLockPath = '/fixture/providers.lock';
+    registry.withFileLock = (_lock, _message, operation) => operation();
+    registry.isProviderUpdateBlocked = () => false;
+    registry.vault = { get: () => 'fixture-secret' };
+    registry.get = id => id === 'xai-api-key' ? {
+        id,
+        name: 'xAI / Grok API',
+        kind: 'xai-api-key',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.5',
+        contextWindow: 1_000_000,
+        backendSearch: true,
+        secretRef: 'provider:xai-api-key',
+        managed: true
+    } : undefined;
+
+    assert.deepEqual(registry.environment('xai-api-key'), {
+        XORA_CODE_XAI_API_KEY: 'fixture-secret',
+        GROK_WEB_SEARCH_MODEL: 'xora-xai-api'
+    });
+
+    registry.get = id => id === 'xai-api-key' ? {
+        id,
+        name: 'xAI / Grok API',
+        kind: 'xai-api-key',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.5',
+        contextWindow: 1_000_000,
+        backendSearch: false,
+        secretRef: 'provider:xai-api-key',
+        managed: true
+    } : undefined;
+    assert.deepEqual(registry.environment('xai-api-key'), {
+        XORA_CODE_XAI_API_KEY: 'fixture-secret'
+    });
+});
+
+test('a Grok TOML write failure cannot replace relay metadata or its credential', () => {
+    const previousFile = {
+        schemaVersion: 1,
+        providers: [],
+        xaiApi: {
+            protocol: 'openai-responses',
+            baseUrl: 'https://old-relay.example.invalid/v1',
+            model: 'old-model',
+            contextWindow: 200_000,
+            backendSearch: false
+        }
+    };
+    let metadata = structuredClone(previousFile);
+    let credential = 'old-fixture-secret';
+    let metadataWrites = 0;
+    let credentialWrites = 0;
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.metadataLockPath = '/fixture/providers.lock';
+    registry.withFileLock = (_lock, _message, operation) => operation();
+    registry.recoverInterruptedProviderUpdateUnlocked = () => undefined;
+    registry.writeProviderUpdateMarker = () => undefined;
+    registry.clearProviderUpdateMarker = () => undefined;
+    registry.readMetadata = () => structuredClone(metadata);
+    registry.writeMetadata = file => {
+        metadataWrites += 1;
+        metadata = structuredClone(file);
+    };
+    let tomlWrites = 0;
+    registry.rewriteManagedBlock = () => {
+        tomlWrites += 1;
+        if (tomlWrites === 1) throw new Error('fixture Grok TOML write failure');
+    };
+    registry.vault = {
+        get: () => credential,
+        set: (_secretRef, value) => {
+            credentialWrites += 1;
+            credential = value;
+        },
+        delete: () => { credential = undefined; }
+    };
+
+    assert.throws(() => registry.save({
+        id: 'xai-api-key',
+        name: 'xAI / Grok API',
+        kind: 'xai-api-key',
+        protocol: 'openai-responses',
+        baseUrl: 'https://new-relay.example.invalid/v1',
+        model: 'grok-4.5',
+        contextWindow: 1_000_000,
+        backendSearch: true,
+        secretRef: 'provider:xai-api-key',
+        managed: true
+    }, 'new-fixture-secret'), /fixture Grok TOML write failure/);
+
+    assert.deepEqual(metadata, previousFile);
+    assert.equal(credential, 'old-fixture-secret');
+    assert.equal(metadataWrites, 0);
+    assert.equal(credentialWrites, 0);
+});
+
+test('a partial credential-store failure rolls Provider metadata and Grok TOML back', () => {
+    const previousFile = {
+        schemaVersion: 1,
+        providers: [],
+        xaiApi: {
+            protocol: 'openai-responses',
+            baseUrl: 'https://old-relay.example.invalid/v1',
+            model: 'old-model',
+            contextWindow: 200_000,
+            backendSearch: false
+        }
+    };
+    const nextFile = structuredClone(previousFile);
+    nextFile.xaiApi = {
+        protocol: 'openai-responses',
+        baseUrl: 'https://new-relay.example.invalid/v1',
+        model: 'grok-4.5',
+        contextWindow: 1_000_000,
+        backendSearch: true
+    };
+    let metadata = structuredClone(previousFile);
+    let managed = structuredClone(previousFile);
+    let credential = 'old-fixture-secret';
+    const events = [];
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.writeProviderUpdateMarker = () => undefined;
+    registry.clearProviderUpdateMarker = () => undefined;
+    registry.rewriteManagedBlock = file => {
+        events.push(`toml:${file.xaiApi.baseUrl}`);
+        managed = structuredClone(file);
+    };
+    registry.writeMetadata = file => {
+        events.push(`metadata:${file.xaiApi.baseUrl}`);
+        metadata = structuredClone(file);
+    };
+    registry.vault = {
+        get: () => credential,
+        set: (_secretRef, value) => {
+            events.push(`credential:${value.startsWith('new-') ? 'new' : 'old'}`);
+            credential = value;
+            if (value.startsWith('new-')) throw new Error('fixture credential write failure');
+        },
+        delete: () => { credential = undefined; }
+    };
+
+    assert.throws(() => registry.commitProviderUpdate(
+        previousFile,
+        nextFile,
+        'xai-api-key',
+        'provider:xai-api-key',
+        'new-fixture-secret'
+    ), /fixture credential write failure/);
+
+    assert.deepEqual(metadata, previousFile);
+    assert.deepEqual(managed, previousFile);
+    assert.equal(credential, 'old-fixture-secret');
+    assert.deepEqual(events, [
+        'toml:https://new-relay.example.invalid/v1',
+        'metadata:https://new-relay.example.invalid/v1',
+        'credential:new',
+        'credential:old',
+        'metadata:https://old-relay.example.invalid/v1',
+        'toml:https://old-relay.example.invalid/v1'
+    ]);
+});
+
+test('a post-replace Grok TOML error restores the old block before unblocking the Provider', () => {
+    const previousFile = {
+        schemaVersion: 1,
+        providers: [],
+        xaiApi: {
+            protocol: 'openai-responses',
+            baseUrl: 'https://old-relay.example.invalid/v1',
+            model: 'old-model',
+            contextWindow: 200_000,
+            backendSearch: false
+        }
+    };
+    const nextFile = structuredClone(previousFile);
+    nextFile.xaiApi = {
+        ...nextFile.xaiApi,
+        baseUrl: 'https://new-relay.example.invalid/v1',
+        model: 'grok-4.5'
+    };
+    let managed = structuredClone(previousFile);
+    let marker = false;
+    let rewrites = 0;
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.writeProviderUpdateMarker = () => { marker = true; };
+    registry.clearProviderUpdateMarker = () => { marker = false; };
+    registry.rewriteManagedBlock = file => {
+        rewrites += 1;
+        managed = structuredClone(file);
+        if (rewrites === 1) throw new Error('fixture error after atomic replace');
+    };
+    registry.writeMetadata = () => assert.fail('metadata must not be written after the TOML failure');
+    registry.vault = {
+        get: () => 'old-fixture-secret',
+        set: () => assert.fail('credential must not be written after the TOML failure'),
+        delete: () => assert.fail('credential must not be deleted after a successful rollback')
+    };
+
+    assert.throws(() => registry.commitProviderUpdate(
+        previousFile,
+        nextFile,
+        'xai-api-key',
+        'provider:xai-api-key',
+        'new-fixture-secret'
+    ), /fixture error after atomic replace/);
+    assert.deepEqual(managed, previousFile);
+    assert.equal(marker, false);
+    assert.equal(rewrites, 2);
+});
+
+test('an uncertain credential rollback keeps the new endpoint blocked instead of restoring the old URL', () => {
+    const previousFile = {
+        schemaVersion: 1,
+        providers: [],
+        xaiApi: {
+            protocol: 'openai-responses',
+            baseUrl: 'https://old-relay.example.invalid/v1',
+            model: 'old-model',
+            contextWindow: 200_000,
+            backendSearch: false
+        }
+    };
+    const nextFile = structuredClone(previousFile);
+    nextFile.xaiApi = {
+        ...nextFile.xaiApi,
+        baseUrl: 'https://new-relay.example.invalid/v1',
+        model: 'grok-4.5'
+    };
+    let metadata = structuredClone(previousFile);
+    let managed = structuredClone(previousFile);
+    let credential = 'old-fixture-secret';
+    let marker = false;
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.writeProviderUpdateMarker = () => { marker = true; };
+    registry.clearProviderUpdateMarker = () => { marker = false; };
+    registry.rewriteManagedBlock = file => { managed = structuredClone(file); };
+    registry.writeMetadata = file => { metadata = structuredClone(file); };
+    registry.vault = {
+        get: () => credential,
+        set: (_secretRef, value) => {
+            if (value.startsWith('old-')) throw new Error('fixture old credential restore failure');
+            credential = value;
+            throw new Error('fixture new credential post-write failure');
+        },
+        delete: () => { throw new Error('fixture credential delete failure'); }
+    };
+
+    assert.throws(() => registry.commitProviderUpdate(
+        previousFile,
+        nextFile,
+        'xai-api-key',
+        'provider:xai-api-key',
+        'new-fixture-secret'
+    ), /已阻止该服务启动/);
+    assert.deepEqual(metadata, nextFile);
+    assert.deepEqual(managed, nextFile);
+    assert.equal(credential, 'new-fixture-secret');
+    assert.equal(marker, true);
+
+    registry.get = () => ({
+        id: 'xai-api-key',
+        name: 'xAI / Grok API',
+        kind: 'xai-api-key',
+        protocol: 'openai-responses',
+        baseUrl: nextFile.xaiApi.baseUrl,
+        model: nextFile.xaiApi.model,
+        secretRef: 'provider:xai-api-key',
+        managed: true
+    });
+    registry.metadataLockPath = '/fixture/providers.lock';
+    registry.withFileLock = (_lock, _message, operation) => operation();
+    registry.isProviderUpdateBlocked = () => marker;
+    assert.throws(() => registry.environment('xai-api-key'), /已阻止启动/);
+    assert.equal(registry.credential('xai-api-key'), undefined);
+});
+
+test('startup recovery deletes an uncertain key and reconciles Grok TOML from Provider metadata', () => {
+    const file = {
+        schemaVersion: 1,
+        providers: [],
+        xaiApi: {
+            protocol: 'openai-responses',
+            baseUrl: 'https://recovered-relay.example.invalid/v1',
+            model: 'grok-4.5',
+            contextWindow: 1_000_000,
+            backendSearch: true
+        }
+    };
+    let marker = {
+        schemaVersion: 1,
+        providerId: 'xai-api-key',
+        secretRef: 'provider:xai-api-key',
+        startedAt: '2026-07-21T00:00:00.000Z'
+    };
+    let credential = 'uncertain-fixture-secret';
+    let managed;
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.readProviderUpdateMarker = () => marker;
+    registry.clearProviderUpdateMarker = () => { marker = undefined; };
+    registry.readMetadata = () => structuredClone(file);
+    registry.rewriteManagedBlock = next => { managed = structuredClone(next); };
+    registry.vault = {
+        delete: () => { credential = undefined; }
+    };
+
+    registry.recoverInterruptedProviderUpdateUnlocked();
+    assert.equal(credential, undefined);
+    assert.deepEqual(managed, file);
+    assert.equal(marker, undefined);
 });
 
 test('persistent authentication consent is Provider-scoped, versioned and never fingerprints a secret', () => {

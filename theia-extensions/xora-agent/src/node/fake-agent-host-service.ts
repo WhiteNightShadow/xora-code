@@ -470,7 +470,8 @@ export class FakeAgentHostService implements AgentHostService {
                 protocol: profile.protocol,
                 baseUrl: profile.baseUrl,
                 model: profile.model,
-                contextWindow: profile.contextWindow
+                contextWindow: profile.contextWindow,
+                backendSearch: profile.backendSearch
             };
             this.providerProfiles.splice(existing, 1, saved);
         } else if (profile.kind === 'custom') {

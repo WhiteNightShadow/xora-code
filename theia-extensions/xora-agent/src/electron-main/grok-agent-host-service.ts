@@ -282,10 +282,11 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.attachedWorkspaceRoots.has(root)) {
             throw new Error('The selected Agent root is not attached to the current Theia workspace.');
         }
-        const provider = this.providers.get(request.providerId);
-        if (!provider) {
+        const requestedProvider = this.providers.get(request.providerId);
+        if (!requestedProvider) {
             throw new Error('The selected Provider no longer exists.');
         }
+        let provider: ProviderProfile = requestedProvider;
         if (this.acp && this.workspaceRoot === root && this.providerId === provider.id && this.phase === 'ready') {
             return this.snapshot();
         }
@@ -312,52 +313,55 @@ export class GrokAgentHostService implements AgentHostService {
                 // Trust-state failures are fail-closed for project MCP, but
                 // they do not prevent the transport from waiting for input.
             }
-            const environment = {
-                ...projectMcpEnvironment,
-                ...this.providers.environment(provider.id)
-            };
-            this.currentSecrets = [...new Set(Object.values(environment).filter((value): value is string => typeof value === 'string' && value.length > 0))];
-            const launch = this.supervisor.launch(root, environment);
-            this.sidecarVersion = launch.version;
-            const acp = new AcpClient({
-                write: createNodeWritableSink(launch.process.stdin),
-                defaultTimeoutMs: 30_000,
-                maxLineBytes: 8 * 1024 * 1024,
-                maxPendingRequests: 128
-            });
-            this.acp = acp;
-            this.bindAcp(acp);
-            launch.process.once('error', error => this.runtimeFailed(error, generation));
-            launch.process.once('exit', (code, signal) => {
-                if (!this.intentionalStop) {
-                    this.runtimeFailed(new Error(`Grok sidecar exited (${signal ?? code ?? 'unknown'}).`), generation);
-                }
-            });
-            this.consumeTask = acp.consume(launch.process.stdout).catch(error => {
-                if (!this.intentionalStop) {
-                    this.runtimeFailed(error, generation);
-                }
-            });
+            const initialized = await this.providers.withProviderEnvironmentAsync(provider.id, async (providerEnvironment, currentProvider) => {
+                provider = currentProvider;
+                const environment = {
+                    ...projectMcpEnvironment,
+                    ...providerEnvironment
+                };
+                this.currentSecrets = [...new Set(Object.values(environment).filter((value): value is string => typeof value === 'string' && value.length > 0))];
+                const launch = this.supervisor.launch(root, environment);
+                this.sidecarVersion = launch.version;
+                const acp = new AcpClient({
+                    write: createNodeWritableSink(launch.process.stdin),
+                    defaultTimeoutMs: 30_000,
+                    maxLineBytes: 8 * 1024 * 1024,
+                    maxPendingRequests: 128
+                });
+                this.acp = acp;
+                this.bindAcp(acp);
+                launch.process.once('error', error => this.runtimeFailed(error, generation));
+                launch.process.once('exit', (code, signal) => {
+                    if (!this.intentionalStop) {
+                        this.runtimeFailed(new Error(`Grok sidecar exited (${signal ?? code ?? 'unknown'}).`), generation);
+                    }
+                });
+                this.consumeTask = acp.consume(launch.process.stdout).catch(error => {
+                    if (!this.intentionalStop) {
+                        this.runtimeFailed(error, generation);
+                    }
+                });
 
-            this.phase = 'initializing';
-            this.emitSnapshot();
-            const initialized = await acp.request<InitializeResponse>('initialize', {
-                protocolVersion: 1,
-                clientCapabilities: {
-                    fs: { readTextFile: false, writeTextFile: false },
-                    terminal: false
-                },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.1.0' },
-                _meta: {
-                    startupHints: {
-                        nonInteractive: true,
-                        skipGitStatus: true,
-                        skipProjectLayout: true
+                this.phase = 'initializing';
+                this.emitSnapshot();
+                return acp.request<InitializeResponse>('initialize', {
+                    protocolVersion: 1,
+                    clientCapabilities: {
+                        fs: { readTextFile: false, writeTextFile: false },
+                        terminal: false
                     },
-                    clientType: 'xora-code-desktop',
-                    clientVersion: '0.1.0'
-                }
-            }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
+                    clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.1.0' },
+                    _meta: {
+                        startupHints: {
+                            nonInteractive: true,
+                            skipGitStatus: true,
+                            skipProjectLayout: true
+                        },
+                        clientType: 'xora-code-desktop',
+                        clientVersion: '0.1.0'
+                    }
+                }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
+            });
             if (generation !== this.runtimeGeneration) {
                 throw new AcpCancelledError('initialize', 'initialize', 'Runtime generation changed.');
             }
@@ -905,15 +909,12 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async fetchProviderModels(providerId: string): Promise<AgentModelOption[]> {
-        const provider = this.providers.get(providerId);
-        if (!provider || provider.kind === 'grok-subscription' || !provider.baseUrl) {
+        if (providerId === 'grok-subscription') {
             throw new Error('此模型服务没有可查询的 API 地址。');
         }
+        const { profile: provider, credential } = this.providers.providerCredentialSnapshot(providerId);
+        if (!provider.baseUrl) throw new Error('此模型服务没有可查询的 API 地址。');
         const endpoint = providerModelsEndpoint(provider.baseUrl);
-        const credential = this.providers.credential(providerId);
-        if (!credential) {
-            throw new Error('This Provider has no available credential.');
-        }
         const headers: Record<string, string> = { accept: 'application/json' };
         if (provider.protocol === 'anthropic-messages') {
             headers['x-api-key'] = credential;
@@ -945,7 +946,8 @@ export class GrokAgentHostService implements AgentHostService {
                 && (previous.protocol !== profile.protocol
                     || previous.baseUrl !== profile.baseUrl
                     || previous.model !== profile.model
-                    || previous.contextWindow !== profile.contextWindow);
+                    || previous.contextWindow !== profile.contextWindow
+                    || previous.backendSearch !== profile.backendSearch);
             const invalidatesExistingRuntime = !!previous && (apiKey !== undefined || runtimeConfigurationChanged);
             if (invalidatesExistingRuntime && profile.id === this.providerId && (this.runtimeActive || this.phase !== 'stopped')) {
                 await this.stopRuntimeLocked();
@@ -1323,11 +1325,16 @@ export class GrokAgentHostService implements AgentHostService {
                 if (!id) {
                     return [];
                 }
+                const meta = asRecord(candidate._meta) ?? asRecord(candidate.meta);
                 return [{
                     id,
                     name: asString(candidate.name) ?? id,
                     description: asString(candidate.description),
-                    contextWindow: asNumber(candidate.contextWindow)
+                    // ACP serializes ModelInfo.meta as `_meta`; Grok Build
+                    // publishes the configured window as totalContextTokens.
+                    // Keep the older field as a compatibility fallback.
+                    contextWindow: asPositiveSafeInteger(meta?.totalContextTokens)
+                        ?? asPositiveSafeInteger(candidate.contextWindow)
                 }];
             });
         }
@@ -2209,6 +2216,10 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function asPositiveSafeInteger(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function modelStateFrom(value: { _meta?: Record<string, unknown>; models?: unknown }): ModelState | undefined {

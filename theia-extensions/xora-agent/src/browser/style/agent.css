@@ -2780,6 +2780,26 @@ form.xora-provider-form,
     grid-column: 1 / -1;
 }
 
+.xora-provider-form label.xora-provider-checkbox,
+.xora-provider-edit-form label.xora-provider-checkbox {
+    display: flex;
+    min-height: 30px;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    align-self: end;
+}
+
+.xora-provider-form .xora-provider-checkbox input,
+.xora-provider-edit-form .xora-provider-checkbox input {
+    width: 15px;
+    min-width: 15px;
+    height: 15px;
+    min-height: 15px;
+    margin: 0;
+    padding: 0;
+}
+
 .xora-provider-security-note {
     display: flex;
     align-items: flex-start;

@@ -401,7 +401,11 @@ export class AgentManagementWidget extends ReactWidget {
                     </select></label>
                     <label>Base URL<input required name='baseUrl' type='url' placeholder='https://api.example.com/v1' /></label>
                     <label>模型 ID<input required name='model' /></label>
-                    <label>上下文窗口<input required name='contextWindow' type='number' min='1024' defaultValue='200000' /></label>
+                    <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue='200000' /></label>
+                    <label className='xora-provider-checkbox'>
+                        <input name='backendSearch' type='checkbox' />
+                        <span>启用服务端联网搜索（仅 Responses）</span>
+                    </label>
                     <label>API 密钥<input required name='apiKey' type='password' autoComplete='off' /></label>
                     <button className='theia-button main' type='submit'>保存模型服务</button>
                 </form>
@@ -485,7 +489,11 @@ export class AgentManagementWidget extends ReactWidget {
                         </select>
                     </label>
                     <label>上下文窗口
-                        <input required name='contextWindow' type='number' min='1024' step='1024' defaultValue={provider.contextWindow ?? 200000} />
+                        <input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 200000} />
+                    </label>
+                    <label className='xora-provider-checkbox'>
+                        <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch === true} />
+                        <span>启用服务端联网搜索（仅 Responses）</span>
                     </label>
                     <label className='xora-provider-field-wide'>模型 ID
                         <input
@@ -518,7 +526,7 @@ export class AgentManagementWidget extends ReactWidget {
                     </p> : undefined}
                     <div className='xora-provider-card-actions xora-provider-edit-actions'>
                         <button className='theia-button main' disabled={this.loading} type='submit'>
-                            保存设置
+                            保存并使用
                         </button>
                         <button
                             className='theia-button secondary'
@@ -564,7 +572,11 @@ export class AgentManagementWidget extends ReactWidget {
                 </select></label>
                 <label>Base URL<input required name='baseUrl' type='url' defaultValue={provider.baseUrl} /></label>
                 <label>模型 ID<input required name='model' defaultValue={provider.model} /></label>
-                <label>上下文窗口<input required name='contextWindow' type='number' min='1024' defaultValue={provider.contextWindow ?? 200000} /></label>
+                <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 200000} /></label>
+                <label className='xora-provider-checkbox'>
+                    <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch === true} />
+                    <span>启用服务端联网搜索（仅 Responses）</span>
+                </label>
                 <label>替换 API 密钥（可选）
                     <input name='apiKey' type='password' autoComplete='off' placeholder='留空则保持当前密钥' />
                 </label>
@@ -891,6 +903,7 @@ export class AgentManagementWidget extends ReactWidget {
             baseUrl: String(form.get('baseUrl')),
             model: String(form.get('model')),
             contextWindow: Number(form.get('contextWindow')),
+            backendSearch: form.get('backendSearch') === 'on',
             secretRef: `provider:${id}`
         };
         try {
@@ -931,6 +944,7 @@ export class AgentManagementWidget extends ReactWidget {
             baseUrl: String(form.get('baseUrl') ?? ''),
             model: String(form.get('model') ?? ''),
             contextWindow: Number(form.get('contextWindow')),
+            backendSearch: form.get('backendSearch') === 'on',
             secretRef: existing.secretRef,
             managed: false
         };
@@ -974,15 +988,22 @@ export class AgentManagementWidget extends ReactWidget {
             baseUrl: String(form.get('baseUrl') ?? ''),
             model: String(form.get('model') ?? ''),
             contextWindow: Number(form.get('contextWindow')),
+            backendSearch: form.get('backendSearch') === 'on',
             secretRef: existing.secretRef,
             managed: true
         };
         try {
             await this.service.saveProvider(provider, optionalCredential(form.get('apiKey')));
+            const switchedProvider = this.runtimeSnapshot?.providerId !== existing.id;
+            if (switchedProvider) {
+                await this.service.selectProvider(existing.id);
+            }
             const password = formElement.elements.namedItem('apiKey');
             if (password instanceof HTMLInputElement) password.value = '';
             await this.refresh();
-            this.messages.info('xAI API 服务设置已保存。');
+            this.messages.info(switchedProvider
+                ? 'xAI API 服务已保存并设为当前模型服务。'
+                : 'xAI API 服务设置已保存。');
         } catch (error) {
             this.messages.error(`无法保存 xAI API 服务：${error instanceof Error ? error.message : String(error)}`);
         }

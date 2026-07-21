@@ -36,6 +36,8 @@ interface ProviderProfileBase {
     baseUrl?: string;
     model?: string;
     contextWindow?: number;
+    /** Whether the configured model endpoint can perform provider-side web search. */
+    backendSearch?: boolean;
     secretRef?: string;
     /** Safe status bit for UI rendering. The credential value never crosses RPC. */
     credentialConfigured?: boolean;

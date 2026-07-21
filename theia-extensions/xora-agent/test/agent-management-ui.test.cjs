@@ -100,15 +100,20 @@ test('built-in xAI settings expose relay configuration and never echo a saved AP
     assert.match(xaiCard, /value='anthropic-messages'/);
     assert.match(xaiCard, /name='model'/);
     assert.match(xaiCard, /name='contextWindow'[^>]*type='number'/);
+    assert.match(xaiCard, /name='contextWindow'[^>]*step='1'/);
+    assert.doesNotMatch(xaiCard, /name='contextWindow'[^>]*step='1024'/);
+    assert.match(xaiCard, /name='backendSearch'[^>]*type='checkbox'/);
     assert.match(xaiCard, /name='apiKey'[^>]*type='password'/);
     assert.doesNotMatch(xaiCard, /required\s+name='apiKey'/);
     assert.doesNotMatch(xaiCard, /value=\{[^}]*apiKey/);
     assert.doesNotMatch(xaiCard, /defaultValue=\{[^}]*apiKey/);
     assert.match(xaiCard, /留空则保持当前密钥/);
     assert.match(xaiCard, /this\.discoverModels\(provider\.id\)/);
+    assert.match(xaiCard, /保存并使用/);
     assert.match(xaiCard, /中转|第三方服务|项目内容/);
     assert.match(source, /saveXaiProvider\(event, provider\)/);
     assert.match(source, /service\.saveProvider\(provider, optionalCredential\(form\.get\('apiKey'\)\)\)/);
+    assert.match(source, /await this\.service\.selectProvider\(existing\.id\)/);
 });
 
 test('model service selection lives in settings and uses the shared backend switch', () => {
