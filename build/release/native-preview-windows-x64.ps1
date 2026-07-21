@@ -227,9 +227,19 @@ archive = tarfile.open(sys.argv[1], "r:gz")
 print(archive.pax_headers.get("comment", ""))
 archive.close()
 '@
-    $archiveCommit = (& python.exe -c $archiveCommitScript $SourceArchive 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $archiveCommit -ne $Commit) {
-        Fail 'Git archive commit identity does not match -Commit'
+    # Passing multiline Python through `python -c` loses nested quotes under
+    # Windows PowerShell 5.1's native argv conversion. Use a UTF-8 temporary
+    # source file inside the new work root, then remove it immediately.
+    $archiveCommitVerifier = Join-Path $WorkRoot 'verify-archive-commit.py'
+    $archiveCommitEncoding = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($archiveCommitVerifier, "$archiveCommitScript`n", $archiveCommitEncoding)
+    try {
+        $archiveCommit = (& python.exe $archiveCommitVerifier $SourceArchive 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $archiveCommit -ne $Commit) {
+            Fail 'Git archive commit identity does not match -Commit'
+        }
+    } finally {
+        Remove-Item -LiteralPath $archiveCommitVerifier -Force -ErrorAction SilentlyContinue
     }
 
     $archiveEntries = @(& tar.exe -tzf $SourceArchive)

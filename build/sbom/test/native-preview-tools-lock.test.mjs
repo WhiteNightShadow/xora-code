@@ -49,6 +49,13 @@ test("native builders require an externally verified archive and full commit", (
   assert.doesNotMatch(`${linuxScript}\n${windowsScript}`, /(?:password|api[_-]?key)\s*=/iu);
 });
 
+test("Windows verifies the Git archive commit without PowerShell 5 native argv quoting", () => {
+  assert.doesNotMatch(windowsScript, /python\.exe -c \$archiveCommitScript/u);
+  assert.match(windowsScript, /verify-archive-commit\.py/u);
+  assert.match(windowsScript, /\[IO\.File\]::WriteAllText\(\$archiveCommitVerifier/u);
+  assert.match(windowsScript, /Remove-Item -LiteralPath \$archiveCommitVerifier/u);
+});
+
 test("Windows activates the MSVC compiler and linker before cargo installs DotSlash", () => {
   const devShell = windowsScript.indexOf("Enter-VsDevShell");
   const cargoInstall = windowsScript.indexOf("'install', 'dotslash'");
