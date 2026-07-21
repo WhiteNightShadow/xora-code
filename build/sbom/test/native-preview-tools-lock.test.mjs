@@ -70,6 +70,21 @@ test("Windows resolves its sibling tool lock after PowerShell 5.1 initializes PS
   assert.match(windowsScript, /if \(\[string\]::IsNullOrWhiteSpace\(\$ToolLock\)\)[\s\S]*?Join-Path \$PSScriptRoot 'native-preview-tools\.lock\.json'/u);
 });
 
+test("native builders retry dependency installation only a bounded number of times", () => {
+  assert.match(linuxScript, /run_with_retry 3 10 yarn install --frozen-lockfile --non-interactive/u);
+  assert.match(linuxScript, /if \(\(attempt >= attempts\)\); then[\s\S]*?return "\$status"/u);
+  assert.match(windowsScript, /function Invoke-CheckedWithRetry/u);
+  assert.match(windowsScript, /\$attempt -ge \$Attempts[\s\S]*?throw/u);
+  assert.match(windowsScript, /Invoke-CheckedWithRetry -File \$YarnExecutable[\s\S]*?-Attempts 3 -DelaySeconds 10/u);
+
+  const linuxInstall = linuxScript.indexOf("run_with_retry 3 10 yarn install");
+  const windowsInstall = windowsScript.indexOf("Invoke-CheckedWithRetry -File $YarnExecutable");
+  assert.ok(linuxInstall >= 0);
+  assert.ok(windowsInstall >= 0);
+  assert.equal(linuxScript.slice(linuxInstall).match(/run_with_retry 3 10 yarn install/gu)?.length, 1);
+  assert.equal(windowsScript.slice(windowsInstall).match(/Invoke-CheckedWithRetry -File \$YarnExecutable/gu)?.length, 1);
+});
+
 test("native builders clear ambient runtime and compiler injection hooks", () => {
   for (const script of [linuxScript, windowsScript]) {
     for (const name of ["NODE_OPTIONS", "PYTHONPATH", "RUSTC_WRAPPER", "CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS"]) {

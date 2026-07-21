@@ -36,6 +36,27 @@ fail() {
     exit 1
 }
 
+run_with_retry() {
+    local attempts="$1" delay_seconds="$2" attempt=1 status
+    shift 2
+    while true; do
+        if "$@"; then
+            return 0
+        else
+            status=$?
+        fi
+        if ((attempt >= attempts)); then
+            printf 'Command failed after %d attempts (exit %d): %s\n' \
+                "$attempts" "$status" "$*" >&2
+            return "$status"
+        fi
+        printf 'Command failed (attempt %d/%d); retrying in %d seconds: %s\n' \
+            "$attempt" "$attempts" "$delay_seconds" "$*" >&2
+        sleep "$delay_seconds"
+        ((attempt += 1))
+    done
+}
+
 assert_clean_absolute_path() {
     local value="$1" label="$2" padded
     [[ -n "$value" && "$value" == /* && "$value" != / && "$value" != //* ]] || \
@@ -272,7 +293,7 @@ export GIT_CONFIG_KEY_0=core.longpaths
 export GIT_CONFIG_VALUE_0=true
 
 cd -- "$source_directory"
-yarn install --frozen-lockfile --non-interactive
+run_with_retry 3 10 yarn install --frozen-lockfile --non-interactive
 node build/grok/build-sidecar.mjs \
     --work-dir "$grok_work" \
     --target linux-x64 \

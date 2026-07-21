@@ -63,6 +63,28 @@ function Invoke-Checked {
     }
 }
 
+function Invoke-CheckedWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$File,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [string]$WorkingDirectory = $WorkRoot,
+        [ValidateRange(1, 10)][int]$Attempts = 3,
+        [ValidateRange(0, 300)][int]$DelaySeconds = 10
+    )
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Invoke-Checked -File $File -Arguments $Arguments -WorkingDirectory $WorkingDirectory
+            return
+        } catch {
+            if ($attempt -ge $Attempts) {
+                throw
+            }
+            Write-Warning "Command failed (attempt $attempt/$Attempts); retrying in $DelaySeconds seconds: $File"
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
 function Assert-Version {
     param(
         [Parameter(Mandatory = $true)][string]$File,
@@ -409,7 +431,9 @@ timeout = 120
     $env:GIT_CONFIG_VALUE_0 = 'true'
     $env:PROTOC = $ProtocExecutable
 
-    Invoke-Checked -File $YarnExecutable -Arguments @('install', '--frozen-lockfile', '--non-interactive') -WorkingDirectory $SourceDirectory
+    Invoke-CheckedWithRetry -File $YarnExecutable -Arguments @(
+        'install', '--frozen-lockfile', '--non-interactive'
+    ) -WorkingDirectory $SourceDirectory -Attempts 3 -DelaySeconds 10
     Invoke-Checked -File $NodeExecutable -Arguments @(
         'build/grok/build-sidecar.mjs', '--work-dir', $GrokWork,
         '--target', 'win32-x64', '--stage-dir', 'resources/sidecars/grok'
