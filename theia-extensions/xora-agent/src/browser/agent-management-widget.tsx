@@ -6,6 +6,12 @@ import URI from '@theia/core/lib/common/uri';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import { URI as VSCodeURI } from '@theia/core/shared/vscode-uri';
 import { AgentHostService, ComponentUpdateStatus, ManagementRequest, ManagementResult, ProviderProfile, ProviderProtocol, RuntimeSnapshot } from '../common/agent-protocol';
+import {
+    AGENT_CODE_HIGHLIGHT_STYLES,
+    AgentCodeHighlightStyle,
+    readAgentCodeHighlightStyle,
+    writeAgentCodeHighlightStyle
+} from './agent-code-highlight';
 import { friendlyAgentErrorMessage } from './agent-error-labels';
 import {
     AgentManagementTab,
@@ -262,6 +268,7 @@ export class AgentManagementWidget extends ReactWidget {
     protected result: ManagementResult | undefined;
     protected loading = false;
     protected discoveredModels = new Map<string, string[]>();
+    protected codeHighlightStyle: AgentCodeHighlightStyle = 'default';
     protected componentUpdate: ComponentUpdateStatus | undefined;
     protected runtimeSnapshot: RuntimeSnapshot | undefined;
     /** Safe, renderer-local result of an explicit login/logout in this widget. */
@@ -277,6 +284,7 @@ export class AgentManagementWidget extends ReactWidget {
         this.title.closable = true;
         this.title.iconClass = 'codicon codicon-settings-gear';
         this.addClass('xora-agent-management');
+        this.codeHighlightStyle = readAgentCodeHighlightStyle();
         this.node.tabIndex = 0;
     }
 
@@ -395,6 +403,20 @@ export class AgentManagementWidget extends ReactWidget {
                 </label>
             </article>
             {visibleProviders.map(provider => this.renderProvider(provider))}
+            <article className='xora-card'>
+                <strong>Agent 代码高亮</strong>
+                <p>回复中的代码块支持多语言着色，可切换高亮风格。</p>
+                <label className='xora-code-highlight-pref'>
+                    高亮风格
+                    <select
+                        aria-label='Agent 代码高亮风格'
+                        value={this.codeHighlightStyle}
+                        onChange={event => this.setCodeHighlightStyle(event.currentTarget.value as AgentCodeHighlightStyle)}>
+                        {AGENT_CODE_HIGHLIGHT_STYLES.map(style =>
+                            <option key={style.id} value={style.id}>{style.label}</option>)}
+                    </select>
+                </label>
+            </article>
             <details className='xora-card xora-provider-form'>
                 <summary>添加自定义 API 服务</summary>
                 <form onSubmit={event => this.addProvider(event)}>
@@ -405,10 +427,10 @@ export class AgentManagementWidget extends ReactWidget {
                         <option value='anthropic-messages'>Anthropic Messages</option>
                     </select></label>
                     <label>Base URL<input required name='baseUrl' type='url' placeholder='https://api.example.com/v1' /></label>
-                    <label>模型 ID<input required name='model' /></label>
-                    <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue='200000' /></label>
+                    {this.renderModelIdField('add', undefined, undefined)}
+                    <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue='1000000' /></label>
                     <label className='xora-provider-checkbox'>
-                        <input name='backendSearch' type='checkbox' />
+                        <input name='backendSearch' type='checkbox' defaultChecked />
                         <span>启用服务端联网搜索（仅 Responses）</span>
                     </label>
                     <label>API 密钥<input required name='apiKey' type='password' autoComplete='off' /></label>
@@ -492,20 +514,18 @@ export class AgentManagementWidget extends ReactWidget {
                     <option value='anthropic-messages'>Anthropic Messages</option>
                 </select></label>
                 <label>Base URL<input required name='baseUrl' type='url' defaultValue={provider.baseUrl} /></label>
-                <label>模型 ID<input required name='model' defaultValue={provider.model} /></label>
-                <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 200000} /></label>
+                {this.renderModelIdField(provider.id, provider.model, models)}
+                <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 1000000} /></label>
                 <label className='xora-provider-checkbox'>
-                    <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch === true} />
+                    <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch !== false} />
                     <span>启用服务端联网搜索（仅 Responses）</span>
                 </label>
                 <label>替换 API 密钥（可选）
                     <input name='apiKey' type='password' autoComplete='off' placeholder='留空则保持当前密钥' />
                 </label>
                 <p className='xora-provider-edit-hint'>修改 Base URL 时必须重新输入 API 密钥；密钥只会发送给 Electron 凭据保险库且不会回显。</p>
-                {models?.length ? <p className='xora-provider-models'>可用模型：{models.join(', ')}</p> : undefined}
                 <div className='xora-provider-card-actions xora-provider-edit-actions'>
                     <button className='theia-button main' disabled={this.loading} type='submit'>保存并使用</button>
-                    <button className='theia-button secondary' disabled={this.loading} type='button' onClick={() => this.discoverModels(provider.id)}>获取模型</button>
                     <button
                         className='theia-button secondary'
                         disabled={this.loading || !provider.credentialConfigured}
@@ -962,14 +982,64 @@ export class AgentManagementWidget extends ReactWidget {
         }
     }
 
+    /**
+     * Model ID field: editable input + optional datalist from “获取模型”,
+     * with the fetch button placed next to the field.
+     */
+    protected renderModelIdField(
+        providerKey: string,
+        currentModel: string | undefined,
+        models: string[] | undefined
+    ): React.ReactNode {
+        const listId = `xora-model-list-${providerKey}`;
+        const hasCatalog = !!models && models.length > 0;
+        return <div className='xora-provider-model-row'>
+            <label className='xora-provider-model-field'>
+                模型 ID
+                <input
+                    required
+                    name='model'
+                    list={hasCatalog ? listId : undefined}
+                    defaultValue={currentModel}
+                    placeholder={hasCatalog ? '从列表选择或直接输入模型 ID' : '例如 gpt-4.1 / claude-sonnet-4'}
+                    autoComplete='off'
+                />
+                {hasCatalog ? <datalist id={listId}>
+                    {models!.map(id => <option key={id} value={id} />)}
+                </datalist> : undefined}
+            </label>
+            <button
+                className='theia-button secondary xora-provider-fetch-models'
+                disabled={this.loading || providerKey === 'add'}
+                type='button'
+                title={providerKey === 'add' ? '请先保存服务后再获取模型列表' : '从 API 拉取可用模型列表'}
+                onClick={() => {
+                    if (providerKey !== 'add') void this.discoverModels(providerKey);
+                }}>
+                获取模型
+            </button>
+        </div>;
+    }
+
+    protected setCodeHighlightStyle(style: AgentCodeHighlightStyle): void {
+        this.codeHighlightStyle = style;
+        writeAgentCodeHighlightStyle(style);
+        this.update();
+        this.messages.info(`已切换 Agent 代码高亮风格：${AGENT_CODE_HIGHLIGHT_STYLES.find(item => item.id === style)?.label ?? style}`);
+    }
+
     protected async discoverModels(providerId: string): Promise<void> {
         try {
+            this.loading = true;
+            this.update();
             const models = await this.service.fetchProviderModels(providerId);
             this.discoveredModels.set(providerId, models.map(model => model.id));
-            this.update();
-            this.messages.info(models.length ? `已获取 ${models.length} 个可用模型。` : '服务没有返回可用模型，请手动输入模型 ID。');
+            this.messages.info(models.length ? `已获取 ${models.length} 个可用模型，可在模型 ID 中下拉选择或继续手输。` : '服务没有返回可用模型，请手动输入模型 ID。');
         } catch (error) {
             this.messages.error(`无法获取模型：${friendlyAgentErrorMessage(error)}`);
+        } finally {
+            this.loading = false;
+            this.update();
         }
     }
 

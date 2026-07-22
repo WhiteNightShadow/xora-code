@@ -853,7 +853,7 @@ export class ProviderRegistry {
             throw new Error('Base URL and model ID are required.');
         }
         const baseUrl = normalizeProviderBaseUrl(input.baseUrl);
-        const contextWindow = input.contextWindow ?? 200_000;
+        const contextWindow = input.contextWindow ?? 1_000_000;
         if (!Number.isSafeInteger(contextWindow) || contextWindow < 1024) {
             throw new Error('Context window must be a positive integer of at least 1024.');
         }
@@ -893,7 +893,7 @@ export class ProviderRegistry {
             }
             return undefined;
         }
-        const contextWindow = input.contextWindow ?? 200_000;
+        const contextWindow = input.contextWindow ?? 1_000_000;
         if (!Number.isSafeInteger(contextWindow) || contextWindow < 1024) {
             throw new Error('上下文窗口必须是至少 1024 的整数。');
         }
@@ -962,7 +962,7 @@ export class ProviderRegistry {
             `base_url = ${JSON.stringify(profile.baseUrl)}`,
             `name = ${JSON.stringify(profile.name)}`,
             `api_backend = ${JSON.stringify(backend)}`,
-            `context_window = ${profile.contextWindow ?? 200_000}`,
+            `context_window = ${profile.contextWindow ?? 1_000_000}`,
             `supports_backend_search = ${profile.backendSearch === true}`
         ];
         if (profile.protocol === 'anthropic-messages') {

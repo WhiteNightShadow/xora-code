@@ -31,3 +31,17 @@ test('其他 locale 不会被产品中文文案覆盖', () => {
     assert.deepEqual(contribution.getReplacement('en'), {});
     assert.deepEqual(contribution.getReplacement('zh-tw'), {});
 });
+
+test('主菜单 Selection / Run 有中文替换且注册了强制改写贡献', () => {
+    const replacements = new XoraTextReplacementContribution().getReplacement('zh-cn');
+    assert.equal(replacements.Selection, '选择');
+    assert.equal(replacements.Run, '运行');
+
+    const moduleSource = fs.readFileSync(path.join(__dirname, '../src/browser/xora-product-frontend-module.ts'), 'utf8');
+    const menuSource = fs.readFileSync(path.join(__dirname, '../src/browser/xora-menu-i18n-contribution.ts'), 'utf8');
+    assert.match(moduleSource, /XoraMenuI18nContribution/);
+    assert.match(menuSource, /3_selection/);
+    assert.match(menuSource, /6_debug/);
+    assert.match(menuSource, /选择/);
+    assert.match(menuSource, /运行/);
+});

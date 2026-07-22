@@ -34,6 +34,7 @@ import {
     ToolCallEvent,
     XAI_MANAGED_MODEL_ID
 } from '../common/agent-protocol';
+import { normalizeWindowsFilesystemPath } from '../common/workspace-path';
 import { ProviderRegistry } from './provider-registry';
 import { validatePromptImageAttachments } from './prompt-image-attachments';
 import { providerModelsEndpoint, requestProviderJson } from './provider-network';
@@ -2794,14 +2795,16 @@ export class GrokAgentHostService implements AgentHostService {
             throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
         }
         // Reject URI-like operands so they cannot be treated as relative paths.
-        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(candidate) && !path.isAbsolute(candidate)) {
+        // Windows drive paths (`D:\…`) are absolute and must pass through.
+        const repairedCandidate = normalizeWindowsFilesystemPath(candidate);
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(repairedCandidate) && !path.isAbsolute(repairedCandidate)) {
             throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
         }
         // Resolve relative Agent paths against the trusted workspace root, not
         // Electron's process.cwd() (which is often the app install directory).
-        const absolute = path.isAbsolute(candidate)
-            ? path.normalize(candidate)
-            : path.resolve(this.workspaceRoot, candidate);
+        const absolute = path.isAbsolute(repairedCandidate)
+            ? path.normalize(repairedCandidate)
+            : path.resolve(this.workspaceRoot, repairedCandidate);
         let existing = absolute;
         const missing: string[] = [];
         while (!fs.existsSync(existing)) {
@@ -2869,10 +2872,11 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.workspaceRoot || candidate.includes('\0')) return false;
         // Reject URI-like operands. ACP filesystem locations must be paths;
         // treating a URI as a relative path would accidentally allow it.
-        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(candidate) && !path.isAbsolute(candidate)) return false;
-        const absolute = path.isAbsolute(candidate)
-            ? path.normalize(candidate)
-            : path.resolve(this.workspaceRoot, candidate);
+        const repairedCandidate = normalizeWindowsFilesystemPath(candidate);
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(repairedCandidate) && !path.isAbsolute(repairedCandidate)) return false;
+        const absolute = path.isAbsolute(repairedCandidate)
+            ? path.normalize(repairedCandidate)
+            : path.resolve(this.workspaceRoot, repairedCandidate);
         let existing = absolute;
         const missing: string[] = [];
         while (!fs.existsSync(existing)) {

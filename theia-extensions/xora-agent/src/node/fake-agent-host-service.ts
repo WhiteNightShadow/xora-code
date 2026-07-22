@@ -20,6 +20,7 @@ import {
     StartRuntimeRequest,
     SynchronizeWorkspaceTrustRequest
 } from '../common/agent-protocol';
+import { normalizeWindowsFilesystemPath } from '../common/workspace-path';
 import { validatePromptImageAttachments } from '../electron-main/prompt-image-attachments';
 
 @injectable()
@@ -603,7 +604,8 @@ export class FakeAgentHostService implements AgentHostService {
     }
 
     protected canonicalRoot(root: string): string {
-        if (!path.isAbsolute(root)) throw new Error('Workspace root must be an absolute path.');
-        return path.normalize(path.resolve(root));
+        const candidate = normalizeWindowsFilesystemPath(root);
+        if (!path.isAbsolute(candidate)) throw new Error('Workspace root must be an absolute path.');
+        return path.normalize(path.resolve(candidate));
     }
 }

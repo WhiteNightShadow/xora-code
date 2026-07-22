@@ -28,7 +28,8 @@ export class XoraTextReplacementContribution implements TextReplacementContribut
                 '如果不信任，项目将以受限模式打开，并禁用这些功能，以防范潜在的恶意代码。',
             "Learn more about Theia's Workspace Trust": '了解项目信任机制',
 
-            // Main menu bar
+            // Main menu bar (also re-applied via XoraMenuI18nContribution for
+            // Selection/Run, which often miss VS Code default translation keys).
             'File': '文件',
             'Edit': '编辑',
             'Selection': '选择',
@@ -37,6 +38,34 @@ export class XoraTextReplacementContribution implements TextReplacementContribut
             'Run': '运行',
             'Terminal': '终端',
             'Help': '帮助',
+            // Selection submenu (common Monaco items)
+            'Select All': '全选',
+            'Expand Selection': '扩大选区',
+            'Shrink Selection': '缩小选区',
+            'Copy Line Up': '向上复制行',
+            'Copy Line Down': '向下复制行',
+            'Move Line Up': '向上移动行',
+            'Move Line Down': '向下移动行',
+            'Duplicate Selection': '复制选区',
+            'Add Cursor Above': '在上方添加光标',
+            'Add Cursor Below': '在下方添加光标',
+            'Add Cursors to Line Ends': '在行尾添加光标',
+            'Add Next Occurrence': '添加下一个匹配项',
+            'Add Previous Occurrence': '添加上一个匹配项',
+            'Select All Occurrences': '选择所有匹配项',
+            // Run / Debug submenu
+            'Start Debugging': '启动调试',
+            'Run Without Debugging': '以非调试模式运行',
+            'Stop Debugging': '停止调试',
+            'Restart Debugging': '重新启动调试',
+            'Open Configurations': '打开配置',
+            'Add Configuration...': '添加配置...',
+            'Step Over': '单步跳过',
+            'Step Into': '单步调试',
+            'Step Out': '单步跳出',
+            'Continue': '继续',
+            'Toggle Breakpoint': '切换断点',
+            'New Breakpoint': '新建断点',
 
             // Common File menu
             'New File...': '新建文件...',

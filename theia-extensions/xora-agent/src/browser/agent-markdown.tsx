@@ -1,4 +1,9 @@
 import * as React from '@theia/core/shared/react';
+import {
+    highlightCodeToHtml,
+    normalizeHighlightLanguage,
+    readAgentCodeHighlightStyle
+} from './agent-code-highlight';
 
 export type AgentMarkdownInline =
     | { readonly kind: 'text'; readonly text: string }
@@ -197,13 +202,23 @@ function renderBlock(
                     </tr>)}</tbody>
                 </table>
             </div>;
-        case 'code':
+        case 'code': {
+            const language = normalizeHighlightLanguage(block.language);
+            const style = readAgentCodeHighlightStyle();
+            const html = highlightCodeToHtml(block.code, language);
             return <pre
                 key={key}
-                className={`xora-agent-markdown-code${block.closed ? '' : ' is-streaming'}`}
-                data-streaming={block.closed ? undefined : 'true'}>
-                <code data-language={block.language}>{block.code}</code>
+                className={`xora-agent-markdown-code xora-hl-theme-${style}${block.closed ? '' : ' is-streaming'}`}
+                data-streaming={block.closed ? undefined : 'true'}
+                data-language={language}>
+                {block.language ? <span className='xora-agent-markdown-code-lang'>{block.language}</span> : undefined}
+                <code
+                    className={`language-${language}`}
+                    data-language={language}
+                    dangerouslySetInnerHTML={{ __html: html }}
+                />
             </pre>;
+        }
         case 'paragraph':
             return <p key={key} className='xora-agent-markdown-paragraph'>
                 {renderInlineWithBreaks(block.text, `paragraph-${key}`, onOpenPath)}

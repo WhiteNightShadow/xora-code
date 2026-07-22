@@ -60,7 +60,7 @@ test('macOS Explorer 为交通灯保留安全边距', () => {
     assert.match(css, /min-height:\s*32px/);
 });
 
-test('桌面外壳只移除次要 chrome，保留项目树、终端和窗口控制', () => {
+test('桌面外壳只移除次要 chrome，保留菜单栏、项目树、终端和窗口控制', () => {
     const css = fs.readFileSync(path.join(__dirname, '../src/browser/style/xora-code.css'), 'utf8');
     const shellContribution = fs.readFileSync(path.join(__dirname, '../src/browser/xora-shell-contribution.ts'), 'utf8');
 
@@ -68,7 +68,8 @@ test('桌面外壳只移除次要 chrome，保留项目树、终端和窗口控�
     assert.match(css, /xora-compact-workbench[\s\S]*?#main-toolbar[\s\S]*?display:\s*none\s*!important/);
     assert.match(css, /#theia-left-content-panel\s*>\s*\.theia-app-sidebar-container/);
     assert.match(css, /xora-compact-workbench[\s\S]*?#theia-statusBar[\s\S]*?display:\s*none\s*!important/);
-    assert.match(css, /#theia-top-panel\s*>\s*:not\(#theia-drag-panel\):not\(#window-controls\)/);
+    // Windows/Linux must keep the application MenuBar visible (not hide the whole top panel).
+    assert.match(css, /#theia-top-panel\s*>\s*:not\(#theia-drag-panel\):not\(#window-controls\):not\(\.p-MenuBar\):not\(\.lm-MenuBar\)/);
     assert.match(css, /xora-platform-darwin #main-toolbar[\s\S]*?min-height:\s*30px/);
     assert.doesNotMatch(css, /#theia-bottom-(?:content|split)-panel[^{]*\{[^}]*display:\s*none/);
 });

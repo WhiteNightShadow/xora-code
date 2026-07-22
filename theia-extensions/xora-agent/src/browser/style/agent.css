@@ -473,6 +473,24 @@ form.xora-provider-form,
     margin-top: 14px;
 }
 
+.xora-provider-model-row {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: end;
+}
+
+.xora-provider-model-field {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.xora-provider-fetch-models {
+    white-space: nowrap;
+}
+
 .xora-provider-form label,
 .xora-provider-edit-form label,
 .xora-provider-key-form label {
@@ -1828,6 +1846,7 @@ form.xora-provider-form,
 }
 
 .xora-agent-markdown-code {
+    position: relative;
     max-height: 340px;
     overflow: auto;
     margin: 6px 0 9px;
@@ -1841,6 +1860,68 @@ form.xora-provider-form,
     line-height: 1.55;
     white-space: pre;
     user-select: text;
+}
+
+.xora-agent-markdown-code-lang {
+    position: sticky;
+    top: 0;
+    float: right;
+    margin: -2px 0 4px 8px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 80%, transparent);
+    font-size: 10px;
+    line-height: 1.4;
+    text-transform: lowercase;
+}
+
+.xora-hl-keyword { color: #c678dd; font-weight: 600; }
+.xora-hl-string { color: #98c379; }
+.xora-hl-comment { color: #7f848e; font-style: italic; }
+.xora-hl-number { color: #d19a66; }
+.xora-hl-type { color: #e5c07b; }
+.xora-hl-punctuation { color: #abb2bf; }
+
+.xora-hl-theme-github .xora-hl-keyword { color: #cf222e; }
+.xora-hl-theme-github .xora-hl-string { color: #0a3069; }
+.xora-hl-theme-github .xora-hl-comment { color: #6e7781; }
+.xora-hl-theme-github .xora-hl-number { color: #0550ae; }
+.xora-hl-theme-github .xora-hl-type { color: #953800; }
+.xora-hl-theme-github .xora-hl-punctuation { color: #24292f; }
+
+.xora-hl-theme-monokai {
+    color: #f8f8f2;
+    background: #272822;
+    border-color: #3e3d32;
+}
+.xora-hl-theme-monokai .xora-hl-keyword { color: #f92672; }
+.xora-hl-theme-monokai .xora-hl-string { color: #e6db74; }
+.xora-hl-theme-monokai .xora-hl-comment { color: #75715e; }
+.xora-hl-theme-monokai .xora-hl-number { color: #ae81ff; }
+.xora-hl-theme-monokai .xora-hl-type { color: #a6e22e; }
+.xora-hl-theme-monokai .xora-hl-punctuation { color: #f8f8f2; }
+
+.xora-hl-theme-one-dark {
+    color: #abb2bf;
+    background: #282c34;
+    border-color: #3e4451;
+}
+.xora-hl-theme-one-dark .xora-hl-keyword { color: #c678dd; }
+.xora-hl-theme-one-dark .xora-hl-string { color: #98c379; }
+.xora-hl-theme-one-dark .xora-hl-comment { color: #5c6370; }
+.xora-hl-theme-one-dark .xora-hl-number { color: #d19a66; }
+.xora-hl-theme-one-dark .xora-hl-type { color: #e5c07b; }
+.xora-hl-theme-one-dark .xora-hl-punctuation { color: #abb2bf; }
+
+.xora-code-highlight-pref {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.xora-code-highlight-pref select {
+    max-width: 280px;
 }
 
 .xora-agent-markdown-table-wrap {
@@ -2382,6 +2463,7 @@ form.xora-provider-form,
 }
 
 .xora-composer {
+    position: relative;
     flex: 0 0 auto;
     padding: 8px var(--xora-agent-pad) 10px;
     border-top: 0;
@@ -2675,6 +2757,135 @@ form.xora-provider-form,
 .xora-composer-tool:disabled {
     opacity: .42;
     cursor: default;
+}
+
+.xora-composer-tool.is-active {
+    color: var(--theia-focusBorder);
+    background: color-mix(in srgb, var(--theia-focusBorder) 14%, transparent);
+}
+
+.xora-composer-tool-label {
+    display: none;
+}
+
+/* Slash command palette — anchored above the whole composer block */
+.xora-slash-menu {
+    position: absolute;
+    z-index: 30;
+    right: var(--xora-agent-pad);
+    bottom: calc(100% - 2px);
+    left: var(--xora-agent-pad);
+    max-height: min(280px, 42vh);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 88%, var(--theia-focusBorder));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 96%, var(--theia-sideBar-background));
+    box-shadow: 0 12px 36px color-mix(in srgb, #000 28%, transparent);
+}
+
+.xora-slash-menu-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-widget-border) 80%, transparent);
+}
+
+.xora-slash-menu-header strong {
+    font-size: 12px;
+    font-weight: 650;
+    color: var(--theia-foreground);
+}
+
+.xora-slash-menu-header span {
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.xora-slash-menu-error {
+    margin: 6px 10px 0;
+    padding: 6px 8px;
+    border-radius: 6px;
+    color: var(--theia-errorForeground);
+    background: color-mix(in srgb, var(--theia-inputValidation-errorBackground) 80%, transparent);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.xora-slash-menu-empty {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 12px;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+}
+
+.xora-slash-menu-list {
+    margin: 0;
+    padding: 4px;
+    overflow: auto;
+    list-style: none;
+    scrollbar-width: thin;
+}
+
+.xora-slash-menu-item {
+    display: flex;
+    width: 100%;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 7px;
+    color: var(--theia-foreground);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+}
+
+.xora-slash-menu-item > .codicon {
+    margin-top: 2px;
+    color: var(--theia-descriptionForeground);
+    font-size: 14px;
+}
+
+.xora-slash-menu-item.is-active,
+.xora-slash-menu-item:hover {
+    background: color-mix(in srgb, var(--theia-list-hoverBackground) 88%, transparent);
+}
+
+.xora-slash-menu-item.is-active > .codicon {
+    color: var(--theia-focusBorder);
+}
+
+.xora-slash-menu-item-copy {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.xora-slash-menu-item-copy strong {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.xora-slash-menu-item-copy span {
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+    line-height: 1.35;
+}
+
+.xora-slash-menu-item-copy em {
+    color: color-mix(in srgb, var(--theia-descriptionForeground) 88%, transparent);
+    font-size: 10px;
+    font-style: normal;
+    line-height: 1.3;
 }
 
 .xora-permission-mode-control.is-full-access,

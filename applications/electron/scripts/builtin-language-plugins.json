@@ -1,0 +1,148 @@
+{
+  "description": "Xora Code 默认内置的语法高亮 / 语言插件（来自 vscode-builtin-extensions）。打包与启动前由 ensure-plugins.js 校验。",
+  "source": "https://github.com/eclipse-theia/vscode-builtin-extensions/releases/download/1.108.2/vscode-builtin-extensions-1.108.2.tar.gz",
+  "note": "纯文本 .txt / .text 由编辑器内置纯文本模式处理，无需独立语法插件。C 与 C++ 均由 vscode.cpp 提供。",
+  "required": [
+    {
+      "id": "vscode.javascript",
+      "languages": ["JavaScript", "JS", "JSX"],
+      "extensions": [".js", ".mjs", ".cjs", ".jsx"]
+    },
+    {
+      "id": "vscode.typescript",
+      "languages": ["TypeScript", "TS", "TSX"],
+      "extensions": [".ts", ".tsx", ".mts", ".cts"]
+    },
+    {
+      "id": "vscode.typescript-language-features",
+      "languages": ["TypeScript / JavaScript 语言服务"],
+      "extensions": [".ts", ".tsx", ".js", ".jsx"]
+    },
+    {
+      "id": "vscode.cpp",
+      "languages": ["C", "C++"],
+      "extensions": [".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"]
+    },
+    {
+      "id": "vscode.python",
+      "languages": ["Python"],
+      "extensions": [".py", ".pyw", ".pyi"]
+    },
+    {
+      "id": "vscode.json",
+      "languages": ["JSON", "JSONC"],
+      "extensions": [".json", ".jsonc"]
+    },
+    {
+      "id": "vscode.json-language-features",
+      "languages": ["JSON 语言服务"],
+      "extensions": [".json", ".jsonc"]
+    },
+    {
+      "id": "vscode.markdown",
+      "languages": ["Markdown"],
+      "extensions": [".md", ".markdown", ".mdown"]
+    },
+    {
+      "id": "vscode.markdown-language-features",
+      "languages": ["Markdown 预览与增强"],
+      "extensions": [".md", ".markdown"]
+    },
+    {
+      "id": "vscode.html",
+      "languages": ["HTML"],
+      "extensions": [".html", ".htm"]
+    },
+    {
+      "id": "vscode.css",
+      "languages": ["CSS"],
+      "extensions": [".css"]
+    },
+    {
+      "id": "vscode.scss",
+      "languages": ["SCSS / Sass"],
+      "extensions": [".scss", ".sass"]
+    },
+    {
+      "id": "vscode.shellscript",
+      "languages": ["Shell", "Bash", "Zsh"],
+      "extensions": [".sh", ".bash", ".zsh"]
+    },
+    {
+      "id": "vscode.yaml",
+      "languages": ["YAML"],
+      "extensions": [".yml", ".yaml"]
+    },
+    {
+      "id": "vscode.xml",
+      "languages": ["XML"],
+      "extensions": [".xml"]
+    },
+    {
+      "id": "vscode.sql",
+      "languages": ["SQL"],
+      "extensions": [".sql"]
+    },
+    {
+      "id": "vscode.go",
+      "languages": ["Go"],
+      "extensions": [".go"]
+    },
+    {
+      "id": "vscode.rust",
+      "languages": ["Rust"],
+      "extensions": [".rs"]
+    },
+    {
+      "id": "vscode.java",
+      "languages": ["Java"],
+      "extensions": [".java"]
+    },
+    {
+      "id": "vscode.docker",
+      "languages": ["Dockerfile"],
+      "extensions": ["Dockerfile", ".dockerfile"]
+    },
+    {
+      "id": "vscode.ini",
+      "languages": ["INI / properties"],
+      "extensions": [".ini", ".cfg", ".conf", ".properties"]
+    },
+    {
+      "id": "vscode.log",
+      "languages": ["Log"],
+      "extensions": [".log"]
+    },
+    {
+      "id": "vscode.theme-defaults",
+      "languages": ["默认主题（影响高亮配色）"],
+      "extensions": []
+    }
+  ],
+  "alsoIncludedFromBuiltinPack": [
+    "vscode.csharp",
+    "vscode.objective-c",
+    "vscode.php",
+    "vscode.ruby",
+    "vscode.swift",
+    "vscode.lua",
+    "vscode.perl",
+    "vscode.r",
+    "vscode.kotlin (via java-related packs if present)",
+    "vscode.make",
+    "vscode.less",
+    "vscode.powershell",
+    "vscode.bat",
+    "vscode.clojure",
+    "vscode.coffeescript",
+    "vscode.dart",
+    "vscode.groovy",
+    "vscode.handlebars",
+    "vscode.hlsl",
+    "vscode.julia",
+    "vscode.latex",
+    "vscode.restructuredtext",
+    "vscode.shaderlab",
+    "vscode.vb"
+  ]
+}

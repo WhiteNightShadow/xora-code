@@ -1,0 +1,69 @@
+const assert = require('node:assert/strict');
+const test = require('node:test');
+
+const {
+    detectSlashQuery,
+    extractNamedResources,
+    filterSlashCommands,
+    replaceSlashToken,
+    resourceMenuItems,
+    slashCommandsToMenuItems
+} = require('../lib/browser/agent-slash-menu');
+
+test('detectSlashQuery activates at start and after whitespace', () => {
+    assert.deepEqual(detectSlashQuery('/file', 5), { start: 0, end: 5, query: 'file' });
+    assert.deepEqual(detectSlashQuery('hello /mc', 9), { start: 6, end: 9, query: 'mc' });
+    assert.equal(detectSlashQuery('https://x', 9), undefined);
+    assert.equal(detectSlashQuery('path/to', 7), undefined);
+    assert.equal(detectSlashQuery('/file more', 10), undefined);
+});
+
+test('filterSlashCommands matches trigger, label and aliases', () => {
+    const files = filterSlashCommands('fi');
+    assert.ok(files.some(item => item.id === 'file'));
+    const skills = filterSlashCommands('技能');
+    assert.ok(skills.some(item => item.id === 'skill'));
+    const mcp = filterSlashCommands('mcp');
+    assert.equal(mcp.length, 1);
+    assert.equal(mcp[0].id, 'mcp');
+});
+
+test('slashCommandsToMenuItems preserves command ids', () => {
+    const items = slashCommandsToMenuItems(filterSlashCommands(''));
+    assert.ok(items.length >= 5);
+    assert.ok(items.every(item => item.kind === 'command' && item.commandId));
+});
+
+test('replaceSlashToken inserts replacement with spacing', () => {
+    const result = replaceSlashToken('先看 /file', { start: 3, end: 8, query: 'file' }, '@src/a.ts');
+    assert.equal(result.text.includes('@src/a.ts'), true);
+    assert.equal(result.text.includes('/file'), false);
+});
+
+test('extractNamedResources reads mcp and skill payloads', () => {
+    const mcp = extractNamedResources({
+        schemaVersion: 1,
+        mcpServers: [
+            { name: 'docs', transport: 'stdio' },
+            { name: 'search', transport: 'http', status: 'healthy' }
+        ]
+    }, 'mcp');
+    assert.deepEqual(mcp.map(item => item.name).sort(), ['docs', 'search']);
+
+    const skills = extractNamedResources({
+        skills: {
+            effectiveSkills: [
+                { name: 'review', path: '/tmp/review/SKILL.md' },
+                { skillName: 'deploy', directory: '/tmp/deploy' }
+            ]
+        }
+    }, 'skill');
+    assert.ok(skills.some(item => item.name === 'review'));
+    assert.ok(skills.some(item => item.name === 'deploy'));
+});
+
+test('resourceMenuItems appends manage action', () => {
+    const items = resourceMenuItems('mcp', [{ name: 'docs', detail: 'stdio' }]);
+    assert.equal(items[0].insertText.includes('docs'), true);
+    assert.equal(items.at(-1).commandId, 'settings');
+});

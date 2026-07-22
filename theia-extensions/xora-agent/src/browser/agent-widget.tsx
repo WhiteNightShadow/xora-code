@@ -2,11 +2,20 @@ import '../../src/browser/style/agent.css';
 
 import { CommandService, Disposable, MessageService } from '@theia/core/lib/common';
 import { CommonCommands, DiffUris, open, OpenerService, ReactWidget } from '@theia/core/lib/browser';
+import { FileUri } from '@theia/core/lib/common/file-uri';
+import { isOSX, isWindows } from '@theia/core/lib/common/os';
 import URI from '@theia/core/lib/common/uri';
 import { URI as VSCodeURI } from '@theia/core/shared/vscode-uri';
+import {
+    filesystemPathKey,
+    filesystemPathListIncludes,
+    filesystemPathsEqual
+} from '../common/workspace-path';
 import { Message } from '@theia/core/shared/@lumino/messaging';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
+import { FileDialogService } from '@theia/filesystem/lib/browser/file-dialog';
+import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { FileNavigatorCommands } from '@theia/navigator/lib/browser/file-navigator-commands';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import {
@@ -42,6 +51,17 @@ import { friendlyAgentErrorMessage } from './agent-error-labels';
 import { shouldSubmitPromptOnEnter } from './agent-input-helpers';
 import { grokSubscriptionAuthStatus } from './agent-management-labels';
 import { AgentMarkdown } from './agent-markdown';
+import {
+    detectSlashQuery,
+    extractNamedResources,
+    filterSlashCommands,
+    replaceSlashToken,
+    resourceMenuItems,
+    SlashCommandId,
+    SlashMenuItem,
+    SlashQuery,
+    slashCommandsToMenuItems
+} from './agent-slash-menu';
 import {
     agentModelChoiceGroups,
     decodeAgentModelChoice,
@@ -148,9 +168,24 @@ export class XoraAgentWidget extends ReactWidget {
     @inject(WorkspaceTrustGuard)
     protected readonly workspaceTrustGuard!: WorkspaceTrustGuard;
 
+    @inject(FileDialogService)
+    protected readonly fileDialogService!: FileDialogService;
+
+    @inject(FileService)
+    protected readonly fileService!: FileService;
+
     protected prompt = '';
     protected providers: ProviderProfile[] = [];
     protected roots: string[] = [];
+    /** Active `/` command palette over the composer (visual selection). */
+    protected slashMenuOpen = false;
+    protected slashQuery: SlashQuery | undefined;
+    protected slashItems: SlashMenuItem[] = [];
+    protected slashActiveIndex = 0;
+    protected slashLoading = false;
+    protected slashPanel: 'commands' | 'mcp' | 'skill' = 'commands';
+    protected slashError: string | undefined;
+    protected slashLoadGeneration = 0;
     protected submission: PromptSubmission | undefined;
     /** Covers the asynchronous Provider refresh before a PromptSubmission is
      * created. Without this guard, two quick Enter presses can both cross the
@@ -229,7 +264,7 @@ export class XoraAgentWidget extends ReactWidget {
         }));
         this.toDispose.push(this.client.onEvent(event => this.acceptAgentEvent(event)));
         this.toDispose.push(this.workspaceService.onWorkspaceChanged(roots => {
-            this.activateWorkspace(roots.map(root => root.resource.path.toString()));
+            this.activateWorkspace(roots.map(root => FileUri.fsPath(root.resource)));
         }));
         this.toDispose.push(Disposable.create(() => {
             this.imageReadGeneration += 1;
@@ -403,6 +438,7 @@ export class XoraAgentWidget extends ReactWidget {
                 {pendingPermissions.map(entry => this.renderEntry(entry))}
             </aside> : undefined}
             <footer className='xora-composer'>
+                {this.renderSlashMenu()}
                 <div className='xora-composer-surface'>
                     <input
                         ref={node => { this.imageInput = node; }}
@@ -423,21 +459,31 @@ export class XoraAgentWidget extends ReactWidget {
                     <textarea
                         ref={node => { this.textarea = node; }}
                         aria-label='Agent 任务输入框'
+                        aria-controls={this.slashMenuOpen ? 'xora-slash-menu' : undefined}
+                        aria-expanded={this.slashMenuOpen}
+                        aria-autocomplete={this.slashMenuOpen ? 'list' : undefined}
                         placeholder={composerGate
                             ? `${composerGate.message}；你可以先在这里写下任务…`
-                            : '描述任务，或输入 / 查看可用命令…'}
+                            : '描述任务，或输入 / 可视化选择文件 · MCP · 技能…'}
                         rows={1}
                         defaultValue={this.prompt}
                         onChange={event => {
                             this.prompt = event.currentTarget.value;
                             this.scheduleComposerResize(event.currentTarget);
                             this.syncComposerSubmitButton();
+                            this.syncSlashMenuFromComposer(event.currentTarget);
                             // This textarea is deliberately uncontrolled.
                             // React's controlled-input restore runs before
                             // Lumino's async update and otherwise erases an
                             // active Chinese/Japanese/Korean IME composition.
                             // Do not redraw the complete transcript for each
                             // keystroke: the native button is updated directly.
+                        }}
+                        onSelect={event => {
+                            if (!this.imeComposing) this.syncSlashMenuFromComposer(event.currentTarget);
+                        }}
+                        onClick={event => {
+                            if (!this.imeComposing) this.syncSlashMenuFromComposer(event.currentTarget);
                         }}
                         onCompositionStart={() => {
                             this.imeComposing = true;
@@ -453,6 +499,7 @@ export class XoraAgentWidget extends ReactWidget {
                             this.imeCompositionJustEnded = true;
                             this.scheduleComposerResize(event.currentTarget);
                             this.syncComposerSubmitButton();
+                            this.syncSlashMenuFromComposer(event.currentTarget);
                             this.imeCompositionGuardTimer = window.setTimeout(() => {
                                 this.imeCompositionJustEnded = false;
                                 this.imeCompositionGuardTimer = undefined;
@@ -462,7 +509,17 @@ export class XoraAgentWidget extends ReactWidget {
                             this.requestRuntimePrewarm(true);
                             this.handleImagePaste(event);
                         }}
+                        onBlur={() => {
+                            // Delay so mousedown on a menu item can run first.
+                            window.setTimeout(() => {
+                                if (this.isDisposed) return;
+                                const active = document.activeElement;
+                                if (active?.closest?.('.xora-slash-menu')) return;
+                                if (this.slashMenuOpen) this.closeSlashMenu();
+                            }, 120);
+                        }}
                         onKeyDown={event => {
+                            if (this.handleSlashMenuKeyDown(event)) return;
                             const nativeEvent = event.nativeEvent as KeyboardEvent;
                             if (shouldSubmitPromptOnEnter({
                                 key: event.key,
@@ -531,6 +588,18 @@ export class XoraAgentWidget extends ReactWidget {
                                 </select>
                             </label>
                             <button
+                                className={`xora-composer-tool${this.slashMenuOpen ? ' is-active' : ''}`}
+                                type='button'
+                                aria-label='打开命令菜单'
+                                aria-haspopup='listbox'
+                                aria-expanded={this.slashMenuOpen}
+                                title='输入 / 可视化选择：文件、图片、MCP、技能'
+                                onMouseDown={event => event.preventDefault()}
+                                onClick={() => this.toggleSlashMenuFromButton()}>
+                                <span className='codicon codicon-symbol-keyword' />
+                                <span className='xora-composer-tool-label'>/</span>
+                            </button>
+                            <button
                                 className='xora-composer-tool'
                                 type='button'
                                 aria-label='添加图片'
@@ -540,6 +609,14 @@ export class XoraAgentWidget extends ReactWidget {
                                 disabled={this.draftImages.length + this.imageReadsInFlight >= MAX_PROMPT_IMAGE_COUNT}
                                 onClick={() => this.imageInput?.click()}>
                                 <span className='codicon codicon-attach' />
+                            </button>
+                            <button
+                                className='xora-composer-tool'
+                                type='button'
+                                aria-label='选择工作区文件'
+                                title='选择工作区文件并插入 @路径'
+                                onClick={() => void this.pickWorkspaceFilesForPrompt()}>
+                                <span className='codicon codicon-file' />
                             </button>
                             <button
                                 className={`xora-context-trigger xora-context-${contextSummary.compactionStatus}${contextSummary.usagePercent !== undefined ? ' has-usage' : ''}`}
@@ -1032,7 +1109,25 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected agentContextKey(workspaceRoot: string, providerId: string, sessionId?: string): string {
-        return [workspaceRoot, providerId, sessionId ?? 'new'].join('\u0000');
+        // Normalize Windows roots so FileUri.fsPath (`d:\…`) and backend
+        // realpath (`D:\…`) share one context key and do not abort send.
+        const rootKey = filesystemPathKey(workspaceRoot, this.pathPlatform());
+        return [rootKey, providerId, sessionId ?? 'new'].join('\u0000');
+    }
+
+    protected pathPlatform(): NodeJS.Platform {
+        // Renderer has no Node `process` global; never read process.platform here.
+        if (isWindows) return 'win32';
+        if (isOSX) return 'darwin';
+        return 'linux';
+    }
+
+    protected rootsInclude(root: string | undefined): boolean {
+        return filesystemPathListIncludes(this.roots, root, this.pathPlatform());
+    }
+
+    protected sameWorkspaceRoot(left: string | undefined, right: string | undefined): boolean {
+        return filesystemPathsEqual(left, right, this.pathPlatform());
     }
 
     protected submissionTargetContextKey(submission: PromptSubmission): string | undefined {
@@ -1111,7 +1206,7 @@ export class XoraAgentWidget extends ReactWidget {
         const sessions = this.openSessionTabs
             .map(id => snapshot.sessions.find(session => session.appSessionId === id))
             .filter((session): session is SessionRecord => !!session
-                && session.workspaceRoot === snapshot.workspaceRoot);
+                && this.sameWorkspaceRoot(session.workspaceRoot, snapshot.workspaceRoot));
         if (!sessions.length && !snapshot.activeSessionId) return undefined;
         const tabs = sessions.length
             ? sessions
@@ -1192,7 +1287,7 @@ export class XoraAgentWidget extends ReactWidget {
         // the project. Older conversations remain visible and are rebound to
         // the current Provider when opened; selecting history never switches
         // application credentials back to its original Provider.
-        const sessions = snapshot.sessions.filter(session => session.workspaceRoot === snapshot.workspaceRoot);
+        const sessions = snapshot.sessions.filter(session => this.sameWorkspaceRoot(session.workspaceRoot, snapshot.workspaceRoot));
         return <section className='xora-agent-popover xora-session-popover' role='dialog' aria-label='会话历史'>
             <header className='xora-popover-header'>
                 <div>
@@ -1513,7 +1608,7 @@ export class XoraAgentWidget extends ReactWidget {
             return;
         }
         const root = snapshot.workspaceRoot;
-        if (!root || !snapshot.workspaceAttached || !this.roots.includes(root)) return;
+        if (!root || !snapshot.workspaceAttached || !this.rootsInclude(root)) return;
         const provider = this.providers.find(candidate => candidate.id === snapshot.providerId);
         if (!provider || (provider.kind !== 'grok-subscription' && provider.credentialConfigured !== true)) return;
 
@@ -1530,7 +1625,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected async prewarmRuntime(root: string, providerId: string, key: string): Promise<void> {
         const current = this.model.snapshot;
         if ((current.phase !== 'stopped' && current.phase !== 'crashed')
-            || current.workspaceRoot !== root
+            || !this.sameWorkspaceRoot(current.workspaceRoot, root)
             || current.providerId !== providerId
             || !current.workspaceAttached) {
             if (this.runtimePrewarmAttemptKey === key) this.runtimePrewarmAttemptKey = undefined;
@@ -1540,7 +1635,7 @@ export class XoraAgentWidget extends ReactWidget {
         this.runtimePrewarmAttempts += 1;
         try {
             await this.service.startRuntime({ workspaceRoot: root, providerId });
-            if (this.model.snapshot.workspaceRoot === root && this.model.snapshot.providerId === providerId) {
+            if (this.sameWorkspaceRoot(this.model.snapshot.workspaceRoot, root) && this.model.snapshot.providerId === providerId) {
                 await this.model.refresh();
                 await this.hydrateActiveSessionInBackground();
             }
@@ -1550,7 +1645,7 @@ export class XoraAgentWidget extends ReactWidget {
             await this.model.refresh().catch(() => undefined);
             const failed = this.model.snapshot;
             if (failed.phase === 'crashed'
-                && failed.workspaceRoot === root
+                && this.sameWorkspaceRoot(failed.workspaceRoot, root)
                 && failed.providerId === providerId
                 && failed.workspaceAttached
                 && this.runtimePrewarmAttempts < RUNTIME_PREWARM_MAX_ATTEMPTS) {
@@ -1639,6 +1734,333 @@ export class XoraAgentWidget extends ReactWidget {
         });
     }
 
+    protected renderSlashMenu(): React.ReactNode {
+        if (!this.slashMenuOpen) return undefined;
+        const title = this.slashPanel === 'mcp'
+            ? 'MCP 服务'
+            : this.slashPanel === 'skill'
+                ? '技能 Skill'
+                : '命令';
+        return <div
+            id='xora-slash-menu'
+            className='xora-slash-menu'
+            role='listbox'
+            aria-label={`Agent ${title}菜单`}
+            onMouseDown={event => event.preventDefault()}>
+            <div className='xora-slash-menu-header'>
+                <strong>{title}</strong>
+                <span>{this.slashLoading ? '加载中…' : '↑↓ 选择 · Enter 确认 · Esc 关闭'}</span>
+            </div>
+            {this.slashError ? <div className='xora-slash-menu-error' role='alert'>{this.slashError}</div> : undefined}
+            {this.slashLoading && !this.slashItems.length
+                ? <div className='xora-slash-menu-empty'>
+                    <span className='codicon codicon-loading codicon-modifier-spin' /> 正在加载…
+                </div>
+                : !this.slashItems.length
+                    ? <div className='xora-slash-menu-empty'>没有匹配项。试试 /file · /mcp · /skill</div>
+                    : <ul className='xora-slash-menu-list'>
+                        {this.slashItems.map((item, index) => <li key={item.key}>
+                            <button
+                                type='button'
+                                role='option'
+                                aria-selected={index === this.slashActiveIndex}
+                                className={`xora-slash-menu-item${index === this.slashActiveIndex ? ' is-active' : ''}`}
+                                onMouseEnter={() => {
+                                    if (this.slashActiveIndex !== index) {
+                                        this.slashActiveIndex = index;
+                                        this.update();
+                                    }
+                                }}
+                                onClick={() => void this.activateSlashItem(item)}>
+                                <span className={`codicon codicon-${item.icon}`} aria-hidden='true' />
+                                <span className='xora-slash-menu-item-copy'>
+                                    <strong>{item.label}</strong>
+                                    <span>{item.description}</span>
+                                    {item.detail ? <em>{item.detail}</em> : undefined}
+                                </span>
+                            </button>
+                        </li>)}
+                    </ul>}
+        </div>;
+    }
+
+    protected syncSlashMenuFromComposer(textarea: HTMLTextAreaElement): void {
+        if (this.imeComposing) return;
+        const cursor = textarea.selectionStart ?? textarea.value.length;
+        const query = detectSlashQuery(textarea.value, cursor);
+        if (!query) {
+            if (this.slashMenuOpen) this.closeSlashMenu();
+            return;
+        }
+        // Resource panels stay open while the user filters after `/mcp` or `/skill`.
+        if (this.slashPanel !== 'commands') {
+            const root = query.query.toLowerCase();
+            const stays = this.slashPanel === 'mcp'
+                ? root === 'mcp' || root.startsWith('mcp')
+                : root === 'skill' || root.startsWith('skill') || root.startsWith('skills');
+            if (!stays && !filterSlashCommands(query.query).some(c => c.id === this.slashPanel)) {
+                this.slashPanel = 'commands';
+            }
+        }
+        this.slashQuery = query;
+        if (this.slashPanel === 'commands') {
+            const items = slashCommandsToMenuItems(filterSlashCommands(query.query));
+            const same = this.slashMenuOpen
+                && this.slashItems.length === items.length
+                && this.slashItems.every((item, index) => item.key === items[index]?.key);
+            this.slashMenuOpen = true;
+            this.slashItems = items;
+            this.slashError = undefined;
+            this.slashLoading = false;
+            if (!same) this.slashActiveIndex = 0;
+            this.update();
+            return;
+        }
+        this.slashMenuOpen = true;
+        this.update();
+    }
+
+    protected closeSlashMenu(): void {
+        if (!this.slashMenuOpen && this.slashPanel === 'commands' && !this.slashItems.length) return;
+        this.slashMenuOpen = false;
+        this.slashQuery = undefined;
+        this.slashItems = [];
+        this.slashActiveIndex = 0;
+        this.slashLoading = false;
+        this.slashPanel = 'commands';
+        this.slashError = undefined;
+        this.update();
+    }
+
+    protected toggleSlashMenuFromButton(): void {
+        if (this.slashMenuOpen) {
+            this.closeSlashMenu();
+            this.textarea?.focus();
+            return;
+        }
+        const textarea = this.textarea;
+        if (!textarea) return;
+        const value = textarea.value;
+        const cursor = textarea.selectionStart ?? value.length;
+        const needsSlash = cursor === 0 || /\s/.test(value.charAt(cursor - 1) || ' ');
+        const insertion = needsSlash ? '/' : '/';
+        // Always insert a fresh `/` token for discovery.
+        const next = `${value.slice(0, cursor)}${insertion}${value.slice(cursor)}`;
+        const nextCursor = cursor + insertion.length;
+        this.applyComposerText(next, nextCursor);
+        this.slashPanel = 'commands';
+        this.syncSlashMenuFromComposer(this.textarea!);
+        this.textarea?.focus();
+    }
+
+    protected handleSlashMenuKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>): boolean {
+        if (!this.slashMenuOpen) {
+            // Allow explicit discovery with Ctrl/Cmd+/ when not already in a token.
+            if (event.key === '/' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                this.toggleSlashMenuFromButton();
+                return true;
+            }
+            return false;
+        }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            this.closeSlashMenu();
+            return true;
+        }
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            if (!this.slashItems.length) return true;
+            this.slashActiveIndex = (this.slashActiveIndex + 1) % this.slashItems.length;
+            this.update();
+            return true;
+        }
+        if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (!this.slashItems.length) return true;
+            this.slashActiveIndex = (this.slashActiveIndex - 1 + this.slashItems.length) % this.slashItems.length;
+            this.update();
+            return true;
+        }
+        if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+            const item = this.slashItems[this.slashActiveIndex];
+            if (!item) return false;
+            event.preventDefault();
+            void this.activateSlashItem(item);
+            return true;
+        }
+        return false;
+    }
+
+    protected async activateSlashItem(item: SlashMenuItem): Promise<void> {
+        if (item.insertText) {
+            this.commitSlashReplacement(item.insertText);
+            return;
+        }
+        if (item.kind === 'action' && item.commandId === 'settings') {
+            this.commitSlashReplacement('');
+            await this.openAgentSettings();
+            return;
+        }
+        if (item.commandId) {
+            await this.runSlashCommand(item.commandId);
+        }
+    }
+
+    protected async runSlashCommand(commandId: SlashCommandId): Promise<void> {
+        switch (commandId) {
+            case 'file':
+                this.commitSlashReplacement('');
+                await this.pickWorkspaceFilesForPrompt();
+                return;
+            case 'image':
+                this.commitSlashReplacement('');
+                this.imageInput?.click();
+                return;
+            case 'settings':
+                this.commitSlashReplacement('');
+                await this.openAgentSettings();
+                return;
+            case 'clear':
+                this.closeSlashMenu();
+                this.applyComposerText('', 0);
+                return;
+            case 'mcp':
+                await this.openSlashResourcePanel('mcp');
+                return;
+            case 'skill':
+                await this.openSlashResourcePanel('skill');
+                return;
+        }
+    }
+
+    protected async openSlashResourcePanel(kind: 'mcp' | 'skill'): Promise<void> {
+        const generation = ++this.slashLoadGeneration;
+        this.slashPanel = kind;
+        this.slashLoading = true;
+        this.slashError = undefined;
+        this.slashItems = [];
+        this.slashActiveIndex = 0;
+        this.slashMenuOpen = true;
+        this.update();
+        try {
+            const result = kind === 'mcp'
+                ? await this.service.runManagementCommand('mcp-list')
+                : await this.service.inspect();
+            if (generation !== this.slashLoadGeneration) return;
+            const entries = extractNamedResources(result.data ?? result, kind);
+            this.slashItems = resourceMenuItems(kind, entries);
+            this.slashLoading = false;
+            if (!entries.length) {
+                this.slashError = kind === 'mcp'
+                    ? '未发现 MCP 服务。可在 Agent 设置中添加。'
+                    : '未发现技能。可在 Agent 设置中管理 Skill。';
+            }
+            this.update();
+        } catch (error) {
+            if (generation !== this.slashLoadGeneration) return;
+            this.slashLoading = false;
+            this.slashError = friendlyAgentErrorMessage(error);
+            this.slashItems = resourceMenuItems(kind, []);
+            this.update();
+        }
+    }
+
+    protected commitSlashReplacement(replacement: string): void {
+        const textarea = this.textarea;
+        const query = this.slashQuery
+            ?? (textarea ? detectSlashQuery(textarea.value, textarea.selectionStart ?? textarea.value.length) : undefined);
+        if (!textarea || !query) {
+            if (replacement) this.insertComposerText(replacement);
+            this.closeSlashMenu();
+            return;
+        }
+        const next = replaceSlashToken(textarea.value, query, replacement);
+        this.closeSlashMenu();
+        this.applyComposerText(next.text, next.cursor);
+    }
+
+    protected applyComposerText(text: string, cursor: number): void {
+        this.prompt = text;
+        if (this.textarea) {
+            this.textarea.value = text;
+            this.resizeComposer(this.textarea);
+            const clamped = Math.max(0, Math.min(cursor, text.length));
+            this.textarea.setSelectionRange(clamped, clamped);
+        }
+        this.syncComposerSubmitButton();
+        this.requestRuntimePrewarm();
+        this.update();
+        requestAnimationFrame(() => this.textarea?.focus());
+    }
+
+    protected insertComposerText(fragment: string): void {
+        const textarea = this.textarea;
+        if (!textarea) {
+            this.applyComposerText(`${this.prompt}${fragment}`, (this.prompt + fragment).length);
+            return;
+        }
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? start;
+        const value = textarea.value;
+        const before = value.slice(0, start);
+        const after = value.slice(end);
+        const needsSpaceBefore = fragment.length > 0 && before.length > 0 && !/\s$/.test(before) && !fragment.startsWith('\n');
+        const needsSpaceAfter = fragment.length > 0 && after.length > 0 && !/^\s/.test(after) && !/\s$/.test(fragment);
+        const body = `${needsSpaceBefore ? ' ' : ''}${fragment}${needsSpaceAfter ? ' ' : ''}`;
+        const next = `${before}${body}${after}`;
+        this.applyComposerText(next, before.length + body.length);
+    }
+
+    protected async openAgentSettings(): Promise<void> {
+        try {
+            await this.commandService.executeCommand(OPEN_AGENT_SETTINGS_COMMAND.id);
+        } catch (error) {
+            this.messages.error(`无法打开 Agent 设置：${friendlyAgentErrorMessage(error)}`);
+        }
+    }
+
+    protected async pickWorkspaceFilesForPrompt(): Promise<void> {
+        try {
+            const rootPath = this.model.snapshot.workspaceRoot ?? this.roots[0];
+            const folder = rootPath
+                ? await this.fileService.resolve(FileUri.create(rootPath))
+                : undefined;
+            const selection = await this.fileDialogService.showOpenDialog({
+                title: '选择要引用的文件',
+                canSelectFiles: true,
+                canSelectFolders: false,
+                canSelectMany: true,
+                openLabel: '插入引用'
+            }, folder);
+            if (!selection) return;
+            const uris = Array.isArray(selection) ? selection : [selection];
+            if (!uris.length) return;
+            const refs = uris.map(uri => this.formatWorkspaceFileRef(uri, rootPath)).filter(Boolean);
+            if (!refs.length) return;
+            this.insertComposerText(refs.join(' '));
+            this.messages.info(`已插入 ${refs.length} 个文件引用`);
+        } catch (error) {
+            this.messages.error(`选择文件失败：${friendlyAgentErrorMessage(error)}`);
+        }
+    }
+
+    protected formatWorkspaceFileRef(uri: URI, workspaceRoot?: string): string {
+        const fsPath = FileUri.fsPath(uri);
+        if (!fsPath) return '';
+        let display = fsPath.replace(/\\/g, '/');
+        if (workspaceRoot) {
+            const root = workspaceRoot.replace(/\\/g, '/').replace(/\/$/, '');
+            const normalized = display.replace(/\/$/, '');
+            if (normalized === root) display = '.';
+            else if (normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)) {
+                display = normalized.slice(root.length + 1);
+            }
+        }
+        // @path is a common agent convention; keep path readable for the model.
+        return `@${display}`;
+    }
+
     protected startNewSession(): void {
         if (this.submission || this.sessionLoading) return;
         this.resetToNewSession('已为新会话清除未发送图片。', true);
@@ -1689,7 +2111,7 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async selectWorkspaceRoot(root: string): Promise<void> {
-        if (root === this.model.snapshot.workspaceRoot || this.sessionLoading || this.submission) return;
+        if (this.sameWorkspaceRoot(root, this.model.snapshot.workspaceRoot) || this.sessionLoading || this.submission) return;
         try {
             await this.workspaceTrustGuard.selectWorkspaceRoot(root);
             this.resetToNewSession('Agent 主目录已切换，未发送的图片已清除。');
@@ -2424,13 +2846,22 @@ export class XoraAgentWidget extends ReactWidget {
         this.update();
         try {
             const root = await this.workspaceRoot();
-            if (!this.isSubmissionContextCurrent(submission)) return;
+            if (!this.isSubmissionContextCurrent(submission)) {
+                this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                return;
+            }
             if (!root) {
                 this.messages.warn('请先打开一个文件夹或工作区。');
                 return;
             }
-            if (root !== submission.workspaceRoot) {
+            // Prefer the backend/canonical root for all host calls once we know
+            // it is the same folder (Windows drive-letter casing may differ).
+            const hostRoot = this.sameWorkspaceRoot(root, submission.workspaceRoot)
+                ? (this.model.snapshot.workspaceRoot ?? root)
+                : root;
+            if (!this.sameWorkspaceRoot(hostRoot, submission.workspaceRoot)) {
                 this.invalidateAgentContext('项目已变化，未发送的图片已清除。');
+                this.messages.warn('项目路径已变化，当前任务未发送。请再点一次发送。');
                 return;
             }
             let runtime = this.model.snapshot;
@@ -2438,8 +2869,11 @@ export class XoraAgentWidget extends ReactWidget {
             // normally completes during project open. Close the tiny startup
             // race here without asking the user to resend their first task.
             if (!runtime.workspaceAttached) {
-                await this.workspaceTrustGuard.selectWorkspaceRoot(root);
-                if (!this.isSubmissionContextCurrent(submission)) return;
+                await this.workspaceTrustGuard.selectWorkspaceRoot(hostRoot);
+                if (!this.isSubmissionContextCurrent(submission)) {
+                    this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                    return;
+                }
                 await this.model.refresh();
                 runtime = this.model.snapshot;
             }
@@ -2453,21 +2887,27 @@ export class XoraAgentWidget extends ReactWidget {
             // preserves a coherent auth-required process, so this call does
             // not restart a pending login merely to validate its authority.
             const runtimePromise = this.service.startRuntime({
-                workspaceRoot: root,
+                workspaceRoot: hostRoot,
                 providerId: submission.providerId
             });
             const [, preparedRuntime] = await Promise.all([
                 this.commandService.executeCommand(CommonCommands.SAVE_ALL.id),
                 runtimePromise
             ]);
-            if (!this.isSubmissionContextCurrent(submission)) return;
+            if (!this.isSubmissionContextCurrent(submission)) {
+                this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                return;
+            }
             runtime = preparedRuntime;
             if (runtime.phase !== 'ready') {
                 if (!await this.authenticateRuntime(runtime, () => this.isSubmissionContextCurrent(submission))) {
                     if (previousRetry && this.isSubmissionContextCurrent(submission)) this.retryablePrompt = previousRetry;
                     return;
                 }
-                if (!this.isSubmissionContextCurrent(submission)) return;
+                if (!this.isSubmissionContextCurrent(submission)) {
+                    this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                    return;
+                }
                 runtime = this.model.snapshot;
             }
             if (attachments.length && runtime.capabilities?.prompt.image !== true) {
@@ -2483,15 +2923,21 @@ export class XoraAgentWidget extends ReactWidget {
                 // backend snapshot emitted just before createSession resolves
                 // cannot expose an unverified active session transition.
                 this.model.startNewSession();
-                if (!this.isSubmissionContextCurrent(submission)) return;
+                if (!this.isSubmissionContextCurrent(submission)) {
+                    this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                    return;
+                }
                 const session = await this.service.createSession({
-                    workspaceRoot: root,
+                    workspaceRoot: hostRoot,
                     providerId: submission.providerId,
                     model: this.newSessionModel ?? contextSnapshot.selectedModel,
                     title: text.slice(0, 64) || (attachments.length === 1 ? '图片任务' : `${attachments.length} 张图片`),
-                    additionalDirectories: this.roots.filter(candidate => candidate !== root)
+                    additionalDirectories: this.roots.filter(candidate => !this.sameWorkspaceRoot(candidate, hostRoot))
                 });
-                if (!this.isSubmissionContextCurrent(submission)) return;
+                if (!this.isSubmissionContextCurrent(submission)) {
+                    this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                    return;
+                }
                 sessionId = session.appSessionId;
                 // Publish the resolved ID before the model update. Reconciliation
                 // then recognises new-session -> created-session as this send's
@@ -2499,14 +2945,20 @@ export class XoraAgentWidget extends ReactWidget {
                 submission.sessionId = sessionId;
                 this.model.setSession(session);
                 this.rememberOpenSessionTab(sessionId);
-                if (!this.isSubmissionContextCurrent(submission)) return;
+                if (!this.isSubmissionContextCurrent(submission)) {
+                    this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                    return;
+                }
             } else {
                 // This is a fast no-op in the backend when the background
                 // prewarm already hydrated the active ACP session. Keeping it
                 // unconditional prevents a stopped/restarted runtime from ever
                 // accepting a prompt for a stale, unhydrated session.
                 await this.service.loadSession(sessionId);
-                if (!this.isSubmissionContextCurrent(submission)) return;
+                if (!this.isSubmissionContextCurrent(submission)) {
+                    this.messages.warn('会话上下文已变化，当前任务未发送。请再点一次发送。');
+                    return;
+                }
             }
             submission.sessionId = sessionId;
             if ((!retry && this.prompt === draftTextAtStart) || (retry && this.prompt.trim() === text)) {
@@ -2658,10 +3110,9 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async deleteSession(session: SessionRecord): Promise<void> {
-        const label = session.title || '未命名会话';
-        const choice = await this.messages.warn(`确定删除会话“${label}”？本地历史无法恢复。`, '删除');
-        if (choice !== '删除') return;
         try {
+            // Direct delete — no confirmation dialog; history is local-only and the
+            // action is already an explicit trash-button click in the session list.
             await this.service.deleteSession(session.appSessionId);
             this.openSessionTabs = (this.openSessionTabs ?? []).filter(id => id !== session.appSessionId);
             await this.model.refresh();
@@ -2791,11 +3242,14 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async workspaceRoot(): Promise<string | undefined> {
-        if (this.model.snapshot.workspaceRoot && this.roots.includes(this.model.snapshot.workspaceRoot)) {
-            return this.model.snapshot.workspaceRoot;
+        const snapshotRoot = this.model.snapshot.workspaceRoot;
+        if (snapshotRoot && this.rootsInclude(snapshotRoot)) {
+            // Prefer backend/canonical root when it is the same folder as a
+            // Theia workspace root (case/separator differences allowed).
+            return snapshotRoot;
         }
         const roots = await this.workspaceService.roots;
-        return roots[0]?.resource.path.toString();
+        return roots[0] ? FileUri.fsPath(roots[0].resource) : undefined;
     }
 
     protected async refreshProviders(): Promise<void> {
@@ -2819,7 +3273,7 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected async refreshRoots(): Promise<void> {
         const roots = await this.workspaceService.roots;
-        this.roots = roots.map(root => root.resource.path.toString());
+        this.roots = roots.map(root => FileUri.fsPath(root.resource));
         this.requestRuntimePrewarm(true);
         this.update();
     }

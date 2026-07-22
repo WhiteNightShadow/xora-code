@@ -142,9 +142,10 @@ body.xora-electron-frameless #window-controls .control-button {
 
 /* Compact desktop workbench -------------------------------------------------
    Remove secondary IDE chrome without removing the surfaces people work in:
-   project tree, editors, the terminal panel and the fixed Agent stay intact.
-   macOS keeps one visually merged safe row for traffic lights; Windows/Linux
-   keep only native-equivalent window controls and the invisible drag target. */
+   project tree, editors, the terminal panel, the main menu and the fixed Agent
+   stay intact. macOS keeps one visually merged safe row for traffic lights;
+   Windows/Linux keep the application menu bar plus native-equivalent window
+   controls and the invisible drag target. */
 body.xora-compact-workbench.xora-electron-frameless #theia-top-panel {
     border: 0;
     box-shadow: none;
@@ -156,7 +157,9 @@ body.xora-compact-workbench.xora-electron-frameless:not(.xora-platform-darwin) #
     min-height: 30px;
 }
 
-body.xora-compact-workbench.xora-electron-frameless:not(.xora-platform-darwin) #theia-top-panel > :not(#theia-drag-panel):not(#window-controls) {
+/* Keep File/Edit/… menus visible. Only suppress non-menu filler chrome that
+   Theia may inject next to the drag strip / window controls. */
+body.xora-compact-workbench.xora-electron-frameless:not(.xora-platform-darwin) #theia-top-panel > :not(#theia-drag-panel):not(#window-controls):not(.p-MenuBar):not(.lm-MenuBar) {
     display: none !important;
 }
 

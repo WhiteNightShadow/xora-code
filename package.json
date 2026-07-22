@@ -29,15 +29,49 @@
     "clean": "lerna run clean --stream",
     "lint": "lerna run lint --stream",
     "test": "lerna run test --stream",
+    "download:plugins": "theia download:plugins --rate-limit=15 --parallel=false && node applications/electron/scripts/ensure-plugins.js",
+    "ensure:plugins": "node applications/electron/scripts/ensure-plugins.js",
     "start:browser": "yarn workspace @xora-code/browser-app start",
-    "start:electron": "yarn workspace @xora-code/electron-app start",
-    "start:electron:debug": "yarn workspace @xora-code/electron-app start:debug",
+    "start:electron": "yarn ensure:plugins && yarn workspace @xora-code/electron-app start",
+    "start:electron:debug": "yarn ensure:plugins && yarn workspace @xora-code/electron-app start:debug",
     "package:electron": "yarn workspace @xora-code/electron-app package",
     "package:electron:preview": "yarn workspace @xora-code/electron-app package:preview",
     "package:mac:preview": "yarn workspace @xora-code/electron-app package:preview",
     "package:mac:preview:installers": "yarn workspace @xora-code/electron-app package:preview:installers:mac",
     "sbom:preview": "node build/sbom/generate-preview-sbom.mjs"
   },
+  "theiaPluginsDir": "plugins",
+  "theiaPlugins": {
+    "vscode-builtin-extensions": "https://github.com/eclipse-theia/vscode-builtin-extensions/releases/download/1.108.2/vscode-builtin-extensions-1.108.2.tar.gz"
+  },
+  "theiaPluginsExcludeIds": [
+    "ms-vscode.js-debug",
+    "ms-vscode.js-debug-companion",
+    "ms-vscode.vscode-js-profile-table",
+    "vscode.extension-editing",
+    "vscode.microsoft-authentication"
+  ],
+  "xoraBuiltinLanguages": [
+    "javascript",
+    "typescript",
+    "c",
+    "cpp",
+    "python",
+    "json",
+    "markdown",
+    "html",
+    "css",
+    "scss",
+    "shell",
+    "yaml",
+    "xml",
+    "sql",
+    "go",
+    "rust",
+    "java",
+    "dockerfile",
+    "plaintext"
+  ],
   "devDependencies": {
     "lerna": "9.0.7",
     "rimraf": "6.0.1"

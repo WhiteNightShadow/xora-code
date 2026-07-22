@@ -1,10 +1,20 @@
 import { FrontendApplication, FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { CommandContribution, CommandRegistry, DisposableCollection, MessageService } from '@theia/core/lib/common';
+import { FileUri } from '@theia/core/lib/common/file-uri';
+import { isOSX, isWindows } from '@theia/core/lib/common/os';
+import URI from '@theia/core/lib/common/uri';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import { WorkspaceTrustService } from '@theia/workspace/lib/browser/workspace-trust-service';
 import { AgentHostService, RuntimeSnapshot } from '../common/agent-protocol';
+import { filesystemPathListIncludes, filesystemPathsEqual } from '../common/workspace-path';
 import { AgentViewModel } from './agent-view-model';
+
+function browserPathPlatform(): NodeJS.Platform {
+    if (isWindows) return 'win32';
+    if (isOSX) return 'darwin';
+    return 'linux';
+}
 
 const EXECUTABLE_COMMANDS = [
     'terminal:new',
@@ -91,24 +101,29 @@ export class WorkspaceTrustGuard implements FrontendApplicationContribution, Com
         await this.enqueue(async () => {
             const roots = await this.workspaceService.roots;
             const paths = this.rootPaths(roots);
-            if (!paths.includes(root)) {
+            const platform = browserPathPlatform();
+            if (!filesystemPathListIncludes(paths, root, platform)) {
                 throw new Error('所选 Agent 主目录不属于当前工作区。');
             }
-            await this.agentHost.setWorkspaceRoot(root);
+            // Prefer an exact path from Theia roots when only casing differs.
+            const hostRoot = paths.find(candidate => filesystemPathsEqual(candidate, root, platform)) ?? root;
+            await this.agentHost.setWorkspaceRoot(hostRoot);
             const trusted = await this.workspaceTrustService.getWorkspaceTrust();
             const snapshot = await this.agentHost.synchronizeWorkspaceTrust({ workspaceRoots: paths, trusted });
-            this.lastSynchronizationSignature = this.synchronizationSignature(paths, root, trusted);
+            this.lastSynchronizationSignature = this.synchronizationSignature(paths, hostRoot, trusted);
             this.requestAgentStandby(snapshot);
         });
     }
 
     protected async synchronize(
-        roots: readonly { resource: { path: { toString(): string } } }[],
+        roots: readonly { resource: URI }[],
         knownTrust?: boolean
     ): Promise<void> {
         const paths = this.rootPaths(roots);
-        const root = this.model.snapshot.workspaceRoot && paths.includes(this.model.snapshot.workspaceRoot)
-            ? this.model.snapshot.workspaceRoot
+        const platform = browserPathPlatform();
+        const snapshotRoot = this.model.snapshot.workspaceRoot;
+        const root = snapshotRoot && filesystemPathListIncludes(paths, snapshotRoot, platform)
+            ? (paths.find(candidate => filesystemPathsEqual(candidate, snapshotRoot, platform)) ?? snapshotRoot)
             : paths[0];
         const trusted = knownTrust ?? await this.workspaceTrustService.getWorkspaceTrust();
         const effectiveTrust = trusted && paths.length > 0;
@@ -128,8 +143,12 @@ export class WorkspaceTrustGuard implements FrontendApplicationContribution, Com
         await this.synchronize(roots, trusted);
     }
 
-    protected rootPaths(roots: readonly { resource: { path: { toString(): string } } }[]): string[] {
-        return roots.map(candidate => candidate.resource.path.toString());
+    /**
+     * Use FileUri.fsPath so Windows roots become `D:\…` rather than Theia's
+     * URI.path form `/d:/…` (which Node realpath turns into `D:\d:\…`).
+     */
+    protected rootPaths(roots: readonly { resource: URI }[]): string[] {
+        return roots.map(candidate => FileUri.fsPath(candidate.resource));
     }
 
     protected synchronizationSignature(paths: readonly string[], root: string | undefined, trusted: boolean): string {
@@ -173,6 +192,13 @@ export class WorkspaceTrustGuard implements FrontendApplicationContribution, Com
     }
 
     protected reportSynchronizationError(error: unknown): void {
-        this.messages.error(`无法同步项目信任状态：${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        // Renderer must never surface Node-only globals; path helpers now avoid
+        // `process`, but keep this guard so residual issues stay non-blocking.
+        if (/process is not defined/i.test(message)) {
+            console.warn('[xora-agent] workspace trust sync skipped:', message);
+            return;
+        }
+        this.messages.error(`无法同步项目信任状态：${message}`);
     }
 }

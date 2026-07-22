@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentPermissionMode } from '../common/agent-protocol';
+import { normalizeWindowsFilesystemPath } from '../common/workspace-path';
 
 interface TrustFile {
     schemaVersion: 1;
@@ -177,10 +178,13 @@ export class WorkspaceSecurityStore {
     }
 
     canonicalRoot(root: string): string {
-        if (!path.isAbsolute(root)) {
+        const candidate = normalizeWindowsFilesystemPath(root);
+        // After Windows URI-path repair, re-check absoluteness so `/d:/foo`
+        // does not slip through as a false absolute and become `D:\d:\foo`.
+        if (!path.isAbsolute(candidate) || isWindowsUriPathForm(candidate)) {
             throw new Error('Workspace root must be an absolute path.');
         }
-        const resolved = fs.realpathSync.native(root);
+        const resolved = fs.realpathSync.native(candidate);
         const stat = fs.statSync(resolved);
         if (!stat.isDirectory()) {
             throw new Error('Workspace root must be a directory.');
@@ -253,4 +257,10 @@ export class WorkspaceSecurityStore {
         fs.renameSync(temporary, target);
         fs.chmodSync(target, 0o600);
     }
+}
+
+/** True for residual `/d:/…` forms that Node still treats as absolute on win32. */
+function isWindowsUriPathForm(value: string): boolean {
+    if (process.platform !== 'win32') return false;
+    return /^[/\\][A-Za-z]:[/\\]/.test(value);
 }
