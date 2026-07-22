@@ -21,7 +21,8 @@
     <a href="#安全与权限">安全与权限</a> ·
     <a href="#v010-release-notes">v0.1.0 Release Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
-    <a href="#参与项目">参与项目</a>
+    <a href="#参与项目">参与项目</a> ·
+    <a href="#问题反馈与交流">问题反馈与交流</a>
   </p>
 </div>
 
@@ -327,6 +328,12 @@ Xora Code 希望成为一个由社区共同建设的开放桌面 Agent 工作台
 - macOS、Windows、Linux 构建与发布反馈
 
 提交代码前，请保持安全边界不被弱化：renderer 不接触密钥、不直接启动 sidecar、不绕过 Workspace Trust，也不以隐式 Git 操作覆盖用户改动。
+
+## 问题反馈与交流
+
+使用中遇到问题、想反馈 bug、或交流逆向思路，欢迎加微信或进群反馈：
+
+**微信号：** `han8888v8888`（加好友请备注「xora-code」）
 
 ## 开源许可
 
