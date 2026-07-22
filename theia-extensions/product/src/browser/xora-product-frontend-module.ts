@@ -3,7 +3,6 @@
 
 import { FrontendApplicationContribution, WidgetFactory, bindViewContribution } from '@theia/core/lib/browser';
 import { AboutDialog } from '@theia/core/lib/browser/about-dialog';
-import { MenuContribution } from '@theia/core/lib/common';
 import { NavigatorWidgetFactory } from '@theia/navigator/lib/browser/navigator-widget-factory';
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { XoraWelcomeContribution } from './xora-welcome-contribution';
@@ -30,7 +29,8 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     bind(FrontendApplicationContribution).toService(XoraShellContribution);
     bind(XoraExplorerContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(XoraExplorerContribution);
+    // Only FrontendApplicationContribution: must not bind MenuContribution and
+    // call registerSubmenu again — that duplicates Selection/Run on the bar.
     bind(XoraMenuI18nContribution).toSelf().inSingletonScope();
-    bind(MenuContribution).toService(XoraMenuI18nContribution);
     bind(FrontendApplicationContribution).toService(XoraMenuI18nContribution);
 });

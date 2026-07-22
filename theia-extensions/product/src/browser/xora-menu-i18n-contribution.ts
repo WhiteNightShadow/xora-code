@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { FrontendApplicationContribution } from '@theia/core/lib/browser';
-import { MAIN_MENU_BAR, MenuContribution, MenuModelRegistry } from '@theia/core/lib/common';
+import { MAIN_MENU_BAR, MenuModelRegistry } from '@theia/core/lib/common';
 import { nls } from '@theia/core/lib/common/nls';
 import { inject, injectable } from '@theia/core/shared/inversify';
 
@@ -11,40 +11,80 @@ const SELECTION_MENU = [...MAIN_MENU_BAR, '3_selection'] as const;
 /** Main-menu path for Debug's Run menu (see DebugMenus.DEBUG). */
 const RUN_MENU = [...MAIN_MENU_BAR, '6_debug'] as const;
 
+interface LabeledMenuNode {
+    id: string;
+    label?: string;
+}
+
+interface MutableMenuParent {
+    children: LabeledMenuNode[];
+    removeNode(node: LabeledMenuNode): void;
+}
+
 /**
- * `nls.localizeByDefault('Selection'|'Run')` only applies TextReplacement when
- * a VS Code translation key exists. Those two labels often miss the key map
- * and fall back to English. Re-register the submenus with Chinese labels after
- * all contributions have run so the menu bar stays localized.
+ * Localize top-level Selection / Run menus for zh-cn.
+ *
+ * IMPORTANT: Do NOT call `MenuModelRegistry.registerSubmenu` for menus that
+ * already exist as labeled submenus. Theia's registry only replaces a node when
+ * it is a Group (no label); for an existing Submenu it *adds another* node with
+ * the same id — that produced duplicate「选择」「运行」entries on the menu bar
+ * (especially visible on Windows).
+ *
+ * Instead we mutate the existing submenu's label and drop any same-id siblings.
+ * TextReplacementContribution still handles the nls path for other strings.
  */
 @injectable()
-export class XoraMenuI18nContribution implements MenuContribution, FrontendApplicationContribution {
+export class XoraMenuI18nContribution implements FrontendApplicationContribution {
     @inject(MenuModelRegistry)
     protected readonly menus!: MenuModelRegistry;
 
-    registerMenus(menus: MenuModelRegistry): void {
-        this.applyChineseLabels(menus);
-    }
-
     onStart(): void {
-        // Monaco/Debug may register after this contribution depending on load
-        // order; force labels again once the workbench is starting.
-        this.applyChineseLabels(this.menus);
+        this.applyChineseLabels();
     }
 
-    protected applyChineseLabels(menus: MenuModelRegistry): void {
+    protected applyChineseLabels(): void {
         if ((nls.locale ?? '').toLowerCase() !== 'zh-cn') {
             return;
         }
-        try {
-            menus.registerSubmenu([...SELECTION_MENU], '选择');
-        } catch {
-            // Submenu may not exist yet in early registerMenus.
+        this.relabelExistingSubmenu([...SELECTION_MENU], '选择');
+        this.relabelExistingSubmenu([...RUN_MENU], '运行');
+        this.dedupeMainMenuBar(['3_selection', '6_debug']);
+    }
+
+    protected relabelExistingSubmenu(menuPath: string[], label: string): void {
+        const node = this.menus.getMenuNode(menuPath) as LabeledMenuNode | undefined;
+        if (!node || typeof node.label !== 'string') {
+            return;
         }
-        try {
-            menus.registerSubmenu([...RUN_MENU], '运行');
-        } catch {
-            // Same for debug contribution.
+        if (node.label !== label) {
+            node.label = label;
+        }
+    }
+
+    /**
+     * Remove later siblings that share an id with an earlier top-level menu.
+     * Safe when a previous buggy registerSubmenu call already injected clones.
+     */
+    protected dedupeMainMenuBar(ids: readonly string[]): void {
+        const bar = this.menus.getMenu([...MAIN_MENU_BAR]) as unknown as MutableMenuParent | undefined;
+        if (!bar || !Array.isArray(bar.children) || typeof bar.removeNode !== 'function') {
+            return;
+        }
+        const target = new Set(ids);
+        const seen = new Set<string>();
+        const extras: LabeledMenuNode[] = [];
+        for (const child of bar.children) {
+            if (!target.has(child.id)) {
+                continue;
+            }
+            if (seen.has(child.id)) {
+                extras.push(child);
+            } else {
+                seen.add(child.id);
+            }
+        }
+        for (const extra of extras) {
+            bar.removeNode(extra);
         }
     }
 }

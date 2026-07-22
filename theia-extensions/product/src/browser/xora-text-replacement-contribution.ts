@@ -28,8 +28,8 @@ export class XoraTextReplacementContribution implements TextReplacementContribut
                 '如果不信任，项目将以受限模式打开，并禁用这些功能，以防范潜在的恶意代码。',
             "Learn more about Theia's Workspace Trust": '了解项目信任机制',
 
-            // Main menu bar (also re-applied via XoraMenuI18nContribution for
-            // Selection/Run, which often miss VS Code default translation keys).
+            // Main menu bar. Selection/Run also get an in-place label fix in
+            // XoraMenuI18nContribution (never re-registerSubmenu — that duplicates).
             'File': '文件',
             'Edit': '编辑',
             'Selection': '选择',
