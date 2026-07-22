@@ -426,7 +426,7 @@ export class AgentManagementWidget extends ReactWidget {
                         <option value='openai-responses'>OpenAI Responses（xAI 官方/兼容站）</option>
                         <option value='anthropic-messages'>Anthropic Messages</option>
                     </select></label>
-                    <p className='xora-muted'>多数第三方中转只实现 Chat Completions。选错协议时 Agent 会报 session/prompt Internal error（常见为上游 401/501）。</p>
+                    <p className='xora-muted'>协议需与中转站文档一致。多数中转仅支持 Chat Completions；选错时对话可能失败并提示 Internal error。</p>
                     <label>Base URL<input required name='baseUrl' type='url' placeholder='https://api.example.com/v1' /></label>
                     {this.renderModelIdField('add', undefined, undefined)}
                     <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue='1000000' /></label>
@@ -514,7 +514,7 @@ export class AgentManagementWidget extends ReactWidget {
                     <option value='openai-responses'>OpenAI Responses（xAI 官方/兼容站）</option>
                     <option value='anthropic-messages'>Anthropic Messages</option>
                 </select></label>
-                <p className='xora-muted'>若对话出现 session/prompt Internal error，先确认中转站实际支持的协议；xfastapi 等站通常只支持 Chat Completions。</p>
+                <p className='xora-muted'>若对话失败并出现 Internal error，请先核对协议是否与中转站一致；多数中转仅支持 Chat Completions。</p>
                 <label>Base URL<input required name='baseUrl' type='url' defaultValue={provider.baseUrl} /></label>
                 {this.renderModelIdField(provider.id, provider.model, models)}
                 <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 1000000} /></label>
