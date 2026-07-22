@@ -6,15 +6,19 @@ import * as path from 'path';
 import { parse as parseToml } from 'smol-toml';
 import { ProviderProfile, ProviderProtocol, XAI_MANAGED_MODEL_ID } from '../common/agent-protocol';
 import { normalizeProviderBaseUrl } from './provider-network';
+import {
+    LEGACY_MANAGED_BLOCK_END as LEGACY_BLOCK_END,
+    LEGACY_MANAGED_BLOCK_START as LEGACY_BLOCK_START,
+    MANAGED_BLOCK_END as BLOCK_END,
+    MANAGED_BLOCK_START as BLOCK_START,
+    removeMarkedManagedBlocksFromToml,
+    removeModelTablesFromToml
+} from './provider-toml';
 import { SecretVault } from './secret-vault';
 
-const BLOCK_START = '# >>> Xora Code managed providers >>>';
-const BLOCK_END = '# <<< Xora Code managed providers <<<';
 // Read the pre-Xora identifiers during the rename transition. New profiles and
 // generated TOML always use the Xora names, but existing profiles must keep
 // their IDs because those IDs are also part of their encrypted secretRef.
-const LEGACY_BLOCK_START = '# >>> WhiteNight Code managed providers >>>';
-const LEGACY_BLOCK_END = '# <<< WhiteNight Code managed providers <<<';
 const PROFILE_ID = /^(?:xora|wnc)-[a-z0-9][a-z0-9-]{0,48}$/;
 const XAI_OFFICIAL_BASE_URL = 'https://api.x.ai/v1';
 export { XAI_MANAGED_MODEL_ID } from '../common/agent-protocol';
@@ -185,6 +189,11 @@ export class ProviderRegistry {
         const file = this.readMetadata();
         const profile = this.profileFromFile(file, providerId);
         if (!profile) return undefined;
+        // Custom profiles own a single ACP catalog alias (their id). Legacy
+        // preferredModels entries may still store the upstream relay model name.
+        if (profile.kind === 'custom' && profile.model) {
+            return profile.id;
+        }
         return file.preferredModels?.[providerId] ?? profile.model;
     }
 
@@ -192,12 +201,15 @@ export class ProviderRegistry {
         const model = this.validateModelId(modelId);
         this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
             const file = this.readMetadata();
-            if (!this.profileFromFile(file, providerId)) {
+            const profile = this.profileFromFile(file, providerId);
+            if (!profile) {
                 throw new Error('所选模型服务已不存在。');
             }
+            // Never persist an upstream relay id as the custom catalog preference.
+            const preferred = profile.kind === 'custom' ? profile.id : model;
             file.preferredModels = file.preferredModels ?? {};
-            if (file.preferredModels[providerId] === model) return;
-            file.preferredModels[providerId] = model;
+            if (file.preferredModels[providerId] === preferred) return;
+            file.preferredModels[providerId] = preferred;
             this.writeMetadata(file);
         });
     }
@@ -361,8 +373,11 @@ export class ProviderRegistry {
         } else {
             file.providers.push(profile);
         }
+        // Custom providers are exposed to ACP under a local catalog alias
+        // (profile.id). Persist that alias, not the upstream relay model name
+        // (e.g. grok-4.5), so preferredModels never collides with subscription.
         file.preferredModels = file.preferredModels ?? {};
-        file.preferredModels[profile.id] = profile.model!;
+        file.preferredModels[profile.id] = profile.id;
         if (!credential && !this.vault.get(profile.secretRef!)) {
             throw new Error('This provider needs an API key.');
         }
@@ -686,7 +701,13 @@ export class ProviderRegistry {
             // model-scoped variable so a relay key is never treated as shared
             // Grok authentication state.
             const environment: NodeJS.ProcessEnv = profile.model
-                ? { [XAI_MANAGED_ENVIRONMENT]: key }
+                ? {
+                    [XAI_MANAGED_ENVIRONMENT]: key,
+                    // Grok 0.2.102 prefers OIDC session JWT over model env_key
+                    // when ~/.grok/auth.json is present. Isolate API profiles.
+                    GROK_HOME: this.ensureApiProviderGrokHome(profile),
+                    XAI_API_KEY: key
+                }
                 : { XAI_API_KEY: key };
             if (profile.model && profile.backendSearch === true) {
                 // Grok resolves the web-search sampler independently from the
@@ -700,14 +721,78 @@ export class ProviderRegistry {
         const environmentName = this.environmentName(profile.id);
         // A copied pre-Xora TOML block can still reference the legacy
         // environment variable until the next managed configuration write.
+        //
+        // Critical: Grok Build 0.2.102 with an active OIDC login
+        // (auth.json) sends the subscription JWT to custom base_url
+        // endpoints and ignores model env_key — which every third-party
+        // relay rejects as INVALID_API_KEY. Point the sidecar at an
+        // isolated GROK_HOME that has the model table but no auth.json so
+        // env_key / XAI_API_KEY are the only credentials available.
         const environment: NodeJS.ProcessEnv = {
             [environmentName]: key,
-            [this.legacyEnvironmentName(profile.id)]: key
+            [this.legacyEnvironmentName(profile.id)]: key,
+            XAI_API_KEY: key,
+            GROK_HOME: this.ensureApiProviderGrokHome(profile)
         };
         if (profile.backendSearch === true) {
             environment.GROK_WEB_SEARCH_MODEL = profile.id;
         }
         return { profile: { ...profile }, environment };
+    }
+
+    /**
+     * Per-API-provider Grok home without OIDC auth.json. Shared ~/.grok is
+     * still used for subscription and external CLI; this directory only exists
+     * so custom/base-url profiles cannot pick up the browser session JWT.
+     */
+    protected ensureApiProviderGrokHome(profile: ProviderProfile): string {
+        if (profile.kind !== 'custom' && !(profile.kind === 'xai-api-key' && profile.model)) {
+            throw new Error('Isolated Grok home is only for API provider profiles.');
+        }
+        const root = path.join(this.providerGrokHomesRoot(), profile.id);
+        fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+        // Never carry OIDC session tokens into the isolated home.
+        for (const name of ['auth.json', 'auth.json.lock']) {
+            const candidate = path.join(root, name);
+            try {
+                if (fs.existsSync(candidate)) fs.rmSync(candidate, { force: true });
+            } catch { /* best effort */ }
+        }
+        const config = [
+            '# Managed by Xora Code for an isolated API-provider sidecar.',
+            '# Do not place auth.json here — OIDC would override env_key.',
+            '[ui]',
+            'permission_mode = "always-approve"',
+            '',
+            this.managedToml(profile),
+            ''
+        ].join('\n');
+        this.atomicWrite(path.join(root, 'config.toml'), config, 0o600);
+
+        // Reuse user skills from the real Grok home when present (read-only).
+        const sharedSkills = path.join(os.homedir(), '.grok', 'skills');
+        const localSkills = path.join(root, 'skills');
+        try {
+            if (fs.existsSync(sharedSkills) && !fs.existsSync(localSkills)) {
+                fs.symlinkSync(sharedSkills, localSkills, 'dir');
+            }
+        } catch { /* skills are optional for API providers */ }
+
+        if (process.platform !== 'win32') {
+            try { fs.chmodSync(root, 0o700); } catch { /* ignore */ }
+        }
+        return root;
+    }
+
+    protected providerGrokHomesRoot(): string {
+        try {
+            if (typeof app?.getPath === 'function') {
+                return path.join(app.getPath('userData'), 'provider-grok-homes');
+            }
+        } catch {
+            /* Electron app may be unavailable in unit tests. */
+        }
+        return path.join(os.tmpdir(), 'xora-code-provider-grok-homes');
     }
 
     credential(profileId: string): string | undefined {
@@ -979,34 +1064,41 @@ export class ProviderRegistry {
             const before = this.readGrokConfig();
             this.assertToml(before);
             const originalHash = crypto.createHash('sha256').update(before).digest('hex');
-            // The retired built-in xAI slot is metadata-only compatibility.
-            // Only ordinary custom Providers belong in the live Grok catalog.
-            const profiles: ProviderProfile[] = [...file.providers];
+            this.assertManagedMarkersWellFormed(before);
+            // Deduplicate by id so a corrupted providers.json cannot emit two
+            // identical [model."…"] tables into config.toml.
+            const byId = new Map<string, ProviderProfile>();
+            for (const profile of file.providers) {
+                byId.set(profile.id, profile);
+            }
+            const profiles = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+            const catalogIds = profiles.map(profile => (
+                profile.kind === 'xai-api-key' ? XAI_MANAGED_MODEL_ID : profile.id
+            ));
+            // Always include the retired managed xAI slot id so a leftover
+            // table cannot collide after Grok rewrites quoted keys to bare ones.
+            if (!catalogIds.includes(XAI_MANAGED_MODEL_ID)) {
+                catalogIds.push(XAI_MANAGED_MODEL_ID);
+            }
+
+            // 1) Drop previous managed marker blocks (current + legacy).
+            // 2) Drop any orphan [model.id] / [model."id"] tables for those
+            //    catalog ids. Grok sometimes rewrites quoted keys to bare keys
+            //    and strips our markers; appending without cleanup then fails
+            //    assertToml with "redefine an already defined table".
+            let working = removeMarkedManagedBlocksFromToml(before);
+            working = removeModelTablesFromToml(working, catalogIds);
+
             const block = [
                 BLOCK_START,
-                ...profiles.sort((a, b) => a.id.localeCompare(b.id)).map(profile => this.managedToml(profile)),
+                ...profiles.map(profile => this.managedToml(profile)),
                 BLOCK_END
             ].join('\n\n');
-            const currentStart = before.indexOf(BLOCK_START);
-            const currentEnd = before.indexOf(BLOCK_END);
-            const legacyStart = before.indexOf(LEGACY_BLOCK_START);
-            const legacyEnd = before.indexOf(LEGACY_BLOCK_END);
-            if ((currentStart >= 0) !== (currentEnd >= 0) || (legacyStart >= 0) !== (legacyEnd >= 0)) {
-                throw new Error('Grok config contains an incomplete managed provider block. Xora Code left it unchanged.');
-            }
-            if (currentStart >= 0 && legacyStart >= 0) {
-                throw new Error('Grok config contains both current and legacy managed provider blocks. Xora Code left it unchanged.');
-            }
-            const start = currentStart >= 0 ? currentStart : legacyStart;
-            const end = currentStart >= 0 ? currentEnd : legacyEnd;
-            const endMarker = currentStart >= 0 ? BLOCK_END : LEGACY_BLOCK_END;
-            let after: string;
-            if (start >= 0 && end >= start) {
-                after = `${before.slice(0, start)}${block}${before.slice(end + endMarker.length)}`;
-            } else {
-                const separator = before.length > 0 && !before.endsWith('\n') ? '\n\n' : before.length > 0 ? '\n' : '';
-                after = `${before}${separator}${block}\n`;
-            }
+            const separator = working.length > 0 && !working.endsWith('\n')
+                ? '\n\n'
+                : working.length > 0 ? '\n' : '';
+            const after = `${working}${separator}${block}\n`;
+
             const current = this.readGrokConfig();
             const currentHash = crypto.createHash('sha256').update(current).digest('hex');
             if (currentHash !== originalHash) {
@@ -1021,6 +1113,19 @@ export class ProviderRegistry {
             }
             this.atomicWrite(this.grokConfigPath, after, 0o600);
         });
+    }
+
+    protected assertManagedMarkersWellFormed(source: string): void {
+        const currentStart = source.indexOf(BLOCK_START);
+        const currentEnd = source.indexOf(BLOCK_END);
+        const legacyStart = source.indexOf(LEGACY_BLOCK_START);
+        const legacyEnd = source.indexOf(LEGACY_BLOCK_END);
+        if ((currentStart >= 0) !== (currentEnd >= 0) || (legacyStart >= 0) !== (legacyEnd >= 0)) {
+            throw new Error('Grok config contains an incomplete managed provider block. Xora Code left it unchanged.');
+        }
+        if (currentStart >= 0 && legacyStart >= 0) {
+            throw new Error('Grok config contains both current and legacy managed provider blocks. Xora Code left it unchanged.');
+        }
     }
 
     protected withLock<T>(operation: () => T): T {

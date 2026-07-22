@@ -122,7 +122,12 @@ test('configured xAI relays use a secret-free managed Grok model and profile-sco
     assert.match(source, /XAI_MANAGED_MODEL_ID.*from '\.\.\/common\/agent-protocol'/s);
     assert.match(source, /const XAI_MANAGED_ENVIRONMENT = 'XORA_CODE_XAI_API_KEY'/);
     assert.match(source, /xaiApi\?: XaiApiSettings/);
-    assert.match(source, /profile\.model\s*\?\s*\{ \[XAI_MANAGED_ENVIRONMENT\]: key \}\s*:\s*\{ XAI_API_KEY: key \}/);
+    // Custom/relay profiles isolate GROK_HOME so OIDC session JWT cannot
+    // override model env_key / XAI_API_KEY on third-party base_url hosts.
+    assert.match(source, /ensureApiProviderGrokHome/);
+    assert.match(source, /GROK_HOME:\s*this\.ensureApiProviderGrokHome\(profile\)/);
+    assert.match(source, /\[XAI_MANAGED_ENVIRONMENT\]:\s*key/);
+    assert.match(source, /XAI_API_KEY:\s*key/);
     assert.match(managedToml, /profile\.kind === 'xai-api-key' \? XAI_MANAGED_MODEL_ID : profile\.id/);
     assert.match(managedToml, /profile\.kind === 'xai-api-key' \? XAI_MANAGED_ENVIRONMENT : this\.environmentName\(profile\.id\)/);
     assert.match(managedToml, /env_key =/);
@@ -130,13 +135,18 @@ test('configured xAI relays use a secret-free managed Grok model and profile-sco
     assert.match(managedToml, /extra_headers = \{ "x-api-key" =/);
     assert.doesNotMatch(managedToml, /vault\.get|credential\(|secretRef/);
     assert.doesNotMatch(rewriteManagedBlock, /xaiProfile\(file\)|file\.xaiApi/);
-    assert.match(rewriteManagedBlock, /const profiles: ProviderProfile\[\] = \[\.\.\.file\.providers\]/);
+    // Deduped profiles + orphan [model.*] cleanup prevent TOML redefine errors.
+    assert.match(rewriteManagedBlock, /byId\.set\(profile\.id, profile\)/);
+    assert.match(rewriteManagedBlock, /removeMarkedManagedBlocksFromToml/);
+    assert.match(rewriteManagedBlock, /removeModelTablesFromToml/);
     assert.match(host, /provider\?\.kind === 'xai-api-key' && provider\.model\s*\? XAI_MANAGED_MODEL_ID/);
     assert.match(host, /if \(providerId === 'grok-subscription'\)/);
     assert.match(host, /if \(!provider\.baseUrl\)/);
-    assert.match(host, /provider\.protocol === 'anthropic-messages'[\s\S]*headers\['x-api-key'\] = credential/);
+    assert.match(host, /protocol === 'anthropic-messages'[\s\S]*headers\['x-api-key'\] = credential/);
     assert.match(host, /headers\.authorization = `Bearer \$\{credential\}`/);
     assert.match(host, /providerCredentialSnapshot\(providerId\)/);
+    assert.match(host, /probeProviderModels/);
+    assert.match(host, /requestProviderModelCatalog/);
     assert.match(host, /withProviderEnvironment\(provider\.id, \(providerEnvironment, currentProvider, runtimeEpoch\)[\s\S]*this\.runtimeProviderEpoch = runtimeEpoch[\s\S]*supervisor\.launch\(root, environment\)/);
 });
 
@@ -255,8 +265,11 @@ test('backend-search relays pin Grok web search to the current process-scoped mo
         managed: true
     } : undefined;
 
+    registry.ensureApiProviderGrokHome = () => '/fixture/provider-grok-home';
     assert.deepEqual(registry.environment('xai-api-key'), {
         XORA_CODE_XAI_API_KEY: 'fixture-secret',
+        GROK_HOME: '/fixture/provider-grok-home',
+        XAI_API_KEY: 'fixture-secret',
         GROK_WEB_SEARCH_MODEL: 'xora-xai-api'
     });
 
@@ -273,7 +286,9 @@ test('backend-search relays pin Grok web search to the current process-scoped mo
         managed: true
     } : undefined;
     assert.deepEqual(registry.environment('xai-api-key'), {
-        XORA_CODE_XAI_API_KEY: 'fixture-secret'
+        XORA_CODE_XAI_API_KEY: 'fixture-secret',
+        GROK_HOME: '/fixture/provider-grok-home',
+        XAI_API_KEY: 'fixture-secret'
     });
 });
 

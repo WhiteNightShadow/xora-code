@@ -473,10 +473,26 @@ form.xora-provider-form,
     margin-top: 14px;
 }
 
+.xora-provider-model-pick {
+    display: flex;
+    min-width: 9rem;
+    max-width: 14rem;
+    flex: 0 1 12rem;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+}
+
+.xora-provider-model-pick select {
+    width: 100%;
+    min-height: 28px;
+}
+
 .xora-provider-model-row {
     grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(9rem, 12rem) auto;
     gap: 8px;
     align-items: end;
 }
@@ -487,8 +503,27 @@ form.xora-provider-form,
     min-width: 0;
 }
 
+.xora-provider-model-pick {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+    color: var(--theia-descriptionForeground);
+    font-size: 12px;
+}
+
+.xora-provider-model-pick select {
+    width: 100%;
+    min-height: 28px;
+}
+
 .xora-provider-fetch-models {
     white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+    .xora-provider-model-row {
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 
 .xora-provider-form label,

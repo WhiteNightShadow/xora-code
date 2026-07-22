@@ -473,6 +473,17 @@ export class FakeAgentHostService implements AgentHostService {
         return this.publishSnapshot();
     }
 
+    async probeProviderModels(_request: {
+        protocol: import('../common/agent-protocol').ProviderProtocol;
+        baseUrl: string;
+        apiKey: string;
+    }) {
+        return [
+            { id: 'probe-model-a', name: 'Probe Model A', contextWindow: 128_000 },
+            { id: 'probe-model-b', name: 'Probe Model B', contextWindow: 256_000 }
+        ];
+    }
+
     async fetchProviderModels(_providerId: string) {
         return this.snapshot.models.map(model => ({ ...model }));
     }

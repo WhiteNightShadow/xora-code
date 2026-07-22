@@ -1,4 +1,10 @@
-import { AcpCancelledError, AcpClient, createNodeWritableSink, RequestHandle } from '@xora-code/acp-client';
+import {
+    AcpCancelledError,
+    AcpClient,
+    AcpRemoteError,
+    createNodeWritableSink,
+    RequestHandle
+} from '@xora-code/acp-client';
 import { app, dialog } from 'electron';
 import { ChildProcess, spawn } from 'child_process';
 import * as crypto from 'crypto';
@@ -27,6 +33,7 @@ import {
     PROVIDER_DEFAULT_MODEL_CHOICE_ID,
     PromptRequest,
     ProviderProfile,
+    ProviderProtocol,
     RuntimeSnapshot,
     SessionRecord,
     StartRuntimeRequest,
@@ -37,7 +44,7 @@ import {
 import { normalizeWindowsFilesystemPath } from '../common/workspace-path';
 import { ProviderRegistry } from './provider-registry';
 import { validatePromptImageAttachments } from './prompt-image-attachments';
-import { providerModelsEndpoint, requestProviderJson } from './provider-network';
+import { normalizeProviderBaseUrl, providerModelsEndpoint, requestProviderJson } from './provider-network';
 import { mergeMcpManagementResults } from './mcp-management';
 import { AgentSessionRepository, deepRedact } from './session-repository';
 import { GrokSidecarSupervisor } from './sidecar-supervisor';
@@ -1348,9 +1355,29 @@ export class GrokAgentHostService implements AgentHostService {
         }
         const { profile: provider, credential } = this.providers.providerCredentialSnapshot(providerId);
         if (!provider.baseUrl) throw new Error('此模型服务没有可查询的 API 地址。');
-        const endpoint = providerModelsEndpoint(provider.baseUrl);
+        const protocol = provider.protocol ?? 'openai-responses';
+        return this.requestProviderModelCatalog(protocol, provider.baseUrl, credential);
+    }
+
+    async probeProviderModels(request: {
+        protocol: ProviderProtocol;
+        baseUrl: string;
+        apiKey: string;
+    }): Promise<AgentModelOption[]> {
+        const apiKey = request.apiKey?.trim();
+        if (!apiKey) throw new Error('请先填写 API 密钥。');
+        const baseUrl = normalizeProviderBaseUrl(request.baseUrl);
+        return this.requestProviderModelCatalog(request.protocol, baseUrl, apiKey);
+    }
+
+    protected async requestProviderModelCatalog(
+        protocol: ProviderProtocol,
+        baseUrl: string,
+        credential: string
+    ): Promise<AgentModelOption[]> {
+        const endpoint = providerModelsEndpoint(baseUrl);
         const headers: Record<string, string> = { accept: 'application/json' };
-        if (provider.protocol === 'anthropic-messages') {
+        if (protocol === 'anthropic-messages') {
             headers['x-api-key'] = credential;
             headers['anthropic-version'] = '2023-06-01';
         } else {
@@ -2936,7 +2963,57 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected redactError(error: unknown): string {
-        return deepRedact(error instanceof Error ? error.message : String(error), this.currentSecrets);
+        return deepRedact(this.formatErrorMessage(error), this.currentSecrets);
+    }
+
+    /**
+     * Grok often returns JSON-RPC `-32603 Internal error` with the useful
+     * detail only in `error.data` (for example upstream 401 / INVALID_API_KEY).
+     * Surface that detail so users are not stuck on an opaque ACP shell error.
+     */
+    protected formatErrorMessage(error: unknown): string {
+        if (error instanceof AcpRemoteError) {
+            const detail = this.describeRemoteErrorData(error.data);
+            if (detail && detail !== error.message) {
+                return `${error.message}: ${detail}`;
+            }
+            return error.message;
+        }
+        if (error instanceof Error) {
+            return error.message;
+        }
+        return String(error);
+    }
+
+    protected describeRemoteErrorData(data: unknown): string | undefined {
+        if (data === undefined || data === null) return undefined;
+        if (typeof data === 'string') {
+            const trimmed = data.trim();
+            return trimmed || undefined;
+        }
+        if (typeof data === 'number' || typeof data === 'boolean') {
+            return String(data);
+        }
+        if (typeof data !== 'object') return undefined;
+        const record = data as Record<string, unknown>;
+        const nested = record.message ?? record.error ?? record.detail ?? record.reason;
+        if (typeof nested === 'string' && nested.trim()) return nested.trim();
+        if (nested && typeof nested === 'object') {
+            const nestedRecord = nested as Record<string, unknown>;
+            const nestedMessage = nestedRecord.message ?? nestedRecord.error;
+            if (typeof nestedMessage === 'string' && nestedMessage.trim()) {
+                return nestedMessage.trim();
+            }
+        }
+        try {
+            const serialized = JSON.stringify(data);
+            if (serialized && serialized !== '{}' && serialized.length <= 800) {
+                return serialized;
+            }
+        } catch {
+            /* ignore non-serializable payloads */
+        }
+        return undefined;
     }
 
     protected async withLifecycle<T>(operation: () => Promise<T>): Promise<T> {

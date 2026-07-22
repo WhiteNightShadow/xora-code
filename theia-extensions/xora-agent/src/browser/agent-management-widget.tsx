@@ -421,17 +421,18 @@ export class AgentManagementWidget extends ReactWidget {
                 <summary>添加自定义 API 服务</summary>
                 <form onSubmit={event => this.addProvider(event)}>
                     <label>显示名称<input required name='name' /></label>
-                    <label>协议<select name='protocol' defaultValue='openai-responses'>
-                        <option value='openai-responses'>OpenAI Responses</option>
-                        <option value='openai-chat-completions'>OpenAI Chat Completions</option>
+                    <label>协议<select name='protocol' defaultValue='openai-chat-completions'>
+                        <option value='openai-chat-completions'>OpenAI Chat Completions（多数中转站）</option>
+                        <option value='openai-responses'>OpenAI Responses（xAI 官方/兼容站）</option>
                         <option value='anthropic-messages'>Anthropic Messages</option>
                     </select></label>
+                    <p className='xora-muted'>多数第三方中转只实现 Chat Completions。选错协议时 Agent 会报 session/prompt Internal error（常见为上游 401/501）。</p>
                     <label>Base URL<input required name='baseUrl' type='url' placeholder='https://api.example.com/v1' /></label>
                     {this.renderModelIdField('add', undefined, undefined)}
                     <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue='1000000' /></label>
                     <label className='xora-provider-checkbox'>
-                        <input name='backendSearch' type='checkbox' defaultChecked />
-                        <span>启用服务端联网搜索（仅 Responses）</span>
+                        <input name='backendSearch' type='checkbox' />
+                        <span>启用服务端联网搜索（仅 Responses 协议有效）</span>
                     </label>
                     <label>API 密钥<input required name='apiKey' type='password' autoComplete='off' /></label>
                     <button className='theia-button main' type='submit'>保存并使用</button>
@@ -509,16 +510,17 @@ export class AgentManagementWidget extends ReactWidget {
             <form className='xora-provider-edit-form' onSubmit={event => this.saveCustomProvider(event, provider)}>
                 <label>显示名称<input required name='name' defaultValue={provider.name} /></label>
                 <label>协议<select required name='protocol' defaultValue={provider.protocol}>
-                    <option value='openai-responses'>OpenAI Responses</option>
-                    <option value='openai-chat-completions'>OpenAI Chat Completions</option>
+                    <option value='openai-chat-completions'>OpenAI Chat Completions（多数中转站）</option>
+                    <option value='openai-responses'>OpenAI Responses（xAI 官方/兼容站）</option>
                     <option value='anthropic-messages'>Anthropic Messages</option>
                 </select></label>
+                <p className='xora-muted'>若对话出现 session/prompt Internal error，先确认中转站实际支持的协议；xfastapi 等站通常只支持 Chat Completions。</p>
                 <label>Base URL<input required name='baseUrl' type='url' defaultValue={provider.baseUrl} /></label>
                 {this.renderModelIdField(provider.id, provider.model, models)}
                 <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 1000000} /></label>
                 <label className='xora-provider-checkbox'>
-                    <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch !== false} />
-                    <span>启用服务端联网搜索（仅 Responses）</span>
+                    <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch === true} />
+                    <span>启用服务端联网搜索（仅 Responses 协议有效）</span>
                 </label>
                 <label>替换 API 密钥（可选）
                     <input name='apiKey' type='password' autoComplete='off' placeholder='留空则保持当前密钥' />
@@ -983,8 +985,9 @@ export class AgentManagementWidget extends ReactWidget {
     }
 
     /**
-     * Model ID field: editable input + optional datalist from “获取模型”,
-     * with the fetch button placed next to the field.
+     * Model ID field: editable input + optional datalist/select from “获取模型”.
+     * The fetch button is beside the field. After a successful fetch we remount
+     * the input (via key) so browsers reliably attach the new datalist.
      */
     protected renderModelIdField(
         providerKey: string,
@@ -993,10 +996,12 @@ export class AgentManagementWidget extends ReactWidget {
     ): React.ReactNode {
         const listId = `xora-model-list-${providerKey}`;
         const hasCatalog = !!models && models.length > 0;
+        const catalogRevision = hasCatalog ? String(models!.length) : '0';
         return <div className='xora-provider-model-row'>
             <label className='xora-provider-model-field'>
                 模型 ID
                 <input
+                    key={`model-input-${providerKey}-${catalogRevision}-${hasCatalog ? models![0] : ''}`}
                     required
                     name='model'
                     list={hasCatalog ? listId : undefined}
@@ -1004,17 +1009,45 @@ export class AgentManagementWidget extends ReactWidget {
                     placeholder={hasCatalog ? '从列表选择或直接输入模型 ID' : '例如 gpt-4.1 / claude-sonnet-4'}
                     autoComplete='off'
                 />
-                {hasCatalog ? <datalist id={listId}>
+                {hasCatalog ? <datalist id={listId} key={`datalist-${providerKey}-${catalogRevision}`}>
                     {models!.map(id => <option key={id} value={id} />)}
                 </datalist> : undefined}
             </label>
+            {hasCatalog ? <label className='xora-provider-model-pick'>
+                快速选择
+                <select
+                    aria-label='从已获取模型中选择'
+                    defaultValue=''
+                    onChange={event => {
+                        const value = event.currentTarget.value;
+                        if (!value) return;
+                        const form = event.currentTarget.closest('form');
+                        const input = form?.elements.namedItem('model');
+                        if (input instanceof HTMLInputElement) {
+                            input.value = value;
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                        // Reset so the same model can be re-picked after manual edit.
+                        event.currentTarget.value = '';
+                    }}>
+                    <option value=''>{`已获取 ${models!.length} 个模型…`}</option>
+                    {models!.map(id => <option key={id} value={id}>{id}</option>)}
+                </select>
+            </label> : undefined}
             <button
                 className='theia-button secondary xora-provider-fetch-models'
-                disabled={this.loading || providerKey === 'add'}
+                disabled={this.loading}
                 type='button'
-                title={providerKey === 'add' ? '请先保存服务后再获取模型列表' : '从 API 拉取可用模型列表'}
-                onClick={() => {
-                    if (providerKey !== 'add') void this.discoverModels(providerKey);
+                title={providerKey === 'add'
+                    ? '使用上方 Base URL / 协议 / API 密钥拉取模型（无需先保存）'
+                    : '从 API 拉取可用模型列表'}
+                onClick={event => {
+                    if (providerKey === 'add') {
+                        const form = (event.currentTarget as HTMLElement).closest('form');
+                        if (form) void this.discoverModelsFromForm(form, 'add');
+                        return;
+                    }
+                    void this.discoverModels(providerKey);
                 }}>
                 获取模型
             </button>
@@ -1034,7 +1067,39 @@ export class AgentManagementWidget extends ReactWidget {
             this.update();
             const models = await this.service.fetchProviderModels(providerId);
             this.discoveredModels.set(providerId, models.map(model => model.id));
-            this.messages.info(models.length ? `已获取 ${models.length} 个可用模型，可在模型 ID 中下拉选择或继续手输。` : '服务没有返回可用模型，请手动输入模型 ID。');
+            this.messages.info(models.length
+                ? `已获取 ${models.length} 个可用模型：可在「快速选择」中点选，或在模型 ID 中输入。`
+                : '服务没有返回可用模型，请手动输入模型 ID。');
+        } catch (error) {
+            this.messages.error(`无法获取模型：${friendlyAgentErrorMessage(error)}`);
+        } finally {
+            this.loading = false;
+            this.update();
+        }
+    }
+
+    /** Fetch models for the “添加自定义 API 服务” form before the provider is saved. */
+    protected async discoverModelsFromForm(form: HTMLFormElement, catalogKey: string): Promise<void> {
+        const data = new FormData(form);
+        const baseUrl = String(data.get('baseUrl') ?? '').trim();
+        const apiKey = String(data.get('apiKey') ?? '').trim();
+        const protocol = String(data.get('protocol') ?? 'openai-chat-completions') as ProviderProtocol;
+        if (!baseUrl) {
+            this.messages.warn('请先填写 Base URL，再获取模型列表。');
+            return;
+        }
+        if (!apiKey) {
+            this.messages.warn('请先填写 API 密钥，再获取模型列表。');
+            return;
+        }
+        try {
+            this.loading = true;
+            this.update();
+            const models = await this.service.probeProviderModels({ protocol, baseUrl, apiKey });
+            this.discoveredModels.set(catalogKey, models.map(model => model.id));
+            this.messages.info(models.length
+                ? `已获取 ${models.length} 个可用模型：可在「快速选择」中点选，或在模型 ID 中输入。`
+                : '服务没有返回可用模型，请手动输入模型 ID。');
         } catch (error) {
             this.messages.error(`无法获取模型：${friendlyAgentErrorMessage(error)}`);
         } finally {

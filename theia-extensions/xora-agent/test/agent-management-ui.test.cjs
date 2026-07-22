@@ -109,6 +109,15 @@ test('model service selection lives in settings and uses the shared backend swit
     assert.doesNotMatch(agentSource, /aria-label='Agent 服务'/);
 });
 
+test('model fetch supports draft probe and remounts the model field with a pick list', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
+    assert.match(source, /probeProviderModels/);
+    assert.match(source, /discoverModelsFromForm/);
+    assert.match(source, /快速选择/);
+    assert.match(source, /key=\{`model-input-\$\{providerKey\}-/);
+    assert.doesNotMatch(source, /providerKey === 'add' \? '请先保存服务后再获取模型列表'/);
+});
+
 test('custom API profiles use save-and-use semantics without adding a second Agent service control', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
     const agentSource = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');

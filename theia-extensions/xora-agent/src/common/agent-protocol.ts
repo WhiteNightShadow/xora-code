@@ -393,6 +393,15 @@ export interface AgentHostService extends RpcServer<AgentHostClient> {
     listProviders(): Promise<ProviderProfile[]>;
     selectProvider(providerId: string): Promise<RuntimeSnapshot>;
     fetchProviderModels(providerId: string): Promise<AgentModelOption[]>;
+    /**
+     * Probe an unsaved endpoint (add-provider form) without writing providers.json.
+     * The API key is transient and must never be logged or persisted by this call.
+     */
+    probeProviderModels(request: {
+        protocol: ProviderProtocol;
+        baseUrl: string;
+        apiKey: string;
+    }): Promise<AgentModelOption[]>;
     saveProvider(profile: ProviderProfile, apiKey?: string): Promise<ProviderProfile>;
     clearProviderCredential(providerId: string): Promise<void>;
     deleteProvider(providerId: string): Promise<void>;
