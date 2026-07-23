@@ -83,11 +83,18 @@ interface PendingAssistantTextDelta {
 }
 
 interface PendingSessionLoad {
-    activationGeneration: number;
     runtimeGeneration: number;
     providerId: string;
     providerEpoch: string;
     promise: Promise<SessionRecord>;
+}
+
+interface ToolActivityTiming {
+    /** Renderer anchor only; duration remains based on the monotonic clock. */
+    startedAt: string;
+    startedNanos: bigint;
+    status: ToolCallEvent['status'];
+    elapsedMs?: number;
 }
 
 /** Electron-main-only notification; never crosses the renderer RPC boundary. */
@@ -136,6 +143,11 @@ export class GrokAgentHostService implements AgentHostService {
     protected readonly sessions = new AgentSessionRepository();
     protected readonly pendingPermissions = new Map<string, PendingPermission>();
     protected readonly activePrompts = new Map<string, RequestHandle<Record<string, unknown>>>();
+    /** Stable prompt-turn identity attached to every renderer/history event. */
+    protected activeTurnIds: Map<string, string> | undefined = new Map();
+    /** Per-turn lifecycle clocks keep running tools observable and prevent a
+     * late ACP `running` update from reviving an already completed operation. */
+    protected toolActivityTimings: Map<string, ToolActivityTiming> | undefined = new Map();
     protected readonly revertableDiffs = new Map<string, RevertableDiff>();
     /** Bounded per-window guard for repeated running/completed ACP diff updates. */
     protected readonly emittedDiffKeys = new Set<string>();
@@ -227,6 +239,14 @@ export class GrokAgentHostService implements AgentHostService {
         return this.supervisor.running || !!this.acp || (!!this.managementChild && this.managementChild.exitCode === null);
     }
 
+    /**
+     * A write to shared auth.json while this process is alive is normally
+     * Grok's proactive token refresh, not an external account switch.
+     */
+    get subscriptionRuntimeActive(): boolean {
+        return this.runtimeActive && this.providerId === 'grok-subscription';
+    }
+
     async getSnapshot(): Promise<RuntimeSnapshot> {
         // Renderer events are intentionally asynchronous. A settings window
         // can therefore delete/recreate a Provider and persist the new global
@@ -247,6 +267,9 @@ export class GrokAgentHostService implements AgentHostService {
     async setWorkspaceRoot(workspaceRoot: string | undefined): Promise<RuntimeSnapshot> {
         const canonical = workspaceRoot ? this.security.canonicalRoot(workspaceRoot) : undefined;
         const workspaceChanged = this.workspaceRoot !== canonical;
+        if (workspaceChanged && this.activePrompts.size > 0) {
+            throw new Error('Finish or cancel every running Agent task before changing the Agent root.');
+        }
         if (workspaceChanged) {
             this.flushAssistantTextDeltas();
             ++this.sessionLoadGeneration;
@@ -427,7 +450,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.1.0' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.0' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -435,7 +458,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.1.0'
+                    clientVersion: '0.2.0'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
@@ -814,47 +837,57 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async loadSession(appSessionId: string): Promise<SessionRecord> {
+        // Loading makes a session usable in the current sidecar; activation is
+        // only the user's latest visible-tab intent. Increment for every call,
+        // including calls that reuse an in-flight hydration, so A -> B -> A
+        // still selects the final A without issuing a duplicate session/load.
+        const activationGeneration = ++this.sessionLoadGeneration;
         const selectedProvider = this.providers.selectedProviderId();
         const selectedProviderEpoch = this.providers.runtimeEpoch(selectedProvider);
         const pendingLoads = this.pendingSessionLoadState();
-        const pending = pendingLoads.get(appSessionId);
+        let entry = pendingLoads.get(appSessionId);
         // Background hydration, explicit tab activation and Send can converge
-        // on the same session within one event-loop turn. Reuse that exact ACP
-        // restore only while no newer A -> B activation or Provider epoch has
-        // superseded it. This preserves latest-intent ordering and credentials.
-        if (pending
-            && pending.activationGeneration === this.sessionLoadGeneration
-            && pending.runtimeGeneration === this.runtimeGeneration
-            && pending.providerId === selectedProvider
-            && pending.providerEpoch === selectedProviderEpoch) {
-            return pending.promise;
+        // on the same session within one event-loop turn. Hydration remains
+        // valid when the user merely opens a different conversation; runtime
+        // and Provider epochs, rather than tab focus, are its authority.
+        if (!entry
+            || entry.runtimeGeneration !== this.runtimeGeneration
+            || entry.providerId !== selectedProvider
+            || entry.providerEpoch !== selectedProviderEpoch) {
+            this.flushAssistantTextDeltas();
+            this.assistantStreamState().clear();
+            let boundRuntimeGeneration = this.runtimeGeneration;
+            let createdEntry: PendingSessionLoad | undefined;
+            const task = this.loadSessionUncoalesced(appSessionId, generation => {
+                boundRuntimeGeneration = generation;
+                if (createdEntry) createdEntry.runtimeGeneration = generation;
+            });
+            const promise = task.finally(() => {
+                if (pendingLoads.get(appSessionId) === createdEntry) pendingLoads.delete(appSessionId);
+            });
+            createdEntry = {
+                runtimeGeneration: boundRuntimeGeneration,
+                providerId: selectedProvider,
+                providerEpoch: selectedProviderEpoch,
+                promise
+            };
+            entry = createdEntry;
+            pendingLoads.set(appSessionId, entry);
         }
-        this.flushAssistantTextDeltas();
-        this.assistantStreamState().clear();
-        const activationGeneration = ++this.sessionLoadGeneration;
-        let boundRuntimeGeneration = this.runtimeGeneration;
-        let entry: PendingSessionLoad | undefined;
-        const task = this.loadSessionUncoalesced(appSessionId, activationGeneration, generation => {
-            boundRuntimeGeneration = generation;
-            if (entry) entry.runtimeGeneration = generation;
-        });
-        const promise = task.finally(() => {
-            if (pendingLoads.get(appSessionId) === entry) pendingLoads.delete(appSessionId);
-        });
-        entry = {
-            activationGeneration,
-            runtimeGeneration: boundRuntimeGeneration,
-            providerId: selectedProvider,
-            providerEpoch: selectedProviderEpoch,
-            promise
-        };
-        pendingLoads.set(appSessionId, entry);
-        return promise;
+        const loaded = await entry.promise;
+        if (activationGeneration === this.sessionLoadGeneration
+            && this.loadedSessionIds.has(appSessionId)
+            && loaded.workspaceRoot === this.workspaceRoot
+            && loaded.providerId === this.providerId) {
+            this.activeSessionId = appSessionId;
+            if (loaded.model) this.selectedModel = loaded.model;
+            this.emitSnapshot();
+        }
+        return loaded;
     }
 
     protected async loadSessionUncoalesced(
         appSessionId: string,
-        activationGeneration: number,
         bindRuntimeGeneration: (generation: number) => void
     ): Promise<SessionRecord> {
         const record = this.sessions.get(appSessionId);
@@ -872,7 +905,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (!record.acpSessionId
             || record.providerId !== globallySelectedProvider
             || recordEpoch !== selectedProviderEpoch) {
-            return this.rebindHistoryToCurrentProvider(record, activationGeneration);
+            return this.rebindHistoryToCurrentProvider(record);
         }
         this.knownSessionIds.add(appSessionId);
         this.acpSessionLookup.set(record.acpSessionId, appSessionId);
@@ -885,7 +918,6 @@ export class GrokAgentHostService implements AgentHostService {
             && recordEpoch === this.providers.runtimeEpoch(record.providerId);
         if (matchingRuntime() && this.activeSessionId === appSessionId && this.loadedSessionIds.has(appSessionId)) {
             const synchronized = await this.synchronizeLoadedSessionModel(record, globallySelectedModel);
-            this.emitSnapshot();
             return synchronized;
         }
         if (!this.acp
@@ -894,18 +926,13 @@ export class GrokAgentHostService implements AgentHostService {
             || this.runtimeProviderEpoch !== recordEpoch) {
             await this.startRuntime({ workspaceRoot: record.workspaceRoot, providerId: record.providerId });
         }
-        if (activationGeneration !== this.sessionLoadGeneration) {
-            return this.sessions.get(appSessionId) ?? record;
-        }
         let restoreRuntimeGeneration: number | undefined;
         try {
             if (this.phase === 'auth-required') {
                 throw new Error('AUTHENTICATION_REQUIRED');
             }
             if (matchingRuntime() && this.loadedSessionIds.has(appSessionId)) {
-                this.activeSessionId = appSessionId;
                 const synchronized = await this.synchronizeLoadedSessionModel(record, globallySelectedModel);
-                this.emitSnapshot();
                 return synchronized;
             }
             restoreRuntimeGeneration = this.runtimeGeneration;
@@ -921,8 +948,8 @@ export class GrokAgentHostService implements AgentHostService {
                     mcpServers: [],
                     ...(globallySelectedModel ? { _meta: { modelId: globallySelectedModel } } : {})
                 }, { timeoutMs: 60_000 });
-                if (activationGeneration !== this.sessionLoadGeneration || restoreRuntimeGeneration !== this.runtimeGeneration) {
-                    return this.sessions.get(appSessionId) ?? record;
+                if (restoreRuntimeGeneration !== this.runtimeGeneration) {
+                    throw new Error('The Agent runtime changed while restoring this conversation.');
                 }
                 const latestProvider = this.providers.selectedProviderId();
                 const latestProviderEpoch = this.providers.runtimeEpoch(record.providerId);
@@ -930,7 +957,7 @@ export class GrokAgentHostService implements AgentHostService {
                     || latestProviderEpoch !== recordEpoch
                     || this.runtimeProviderEpoch !== recordEpoch) {
                     this.notifyProviderDefaultsChanged();
-                    return this.rebindHistoryToCurrentProvider(record, activationGeneration);
+                    return this.rebindHistoryToCurrentProvider(record);
                 }
                 const latestGlobalModel = this.defaultModelId(record.providerId);
                 const restoredModelState = modelStateFrom(result);
@@ -947,15 +974,14 @@ export class GrokAgentHostService implements AgentHostService {
                         sessionId: record.acpSessionId,
                         modelId: latestGlobalModel
                     });
-                    if (activationGeneration !== this.sessionLoadGeneration
-                        || restoreRuntimeGeneration !== this.runtimeGeneration) {
-                        return this.sessions.get(appSessionId) ?? record;
+                    if (restoreRuntimeGeneration !== this.runtimeGeneration) {
+                        throw new Error('The Agent runtime changed while restoring this conversation.');
                     }
                     if (this.providers.selectedProviderId() !== record.providerId
                         || this.providers.runtimeEpoch(record.providerId) !== recordEpoch
                         || this.defaultModelId(record.providerId) !== latestGlobalModel) {
                         this.notifyProviderDefaultsChanged();
-                        return this.rebindHistoryToCurrentProvider(record, activationGeneration);
+                        return this.rebindHistoryToCurrentProvider(record);
                     }
                 }
                 this.loadedSessionIds.add(appSessionId);
@@ -975,17 +1001,14 @@ export class GrokAgentHostService implements AgentHostService {
                         ...(restoredModel ? { model: restoredModel } : {})
                     })
                     : currentRecord;
-                this.activeSessionId = appSessionId;
                 this.emit({ kind: 'session', session: loaded });
-                this.emitSnapshot();
                 return loaded;
             } finally {
                 this.endSessionRestore(appSessionId);
             }
         } catch (error) {
-            if (activationGeneration !== this.sessionLoadGeneration
-                || (restoreRuntimeGeneration !== undefined && restoreRuntimeGeneration !== this.runtimeGeneration)) {
-                return this.sessions.get(appSessionId) ?? record;
+            if (restoreRuntimeGeneration !== undefined && restoreRuntimeGeneration !== this.runtimeGeneration) {
+                throw error;
             }
             if (this.phase === 'auth-required' || this.redactError(error) === 'AUTHENTICATION_REQUIRED') {
                 throw error;
@@ -994,7 +1017,7 @@ export class GrokAgentHostService implements AgentHostService {
                 // A missing/expired remote ACP session should not turn the
                 // local conversation into a dead end. Attach a fresh session
                 // to the same local history; never replay the stored prompts.
-                return await this.rebindHistoryToCurrentProvider(record, activationGeneration);
+                return await this.rebindHistoryToCurrentProvider(record);
             } catch (reconnectError) {
                 if (this.redactError(reconnectError) === 'AUTHENTICATION_REQUIRED') {
                     throw reconnectError;
@@ -1109,9 +1132,10 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.loadedSessionIds.has(request.sessionId)) {
             throw new Error('Restore the selected conversation before sending another task.');
         }
-        // Focus the session that accepted the prompt so UI/history stay aligned,
-        // without cancelling other loaded sessions that may still be running.
-        this.activeSessionId = request.sessionId;
+        // Prompt ownership is independent from the conversation currently
+        // visible in the renderer. A background tab may keep working while the
+        // user reads or sends from another loaded session; accepting its turn
+        // must therefore never steal the active history selection.
         if (this.activePrompts.has(request.sessionId)) {
             throw new Error('This session already has a running task.');
         }
@@ -1129,8 +1153,11 @@ export class GrokAgentHostService implements AgentHostService {
         // Reset before the user event so this turn's first assistant fragment
         // crosses Electron IPC and JSONL immediately. Later fragments retain
         // the fixed batching window that prevents renderer churn.
+        this.clearToolActivityTimings(request.sessionId);
         this.flushAssistantTextDeltas(request.sessionId);
         this.assistantStreamState().delete(request.sessionId);
+        const turnId = crypto.randomUUID();
+        this.activeTurnIdState().set(request.sessionId, turnId);
         this.emit({
             kind: 'text-delta',
             sessionId: request.sessionId,
@@ -1181,6 +1208,9 @@ export class GrokAgentHostService implements AgentHostService {
             this.flushAssistantTextDeltas(request.sessionId);
             this.assistantStreamState().delete(request.sessionId);
             this.activePrompts.delete(request.sessionId);
+            if (this.activeTurnIdState().get(request.sessionId) === turnId) {
+                this.activeTurnIdState().delete(request.sessionId);
+            }
             this.sessions.flushEvents(request.sessionId);
             if (this.providerDefaultsRefreshPending) {
                 this.scheduleProviderDefaultsRefresh();
@@ -2288,7 +2318,9 @@ export class GrokAgentHostService implements AgentHostService {
         // label/output. Truncating first could turn a long secret into an
         // unmatched prefix that later event-level redaction cannot remove.
         const safeUpdate = asRecord(deepRedact(update, this.currentSecrets)) ?? {};
-        const status = normalizeToolStatus(asString(safeUpdate.status), type);
+        const incomingStatus = normalizeToolStatus(asString(safeUpdate.status), type);
+        const timing = this.toolActivityTiming(appSessionId, toolCallId, incomingStatus);
+        const status = timing.status;
         const identity = normalizeToolIdentity(safeUpdate, type);
         const locations = normalizeToolLocations(safeUpdate.locations);
         const output = textFromToolContent(safeUpdate.content) ?? stringifySmall(safeUpdate.rawOutput);
@@ -2303,6 +2335,8 @@ export class GrokAgentHostService implements AgentHostService {
             presentation: normalizeToolPresentation(identity, safeUpdate, locations),
             locations,
             status,
+            startedAt: timing.startedAt,
+            ...(timing.elapsedMs !== undefined ? { elapsedMs: timing.elapsedMs } : {}),
             input: boundedToolInput(safeUpdate.rawInput),
             output
         };
@@ -2322,6 +2356,7 @@ export class GrokAgentHostService implements AgentHostService {
                         const oldHash = crypto.createHash('sha256').update(oldText).digest('hex');
                         const newHash = crypto.createHash('sha256').update(newText).digest('hex');
                         const diffKey = JSON.stringify([
+                            this.activeTurnIdState().get(appSessionId) ?? 'legacy',
                             appSessionId,
                             toolCallId,
                             path.normalize(targetPath),
@@ -2350,6 +2385,49 @@ export class GrokAgentHostService implements AgentHostService {
                 }
             }
         }
+    }
+
+    protected toolActivityTiming(
+        appSessionId: string,
+        toolCallId: string,
+        incomingStatus: ToolCallEvent['status']
+    ): ToolActivityTiming {
+        const key = `${appSessionId}\0${toolCallId}`;
+        const timings = this.toolActivityTimingState();
+        const existing = timings.get(key);
+        if (!existing) {
+            const startedNanos = process.hrtime.bigint();
+            const timing: ToolActivityTiming = {
+                startedAt: new Date().toISOString(),
+                startedNanos,
+                status: incomingStatus
+            };
+            timings.set(key, timing);
+            return timing;
+        }
+        if (isTerminalToolStatus(existing.status)) {
+            return existing;
+        }
+        if (existing.status === 'running' && incomingStatus === 'pending') {
+            return existing;
+        }
+        existing.status = incomingStatus;
+        if (isTerminalToolStatus(incomingStatus) && existing.elapsedMs === undefined) {
+            existing.elapsedMs = Math.max(0, Number((process.hrtime.bigint() - existing.startedNanos) / 1_000_000n));
+        }
+        return existing;
+    }
+
+    protected clearToolActivityTimings(appSessionId: string): void {
+        const prefix = `${appSessionId}\0`;
+        const timings = this.toolActivityTimingState();
+        for (const key of timings.keys()) {
+            if (key.startsWith(prefix)) timings.delete(key);
+        }
+    }
+
+    protected toolActivityTimingState(): Map<string, ToolActivityTiming> {
+        return this.toolActivityTimings ?? (this.toolActivityTimings = new Map());
     }
 
     protected rememberEmittedDiff(key: string): void {
@@ -2474,7 +2552,10 @@ export class GrokAgentHostService implements AgentHostService {
         const session = this.sessions.get(appSessionId);
         if (!session || session.status === 'read-only'
             || session.providerId !== this.providerId
-            || this.activeSessionId !== appSessionId
+            // Focus is presentation state, not an authorization boundary.
+            // A background session remains allowed to finish an already
+            // accepted turn after the user opens another conversation.
+            || !this.activePrompts.has(appSessionId)
             || !this.loadedSessionIds.has(appSessionId)) {
             return false;
         }
@@ -2562,10 +2643,7 @@ export class GrokAgentHostService implements AgentHostService {
      * remains one continuous history, but the sidecar receives only a fresh
      * `session/new`; old prompts are deliberately not replayed.
      */
-    protected async rebindHistoryToCurrentProvider(
-        record: SessionRecord,
-        activationGeneration: number
-    ): Promise<SessionRecord> {
+    protected async rebindHistoryToCurrentProvider(record: SessionRecord): Promise<SessionRecord> {
         const providerId = this.providers.selectedProviderId();
         const root = this.security.canonicalRoot(record.workspaceRoot);
         const requestedEpoch = this.providers.runtimeEpoch(providerId);
@@ -2575,9 +2653,6 @@ export class GrokAgentHostService implements AgentHostService {
             || this.providerId !== providerId
             || this.runtimeProviderEpoch !== requestedEpoch) {
             await this.startRuntime({ workspaceRoot: root, providerId });
-        }
-        if (activationGeneration !== this.sessionLoadGeneration) {
-            return this.sessions.get(record.appSessionId) ?? record;
         }
         if (this.phase === 'auth-required') {
             throw new Error('AUTHENTICATION_REQUIRED');
@@ -2602,9 +2677,8 @@ export class GrokAgentHostService implements AgentHostService {
         if (typeof result.sessionId !== 'string' || !result.sessionId) {
             throw new Error('Grok returned an invalid ACP session ID.');
         }
-        if (activationGeneration !== this.sessionLoadGeneration
-            || runtimeGeneration !== this.runtimeGeneration) {
-            return this.sessions.get(record.appSessionId) ?? record;
+        if (runtimeGeneration !== this.runtimeGeneration) {
+            throw new Error('The Agent runtime changed while reconnecting this conversation.');
         }
 
         const createdModelState = modelStateFrom(result);
@@ -2631,9 +2705,8 @@ export class GrokAgentHostService implements AgentHostService {
             }
             resolvedModel = latestModel;
         }
-        if (activationGeneration !== this.sessionLoadGeneration
-            || runtimeGeneration !== this.runtimeGeneration) {
-            return this.sessions.get(record.appSessionId) ?? record;
+        if (runtimeGeneration !== this.runtimeGeneration) {
+            throw new Error('The Agent runtime changed while reconnecting this conversation.');
         }
         if (!this.providerAuthorityIsCurrent(providerId, runtimeEpoch)
             || this.defaultModelId(providerId) !== latestModel) {
@@ -2654,7 +2727,6 @@ export class GrokAgentHostService implements AgentHostService {
         this.knownSessionIds.add(record.appSessionId);
         this.acpSessionLookup.set(result.sessionId, record.appSessionId);
         this.loadedSessionIds.add(record.appSessionId);
-        this.activeSessionId = record.appSessionId;
         if (resolvedModel) this.selectedModel = resolvedModel;
         this.contextStates().delete(record.appSessionId);
         this.contextEventHighwaters?.delete(record.appSessionId);
@@ -2667,7 +2739,6 @@ export class GrokAgentHostService implements AgentHostService {
                 contextWindow: this.modelContextWindow(resolvedModel)
             } : {})
         });
-        this.emitSnapshot();
         return rebound;
     }
 
@@ -2688,7 +2759,7 @@ export class GrokAgentHostService implements AgentHostService {
             throw new Error('The Provider changed after this session was created.');
         }
         if (record.model !== globallySelectedModel) {
-            if (this.activePrompts.size > 0) {
+            if (this.activePrompts.has(record.appSessionId)) {
                 throw new Error('请等待当前任务结束后再同步全局模型。');
             }
             if (this.models.length > 0 && !this.models.some(model => model.id === globallySelectedModel)) {
@@ -2748,6 +2819,7 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected emit(event: AgentHostEvent, persist = true): void {
+        event = this.attachActiveTurnId(event);
         if (event.kind === 'text-delta' && event.role === 'assistant') {
             this.enqueueAssistantTextDelta(event, persist);
             return;
@@ -2766,6 +2838,17 @@ export class GrokAgentHostService implements AgentHostService {
             this.flushAssistantTextDeltas();
         }
         this.emitImmediately(event, persist);
+    }
+
+    protected attachActiveTurnId(event: AgentHostEvent): AgentHostEvent {
+        if (!('sessionId' in event) || typeof event.sessionId !== 'string' || event.turnId) return event;
+        const turnId = this.activeTurnIdState().get(event.sessionId);
+        return turnId ? { ...event, turnId } as AgentHostEvent : event;
+    }
+
+    /** Keeps prototype-only migration and test harnesses backwards compatible. */
+    protected activeTurnIdState(): Map<string, string> {
+        return this.activeTurnIds ?? (this.activeTurnIds = new Map());
     }
 
     protected enqueueAssistantTextDelta(event: AgentTextEvent, persist: boolean): void {
@@ -3587,6 +3670,10 @@ function normalizeToolStatus(status: string | undefined, updateType: string): To
     return updateType === 'tool_call' ? 'pending' : 'running';
 }
 
+function isTerminalToolStatus(status: ToolCallEvent['status']): boolean {
+    return status === 'completed' || status === 'failed' || status === 'rejected';
+}
+
 function textFromToolContent(value: unknown): string | undefined {
     if (!Array.isArray(value)) return undefined;
     const pieces = value.flatMap(candidate => {
@@ -3629,8 +3716,8 @@ function truncateToolOutput(value: string): string {
 }
 
 function unifiedDiff(file: string, before: string, after: string): string {
-    const oldLines = before.replace(/\n$/, '').split('\n');
-    const newLines = after.replace(/\n$/, '').split('\n');
+    const oldLines = diffLines(before);
+    const newLines = diffLines(after);
     return [
         `--- a/${file}`,
         `+++ b/${file}`,
@@ -3638,6 +3725,11 @@ function unifiedDiff(file: string, before: string, after: string): string {
         ...oldLines.map(line => `-${line}`),
         ...newLines.map(line => `+${line}`)
     ].join('\n');
+}
+
+function diffLines(value: string): string[] {
+    if (!value.length) return [];
+    return value.endsWith('\n') ? value.slice(0, -1).split('\n') : value.split('\n');
 }
 
 function errorMessage(error: unknown): string {

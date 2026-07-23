@@ -730,6 +730,57 @@ test('prompt send revalidates ProviderRegistry before ACP, while an already-star
     assert.equal(promptStarts, 1);
 });
 
+test('two loaded sessions run concurrently without stealing the visible session', async () => {
+    const host = baseHost();
+    const sessionA = session('parallel-a');
+    const sessionB = session('parallel-b');
+    const records = attachSessionRepository(host, [sessionA, sessionB]);
+    const gates = new Map([
+        [sessionA.acpSessionId, deferred()],
+        [sessionB.acpSessionId, deferred()]
+    ]);
+    const starts = [];
+    host.activeSessionId = sessionB.appSessionId;
+    host.loadedSessionIds = new Set([sessionA.appSessionId, sessionB.appSessionId]);
+    host.capabilities = { prompt: { image: false } };
+    host.providers = {
+        selectedProviderId: () => 'grok-subscription',
+        runtimeEpoch: () => 'subscription-epoch',
+        preferredModelId: () => 'model-1',
+        get: id => ({ id, name: id, kind: 'grok-subscription' }),
+        selectPreferredModel: () => undefined
+    };
+    host.acp = {
+        startRequest: (_method, params) => {
+            starts.push(params.sessionId);
+            const gate = gates.get(params.sessionId);
+            return { promise: gate.promise, cancel: async () => undefined };
+        }
+    };
+
+    const sendingA = host.sendPrompt({ sessionId: sessionA.appSessionId, text: '任务 A' });
+    const sendingB = host.sendPrompt({ sessionId: sessionB.appSessionId, text: '任务 B' });
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(new Set(starts), new Set([sessionA.acpSessionId, sessionB.acpSessionId]));
+    assert.equal(host.activePrompts.size, 2);
+    assert.equal(host.activeSessionId, sessionB.appSessionId,
+        'a background prompt must not replace the conversation selected by the user');
+    assert.equal(records.get(sessionA.appSessionId).status, 'running');
+    assert.equal(records.get(sessionB.appSessionId).status, 'running');
+
+    gates.get(sessionB.acpSessionId).resolve({ stopReason: 'end_turn' });
+    await sendingB;
+    assert.equal(records.get(sessionB.appSessionId).status, 'completed');
+    assert.equal(records.get(sessionA.appSessionId).status, 'running');
+
+    gates.get(sessionA.acpSessionId).resolve({ stopReason: 'end_turn' });
+    await sendingA;
+    assert.equal(records.get(sessionA.appSessionId).status, 'completed');
+    assert.equal(host.activePrompts.size, 0);
+    assert.equal(host.activeSessionId, sessionB.appSessionId);
+});
+
 for (const mismatch of [
     {
         name: 'runtime epoch differs from the session record',

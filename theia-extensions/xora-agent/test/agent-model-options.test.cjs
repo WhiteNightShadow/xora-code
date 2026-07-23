@@ -147,3 +147,13 @@ test('pending new-session selection is reflected immediately and can be rolled b
         'grok-fast'
     );
 });
+
+test('the Grok subscription fallback model uses a friendly product label', () => {
+    const runtime = snapshot('grok-subscription', [
+        { id: 'grok-build', name: 'grok-build' }
+    ], 'grok-build');
+    const groups = agentModelChoiceGroups([subscription], runtime);
+
+    assert.equal(groups[0].choices[0].modelId, 'grok-build');
+    assert.equal(groups[0].choices[0].label, 'Grok Build');
+});

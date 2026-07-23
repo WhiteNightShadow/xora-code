@@ -7,6 +7,7 @@ import type {
     ToolCallEvent
 } from '../common/agent-protocol';
 import type { TranscriptEntry } from './agent-view-model';
+import { agentModelDisplayName } from './agent-model-options';
 
 type ToolTitleSource = Pick<ToolCallEvent,
     'title' | 'toolCallId' | 'toolName' | 'toolKind' | 'toolNamespace' | 'presentation' | 'locations' | 'input'>;
@@ -287,7 +288,9 @@ export function summarizeAgentContext(snapshot: RuntimeSnapshot, transcript: rea
         toolCount: tools.size,
         changedFileCount: changedFiles.size,
         currentModelId,
-        currentModelName: model?.name ?? currentModelId ?? '服务默认模型',
+        currentModelName: currentModelId
+            ? agentModelDisplayName(currentModelId, model?.name)
+            : '服务默认模型',
         contextWindow,
         totalTokens,
         usagePercent,

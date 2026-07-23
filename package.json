@@ -1,6 +1,6 @@
 {
   "name": "xora-code",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "An open-source, model-neutral desktop Agent IDE built on Eclipse Theia, Electron, and ACP, with first-class Grok Build integration.",
   "author": {

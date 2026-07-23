@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "@xora-code/agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Xora Code ACP agent workbench",
   "license": "Apache-2.0",
   "dependencies": {
@@ -12,9 +12,9 @@
     "@theia/navigator": "1.73.1",
     "@theia/toolbar": "1.73.1",
     "@theia/workspace": "1.73.1",
-    "@xora-code/acp-client": "0.1.0",
-    "@xora-code/runtime-core": "0.1.0",
-    "@xora-code/update-build-tools": "0.1.0",
+    "@xora-code/acp-client": "0.2.0",
+    "@xora-code/runtime-core": "0.2.0",
+    "@xora-code/update-build-tools": "0.2.0",
     "smol-toml": "1.6.1"
   },
   "devDependencies": {

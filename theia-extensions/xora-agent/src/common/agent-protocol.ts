@@ -225,6 +225,8 @@ export interface PermissionDecision {
 export interface AgentTextEvent {
     kind: 'text-delta';
     sessionId: string;
+    /** Stable identifier for one user prompt and its complete Agent turn. */
+    turnId?: string;
     role: 'assistant' | 'user' | 'system';
     text: string;
     /** Safe metadata only. Raw attachment data is never persisted. */
@@ -234,6 +236,7 @@ export interface AgentTextEvent {
 export interface AgentPlanEvent {
     kind: 'plan';
     sessionId: string;
+    turnId?: string;
     title?: string;
     entries: Array<{ id: string; text: string; status: 'pending' | 'in-progress' | 'completed' | 'failed' }>;
 }
@@ -277,6 +280,7 @@ export interface AgentToolLocation {
 export interface ToolCallEvent {
     kind: 'tool-call';
     sessionId: string;
+    turnId?: string;
     toolCallId: string;
     title: string;
     toolName: string;
@@ -288,6 +292,10 @@ export interface ToolCallEvent {
     presentation?: AgentToolPresentation;
     locations?: AgentToolLocation[];
     status: 'pending' | 'running' | 'completed' | 'failed' | 'rejected';
+    /** Wall-clock anchor for renderer-only live elapsed updates. */
+    startedAt?: string;
+    /** Monotonic duration frozen by Electron when the operation terminates. */
+    elapsedMs?: number;
     input?: unknown;
     output?: string;
 }
@@ -295,6 +303,7 @@ export interface ToolCallEvent {
 export interface PermissionRequestEvent {
     kind: 'permission-request';
     sessionId: string;
+    turnId?: string;
     requestId: string;
     toolCallId?: string;
     toolName?: string;
@@ -308,6 +317,7 @@ export interface DiffEvent {
     kind: 'diff';
     diffId: string;
     sessionId: string;
+    turnId?: string;
     toolCallId?: string;
     path: string;
     oldPath?: string;
@@ -324,15 +334,16 @@ export type AgentHostEvent =
     | ToolCallEvent
     | PermissionRequestEvent
     | DiffEvent
-    | { kind: 'context-usage'; sessionId: string; context: AgentSessionContext }
+    | { kind: 'context-usage'; sessionId: string; turnId?: string; context: AgentSessionContext }
     | {
         kind: 'turn-completed';
         sessionId: string;
+        turnId?: string;
         stopReason?: string;
         /** Monotonic ACP prompt duration measured by Electron main. */
         elapsedMs?: number;
     }
-    | { kind: 'error'; sessionId?: string; code: string; message: string; recoverable: boolean };
+    | { kind: 'error'; sessionId?: string; turnId?: string; code: string; message: string; recoverable: boolean };
 
 export interface ManagementResult {
     ok: boolean;

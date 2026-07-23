@@ -15,6 +15,7 @@ import {
     removeModelTablesFromToml
 } from './provider-toml';
 import { SecretVault } from './secret-vault';
+import { sharedGrokHome } from './shared-grok-home';
 
 // Read the pre-Xora identifiers during the rename transition. New profiles and
 // generated TOML always use the Xora names, but existing profiles must keep
@@ -92,10 +93,11 @@ export class ProviderRegistry {
     protected readonly mcpCredentialPath = path.join(app.getPath('userData'), 'mcp-credentials.json');
     protected readonly metadataLockPath = path.join(app.getPath('userData'), '.providers.lock');
     protected readonly providerUpdatePath = path.join(app.getPath('userData'), '.provider-update.json');
-    protected readonly grokConfigPath = path.join(os.homedir(), '.grok', 'config.toml');
+    protected readonly grokHomePath = sharedGrokHome();
+    protected readonly grokConfigPath = path.join(this.grokHomePath, 'config.toml');
     // Keep using the legacy shared lock for one compatibility epoch so Xora
     // Code and an older desktop build cannot edit ~/.grok concurrently.
-    protected readonly lockPath = path.join(os.homedir(), '.grok', '.whitenight-code.lock');
+    protected readonly lockPath = path.join(this.grokHomePath, '.whitenight-code.lock');
 
     constructor(protected readonly vault: SecretVault) {
         // A process may have stopped between the three atomic Provider writes.
@@ -792,7 +794,7 @@ export class ProviderRegistry {
         }
 
         // Reuse user skills from the real Grok home when present (read-only).
-        const sharedSkills = path.join(os.homedir(), '.grok', 'skills');
+        const sharedSkills = path.join(this.grokHomePath ?? sharedGrokHome(), 'skills');
         const localSkills = path.join(root, 'skills');
         try {
             if (fs.existsSync(sharedSkills) && !fs.existsSync(localSkills)) {

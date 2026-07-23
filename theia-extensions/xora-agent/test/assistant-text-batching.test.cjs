@@ -111,6 +111,101 @@ test('semantic events flush the matching assistant batch before crossing either 
     assert.equal(ipc.length, boundaries.length * 2, 'cleared batch timers must not emit duplicates');
 });
 
+test('sendPrompt persists one stable turnId across every turn event and rotates it for the next prompt', async () => {
+    const { host, ipc, history } = hostHarness();
+    let record = {
+        ...session('a'),
+        providerRuntimeEpoch: 'legacy-v1'
+    };
+    let turnNumber = 0;
+    host.phase = 'ready';
+    host.workspaceRoot = '/fixture';
+    host.providerId = 'grok-subscription';
+    host.runtimeProviderEpoch = 'legacy-v1';
+    host.selectedModel = undefined;
+    host.models = [];
+    host.capabilities = { prompt: { image: false } };
+    host.loadedSessionIds = new Set(['a']);
+    host.activePrompts = new Map();
+    host.activeTurnIds = new Map();
+    host.sessions.get = sessionId => sessionId === 'a' ? record : undefined;
+    host.sessions.update = (_sessionId, patch) => (record = { ...record, ...patch });
+    host.providers = {
+        selectedProviderId: () => 'grok-subscription',
+        runtimeEpoch: () => 'legacy-v1',
+        preferredModelId: () => undefined,
+        get: providerId => ({ id: providerId, name: 'Grok Subscription', kind: 'grok-subscription' })
+    };
+    host.acp = {
+        startRequest: () => {
+            turnNumber += 1;
+            const toolCallId = `tool-${turnNumber}`;
+            host.emit({
+                kind: 'tool-call',
+                sessionId: 'a',
+                toolCallId,
+                title: `Tool ${turnNumber}`,
+                toolName: 'fixture',
+                status: 'completed'
+            });
+            host.emit({
+                kind: 'diff',
+                diffId: `diff-${turnNumber}`,
+                sessionId: 'a',
+                toolCallId,
+                path: `fixture-${turnNumber}.ts`,
+                oldHash: 'old',
+                newHash: 'new',
+                diff: '@@ -1 +1 @@\n-old\n+new'
+            });
+            host.emit({
+                kind: 'text-delta',
+                sessionId: 'a',
+                role: 'assistant',
+                text: `answer-${turnNumber}`
+            });
+            return {
+                promise: Promise.resolve({ stopReason: 'end_turn' }),
+                cancel: async () => undefined
+            };
+        }
+    };
+
+    await host.sendPrompt({ sessionId: 'a', text: 'first prompt' });
+    assert.equal(host.activeTurnIds.size, 0, 'a completed prompt must release its active turn id');
+    await host.sendPrompt({ sessionId: 'a', text: 'second prompt' });
+    assert.equal(host.activeTurnIds.size, 0, 'the next completed prompt must also release its active turn id');
+
+    const isTurnEvent = event => event.kind === 'tool-call'
+        || event.kind === 'diff'
+        || event.kind === 'turn-completed'
+        || event.kind === 'text-delta';
+    const emittedTurns = ipc.filter(isTurnEvent);
+    const persistedTurns = history.map(item => item.event).filter(isTurnEvent);
+    const expectedShape = [
+        'text-delta:user',
+        'tool-call',
+        'diff',
+        'text-delta:assistant',
+        'turn-completed'
+    ];
+    const shape = event => event.kind === 'text-delta' ? `${event.kind}:${event.role}` : event.kind;
+
+    assert.deepEqual(emittedTurns.map(shape), [...expectedShape, ...expectedShape]);
+    assert.deepEqual(persistedTurns.map(shape), [...expectedShape, ...expectedShape]);
+    for (const events of [emittedTurns, persistedTurns]) {
+        const firstTurnId = events[0].turnId;
+        const secondTurnId = events[expectedShape.length].turnId;
+        assert.equal(typeof firstTurnId, 'string');
+        assert.ok(firstTurnId.length > 0);
+        assert.equal(typeof secondTurnId, 'string');
+        assert.ok(secondTurnId.length > 0);
+        assert.ok(events.slice(0, expectedShape.length).every(event => event.turnId === firstTurnId));
+        assert.ok(events.slice(expectedShape.length).every(event => event.turnId === secondTurnId));
+        assert.notEqual(secondTurnId, firstTurnId, 'each prompt must receive a fresh turn id');
+    }
+});
+
 test('a sessionless error flushes every pending session in original batch order', () => {
     const { host, ipc } = hostHarness();
     host.emit({ kind: 'text-delta', sessionId: 'a', role: 'assistant', text: 'A' });

@@ -48,7 +48,7 @@ import {
 } from './agent-display-helpers';
 import { OPEN_AGENT_SETTINGS_COMMAND } from './agent-entry-commands';
 import { friendlyAgentErrorMessage } from './agent-error-labels';
-import { shouldSubmitPromptOnEnter } from './agent-input-helpers';
+import { shouldCommitRenameOnEnter, shouldSubmitPromptOnEnter } from './agent-input-helpers';
 import { grokSubscriptionAuthStatus } from './agent-management-labels';
 import { AgentMarkdown } from './agent-markdown';
 import {
@@ -74,12 +74,16 @@ import { AgentViewModel, TranscriptEntry } from './agent-view-model';
 import { WorkspaceTrustGuard } from './workspace-trust-guard';
 
 interface PromptSubmission {
+    /** Renderer-local identity used for FIFO queueing and single-item cancel. */
+    readonly id: string;
     readonly text: string;
     /** Immutable binding that prevents an async send from crossing Agent contexts. */
     readonly contextKey: string;
     readonly generation: number;
     readonly workspaceRoot: string;
     readonly providerId: string;
+    /** Renderer-local click-to-completion anchor used only for live UX. */
+    readonly acceptedAt: number;
     readonly sourceSessionId?: string;
     sessionId?: string;
     readonly attachments: PromptImageAttachment[];
@@ -88,6 +92,10 @@ interface PromptSubmission {
      * turn. Until then the conversation renders a lightweight local bubble so
      * cold session creation never looks like a missed click. */
     userEventReceived?: boolean;
+    cancelled?: boolean;
+    state?: 'queued' | 'preparing' | 'running';
+    resolveCompletion?: () => void;
+    completion?: Promise<void>;
 }
 
 interface RetryablePrompt extends PromptSubmission {
@@ -100,6 +108,7 @@ type AgentPaneView = 'conversation' | 'activity' | 'changes';
 const MAX_RENDERED_TRANSCRIPT_ENTRIES = 180;
 const MAX_PROMPT_IMAGE_COUNT = 4;
 const MAX_PROMPT_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_QUEUED_PROMPTS_PER_SESSION = 16;
 const ACTIVITY_FILTERS: Array<{ id: AgentActivityFilter; label: string }> = [
     { id: 'all', label: '全部' },
     { id: 'files', label: '文件' },
@@ -127,6 +136,31 @@ interface AgentInlineNotice {
     id: number;
     message: string;
     tone: 'info' | 'warning' | 'error';
+}
+
+interface ComposerDraftState {
+    text: string;
+    images: DraftImageAttachment[];
+    imageError?: string;
+    imageAnnouncement: string;
+    previewImageId?: string;
+}
+
+/**
+ * One renderer lane per conversation. Grok/ACP still receives at most one
+ * prompt request per session at a time, while independent session lanes can
+ * progress concurrently through the same sidecar.
+ */
+interface SessionPromptLane {
+    key: string;
+    workspaceRoot: string;
+    providerId: string;
+    sourceSessionId?: string;
+    sessionId?: string;
+    queue: PromptSubmission[];
+    active?: PromptSubmission;
+    processing?: Promise<void>;
+    retryable?: RetryablePrompt;
 }
 
 // Yield one browser task so root, Provider and backend workspace attachment
@@ -197,6 +231,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected slashPanel: 'commands' | 'mcp' | 'skill' = 'commands';
     protected slashError: string | undefined;
     protected slashLoadGeneration = 0;
+    /** Compatibility mirror for focused tests; lane state is authoritative. */
     protected submission: PromptSubmission | undefined;
     /** Covers the asynchronous Provider refresh before a PromptSubmission is
      * created. Without this guard, two quick Enter presses can both cross the
@@ -206,6 +241,11 @@ export class XoraAgentWidget extends ReactWidget {
     protected sendPreparationPreview: Pick<PromptSubmission, 'text' | 'attachments'> | undefined;
     protected retryablePrompt: RetryablePrompt | undefined;
     protected readonly cancelRequested = new Set<string>();
+    protected promptSequence = 0;
+    protected newSessionLaneSequence = 0;
+    protected activeComposerLaneKey: string | undefined;
+    protected composerDrafts = new Map<string, ComposerDraftState>();
+    protected promptLanes = new Map<string, SessionPromptLane>();
     protected readonly permissionDecisions = new Set<string>();
     protected textarea: HTMLTextAreaElement | null = null;
     protected composerSubmitButton: HTMLButtonElement | null = null;
@@ -226,8 +266,11 @@ export class XoraAgentWidget extends ReactWidget {
     protected newSessionModel: string | undefined;
     protected modelOptionsLoading = false;
     protected providerRefreshInFlight: Promise<void> | undefined;
+    protected runtimeAuthenticationInFlight: { providerId: string; promise: Promise<boolean> } | undefined;
     protected permissionModeChanging = false;
     protected imeComposing = false;
+    protected imeCompositionLaneKey: string | undefined;
+    protected ignoreDetachedCompositionEnd = false;
     protected imeCompositionJustEnded = false;
     protected imeCompositionGuardTimer: number | undefined;
     protected draftImages: DraftImageAttachment[] = [];
@@ -254,6 +297,7 @@ export class XoraAgentWidget extends ReactWidget {
      * authority. */
     protected activeSessionHydrationKey: string | undefined;
     protected activeSessionHydrationPromise: { key: string; promise: Promise<SessionRecord> } | undefined;
+    protected sessionHydrationPromises = new Map<string, Promise<SessionRecord>>();
     /** Successful ACP loads bound to the current runtime. Grok keeps multiple
      * sessions attached, so A -> B -> A must not replay session/load. */
     protected hydratedSessionKeys = new Set<string>();
@@ -263,11 +307,16 @@ export class XoraAgentWidget extends ReactWidget {
         updatedAt: string;
         events: AgentHostEvent[];
     }>();
+    /** Live events received while a first JSONL read is in flight. */
+    protected sessionHistoryCatchup = new Map<string, AgentHostEvent[]>();
     protected observedRuntimePhase: RuntimePhase | undefined;
     /** Open multi-session tabs for the current project (order is left-to-right). */
     protected openSessionTabs: string[] = [];
     protected renamingSessionId: string | undefined;
     protected renameDraft = '';
+    protected renameImeComposing = false;
+    protected renameImeCompositionJustEnded = false;
+    protected renameImeCompositionGuardTimer: number | undefined;
     /** One automatic "restore latest conversation" transaction per workspace. */
     protected workspaceRestoreKey: string | undefined;
     protected workspaceRestoreGeneration = 0;
@@ -277,6 +326,10 @@ export class XoraAgentWidget extends ReactWidget {
     protected inlineNotice: AgentInlineNotice | undefined;
     protected inlineNoticeTimer: number | undefined;
     protected inlineNoticeSequence = 0;
+    /** Live elapsed labels update their own text nodes so a long turn does not
+     * force the entire 180-entry transcript through React every second. */
+    protected readonly liveElapsedNodes = new Set<HTMLElement>();
+    protected liveElapsedTimer: number | undefined;
     protected readonly openMarkdownPath = (filePath: string): void => {
         void this.openWorkspacePath(filePath, { reveal: true });
     };
@@ -290,7 +343,8 @@ export class XoraAgentWidget extends ReactWidget {
         this.title.iconClass = 'xora-agent-brand-icon';
         this.addClass('xora-agent-widget');
         this.node.tabIndex = 0;
-        this.observedAgentContextKey = this.imageDraftContextKey();
+        this.activeComposerLaneKey = this.imageDraftContextKey();
+        this.observedAgentContextKey = this.activeComposerLaneKey;
         this.observedProviderId = this.model.snapshot.providerId;
         this.observedRuntimePhase = this.model.snapshot.phase;
         this.toDispose.push(this.model.onDidChange(() => {
@@ -309,6 +363,9 @@ export class XoraAgentWidget extends ReactWidget {
             if (this.imeCompositionGuardTimer !== undefined) {
                 window.clearTimeout(this.imeCompositionGuardTimer);
             }
+            if (this.renameImeCompositionGuardTimer !== undefined) {
+                window.clearTimeout(this.renameImeCompositionGuardTimer);
+            }
             if (this.followTranscriptFrame !== undefined) {
                 window.cancelAnimationFrame(this.followTranscriptFrame);
             }
@@ -319,8 +376,20 @@ export class XoraAgentWidget extends ReactWidget {
             this.composerResizeTarget = null;
             this.cancelRuntimePrewarmTimer();
             if (this.inlineNoticeTimer !== undefined) window.clearTimeout(this.inlineNoticeTimer);
-            for (const image of this.draftImages) URL.revokeObjectURL(image.previewUrl);
+            this.stopLiveElapsedTimer();
+            this.liveElapsedNodes.clear();
+            const previewUrls = new Set(this.draftImages.map(image => image.previewUrl));
+            for (const draft of this.composerDraftState().values()) {
+                for (const image of draft.images) previewUrls.add(image.previewUrl);
+            }
+            for (const previewUrl of previewUrls) URL.revokeObjectURL(previewUrl);
             this.draftImages = [];
+            this.composerDraftState().clear();
+            for (const lane of this.promptLaneState().values()) {
+                for (const item of lane.queue) item.cancelled = true;
+                if (lane.active) lane.active.cancelled = true;
+            }
+            this.promptLaneState().clear();
         }));
         this.update();
         // Providers and workspace roots are metadata, not prerequisites for
@@ -380,12 +449,11 @@ export class XoraAgentWidget extends ReactWidget {
             : undefined;
         const composerImageError = this.imageError ?? imageCapabilityError;
         const composerGate = this.composerGate(snapshot);
-        const sendInFlight = !!this.submission || this.sendPreparationInFlight;
-        const pendingSubmission = this.agentPaneView === 'conversation'
-            ? this.submission && !this.submission.userEventReceived
-                ? this.submission
-                : this.sendPreparationPreview
-            : undefined;
+        const currentLane = this.currentPromptLane(false);
+        const sendInFlight = currentLane?.active?.state === 'preparing';
+        const pendingSubmissions = this.agentPaneView === 'conversation'
+            ? this.visiblePendingSubmissions()
+            : [];
         return <div className='xora-agent-root' onKeyDown={event => this.handleRootKeyDown(event)}>
             <header className='xora-agent-header'>
                 <div className='xora-agent-heading'>
@@ -426,7 +494,7 @@ export class XoraAgentWidget extends ReactWidget {
                         className='xora-agent-icon-button'
                         aria-label='新建 Agent 会话'
                         title='新建会话'
-                        disabled={sendInFlight || this.sessionLoading}
+                        disabled={this.sessionLoading}
                         onClick={() => this.startNewSession()}>
                         <span className='codicon codicon-add' />
                     </button>
@@ -455,9 +523,9 @@ export class XoraAgentWidget extends ReactWidget {
                 aria-busy={this.sessionLoading}
                 ref={node => { this.transcriptNode = node; }}
                 onScroll={event => this.onTranscriptScroll(event.currentTarget)}>
-                {this.agentPaneView === 'conversation' && this.model.transcript.length === 0 && !pendingSubmission
+                {this.agentPaneView === 'conversation' && this.model.transcript.length === 0 && !pendingSubmissions.length
                     ? this.workspaceRestorePending ? this.renderWorkspaceRestorePending() : this.renderEmpty()
-                    : renderedTranscript.length === 0 && !pendingSubmission
+                    : renderedTranscript.length === 0 && !pendingSubmissions.length
                         ? this.renderPaneEmpty()
                         : <>
                             {hiddenTranscriptCount ? <div className='xora-history-window-notice' role='status'>
@@ -465,13 +533,20 @@ export class XoraAgentWidget extends ReactWidget {
                             </div> : undefined}
                             {this.agentPaneView === 'changes' ? this.renderChangesOverview(renderedTranscript) : undefined}
                             {this.renderTranscript(renderedTranscript)}
-                            {pendingSubmission ? this.renderPendingSubmission(pendingSubmission) : undefined}
+                            {pendingSubmissions.map((submission, index) => this.renderPendingSubmission(
+                                submission,
+                                currentLane?.active === submission,
+                                index
+                            ))}
                     </>}
+                {this.agentPaneView === 'conversation'
+                    ? this.renderTurnProgress(visibleTranscript, active, currentLane)
+                    : undefined}
                 {snapshot.message ? this.renderRuntimeNotice(snapshot.message) : undefined}
                 {this.retryablePrompt ? this.renderRetry(this.retryablePrompt) : undefined}
             </section>
-            {this.agentPaneView === 'conversation' && this.newOutputAvailable ? <button className='xora-jump-latest' onClick={() => this.scrollToBottom()}>
-                <span className='codicon codicon-arrow-down' /> 有新输出
+            {this.agentPaneView !== 'changes' && this.newOutputAvailable ? <button className='xora-jump-latest' onClick={() => this.scrollToBottom()}>
+                <span className='codicon codicon-arrow-down' /> {this.agentPaneView === 'activity' ? '有新活动' : '有新输出'}
             </button> : undefined}
             {pendingPermissions.length ? <aside className='xora-permission-dock' aria-label='等待处理的权限请求'>
                 {pendingPermissions.map(entry => this.renderEntry(entry))}
@@ -518,6 +593,18 @@ export class XoraAgentWidget extends ReactWidget {
                         rows={1}
                         defaultValue={this.prompt}
                         onChange={event => {
+                            if (this.imeComposing
+                                && this.imeCompositionLaneKey
+                                && this.imeCompositionLaneKey !== this.activeComposerLaneKey) {
+                                const draft = this.composerDraftState().get(this.imeCompositionLaneKey) ?? {
+                                    text: '', images: [], imageAnnouncement: ''
+                                };
+                                this.composerDraftState().set(this.imeCompositionLaneKey, {
+                                    ...draft,
+                                    text: event.currentTarget.value
+                                });
+                                return;
+                            }
                             this.prompt = event.currentTarget.value;
                             this.scheduleComposerResize(event.currentTarget);
                             this.syncComposerSubmitButton();
@@ -537,6 +624,8 @@ export class XoraAgentWidget extends ReactWidget {
                         }}
                         onCompositionStart={() => {
                             this.imeComposing = true;
+                            this.imeCompositionLaneKey = this.activeComposerLaneKey;
+                            this.ignoreDetachedCompositionEnd = false;
                             this.imeCompositionJustEnded = false;
                             if (this.imeCompositionGuardTimer !== undefined) {
                                 window.clearTimeout(this.imeCompositionGuardTimer);
@@ -544,6 +633,20 @@ export class XoraAgentWidget extends ReactWidget {
                             }
                         }}
                         onCompositionEnd={event => {
+                            if (this.ignoreDetachedCompositionEnd) {
+                                this.ignoreDetachedCompositionEnd = false;
+                                this.imeCompositionLaneKey = undefined;
+                                this.imeComposing = false;
+                                this.imeCompositionJustEnded = false;
+                                return;
+                            }
+                            const compositionLaneKey = this.imeCompositionLaneKey;
+                            this.imeCompositionLaneKey = undefined;
+                            if (compositionLaneKey && compositionLaneKey !== this.activeComposerLaneKey) {
+                                this.imeComposing = false;
+                                this.imeCompositionJustEnded = false;
+                                return;
+                            }
                             this.prompt = event.currentTarget.value;
                             this.imeComposing = false;
                             this.imeCompositionJustEnded = true;
@@ -597,8 +700,7 @@ export class XoraAgentWidget extends ReactWidget {
                                     title={modelChoiceCount === 0
                                         ? '点击加载当前服务提供的模型'
                                         : '选择当前模型服务提供的模型'}
-                                    disabled={active?.status === 'running'
-                                        || sendInFlight
+                                    disabled={this.hasPromptLaneWork()
                                         || this.sessionLoading
                                         || this.modelOptionsLoading
                                         || snapshot.phase === 'starting'
@@ -630,7 +732,7 @@ export class XoraAgentWidget extends ReactWidget {
                                 <span className='codicon codicon-shield' />
                                 <select
                                     aria-label='Agent 全局权限'
-                                    disabled={active?.status === 'running' || sendInFlight || this.sessionLoading || this.permissionModeChanging}
+                                    disabled={this.hasPromptLaneWork() || this.sessionLoading || this.permissionModeChanging}
                                     value={permissionMode}
                                     onChange={event => void this.selectPermissionMode(event.currentTarget.value as AgentPermissionMode)}>
                                     <option value='request-approval'>请求审批</option>
@@ -684,8 +786,7 @@ export class XoraAgentWidget extends ReactWidget {
                         </div>
                         <span className='xora-image-live' aria-live='polite'>{this.imageAnnouncement}</span>
                         <span className='xora-composer-hint'>Enter 发送 · Shift+Enter 换行</span>
-                    {active?.status === 'running'
-                        ? <button
+                    {active?.status === 'running' ? <button
                             ref={node => { this.composerSubmitButton = node; }}
                             className='xora-composer-submit xora-composer-stop'
                             aria-label='停止当前任务'
@@ -693,8 +794,8 @@ export class XoraAgentWidget extends ReactWidget {
                             disabled={this.cancelRequested.has(active.appSessionId)}
                             onClick={() => this.cancel(active.appSessionId)}>
                             <span className={`codicon ${this.cancelRequested.has(active.appSessionId) ? 'codicon-loading codicon-modifier-spin' : 'codicon-debug-stop'}`} />
-                        </button>
-                        : <button
+                        </button> : undefined}
+                        <button
                             ref={node => {
                                 this.composerSubmitButton = node;
                                 if (node) this.syncComposerSubmitButton();
@@ -720,14 +821,13 @@ export class XoraAgentWidget extends ReactWidget {
                             // native DOM node. Lifecycle gates stay declarative,
                             // while content availability is synchronized by the
                             // ref and native textarea change path.
-                            disabled={sendInFlight
-                                || !!composerGate
+                            disabled={!!composerGate
                                 || this.sessionLoading
                                 || this.imageReadsInFlight > 0
                                 || !!imageCapabilityError}
                             onClick={() => this.send()}>
                             <span className={`codicon ${sendInFlight ? 'codicon-loading codicon-modifier-spin' : 'codicon-send'}`} />
-                        </button>}
+                        </button>
                     </div>
                     {composerImageError ? <div className='xora-composer-image-error' role='alert'>
                         <span className='codicon codicon-warning' />
@@ -746,7 +846,7 @@ export class XoraAgentWidget extends ReactWidget {
                 <span className='codicon codicon-root-folder' />
                 <select
                     aria-label='Agent 主目录'
-                    disabled={!!this.submission || this.sessionLoading}
+                    disabled={this.hasPromptLaneWork() || this.sessionLoading}
                     value={snapshot.workspaceRoot ?? this.roots[0]}
                     onChange={event => {
                         void this.selectWorkspaceRoot(event.currentTarget.value);
@@ -804,9 +904,11 @@ export class XoraAgentWidget extends ReactWidget {
                 className={this.activityFilter === filter.id ? 'active' : undefined}
                 onClick={() => {
                     this.activityFilter = filter.id;
+                    this.stickToBottom = true;
+                    this.newOutputAvailable = false;
                     this.update();
                     requestAnimationFrame(() => {
-                        if (this.transcriptNode) this.transcriptNode.scrollTop = 0;
+                        if (this.transcriptNode) this.transcriptNode.scrollTop = this.transcriptNode.scrollHeight;
                     });
                 }}>
                 {filter.label}
@@ -818,11 +920,13 @@ export class XoraAgentWidget extends ReactWidget {
     protected selectAgentPane(view: AgentPaneView): void {
         if (this.agentPaneView === view) return;
         this.agentPaneView = view;
+        this.stickToBottom = view !== 'changes';
+        this.newOutputAvailable = false;
         this.closePopover();
         this.update();
         requestAnimationFrame(() => {
             if (!this.transcriptNode) return;
-            this.transcriptNode.scrollTop = view === 'conversation' ? this.transcriptNode.scrollHeight : 0;
+            this.transcriptNode.scrollTop = view === 'changes' ? 0 : this.transcriptNode.scrollHeight;
         });
     }
 
@@ -1151,11 +1255,163 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected imageDraftContextKey(): string {
         const snapshot = this.model.snapshot;
-        return this.agentContextKey(
+        return this.promptLaneKey(
             snapshot.workspaceRoot ?? this.roots?.[0] ?? '',
             snapshot.providerId,
             snapshot.activeSessionId
         );
+    }
+
+    protected promptLaneKey(workspaceRoot: string, providerId: string, sessionId?: string): string {
+        const context = this.agentContextKey(workspaceRoot, providerId, sessionId);
+        return sessionId ? context : `${context}\u0000draft-${this.newSessionLaneSequence ?? 0}`;
+    }
+
+    protected composerDraftState(): Map<string, ComposerDraftState> {
+        return this.composerDrafts ?? (this.composerDrafts = new Map());
+    }
+
+    protected promptLaneState(): Map<string, SessionPromptLane> {
+        return this.promptLanes ?? (this.promptLanes = new Map());
+    }
+
+    protected currentPromptLane(create = false): SessionPromptLane | undefined {
+        const key = this.activeComposerLaneKey ?? this.imageDraftContextKey();
+        let lane = this.promptLaneState().get(key);
+        if (!lane && create) {
+            const snapshot = this.model.snapshot;
+            lane = {
+                key,
+                workspaceRoot: snapshot.workspaceRoot ?? this.roots?.[0] ?? '',
+                providerId: snapshot.providerId,
+                sourceSessionId: snapshot.activeSessionId,
+                sessionId: snapshot.activeSessionId,
+                queue: []
+            };
+            this.promptLaneState().set(key, lane);
+        }
+        return lane;
+    }
+
+    protected storeActiveComposerDraft(): void {
+        const key = this.activeComposerLaneKey ?? this.imageDraftContextKey();
+        this.activeComposerLaneKey = key;
+        this.composerDraftState().set(key, {
+            text: this.prompt ?? '',
+            images: [...(this.draftImages ?? [])],
+            imageError: this.imageError,
+            imageAnnouncement: this.imageAnnouncement ?? '',
+            previewImageId: this.previewImageId
+        });
+    }
+
+    protected activateComposerLane(key: string): void {
+        const previous = this.activeComposerLaneKey;
+        if (previous && previous !== key && this.imeComposing) {
+            // Finish ownership of the native composition before rebinding the
+            // uncontrolled textarea. A late compositionend is ignored instead
+            // of writing A's candidate into B's draft.
+            this.prompt = this.textarea?.value ?? this.prompt;
+            this.storeActiveComposerDraft();
+            this.textarea?.blur();
+            this.imeComposing = false;
+            this.imeCompositionJustEnded = false;
+            this.imeCompositionLaneKey = undefined;
+            this.ignoreDetachedCompositionEnd = true;
+            if (this.imeCompositionGuardTimer !== undefined) {
+                window.clearTimeout(this.imeCompositionGuardTimer);
+                this.imeCompositionGuardTimer = undefined;
+            }
+        }
+        if (previous && previous !== key) this.storeActiveComposerDraft();
+        this.activeComposerLaneKey = key;
+        // Reads started for the previous draft are intentionally discarded;
+        // already decoded images remain owned by that lane's saved draft.
+        if (previous !== key) {
+            this.imageReadGeneration += 1;
+            this.imageReadsInFlight = 0;
+            this.pendingImageBytes = 0;
+        }
+        const draft = this.composerDraftState().get(key);
+        this.prompt = draft?.text ?? '';
+        this.draftImages = [...(draft?.images ?? [])];
+        this.imageError = draft?.imageError;
+        this.imageAnnouncement = draft?.imageAnnouncement ?? '';
+        this.previewImageId = draft?.previewImageId;
+        this.draftImageContextKey = this.draftImages.length ? key : undefined;
+        this.closeSlashMenu();
+        this.syncVisiblePromptLane();
+        const apply = (): void => {
+            if (!this.textarea) return;
+            this.textarea.value = this.prompt;
+            this.resizeComposer(this.textarea);
+            this.syncComposerSubmitButton();
+        };
+        apply();
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(apply);
+    }
+
+    protected syncVisiblePromptLane(): void {
+        const lane = this.currentPromptLane(false);
+        this.submission = lane?.active;
+        this.sendPreparationInFlight = lane?.active?.state === 'preparing';
+        const optimistic = lane?.active && !lane.active.userEventReceived ? lane.active : lane?.queue[0];
+        this.sendPreparationPreview = optimistic
+            ? { text: optimistic.text, attachments: optimistic.attachments }
+            : undefined;
+        this.retryablePrompt = lane?.retryable;
+    }
+
+    protected visiblePendingSubmissions(): PromptSubmission[] {
+        const lane = this.currentPromptLane(false);
+        if (!lane) return [];
+        return [
+            ...(lane.active && !lane.active.userEventReceived ? [lane.active] : []),
+            ...lane.queue.filter(item => !item.cancelled)
+        ];
+    }
+
+    /** Provider, permission and root controls are application/runtime-wide.
+     * A background lane therefore owns the same safety lock as the visible
+     * conversation even though it must not block typing or sending here. */
+    protected hasPromptLaneWork(): boolean {
+        if (this.model?.snapshot?.sessions?.some(session => session.status === 'running')) return true;
+        for (const lane of this.promptLaneState().values()) {
+            if (lane.active || lane.queue.some(item => !item.cancelled)) return true;
+        }
+        return false;
+    }
+
+    protected sessionHasPromptLaneWork(appSessionId: string): boolean {
+        const lane = this.findPromptLaneBySession(appSessionId);
+        return !!lane && (!!lane.active || lane.queue.some(item => !item.cancelled));
+    }
+
+    /** Releases every renderer-owned resource for an unreachable composer.
+     * Running lanes are never disposed through this path. */
+    protected disposePromptLane(key: string): void {
+        const lane = this.promptLaneState().get(key);
+        if (lane?.active) return;
+        const draft = this.composerDraftState().get(key);
+        if (draft) {
+            for (const image of draft.images) URL.revokeObjectURL(image.previewUrl);
+            this.composerDraftState().delete(key);
+        }
+        if (lane) {
+            for (const item of lane.queue) {
+                item.cancelled = true;
+                item.resolveCompletion?.();
+            }
+            this.promptLaneState().delete(key);
+        }
+        if (this.activeComposerLaneKey === key) {
+            this.prompt = '';
+            this.draftImages = [];
+            this.imageError = undefined;
+            this.previewImageId = undefined;
+            this.draftImageContextKey = undefined;
+            if (this.textarea) this.textarea.value = '';
+        }
     }
 
     protected agentContextKey(workspaceRoot: string, providerId: string, sessionId?: string): string {
@@ -1187,11 +1443,16 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected isSubmissionContextCurrent(submission: PromptSubmission): boolean {
         if (submission.generation !== this.agentContextGeneration) return false;
-        const current = this.imageDraftContextKey();
-        return current === submission.contextKey || current === this.submissionTargetContextKey(submission);
+        const snapshot = this.model.snapshot;
+        const root = snapshot.workspaceRoot ?? this.roots?.[0] ?? '';
+        // Viewing another conversation is not a runtime boundary. Only a
+        // project/Provider change may invalidate a queued or running prompt.
+        return this.sameWorkspaceRoot(root, submission.workspaceRoot)
+            && snapshot.providerId === submission.providerId;
     }
 
     protected invalidateAgentContext(announcement?: string): void {
+        this.storeActiveComposerDraft();
         this.agentContextGeneration += 1;
         this.sessionLoadGeneration += 1;
         this.sessionLoading = false;
@@ -1201,7 +1462,10 @@ export class XoraAgentWidget extends ReactWidget {
         this.activeSessionHydrationKey = undefined;
         this.activeSessionHydrationPromise = undefined;
         this.cancelRuntimePrewarmTimer();
-        if (this.hasImageDraft()) this.clearDraftImages(announcement);
+        if (announcement) this.imageAnnouncement = announcement;
+        this.submission = undefined;
+        this.sendPreparationInFlight = false;
+        this.sendPreparationPreview = undefined;
         this.retryablePrompt = undefined;
         this.toolDisclosure?.clear();
         this.diffDisclosure?.clear();
@@ -1210,6 +1474,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected reconcileAgentContext(): void {
         const providerId = this.model.snapshot.providerId;
         if (this.observedProviderId !== undefined && providerId !== this.observedProviderId) {
+            this.invalidateAgentContext('模型服务已变化，草稿已按会话分别保留。');
             this.newSessionModel = undefined;
             if (this.providers.length > 0 && !this.providers.some(provider => provider.id === providerId)) {
                 void this.refreshProviders();
@@ -1218,18 +1483,7 @@ export class XoraAgentWidget extends ReactWidget {
         this.observedProviderId = providerId;
         const current = this.imageDraftContextKey();
         if (this.observedAgentContextKey !== undefined && current !== this.observedAgentContextKey) {
-            const submission = this.submission;
-            const controlledSubmissionTransition = submission
-                && submission.generation === this.agentContextGeneration
-                && this.observedAgentContextKey === submission.contextKey
-                && current === this.submissionTargetContextKey(submission);
-            if (controlledSubmissionTransition) {
-                if (this.draftImageContextKey === submission.contextKey) {
-                    this.draftImageContextKey = current;
-                }
-            } else {
-                this.invalidateAgentContext('会话上下文已变化，未发送的图片已清除。');
-            }
+            this.activateComposerLane(current);
         }
         this.observedAgentContextKey = current;
     }
@@ -1260,6 +1514,56 @@ export class XoraAgentWidget extends ReactWidget {
         return `${minutes} 分 ${seconds} 秒`;
     }
 
+    protected bindLiveElapsed(
+        node: HTMLElement | null,
+        startedAtMs: number | undefined,
+        frozenElapsedMs?: number
+    ): void {
+        if (!node) return;
+        this.liveElapsedNodes.delete(node);
+        if (Number.isFinite(frozenElapsedMs) && (frozenElapsedMs ?? -1) >= 0) {
+            delete node.dataset.xoraStartedAt;
+            node.textContent = this.formatTurnDuration(frozenElapsedMs!);
+            return;
+        }
+        if (!Number.isFinite(startedAtMs)) {
+            node.textContent = '';
+            return;
+        }
+        node.dataset.xoraStartedAt = String(startedAtMs);
+        this.liveElapsedNodes.add(node);
+        this.updateLiveElapsedNode(node);
+        this.ensureLiveElapsedTimer();
+    }
+
+    protected ensureLiveElapsedTimer(): void {
+        if (this.liveElapsedTimer !== undefined || typeof window === 'undefined' || typeof window.setInterval !== 'function') return;
+        this.liveElapsedTimer = window.setInterval(() => {
+            for (const node of [...this.liveElapsedNodes]) {
+                if (!node.isConnected) {
+                    this.liveElapsedNodes.delete(node);
+                    continue;
+                }
+                this.updateLiveElapsedNode(node);
+            }
+            if (!this.liveElapsedNodes.size) this.stopLiveElapsedTimer();
+        }, 1_000);
+    }
+
+    protected updateLiveElapsedNode(node: HTMLElement): void {
+        const startedAtMs = Number(node.dataset.xoraStartedAt);
+        if (!Number.isFinite(startedAtMs)) return;
+        node.textContent = this.formatTurnDuration(Math.max(0, Date.now() - startedAtMs));
+    }
+
+    protected stopLiveElapsedTimer(): void {
+        if (this.liveElapsedTimer === undefined) return;
+        if (typeof window !== 'undefined' && typeof window.clearInterval === 'function') {
+            window.clearInterval(this.liveElapsedTimer);
+        }
+        this.liveElapsedTimer = undefined;
+    }
+
     protected renderSessionTabs(): React.ReactNode {
         const snapshot = this.model.snapshot;
         const sessions = this.openSessionTabs
@@ -1283,25 +1587,16 @@ export class XoraAgentWidget extends ReactWidget {
                     title={session.title || '未命名会话'}>
                     {renaming ? <input
                         className='xora-session-rename-input'
-                        value={this.renameDraft}
+                        defaultValue={this.renameDraft}
                         autoFocus
                         aria-label='重命名会话'
                         onChange={event => {
                             this.renameDraft = event.currentTarget.value;
-                            this.update();
                         }}
+                        onCompositionStart={() => this.beginSessionRenameComposition()}
+                        onCompositionEnd={event => this.endSessionRenameComposition(event.currentTarget.value)}
                         onBlur={() => void this.commitSessionRename(session.appSessionId)}
-                        onKeyDown={event => {
-                            if (event.key === 'Enter') {
-                                event.preventDefault();
-                                void this.commitSessionRename(session.appSessionId);
-                            } else if (event.key === 'Escape') {
-                                event.preventDefault();
-                                this.renamingSessionId = undefined;
-                                this.renameDraft = '';
-                                this.update();
-                            }
-                        }}
+                        onKeyDown={event => this.handleSessionRenameKeyDown(event, session.appSessionId)}
                     /> : <button
                         type='button'
                         className='xora-session-tab-button'
@@ -1333,7 +1628,7 @@ export class XoraAgentWidget extends ReactWidget {
                 className='xora-session-tab-add'
                 aria-label='新建会话标签'
                 title='新建会话'
-                disabled={!!this.submission || this.sessionLoading}
+                disabled={this.sessionLoading}
                 onClick={() => this.startNewSession()}>
                 <span className='codicon codicon-add' />
             </button>
@@ -1357,7 +1652,7 @@ export class XoraAgentWidget extends ReactWidget {
                     className='xora-agent-icon-button'
                     aria-label='刷新会话历史'
                     title='刷新'
-                    disabled={!!this.submission || this.sessionLoading}
+                    disabled={this.sessionLoading}
                     onClick={() => this.refreshAll()}>
                     <span className={`codicon ${this.sessionLoading ? 'codicon-loading codicon-modifier-spin' : 'codicon-refresh'}`} />
                 </button>
@@ -1374,25 +1669,16 @@ export class XoraAgentWidget extends ReactWidget {
                         <span className={`xora-session-status-dot xora-session-status-${session.status}`} />
                         {renaming ? <input
                             className='xora-session-rename-input'
-                            value={this.renameDraft}
+                            defaultValue={this.renameDraft}
                             autoFocus
                             aria-label='重命名会话'
                             onChange={event => {
                                 this.renameDraft = event.currentTarget.value;
-                                this.update();
                             }}
+                            onCompositionStart={() => this.beginSessionRenameComposition()}
+                            onCompositionEnd={event => this.endSessionRenameComposition(event.currentTarget.value)}
                             onBlur={() => void this.commitSessionRename(session.appSessionId)}
-                            onKeyDown={event => {
-                                if (event.key === 'Enter') {
-                                    event.preventDefault();
-                                    void this.commitSessionRename(session.appSessionId);
-                                } else if (event.key === 'Escape') {
-                                    event.preventDefault();
-                                    this.renamingSessionId = undefined;
-                                    this.renameDraft = '';
-                                    this.update();
-                                }
-                            }}
+                            onKeyDown={event => this.handleSessionRenameKeyDown(event, session.appSessionId)}
                         /> : <button
                             type='button'
                             className='xora-session-item-main'
@@ -1426,7 +1712,9 @@ export class XoraAgentWidget extends ReactWidget {
                                 className='xora-agent-icon-button'
                                 aria-label='删除会话'
                                 title='删除会话'
-                                disabled={session.status === 'running' || this.sessionLoading}
+                                disabled={session.status === 'running'
+                                    || this.sessionHasPromptLaneWork(session.appSessionId)
+                                    || this.sessionLoading}
                                 onClick={event => {
                                     event.stopPropagation();
                                     void this.deleteSession(session);
@@ -1438,7 +1726,7 @@ export class XoraAgentWidget extends ReactWidget {
                 }) : <div className='xora-session-empty'>完成第一项任务后，会话会显示在这里。</div>}
             </div>
             <footer className='xora-popover-footer'>
-                <button className='theia-button secondary' disabled={!!this.submission || this.sessionLoading} onClick={() => this.startNewSession()}>
+                <button className='theia-button secondary' disabled={this.sessionLoading} onClick={() => this.startNewSession()}>
                     <span className='codicon codicon-add' /> 新建会话
                 </button>
             </footer>
@@ -1743,6 +2031,7 @@ export class XoraAgentWidget extends ReactWidget {
         if (phase !== 'ready' && phase !== this.observedRuntimePhase) {
             this.activeSessionHydrationKey = undefined;
             this.activeSessionHydrationPromise = undefined;
+            this.sessionHydrationPromiseState().clear();
             this.hydratedSessionKeyState().clear();
         }
         if (phase === 'stopped' && this.observedRuntimePhase !== undefined && this.observedRuntimePhase !== 'stopped') {
@@ -1789,26 +2078,33 @@ export class XoraAgentWidget extends ReactWidget {
     protected async ensureSessionHydrated(sessionId: string, key: string): Promise<SessionRecord> {
         const current = (this.model.snapshot.sessions ?? []).find(session => session.appSessionId === sessionId);
         if (this.hydratedSessionKeyState().has(key) && current) return current;
-        const inFlight = this.activeSessionHydrationPromise;
-        if (inFlight?.key === key) return inFlight.promise;
-
-        const generation = this.sessionLoadGeneration;
+        const hydrationPromises = this.sessionHydrationPromiseState();
+        const concurrent = hydrationPromises.get(key);
+        if (concurrent) return concurrent;
         const promise = this.service.loadSession(sessionId);
+        hydrationPromises.set(key, promise);
         this.activeSessionHydrationKey = key;
         this.activeSessionHydrationPromise = { key, promise };
         try {
             const loaded = await promise;
-            if (generation === this.sessionLoadGeneration
-                && this.model.snapshot.phase === 'ready'
-                && this.imageDraftContextKey() === key) {
+            const authority = loaded ?? current;
+            if (this.model.snapshot.phase === 'ready'
+                && authority
+                && this.sameWorkspaceRoot(authority.workspaceRoot, this.model.snapshot.workspaceRoot)
+                && authority.providerId === this.model.snapshot.providerId) {
                 this.hydratedSessionKeyState().add(key);
             }
             return loaded;
         } finally {
+            if (hydrationPromises.get(key) === promise) hydrationPromises.delete(key);
             if (this.activeSessionHydrationPromise?.promise === promise) {
                 this.activeSessionHydrationPromise = undefined;
             }
         }
+    }
+
+    protected sessionHydrationPromiseState(): Map<string, Promise<SessionRecord>> {
+        return this.sessionHydrationPromises ?? (this.sessionHydrationPromises = new Map());
     }
 
     protected hydratedSessionKeyState(): Set<string> {
@@ -2203,8 +2499,8 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected startNewSession(): void {
-        if (this.submission || this.sessionLoading) return;
-        this.resetToNewSession('已为新会话清除未发送图片。', true);
+        if (this.sessionLoading) return;
+        this.resetToNewSession('已切换到新的会话草稿。', true);
     }
 
     /**
@@ -2231,7 +2527,7 @@ export class XoraAgentWidget extends ReactWidget {
         this.workspaceRestoreKey = key;
         const generation = ++this.workspaceRestoreGeneration;
         this.workspaceRestorePending = !!root;
-        this.resetToNewSession('项目已变化，未发送的图片已清除。', false, true);
+        this.resetToNewSession('项目已变化，草稿已按项目分别保留。', false, true, true);
         this.requestRuntimePrewarm(true);
         this.update();
         if (!root) {
@@ -2268,16 +2564,33 @@ export class XoraAgentWidget extends ReactWidget {
         }
     }
 
-    protected resetToNewSession(announcement: string, focusComposer = false, preserveWorkspaceRestore = false): void {
+    protected resetToNewSession(
+        announcement: string,
+        focusComposer = false,
+        preserveWorkspaceRestore = false,
+        runtimeBoundary = false
+    ): void {
         if (!preserveWorkspaceRestore) {
             ++this.workspaceRestoreGeneration;
             this.workspaceRestorePending = false;
             this.workspaceRestorePromise = undefined;
         }
-        this.invalidateAgentContext(announcement);
+        const previousLaneKey = this.activeComposerLaneKey;
+        const previousWasUnsavedNewSession = !this.model.snapshot.activeSessionId;
+        this.storeActiveComposerDraft();
+        if (previousWasUnsavedNewSession && previousLaneKey) {
+            const previousLane = this.promptLaneState().get(previousLaneKey);
+            if (!previousLane?.active && !previousLane?.queue.some(item => !item.cancelled)) {
+                this.disposePromptLane(previousLaneKey);
+            }
+        }
+        if (runtimeBoundary) this.invalidateAgentContext(announcement);
+        else this.sessionLoadGeneration += 1;
         this.openPopover = undefined;
+        this.newSessionLaneSequence = Number.isSafeInteger(this.newSessionLaneSequence)
+            ? this.newSessionLaneSequence + 1
+            : 1;
         this.newSessionModel = this.model.snapshot.selectedModel;
-        this.retryablePrompt = undefined;
         this.newOutputAvailable = false;
         this.stickToBottom = true;
         this.agentPaneView = 'conversation';
@@ -2285,10 +2598,12 @@ export class XoraAgentWidget extends ReactWidget {
         // AgentViewModel emits one render for the transition. Set all local
         // state first so clicking New session never schedules a duplicate
         // full-panel update.
-        this.observedAgentContextKey = this.agentContextKey(
+        this.observedAgentContextKey = this.promptLaneKey(
             this.model.snapshot.workspaceRoot ?? this.roots[0] ?? '',
-            this.model.snapshot.providerId
+            this.model.snapshot.providerId,
+            undefined
         );
+        this.activateComposerLane(this.observedAgentContextKey);
         this.model.startNewSession();
         if (focusComposer) requestAnimationFrame(() => this.textarea?.focus());
     }
@@ -2302,7 +2617,9 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async selectWorkspaceRoot(root: string): Promise<void> {
-        if (this.sameWorkspaceRoot(root, this.model.snapshot.workspaceRoot) || this.sessionLoading || this.submission) return;
+        if (this.sameWorkspaceRoot(root, this.model.snapshot.workspaceRoot)
+            || this.sessionLoading
+            || this.hasPromptLaneWork()) return;
         try {
             await this.workspaceTrustGuard.selectWorkspaceRoot(root);
             this.activateWorkspace(this.roots, root, true);
@@ -2314,7 +2631,7 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async selectModel(session: SessionRecord | undefined, modelId: string): Promise<void> {
-        if (this.sessionLoading) return;
+        if (this.sessionLoading || this.hasPromptLaneWork()) return;
         const decoded = decodeAgentModelChoice(modelId);
         const selection = decoded ?? { providerId: this.model.snapshot.providerId, modelId };
         // Provider/credential selection belongs to Settings. A stale DOM event
@@ -2416,7 +2733,7 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async selectPermissionMode(mode: AgentPermissionMode): Promise<void> {
-        if (this.permissionModeChanging || this.sessionLoading || this.submission) return;
+        if (this.permissionModeChanging || this.sessionLoading || this.hasPromptLaneWork()) return;
         const currentMode = this.model.snapshot.permissionMode;
         if (mode === currentMode) return;
         if (mode === 'full-access') {
@@ -2464,7 +2781,7 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected followTranscript(): void {
-        if (this.agentPaneView !== 'conversation' || this.followTranscriptFrame !== undefined) return;
+        if (this.agentPaneView === 'changes' || this.followTranscriptFrame !== undefined) return;
         this.followTranscriptFrame = window.requestAnimationFrame(() => {
             this.followTranscriptFrame = undefined;
             const node = this.transcriptNode;
@@ -2483,7 +2800,7 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected onTranscriptScroll(node: HTMLElement): void {
-        if (this.agentPaneView !== 'conversation') return;
+        if (this.agentPaneView === 'changes') return;
         const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 56;
         this.stickToBottom = nearBottom;
         if (nearBottom && this.newOutputAvailable) {
@@ -2525,7 +2842,6 @@ export class XoraAgentWidget extends ReactWidget {
         const snapshot = this.model.snapshot;
         const imageCapabilityError = this.draftImages.length > 0 && snapshot.capabilities?.prompt.image === false;
         button.disabled = (!this.prompt.trim() && this.draftImages.length === 0)
-            || !!this.submission
             || !!this.composerGate(snapshot)
             || this.sessionLoading
             || this.imageReadsInFlight > 0
@@ -2619,41 +2935,145 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected renderTranscript(entries: TranscriptEntry[]): React.ReactNode[] {
+        // Tool and diff updates are commonly interleaved. Grouping only
+        // adjacent tools split a single prompt into many repeated "Agent 活动"
+        // cards. Build the groups once by the persisted turn key, then render
+        // each group at the position of its first visible tool. Diff cards keep
+        // their original order and actions below that one stable summary.
+        const toolsByTurn = new Map<string, TranscriptEntry[]>();
+        for (const entry of entries) {
+            if (entry.kind !== 'tool') continue;
+            const groupId = entry.activityTurnId ?? `entry:${entry.id}`;
+            const tools = toolsByTurn.get(groupId);
+            if (tools) tools.push(entry);
+            else toolsByTurn.set(groupId, [entry]);
+        }
         const rendered: React.ReactNode[] = [];
+        const renderedTurns = new Set<string>();
         for (let index = 0; index < entries.length; index += 1) {
             const entry = entries[index];
             if (entry.kind !== 'tool') {
                 rendered.push(this.renderEntry(entry));
                 continue;
             }
-            const tools = [entry];
-            while (index + 1 < entries.length && entries[index + 1].kind === 'tool') {
-                tools.push(entries[index + 1]);
-                index += 1;
-            }
-            // Keep the conversation timeline structurally stable from the
-            // very first tool event. Previously one running tool rendered as
-            // a fully expanded card, then remounted as an "Agent 活动" group
-            // when the next event arrived. Large input/output blocks flashed
-            // for a frame and shifted the whole transcript.
-            rendered.push(this.agentPaneView === 'conversation' || tools.length > 1
-                ? this.renderToolGroup(tools, this.agentPaneView === 'conversation')
-                : this.renderToolEntry(entry));
+            const groupId = entry.activityTurnId ?? `entry:${entry.id}`;
+            if (renderedTurns.has(groupId)) continue;
+            renderedTurns.add(groupId);
+            rendered.push(this.renderToolGroup(
+                toolsByTurn.get(groupId) ?? [entry],
+                this.agentPaneView === 'conversation',
+                groupId
+            ));
         }
         return rendered;
     }
 
-    protected renderToolGroup(entries: TranscriptEntry[], compact = false): React.ReactNode {
+    protected renderTurnProgress(
+        entries: TranscriptEntry[],
+        session: SessionRecord | undefined,
+        lane: SessionPromptLane | undefined
+    ): React.ReactNode {
+        if (!session || session.status !== 'running') return undefined;
+        const sessionId = session.appSessionId;
+        let activeToolEntry: TranscriptEntry | undefined;
+        let latestToolEntry: TranscriptEntry | undefined;
+        let activePlanEntry: TranscriptEntry | undefined;
+        let lastEntry: TranscriptEntry | undefined;
+        // A restored transcript can contain thousands of entries. Resolve all
+        // progress hints in one backwards pass instead of allocating several
+        // reversed copies on every streamed notification.
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+            const entry = entries[index];
+            if (!entry.payload || !('sessionId' in entry.payload) || entry.payload.sessionId !== sessionId) continue;
+            lastEntry ??= entry;
+            if (entry.kind === 'tool' && entry.payload.kind === 'tool-call') {
+                latestToolEntry ??= entry;
+                if (!activeToolEntry && (entry.payload.status === 'pending' || entry.payload.status === 'running')) {
+                    activeToolEntry = entry;
+                }
+            } else if (!activePlanEntry && entry.kind === 'plan' && entry.payload.kind === 'plan'
+                && entry.payload.entries.some(item => item.status === 'in-progress')) {
+                activePlanEntry = entry;
+            }
+        }
+        const permission = [...this.model.pendingPermissions.values()].find(candidate => candidate.sessionId === sessionId);
+        const activeTool = activeToolEntry?.payload?.kind === 'tool-call' ? activeToolEntry.payload : undefined;
+        const latestTool = latestToolEntry?.payload?.kind === 'tool-call' ? latestToolEntry.payload : undefined;
+        const activePlan = activePlanEntry?.payload?.kind === 'plan' ? activePlanEntry.payload : undefined;
+        const activeToolDisplay = activeTool ? presentAgentTool(activeTool) : undefined;
+        const latestToolDisplay = latestTool ? presentAgentTool(latestTool) : undefined;
+        const permissionDisplay = permission ? presentAgentTool({
+            title: permission.title,
+            toolCallId: permission.toolCallId ?? permission.requestId,
+            toolName: permission.toolName ?? 'tool',
+            presentation: permission.presentation
+        }) : undefined;
+        const startedAt = lane?.active?.sessionId === sessionId
+            ? lane.active.acceptedAt
+            : Date.parse(session.updatedAt);
+        let title = '正在分析任务';
+        let detail = 'Agent 已接收请求，正在规划下一步';
+        let icon = 'codicon-loading codicon-modifier-spin';
+        let tone = 'agent';
+        if (permission && permissionDisplay) {
+            title = '等待你的审批';
+            detail = permissionDisplay.title;
+            icon = 'codicon-shield';
+            tone = permissionDisplay.tone;
+        } else if (activeTool && activeToolDisplay) {
+            title = `正在执行：${activeToolDisplay.title}`;
+            detail = activeToolDisplay.detailLabel ?? `${activeToolDisplay.badgeLabel}操作进行中`;
+            icon = activeToolDisplay.iconClass;
+            tone = activeToolDisplay.tone;
+        } else if (activePlan) {
+            const activeStep = activePlan.entries.find(item => item.status === 'in-progress');
+            title = '正在推进执行计划';
+            detail = activeStep?.text ?? activePlan.title ?? '正在处理下一步';
+            icon = 'codicon-checklist';
+            tone = 'plan';
+        } else if (lastEntry?.kind === 'assistant') {
+            title = '正在生成回复';
+            detail = '结果会持续显示在当前会话中';
+        } else if (latestToolDisplay) {
+            title = '正在继续处理';
+            detail = `刚刚完成：${latestToolDisplay.title}`;
+            tone = latestToolDisplay.tone;
+        }
+        return <aside className={`xora-live-turn tone-${tone}`} role='status' aria-live='polite'>
+            <span className={`xora-live-turn-icon tone-${tone}`} aria-hidden='true'>
+                <span className={`codicon ${icon}`} />
+            </span>
+            <span className='xora-live-turn-copy'>
+                <strong>{title}</strong>
+                <span title={detail}>{detail}</span>
+            </span>
+            <span className='xora-live-turn-time' title='从发送任务起的等待时间'>
+                <span className='codicon codicon-watch' aria-hidden='true' />
+                <span ref={node => this.bindLiveElapsed(node, Number.isFinite(startedAt) ? startedAt : Date.now())} aria-hidden='true' />
+            </span>
+        </aside>;
+    }
+
+    protected renderToolGroup(entries: TranscriptEntry[], compact = false, groupId = entries[0].id): React.ReactNode {
         const tools = entries.map(entry => entry.payload as ToolCallEvent);
         const categories = summarizeToolCategories(tools);
         const active = tools.some(tool => tool.status === 'pending' || tool.status === 'running');
+        const activeTool = [...tools].reverse().find(tool => tool.status === 'pending' || tool.status === 'running');
+        const featuredTool = activeTool ?? tools[tools.length - 1];
+        const featuredDisplay = featuredTool ? presentAgentTool(featuredTool) : undefined;
+        const activeStartedAt = this.toolStartedAtMs(activeTool);
         const failed = tools.some(tool => tool.status === 'failed' || tool.status === 'rejected');
         const status = active ? '执行中' : failed ? '有未完成项' : '已完成';
-        const disclosureId = `group:${entries[0].id}`;
-        const defaultExpanded = compact ? false : active || failed;
+        const disclosureId = `group:${groupId}`;
+        // A running edge is painted immediately. Auto-opening its potentially
+        // large input/output body and auto-closing it on the next terminal
+        // frame caused the whole Agent activity region to flash. The summary
+        // below already exposes the live operation and elapsed time, so only
+        // failures outside the compact conversation view open automatically.
+        const defaultExpanded = !compact && failed;
         const expanded = this.toolDisclosureOpen(disclosureId, defaultExpanded);
         return <details
-            key={`tool-group-${entries[0].id}`}
+            key={`tool-group-${groupId}`}
             className='xora-activity xora-tool-group'
             open={expanded}
             onToggle={event => this.rememberToolDisclosure(disclosureId, event.currentTarget.open, defaultExpanded)}>
@@ -2661,11 +3081,18 @@ export class XoraAgentWidget extends ReactWidget {
                 <span className='xora-tool-icon tone-group'><span className={`codicon ${active ? 'codicon-loading codicon-modifier-spin' : failed ? 'codicon-warning' : 'codicon-check-all'}`} /></span>
                 <span className='xora-tool-group-copy'>
                     <span className='xora-activity-title'>Agent 活动</span>
-                    <span className='xora-tool-category-list'>{categories.map(category => <span key={category.filter}>
-                        {category.label}{category.count > 1 ? ` ${category.count}` : ''}
-                    </span>)}</span>
+                    <span className='xora-tool-group-current'>
+                        <span className='xora-tool-category-list'>{categories.map(category => <span key={category.filter}>
+                            {category.label}{category.count > 1 ? ` ${category.count}` : ''}
+                        </span>)}</span>
+                        {featuredDisplay ? <span className='xora-tool-group-operation' title={featuredDisplay.title}>
+                            {featuredDisplay.title}
+                        </span> : undefined}
+                    </span>
                 </span>
-                <span className='xora-activity-meta'>{tools.length} 项 · {status}</span>
+                <span className='xora-activity-meta'>{tools.length} 项 · {status}{activeStartedAt !== undefined ? <>
+                    {' · '}<span className='xora-activity-elapsed' ref={node => this.bindLiveElapsed(node, activeStartedAt)} />
+                </> : undefined}</span>
                 <span className='codicon codicon-chevron-right xora-details-chevron' />
             </summary>
             {expanded ? <div className='xora-tool-group-body'>
@@ -2678,11 +3105,15 @@ export class XoraAgentWidget extends ReactWidget {
         const tool = entry.payload as ToolCallEvent;
         const display = presentAgentTool(tool);
         const terminal = display.action === 'terminal' || display.action === 'test';
-        const expanded = this.toolDisclosureOpen(entry.id, tool.status === 'running' || tool.status === 'failed' || tool.status === 'rejected');
+        const active = tool.status === 'pending' || tool.status === 'running';
+        const startedAt = this.toolStartedAtMs(tool);
+        const hasElapsed = active ? startedAt !== undefined : tool.elapsedMs !== undefined;
+        const defaultExpanded = tool.status === 'failed' || tool.status === 'rejected';
+        const expanded = this.toolDisclosureOpen(entry.id, defaultExpanded);
         return <details
             key={entry.id}
             open={expanded}
-            onToggle={event => this.rememberToolDisclosure(entry.id, event.currentTarget.open, tool.status === 'running' || tool.status === 'failed' || tool.status === 'rejected')}
+            onToggle={event => this.rememberToolDisclosure(entry.id, event.currentTarget.open, defaultExpanded)}
             className={`xora-activity xora-tool-card tone-${display.tone}${terminal ? ' xora-terminal-card' : ''}${nested ? ' xora-tool-group-item' : ''}`}>
             <summary className='xora-activity-summary'>
                 <span className={`xora-tool-icon tone-${display.tone}`}><span className={`codicon ${display.iconClass}`} /></span>
@@ -2693,7 +3124,9 @@ export class XoraAgentWidget extends ReactWidget {
                     </span>
                     {display.detailLabel ? <span className='xora-tool-target'>{display.detailLabel}</span> : undefined}
                 </span>
-                <span className={`xora-tool-status xora-tool-status-${tool.status}`}>{toolStatusLabel(tool.status)}</span>
+                <span className={`xora-tool-status xora-tool-status-${tool.status}`}>{toolStatusLabel(tool.status)}{hasElapsed ? <>
+                    {' · '}<span className='xora-activity-elapsed' ref={node => this.bindLiveElapsed(node, startedAt, active ? undefined : tool.elapsedMs)} />
+                </> : undefined}</span>
                 <span className='codicon codicon-chevron-right xora-details-chevron' />
             </summary>
             {expanded ? <div className='xora-activity-body'>
@@ -2723,9 +3156,17 @@ export class XoraAgentWidget extends ReactWidget {
                     <summary>查看参数</summary>
                     <pre>{this.printToolInput(tool.input)}</pre>
                 </details> : undefined}
-                {tool.output ? <pre className={terminal ? 'xora-terminal-output' : undefined}>{tool.output}</pre> : <p>暂无输出。</p>}
+                {tool.output ? <pre className={terminal ? 'xora-terminal-output' : undefined}>{tool.output}</pre> : <p>{active
+                    ? '正在等待工具返回结果…'
+                    : '此操作未返回额外输出。'}</p>}
             </div> : undefined}
         </details>;
+    }
+
+    protected toolStartedAtMs(tool: ToolCallEvent | undefined): number | undefined {
+        if (!tool?.startedAt) return undefined;
+        const startedAt = Date.parse(tool.startedAt);
+        return Number.isFinite(startedAt) ? startedAt : undefined;
     }
 
     protected toolDisclosureOpen(id: string, defaultValue: boolean): boolean {
@@ -2912,8 +3353,6 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected renderRetry(retry: RetryablePrompt): React.ReactNode {
-        const snapshot = this.model.snapshot;
-        const running = snapshot.sessions.some(session => session.status === 'running');
         return <article className='xora-card xora-retry-card' role='alert'>
             <div><strong>任务执行失败</strong><span className='codicon codicon-warning' /></div>
             <p>{retry.message}</p>
@@ -2925,317 +3364,335 @@ export class XoraAgentWidget extends ReactWidget {
             <div className='xora-card-actions'>
                 <button
                     className='theia-button main'
-                    disabled={!!this.submission || running}
                     onClick={() => this.retry(retry)}>
                     {retry.attachments.length ? `重试（含 ${retry.attachments.length} 张图片）` : '重试'}
                 </button>
-                <button className='theia-button secondary' disabled={!!this.submission} onClick={() => this.dismissRetry()}>忽略</button>
+                <button className='theia-button secondary' onClick={() => this.dismissRetry()}>忽略</button>
             </div>
         </article>;
     }
 
-    protected renderPendingSubmission(submission: Pick<PromptSubmission, 'text' | 'attachments'>): React.ReactNode {
-        return <article className='xora-message xora-message-user xora-message-pending' aria-label='任务已接收，正在发送'>
+    protected renderPendingSubmission(submission: PromptSubmission, active: boolean, queueIndex: number): React.ReactNode {
+        const stateLabel = active
+            ? submission.state === 'running' ? '正在执行' : '正在发送'
+            : `排队中${queueIndex > 0 ? ` · 前面 ${queueIndex} 条` : ''}`;
+        return <article
+            key={submission.id}
+            className='xora-message xora-message-user xora-message-pending'
+            aria-label={`任务已接收，${stateLabel}`}>
             {submission.text ? <div className='xora-message-text'>{submission.text}</div> : undefined}
             {submission.attachments.length ? <div className='xora-pending-attachment-count'>
                 <span className='codicon codicon-file-media' />
                 {submission.attachments.length} 张图片
             </div> : undefined}
             <div className='xora-pending-send-state' role='status'>
-                <span className='codicon codicon-loading codicon-modifier-spin' />
-                正在发送
+                <span className={`codicon ${active ? 'codicon-loading codicon-modifier-spin' : 'codicon-clock'}`} />
+                <span>{stateLabel}{active ? <>
+                    {' · '}<span ref={node => this.bindLiveElapsed(node, submission.acceptedAt)} />
+                </> : undefined}</span>
+                <button
+                    type='button'
+                    className='xora-pending-cancel'
+                    aria-label='取消这条消息'
+                    onClick={() => void this.cancelPromptItem(submission.id)}>
+                    取消
+                </button>
             </div>
         </article>;
     }
 
     protected async send(retry?: PromptSubmission): Promise<void> {
-        if (this.submission || this.sendPreparationInFlight || this.sessionLoading || (!retry && this.imageReadsInFlight > 0)) {
+        if (this.sessionLoading || (!retry && this.imageReadsInFlight > 0)) return;
+        const contextSnapshot = this.model.snapshot;
+        const composerGate = this.composerGate(contextSnapshot);
+        if (composerGate) {
+            this.showInlineNotice(`${composerGate.message}。当前输入已作为草稿保留。`);
             return;
         }
-        if (retry && !this.isSubmissionContextCurrent(retry)) {
-            this.retryablePrompt = undefined;
-            this.showInlineNotice('会话上下文已变化，旧任务不会在当前会话中重试。', 'warning');
-            this.update();
+        const lane = this.currentPromptLane(true)!;
+        if (lane.queue.length + (lane.active ? 1 : 0) >= MAX_QUEUED_PROMPTS_PER_SESSION) {
+            this.showInlineNotice(`当前会话最多等待 ${MAX_QUEUED_PROMPTS_PER_SESSION} 条消息，请先取消或等待一条完成。`, 'warning');
             return;
         }
-        // Freeze exactly what the user submitted before waiting for the
-        // backend's latest application-wide Provider. Text or images added
-        // while that refresh is pending remain as the next draft.
-        this.sendPreparationInFlight = true;
+        if (retry && lane.retryable !== retry) {
+            this.showInlineNotice('这条重试任务已不属于当前会话。', 'warning');
+            return;
+        }
         const draftTextAtStart = this.prompt;
-        const preparedText = retry?.text.trim() ?? draftTextAtStart.trim();
-        const preparedDraftImages = retry ? [] : [...this.draftImages];
-        const preparedAttachments = retry?.attachments ?? preparedDraftImages.map(image => ({
+        const text = retry?.text.trim() ?? draftTextAtStart.trim();
+        const draftImages = retry ? [] : [...this.draftImages];
+        const attachments = retry?.attachments ?? draftImages.map(image => ({
             mimeType: image.mimeType,
             data: image.data,
             ...(image.name ? { name: image.name } : {})
         }));
-        const preparationContextKey = this.imageDraftContextKey();
-        const preparationGeneration = this.agentContextGeneration;
-        if (!preparedText && !preparedAttachments.length) {
-            this.sendPreparationInFlight = false;
-            this.update();
-            return;
-        }
-        this.sendPreparationPreview = { text: preparedText, attachments: preparedAttachments };
-        // Disk-first remains mandatory, but saving editors is independent of
-        // the authoritative Provider snapshot read. Start both together so a
-        // prewarmed first Send does not pay two serial IPC/filesystem waits.
-        const saveAllPromise = Promise.resolve()
-            .then(() => this.commandService.executeCommand(CommonCommands.SAVE_ALL.id))
-            .then(
-                () => ({ ok: true as const }),
-                error => ({ ok: false as const, error })
-            );
-        this.update();
-        // A ready, attached runtime already receives cross-window snapshot
-        // events, while Electron revalidates Provider/model/epoch again in
-        // createSession and sendPrompt. Avoid an unconditional lifecycle RPC
-        // on every warm Send; cold or incomplete contexts still refresh.
-        const currentBeforePreparation = this.model.snapshot;
-        const needsAuthoritativeRefresh = !retry && (!currentBeforePreparation.workspaceAttached
-            || !['ready', 'auth-required'].includes(currentBeforePreparation.phase)
-            || !(this.providers ?? []).some(provider => provider.id === currentBeforePreparation.providerId));
-        if (needsAuthoritativeRefresh) {
-            try {
-                await this.model.refresh();
-            } catch (error) {
-                this.sendPreparationInFlight = false;
-                this.sendPreparationPreview = undefined;
-                this.update();
-                this.showInlineNotice(`无法同步当前模型服务：${friendlyAgentErrorMessage(error)}`, 'error');
-                return;
-            }
-        }
-        // A Provider/session switch during refresh deliberately clears image
-        // drafts. Never rebind the local pre-refresh copy to the new service;
-        // retain the text and require the user to attach images again.
-        if (!retry && preparedDraftImages.length > 0
-            && (preparationGeneration !== this.agentContextGeneration
-                || preparationContextKey !== this.imageDraftContextKey())) {
-            this.sendPreparationInFlight = false;
-            this.sendPreparationPreview = undefined;
-            this.update();
-            this.showInlineNotice('模型或会话已变化，文字草稿已保留；请在当前会话中重新添加图片。', 'warning');
-            return;
-        }
-        if (this.submission || this.sessionLoading || (!retry && this.imageReadsInFlight > 0)) {
-            this.sendPreparationInFlight = false;
-            this.sendPreparationPreview = undefined;
-            this.update();
-            return;
-        }
-        const contextSnapshot = this.model.snapshot;
-        const composerGate = this.composerGate(contextSnapshot);
-        if (composerGate) {
-            this.sendPreparationInFlight = false;
-            this.sendPreparationPreview = undefined;
-            this.update();
-            this.showInlineNotice(`${composerGate.message}。当前输入已作为草稿保留。`);
-            return;
-        }
-        const workspaceRoot = contextSnapshot.workspaceRoot ?? this.roots?.[0] ?? '';
-        const providerId = contextSnapshot.providerId;
-        const sourceSessionId = contextSnapshot.activeSessionId;
-        const text = preparedText;
-        const draftImages = preparedDraftImages;
-        const attachments = preparedAttachments;
+        if (!text && !attachments.length) return;
+        let resolveCompletion: (() => void) | undefined;
+        const completion = new Promise<void>(resolve => { resolveCompletion = resolve; });
+        this.promptSequence = Number.isSafeInteger(this.promptSequence) ? this.promptSequence + 1 : 1;
         const submission: PromptSubmission = {
+            id: `prompt-${Date.now().toString(36)}-${this.promptSequence}`,
             text,
-            contextKey: this.agentContextKey(workspaceRoot, providerId, sourceSessionId),
+            contextKey: lane.key,
             generation: this.agentContextGeneration,
-            workspaceRoot,
-            providerId,
-            sourceSessionId,
-            sessionId: retry?.sessionId,
+            workspaceRoot: lane.workspaceRoot,
+            providerId: lane.providerId,
+            acceptedAt: Date.now(),
+            sourceSessionId: lane.sourceSessionId,
+            sessionId: retry?.sessionId ?? lane.sessionId,
             attachments,
+            state: 'queued',
+            completion,
+            resolveCompletion,
             ...(!retry && draftImages.length ? { draftAttachmentIds: draftImages.map(image => image.id) } : {})
         };
-        const previousRetry = retry ? this.retryablePrompt : undefined;
-        let promptConsumed = !!retry;
+        lane.retryable = undefined;
+        lane.queue.push(submission);
+        // Accept locally first. The user can immediately write the next queued
+        // message while this lane prepares Save All/runtime work in order.
+        if (!retry) {
+            if (this.prompt === draftTextAtStart) this.prompt = '';
+            if (this.textarea && this.activeComposerLaneKey === lane.key) {
+                this.textarea.value = this.prompt;
+                this.resizeComposer(this.textarea);
+            }
+            if (submission.draftAttachmentIds?.length) {
+                this.consumeDraftImages(submission.draftAttachmentIds);
+                this.imageAnnouncement = '图片已加入等待队列。';
+            }
+            this.storeActiveComposerDraft();
+        }
         this.runtimePrewarmRequested = false;
         this.cancelRuntimePrewarmTimer();
-        this.submission = submission;
-        this.sendPreparationInFlight = false;
-        this.sendPreparationPreview = undefined;
-        this.retryablePrompt = undefined;
-        this.imageError = undefined;
         this.stickToBottom = true;
+        this.syncVisiblePromptLane();
         this.update();
+        this.syncComposerSubmitButton();
+        this.startPromptLane(lane);
+        return completion;
+    }
+
+    protected startPromptLane(lane: SessionPromptLane): void {
+        if (lane.processing) return;
+        const processing = this.processPromptLane(lane).finally(() => {
+            if (lane.processing === processing) lane.processing = undefined;
+            if (lane.queue.some(item => !item.cancelled)) this.startPromptLane(lane);
+        });
+        lane.processing = processing;
+    }
+
+    protected async processPromptLane(lane: SessionPromptLane): Promise<void> {
+        while (lane.queue.length) {
+            const submission = lane.queue.shift()!;
+            if (submission.cancelled) {
+                submission.resolveCompletion?.();
+                continue;
+            }
+            lane.active = submission;
+            submission.state = 'preparing';
+            this.syncPromptLaneIfVisible(lane);
+            try {
+                await this.executePromptSubmission(lane, submission);
+            } finally {
+                submission.resolveCompletion?.();
+                if (lane.active === submission) lane.active = undefined;
+                this.syncPromptLaneIfVisible(lane);
+            }
+        }
+    }
+
+    protected async executePromptSubmission(lane: SessionPromptLane, submission: PromptSubmission): Promise<void> {
+        const saveAllPromise = Promise.resolve()
+            .then(() => this.commandService.executeCommand(CommonCommands.SAVE_ALL.id))
+            .then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
         try {
+            if (!this.submissionCanContinue(lane, submission)) return;
+            const beforePreparation = this.model.snapshot;
+            if (!beforePreparation.workspaceAttached
+                || !['ready', 'auth-required'].includes(beforePreparation.phase)
+                || !(this.providers ?? []).some(provider => provider.id === beforePreparation.providerId)) {
+                await this.model.refresh();
+                if (!this.submissionCanContinue(lane, submission)) return;
+            }
             const root = await this.workspaceRoot();
-            if (!this.isSubmissionContextCurrent(submission)) {
-                this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                return;
+            if (!root || !this.sameWorkspaceRoot(root, submission.workspaceRoot)) {
+                throw new Error(root ? '项目路径已变化，当前任务未发送。' : '请先打开一个文件夹或工作区。');
             }
-            if (!root) {
-                this.showInlineNotice('请先打开一个文件夹或工作区。', 'warning');
-                return;
-            }
-            // Prefer the backend/canonical root for all host calls once we know
-            // it is the same folder (Windows drive-letter casing may differ).
-            const hostRoot = this.sameWorkspaceRoot(root, submission.workspaceRoot)
-                ? (this.model.snapshot.workspaceRoot ?? root)
-                : root;
-            if (!this.sameWorkspaceRoot(hostRoot, submission.workspaceRoot)) {
-                this.invalidateAgentContext('项目已变化，未发送的图片已清除。');
-                this.showInlineNotice('项目路径已变化，当前任务未发送。请再点一次发送。', 'warning');
-                return;
-            }
+            const hostRoot = this.model.snapshot.workspaceRoot ?? root;
             let runtime = this.model.snapshot;
-            // Workspace attachment is independent from native Theia trust and
-            // normally completes during project open. Close the tiny startup
-            // race here without asking the user to resend their first task.
             if (!runtime.workspaceAttached) {
                 await this.workspaceTrustGuard.selectWorkspaceRoot(hostRoot);
-                if (!this.isSubmissionContextCurrent(submission)) {
-                    this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                    return;
-                }
+                if (!this.submissionCanContinue(lane, submission)) return;
                 await this.model.refresh();
                 runtime = this.model.snapshot;
             }
-            // `model.refresh()` above crossed the Electron lifecycle queue and
-            // is therefore authoritative for this submission. Reuse an
-            // already-ready/auth-pending prewarm instead of queueing a second
-            // startRuntime RPC; a cold/stale snapshot still starts normally.
             const runtimeReusable = runtime.workspaceAttached
                 && this.sameWorkspaceRoot(runtime.workspaceRoot, hostRoot)
                 && runtime.providerId === submission.providerId
                 && (runtime.phase === 'ready' || runtime.phase === 'auth-required');
             const runtimePromise = runtimeReusable
                 ? Promise.resolve(runtime)
-                : this.service.startRuntime({
-                    workspaceRoot: hostRoot,
-                    providerId: submission.providerId
-                });
+                : this.service.startRuntime({ workspaceRoot: hostRoot, providerId: submission.providerId });
             const [saveAll, preparedRuntime] = await Promise.all([saveAllPromise, runtimePromise]);
             if (!saveAll.ok) throw saveAll.error;
-            if (!this.isSubmissionContextCurrent(submission)) {
-                this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                return;
-            }
+            if (!this.submissionCanContinue(lane, submission)) return;
             runtime = preparedRuntime;
             if (runtime.phase !== 'ready') {
-                if (!await this.authenticateRuntime(runtime, () => this.isSubmissionContextCurrent(submission))) {
-                    if (previousRetry && this.isSubmissionContextCurrent(submission)) this.retryablePrompt = previousRetry;
-                    return;
-                }
-                if (!this.isSubmissionContextCurrent(submission)) {
-                    this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                    return;
-                }
+                if (!await this.authenticateRuntime(runtime, () =>
+                    this.isSubmissionContextCurrent(submission) && !submission.cancelled)) return;
+                if (!this.submissionCanContinue(lane, submission)) return;
                 runtime = this.model.snapshot;
             }
-            if (attachments.length && runtime.capabilities?.prompt.image !== true) {
-                const message = '当前 Grok Build 版本不支持图片输入。图片已保留，请移除或更新运行时后再发送。';
-                this.imageError = message;
-                if (previousRetry) this.retryablePrompt = { ...previousRetry, message };
-                this.showInlineNotice(message, 'warning');
-                return;
+            if (submission.attachments.length && runtime.capabilities?.prompt.image !== true) {
+                throw new Error('当前 Grok Build 版本不支持图片输入。');
             }
-            let sessionId = submission.sessionId ?? this.model.snapshot.activeSessionId;
+            let sessionId = lane.sessionId ?? submission.sessionId ?? submission.sourceSessionId;
             if (!sessionId) {
-                // Pin the view model to its explicit "new session" state so a
-                // backend snapshot emitted just before createSession resolves
-                // cannot expose an unverified active session transition.
-                this.model.startNewSession();
-                if (!this.isSubmissionContextCurrent(submission)) {
-                    this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                    return;
-                }
+                const laneWasVisible = this.activeComposerLaneKey === lane.key;
+                if (laneWasVisible) this.model.startNewSession();
                 const session = await this.service.createSession({
                     workspaceRoot: hostRoot,
                     providerId: submission.providerId,
-                    model: this.newSessionModel ?? contextSnapshot.selectedModel,
-                    title: text.slice(0, 64) || (attachments.length === 1 ? '图片任务' : `${attachments.length} 张图片`),
+                    model: this.newSessionModel ?? this.model.snapshot.selectedModel,
+                    title: submission.text.slice(0, 64)
+                        || (submission.attachments.length === 1 ? '图片任务' : `${submission.attachments.length} 张图片`),
                     additionalDirectories: this.roots.filter(candidate => !this.sameWorkspaceRoot(candidate, hostRoot))
                 });
-                if (!this.isSubmissionContextCurrent(submission)) {
-                    this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                    return;
-                }
+                if (!this.submissionCanContinue(lane, submission)) return;
                 sessionId = session.appSessionId;
-                // Publish the resolved ID before the model update. Reconciliation
-                // then recognises new-session -> created-session as this send's
-                // sole allowed context transition instead of an external switch.
                 submission.sessionId = sessionId;
-                this.model.setSession(session);
+                this.bindPromptLaneToSession(lane, session);
+                if (laneWasVisible && this.activeComposerLaneKey === lane.key) this.model.setSession(session);
+                else this.model.updateSession(session);
                 this.rememberOpenSessionTab(sessionId);
-                // session/new is already attached in the current ACP runtime.
-                this.hydratedSessionKeyState().add(
-                    this.agentContextKey(hostRoot, submission.providerId, sessionId)
-                );
-                if (!this.isSubmissionContextCurrent(submission)) {
-                    this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                    return;
-                }
+                this.hydratedSessionKeyState().add(this.agentContextKey(hostRoot, submission.providerId, sessionId));
             } else {
                 const hydrationKey = this.agentContextKey(hostRoot, submission.providerId, sessionId);
                 await this.ensureSessionHydrated(sessionId, hydrationKey);
-                if (!this.isSubmissionContextCurrent(submission)) {
-                    this.showInlineNotice('会话上下文已变化，当前任务未发送。请再点一次发送。', 'warning');
-                    return;
-                }
+                if (!this.submissionCanContinue(lane, submission)) return;
             }
             submission.sessionId = sessionId;
-            if ((!retry && this.prompt === draftTextAtStart) || (retry && this.prompt.trim() === text)) {
-                this.prompt = '';
-                if (this.textarea) {
-                    this.textarea.value = '';
-                    this.resizeComposer(this.textarea);
-                }
-            }
-            if (submission.draftAttachmentIds?.length) {
-                this.consumeDraftImages(submission.draftAttachmentIds);
-                this.imageAnnouncement = '图片已加入任务。';
-            }
-            promptConsumed = true;
-            this.update();
-            requestAnimationFrame(() => {
-                if (this.textarea) this.resizeComposer(this.textarea);
-            });
-            await this.service.sendPrompt({ sessionId, text, attachments });
-            if (!this.isSubmissionContextCurrent(submission)) return;
+            submission.state = 'running';
+            this.syncPromptLaneIfVisible(lane);
+            await this.service.sendPrompt({ sessionId, text: submission.text, attachments: submission.attachments });
         } catch (error) {
-            // A late failure from an old project/provider/session must never
-            // recreate its retry card (and image payload) in the new context.
-            if (!this.isSubmissionContextCurrent(submission)) return;
-            const message = friendlyAgentErrorMessage(error);
-            const cancelled = (submission.sessionId ? this.cancelRequested.has(submission.sessionId) : false)
+            const cancelled = submission.cancelled
+                || (submission.sessionId ? this.cancelRequested.has(submission.sessionId) : false)
                 || this.isCancellationError(error);
-            if (!cancelled && promptConsumed) {
-                const visibleMessage = (this.retryablePrompt as RetryablePrompt | undefined)?.message ?? message;
-                this.retryablePrompt = { ...submission, message: visibleMessage };
-            } else if (!cancelled) {
-                this.showInlineNotice(`任务发送失败：${message}`, 'error');
+            if (!cancelled && this.isSubmissionContextCurrent(submission)) {
+                const message = friendlyAgentErrorMessage(error);
+                lane.retryable = { ...submission, message };
+                if (this.activeComposerLaneKey === lane.key) {
+                    this.showInlineNotice(`任务发送失败：${message}`, 'error');
+                }
             }
         } finally {
             if (submission.sessionId) this.cancelRequested.delete(submission.sessionId);
-            if (this.submission === submission) this.submission = undefined;
-            this.update();
         }
     }
 
+    protected submissionCanContinue(lane: SessionPromptLane, submission: PromptSubmission): boolean {
+        if (submission.cancelled) return false;
+        if (this.isSubmissionContextCurrent(submission)) return true;
+        // A global project/Provider change must not replay the old operation,
+        // but its text is still valuable. It belongs only to the lane that
+        // accepted it; never write it through the global textarea after the
+        // user has moved to another conversation or Provider.
+        const drafts = this.composerDraftState();
+        const oldDraft = drafts.get(lane.key) ?? {
+            text: '',
+            images: [],
+            imageAnnouncement: ''
+        };
+        if (!oldDraft.text.trim()) {
+            drafts.set(lane.key, { ...oldDraft, text: submission.text });
+            if (this.activeComposerLaneKey === lane.key && !this.prompt.trim()) {
+                this.prompt = submission.text;
+                if (this.textarea) {
+                    this.textarea.value = submission.text;
+                    this.resizeComposer(this.textarea);
+                }
+            }
+        } else {
+            lane.retryable = { ...submission, message: '项目或模型服务已变化，请确认后重试。' };
+        }
+        if (this.activeComposerLaneKey === lane.key) {
+            const imageHint = submission.attachments.length ? '；图片没有带入新服务，请重新添加图片' : '';
+            this.showInlineNotice(`项目或模型服务已变化，任务未发送；文字草稿已保留${imageHint}。`, 'warning');
+        }
+        return false;
+    }
+
+    protected bindPromptLaneToSession(lane: SessionPromptLane, session: SessionRecord): void {
+        const oldKey = lane.key;
+        const nextKey = this.promptLaneKey(session.workspaceRoot, this.model.snapshot.providerId, session.appSessionId);
+        this.promptLaneState().delete(oldKey);
+        lane.key = nextKey;
+        lane.sourceSessionId = session.appSessionId;
+        lane.sessionId = session.appSessionId;
+        for (const queued of lane.queue) queued.sessionId = session.appSessionId;
+        this.promptLaneState().set(nextKey, lane);
+        const draft = this.composerDraftState().get(oldKey);
+        if (draft) {
+            this.composerDraftState().delete(oldKey);
+            this.composerDraftState().set(nextKey, draft);
+        }
+        if (this.activeComposerLaneKey === oldKey) {
+            this.activeComposerLaneKey = nextKey;
+            this.observedAgentContextKey = nextKey;
+        }
+    }
+
+    protected syncPromptLaneIfVisible(lane: SessionPromptLane): void {
+        if (this.activeComposerLaneKey !== lane.key) return;
+        this.syncVisiblePromptLane();
+        this.update();
+        this.syncComposerSubmitButton();
+    }
+
     protected retry(retry: RetryablePrompt): void {
-        if (this.retryablePrompt !== retry || this.submission) return;
+        const lane = this.currentPromptLane(false);
+        if (!lane || lane.retryable !== retry) return;
         void this.send(retry);
     }
 
     protected dismissRetry(): void {
-        if (this.submission) return;
-        this.retryablePrompt = undefined;
+        const lane = this.currentPromptLane(false);
+        if (!lane?.retryable) return;
+        lane.retryable = undefined;
+        this.syncVisiblePromptLane();
         this.update();
+    }
+
+    protected async cancelPromptItem(promptId: string): Promise<void> {
+        for (const lane of this.promptLaneState().values()) {
+            const queuedIndex = lane.queue.findIndex(item => item.id === promptId);
+            if (queuedIndex >= 0) {
+                const [queued] = lane.queue.splice(queuedIndex, 1);
+                queued.cancelled = true;
+                queued.resolveCompletion?.();
+                this.syncPromptLaneIfVisible(lane);
+                return;
+            }
+            if (lane.active?.id !== promptId) continue;
+            lane.active.cancelled = true;
+            if (lane.active.sessionId) await this.cancel(lane.active.sessionId);
+            this.syncPromptLaneIfVisible(lane);
+            return;
+        }
     }
 
     protected async cancel(sessionId: string): Promise<void> {
         if (this.cancelRequested.has(sessionId)) return;
+        const lane = this.findPromptLaneBySession(sessionId);
+        if (lane?.active) lane.active.cancelled = true;
         this.cancelRequested.add(sessionId);
         this.update();
         try {
             await this.service.cancel(sessionId);
         } catch (error) {
             this.cancelRequested.delete(sessionId);
+            if (lane?.active) lane.active.cancelled = false;
             this.showInlineNotice(`无法取消任务：${error instanceof Error ? error.message : String(error)}`, 'error');
             this.update();
         }
@@ -3253,17 +3710,25 @@ export class XoraAgentWidget extends ReactWidget {
             && typeof event.sessionId === 'string'
             ? event.sessionId
             : undefined;
+        if (changedSessionId) {
+            this.sessionHistoryCatchup?.get(changedSessionId)?.push(event);
+        }
         if (changedSessionId) this.sessionHistoryCacheState().delete(changedSessionId);
         if (event.kind === 'turn-completed' && event.stopReason === 'cancelled') {
-            if (this.retryablePrompt?.sessionId === event.sessionId) this.retryablePrompt = undefined;
+            const lane = this.findPromptLaneBySession(event.sessionId);
+            if (lane?.retryable?.sessionId === event.sessionId) lane.retryable = undefined;
+            if (lane) this.syncPromptLaneIfVisible(lane);
             this.update();
             return;
         }
-        const submission = this.submission;
+        const lane = 'sessionId' in event && typeof event.sessionId === 'string'
+            ? this.findPromptLaneBySession(event.sessionId)
+            : undefined;
+        const submission = lane?.active;
         if (event.kind === 'text-delta' && event.role === 'user' && submission
             && submission.sessionId === event.sessionId) {
             submission.userEventReceived = true;
-            this.update();
+            if (lane) this.syncPromptLaneIfVisible(lane);
             return;
         }
         if (event.kind !== 'error' || !event.recoverable || !submission) return;
@@ -3271,8 +3736,15 @@ export class XoraAgentWidget extends ReactWidget {
         if (event.sessionId && submission.sessionId && event.sessionId !== submission.sessionId) return;
         if ((submission.sessionId && this.cancelRequested.has(submission.sessionId))
             || this.isCancellationMessage(event.code, event.message)) return;
-        this.retryablePrompt = { ...submission, message: friendlyAgentErrorMessage(event.message) };
-        this.update();
+        lane.retryable = { ...submission, message: friendlyAgentErrorMessage(event.message) };
+        this.syncPromptLaneIfVisible(lane);
+    }
+
+    protected findPromptLaneBySession(sessionId: string): SessionPromptLane | undefined {
+        for (const lane of this.promptLaneState().values()) {
+            if (lane.sessionId === sessionId || lane.sourceSessionId === sessionId) return lane;
+        }
+        return undefined;
     }
 
     protected isCancellationError(error: unknown): boolean {
@@ -3313,9 +3785,71 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected beginSessionRename(session: SessionRecord): void {
+        this.resetSessionRenameComposition();
         this.renamingSessionId = session.appSessionId;
         this.renameDraft = session.title || '';
         this.update();
+    }
+
+    protected beginSessionRenameComposition(): void {
+        this.renameImeComposing = true;
+        this.renameImeCompositionJustEnded = false;
+        if (this.renameImeCompositionGuardTimer !== undefined) {
+            window.clearTimeout(this.renameImeCompositionGuardTimer);
+            this.renameImeCompositionGuardTimer = undefined;
+        }
+    }
+
+    protected endSessionRenameComposition(value: string): void {
+        this.renameDraft = value;
+        this.renameImeComposing = false;
+        this.renameImeCompositionJustEnded = true;
+        if (this.renameImeCompositionGuardTimer !== undefined) {
+            window.clearTimeout(this.renameImeCompositionGuardTimer);
+        }
+        this.renameImeCompositionGuardTimer = window.setTimeout(() => {
+            this.renameImeCompositionJustEnded = false;
+            this.renameImeCompositionGuardTimer = undefined;
+        }, 0);
+    }
+
+    protected handleSessionRenameKeyDown(event: React.KeyboardEvent<HTMLInputElement>, appSessionId: string): void {
+        const nativeEvent = event.nativeEvent as KeyboardEvent;
+        const composing = this.renameImeComposing
+            || this.renameImeCompositionJustEnded
+            || nativeEvent.isComposing
+            || nativeEvent.keyCode === 229;
+        if (shouldCommitRenameOnEnter({
+            key: event.key,
+            widgetComposing: this.renameImeComposing,
+            nativeComposing: nativeEvent.isComposing,
+            nativeKeyCode: nativeEvent.keyCode,
+            compositionJustEnded: this.renameImeCompositionJustEnded
+        })) {
+            event.preventDefault();
+            event.stopPropagation();
+            void this.commitSessionRename(appSessionId);
+        } else if (event.key === 'Escape' && !composing) {
+            event.preventDefault();
+            event.stopPropagation();
+            this.cancelSessionRename();
+        }
+    }
+
+    protected cancelSessionRename(): void {
+        this.renamingSessionId = undefined;
+        this.renameDraft = '';
+        this.resetSessionRenameComposition();
+        this.update();
+    }
+
+    protected resetSessionRenameComposition(): void {
+        this.renameImeComposing = false;
+        this.renameImeCompositionJustEnded = false;
+        if (this.renameImeCompositionGuardTimer !== undefined) {
+            window.clearTimeout(this.renameImeCompositionGuardTimer);
+            this.renameImeCompositionGuardTimer = undefined;
+        }
     }
 
     protected async commitSessionRename(appSessionId: string): Promise<void> {
@@ -3323,13 +3857,25 @@ export class XoraAgentWidget extends ReactWidget {
         const title = this.renameDraft.trim();
         this.renamingSessionId = undefined;
         this.renameDraft = '';
+        this.resetSessionRenameComposition();
+        // Leave edit mode before crossing Electron IPC. This also makes the
+        // blur triggered by unmount a harmless no-op instead of a second RPC.
+        this.update();
         if (!title) {
-            this.update();
             return;
         }
         try {
             const updated = await this.service.renameSession(appSessionId, title);
-            this.model.updateSession(updated);
+            const current = this.model.snapshot.sessions.find(session => session.appSessionId === appSessionId);
+            // Session status can advance while the rename RPC is crossing IPC.
+            // Never overwrite a newer running/completed record with the older
+            // metadata returned by renameSession.
+            const currentTimestamp = current ? Date.parse(current.updatedAt) : Number.NEGATIVE_INFINITY;
+            const updatedTimestamp = Date.parse(updated.updatedAt);
+            if (!current || !Number.isFinite(currentTimestamp) || !Number.isFinite(updatedTimestamp)
+                || updatedTimestamp > currentTimestamp) {
+                this.model.updateSession(updated);
+            }
             this.rememberOpenSessionTab(appSessionId);
             this.update();
         } catch (error) {
@@ -3339,6 +3885,10 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async deleteSession(session: SessionRecord): Promise<void> {
+        if (session.status === 'running' || this.sessionHasPromptLaneWork(session.appSessionId)) {
+            this.showInlineNotice('请先取消或等待该会话中的任务完成，再删除会话。', 'warning');
+            return;
+        }
         try {
             // Direct delete — no confirmation dialog; history is local-only and the
             // action is already an explicit trash-button click in the session list.
@@ -3346,6 +3896,14 @@ export class XoraAgentWidget extends ReactWidget {
             this.sessionHistoryCacheState().delete(session.appSessionId);
             for (const key of this.hydratedSessionKeyState()) {
                 if (key.endsWith(`\u0000${session.appSessionId}`)) this.hydratedSessionKeyState().delete(key);
+            }
+            for (const [key, lane] of [...this.promptLaneState()]) {
+                if (lane.sessionId === session.appSessionId || lane.sourceSessionId === session.appSessionId) {
+                    this.disposePromptLane(key);
+                }
+            }
+            for (const key of [...this.composerDraftState().keys()]) {
+                if (key.endsWith(`\u0000${session.appSessionId}`)) this.disposePromptLane(key);
             }
             this.openSessionTabs = (this.openSessionTabs ?? []).filter(id => id !== session.appSessionId);
             await this.model.refresh();
@@ -3385,6 +3943,28 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected sessionHistoryCacheState(): Map<string, { updatedAt: string; events: AgentHostEvent[] }> {
         return this.sessionHistoryCache ?? (this.sessionHistoryCache = new Map());
+    }
+
+    /** Merge events which crossed IPC during the local history read. Backend
+     * delivery precedes JSONL append, so a caught event may or may not already
+     * be present in the returned tail. Exact tail multiset matching preserves
+     * order without duplicating either case. */
+    protected mergeHistoryCatchup(history: AgentHostEvent[], caught: AgentHostEvent[]): AgentHostEvent[] {
+        if (!caught.length) return history;
+        const tailSize = Math.max(64, caught.length * 4);
+        const fingerprints = new Map<string, number>();
+        for (const event of history.slice(-tailSize)) {
+            const fingerprint = JSON.stringify(event);
+            fingerprints.set(fingerprint, (fingerprints.get(fingerprint) ?? 0) + 1);
+        }
+        const missing: AgentHostEvent[] = [];
+        for (const event of caught) {
+            const fingerprint = JSON.stringify(event);
+            const count = fingerprints.get(fingerprint) ?? 0;
+            if (count > 0) fingerprints.set(fingerprint, count - 1);
+            else missing.push(event);
+        }
+        return missing.length ? [...history, ...missing] : history;
     }
 
     protected cachedSessionHistory(session: SessionRecord): AgentHostEvent[] | undefined {
@@ -3428,8 +4008,8 @@ export class XoraAgentWidget extends ReactWidget {
             this.model.snapshot.providerId,
             session.appSessionId
         );
-        this.invalidateAgentContext('会话已切换，未发送的图片已清除。');
-        const generation = this.sessionLoadGeneration;
+        this.storeActiveComposerDraft();
+        const generation = ++this.sessionLoadGeneration;
         this.openPopover = undefined;
         this.sessionLoading = true;
         const cachedHistory = this.cachedSessionHistory(session);
@@ -3437,18 +4017,28 @@ export class XoraAgentWidget extends ReactWidget {
         // removes the previous transcript; cached local content can paint in
         // the same browser frame and a first-time disk read fills it next.
         this.observedAgentContextKey = targetContextKey;
+        this.activateComposerLane(targetContextKey);
         this.model.showSessionHistory(session, cachedHistory ?? []);
         this.stickToBottom = true;
         this.followTranscript();
         this.update();
         try {
             if (!cachedHistory) {
-                const history = await this.service.getSessionHistory(session.appSessionId);
-                if (generation !== this.sessionLoadGeneration || this.imageDraftContextKey() !== targetContextKey) return;
-                this.cacheSessionHistory(session, history);
-                this.model.showSessionHistory(session, history);
-                this.stickToBottom = true;
-                this.followTranscript();
+                const catchup: AgentHostEvent[] = [];
+                this.sessionHistoryCatchup.set(session.appSessionId, catchup);
+                try {
+                    const history = await this.service.getSessionHistory(session.appSessionId);
+                    if (generation !== this.sessionLoadGeneration || this.imageDraftContextKey() !== targetContextKey) return;
+                    const completeHistory = this.mergeHistoryCatchup(history, catchup);
+                    this.cacheSessionHistory(session, completeHistory);
+                    this.model.showSessionHistory(session, completeHistory);
+                    this.stickToBottom = true;
+                    this.followTranscript();
+                } finally {
+                    if (this.sessionHistoryCatchup.get(session.appSessionId) === catchup) {
+                        this.sessionHistoryCatchup.delete(session.appSessionId);
+                    }
+                }
             }
             // The conversation is usable as soon as its local history is on
             // screen. ACP hydration continues below and is single-flighted
@@ -3490,6 +4080,24 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected async authenticateRuntime(runtime: RuntimeSnapshot, contextIsCurrent?: () => boolean): Promise<boolean> {
         if (runtime.phase !== 'auth-required') return true;
+        if (contextIsCurrent && !contextIsCurrent()) return false;
+        let flight = this.runtimeAuthenticationInFlight;
+        if (!flight || flight.providerId !== runtime.providerId) {
+            const promise = this.authenticateRuntimeOnce(runtime);
+            flight = { providerId: runtime.providerId, promise };
+            this.runtimeAuthenticationInFlight = flight;
+            const clear = (): void => {
+                if (this.runtimeAuthenticationInFlight?.promise === promise) {
+                    this.runtimeAuthenticationInFlight = undefined;
+                }
+            };
+            void promise.then(clear, clear);
+        }
+        const authenticated = await flight.promise;
+        return authenticated && (!contextIsCurrent || contextIsCurrent());
+    }
+
+    protected async authenticateRuntimeOnce(runtime: RuntimeSnapshot): Promise<boolean> {
         const provider = this.providers.find(candidate => candidate.id === runtime.providerId);
         const methodId = provider?.kind === 'grok-subscription'
             ? runtime.capabilities?.authMethods.find(method => method.id !== 'xai.api_key'
@@ -3499,9 +4107,7 @@ export class XoraAgentWidget extends ReactWidget {
                 ?? runtime.capabilities?.defaultAuthMethodId
                 ?? runtime.capabilities?.authMethods[0]?.id;
         if (!methodId) throw new Error('Grok Build 未提供兼容的认证方式。');
-        if (contextIsCurrent && !contextIsCurrent()) return false;
         const result = await this.service.authenticate(methodId);
-        if (contextIsCurrent && !contextIsCurrent()) return false;
         if (result.status === 'authenticated') return true;
         const warning = provider?.kind === 'grok-subscription'
             ? '首次使用当前 Grok 订阅需要确认。登录或切换账号会共用 ~/.grok，并影响外部 Grok CLI 和其他 Xora Code 窗口；相同配置后续不再提示。'
@@ -3511,11 +4117,9 @@ export class XoraAgentWidget extends ReactWidget {
                     : '首次恢复旧版 API 服务需要确认。建议在设置中迁移到自定义模型服务；相同配置后续不再提示。'
                 : `是否使用“${provider?.name ?? '当前服务'}”已配置的凭据继续？只有当前服务的凭据会注入 Agent 进程，相同配置后续不再提示。`;
         const choice = await this.messages.warn(warning, '继续');
-        if (contextIsCurrent && !contextIsCurrent()) return false;
         if (choice !== '继续') return false;
-        if (contextIsCurrent && !contextIsCurrent()) return false;
         const confirmed = await this.service.authenticate(methodId, true);
-        return confirmed.status === 'authenticated' && (!contextIsCurrent || contextIsCurrent());
+        return confirmed.status === 'authenticated';
     }
 
     protected async workspaceRoot(): Promise<string | undefined> {

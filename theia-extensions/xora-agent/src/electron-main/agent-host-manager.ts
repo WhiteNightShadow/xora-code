@@ -1,12 +1,11 @@
 import { ElectronMainApplication, ElectronMainApplicationContribution } from '@theia/core/lib/electron-main/electron-main-application';
 import { injectable } from '@theia/core/shared/inversify';
 import { FSWatcher, mkdirSync, watch } from 'fs';
-import { homedir } from 'os';
-import { join } from 'path';
 import { AgentHostClient } from '../common/agent-protocol';
 import { GrokAgentHostService, ProviderRuntimeInvalidation } from './grok-agent-host-service';
 import { ProviderRegistry } from './provider-registry';
 import { SecretVault } from './secret-vault';
+import { sharedGrokHome } from './shared-grok-home';
 import { WorkspaceSecurityStore } from './workspace-security';
 import { SidecarUpdateCoordinator } from './sidecar-update-coordinator';
 
@@ -20,17 +19,22 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
     protected grokHomeWatcher: FSWatcher | undefined;
     protected grokHomeNotification: NodeJS.Timeout | undefined;
     protected grokAuthenticationNotificationPending = false;
+    protected grokConfigurationNotificationPending = false;
     protected grokManagedAuthenticationNotificationPending = false;
     /** Sticky for one managed transaction, even after the normal UI debounce flushes. */
     protected grokManagedAuthenticationEventsObserved = false;
     protected readonly grokHomeNotificationDelayMs = 200;
     protected readonly subscriptionAuthenticationDrainQuietMs = 250;
+    /** Windows can deliver the final rename notification after the CLI exits. */
+    protected readonly managedSubscriptionAuthenticationGraceMs = 2_000;
+    protected lastManagedSubscriptionAuthenticationAt = 0;
     protected subscriptionAuthenticationDrainTimer: NodeJS.Timeout | undefined;
     protected subscriptionAuthenticationDrainResolve: (() => void) | undefined;
     protected subscriptionAuthenticationMutationActive = false;
+    protected readonly grokHomePath = sharedGrokHome();
 
     onStart(_application: ElectronMainApplication): void {
-        const grokHome = join(homedir(), '.grok');
+        const grokHome = this.grokHomePath;
         // Grok Build treats ~/.grok as its authoritative shared home. Creating
         // only the directory lets us observe future CLI writes without ever
         // opening authentication, OAuth or session files.
@@ -136,6 +140,7 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
             // late self-notification could rotate the freshly-created epoch and
             // retire a session created immediately after login/logout.
             await this.drainManagedSubscriptionAuthenticationNotifications();
+            this.lastManagedSubscriptionAuthenticationAt = Date.now();
             this.subscriptionAuthenticationMutationActive = false;
         }
     }
@@ -147,20 +152,31 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
      * as an external authentication change.
      */
     protected observeGrokHomeChange(name: string | undefined): void {
-        if (name && !/(?:^|[/\\])(config\.toml|[^/\\]*(?:auth|oauth|credential)[^/\\]*)$/iu.test(name)) {
-            return;
-        }
-        const authenticationChanged = !name
-            || /(?:^|[/\\])[^/\\]*(?:auth|oauth|credential)[^/\\]*$/iu.test(name);
+        // Node does not guarantee a filename for fs.watch events on Windows.
+        // Unknown writes cannot be promoted to account changes because Grok
+        // also writes caches, logs and sessions under this directory.
+        if (!name) return;
+        const leaf = name.replace(/\\/g, '/').split('/').pop()?.toLowerCase();
+        const authenticationChanged = leaf === 'auth.json';
+        const configurationChanged = leaf === 'config.toml';
+        // auth.json.lock, auth.json.<pid>.tmp and mcp_credentials.json are not
+        // account changes. The final atomic rename still emits `auth.json`.
+        if (!authenticationChanged && !configurationChanged) return;
         if (authenticationChanged) {
-            if (this.subscriptionAuthenticationMutationActive) {
+            const recentlyManaged = Date.now() - this.lastManagedSubscriptionAuthenticationAt
+                <= this.managedSubscriptionAuthenticationGraceMs;
+            const runtimeOwnedRefresh = [...this.services].some(service => service.subscriptionRuntimeActive);
+            if (this.subscriptionAuthenticationMutationActive || recentlyManaged || runtimeOwnedRefresh) {
                 this.grokManagedAuthenticationNotificationPending = true;
-                this.grokManagedAuthenticationEventsObserved = true;
-                this.restartSubscriptionAuthenticationDrainQuietPeriod();
+                if (this.subscriptionAuthenticationMutationActive) {
+                    this.grokManagedAuthenticationEventsObserved = true;
+                    this.restartSubscriptionAuthenticationDrainQuietPeriod();
+                }
             } else {
                 this.grokAuthenticationNotificationPending = true;
             }
         }
+        if (configurationChanged) this.grokConfigurationNotificationPending = true;
         if (this.grokHomeNotification) clearTimeout(this.grokHomeNotification);
         this.grokHomeNotification = setTimeout(
             () => this.flushGrokHomeNotification(),
@@ -172,7 +188,9 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
     protected flushGrokHomeNotification(): void {
         this.grokHomeNotification = undefined;
         const authenticationChanged = this.grokAuthenticationNotificationPending;
+        const configurationChanged = this.grokConfigurationNotificationPending;
         this.grokAuthenticationNotificationPending = false;
+        this.grokConfigurationNotificationPending = false;
         // A managed event was already covered by the coordinator's pre-rotation.
         // Clearing it here is the drain; it must not invalidate auth or sessions.
         this.grokManagedAuthenticationNotificationPending = false;
@@ -188,7 +206,9 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
                     invalidateSession: true
                 });
             }
-            service.notifySharedGrokStateChanged(authenticationChanged);
+            if (authenticationChanged || configurationChanged) {
+                service.notifySharedGrokStateChanged(authenticationChanged);
+            }
         }
     }
 

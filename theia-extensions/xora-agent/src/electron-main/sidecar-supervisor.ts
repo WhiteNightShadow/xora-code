@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { StringDecoder } from 'string_decoder';
 import { deepRedact, StreamingOpaquePayloadRedactor } from './session-repository';
+import { sharedGrokHome } from './shared-grok-home';
 import { sidecarFilesystemError } from './sidecar-errors';
 
 export const EMBEDDED_GROK_VERSION = '0.2.102';
@@ -201,6 +202,10 @@ export class GrokSidecarSupervisor {
                 environment[name] = process.env[name];
             }
         }
+        // Always bind Grok CLI and ACP processes to the same user-global home.
+        // Custom API Providers may deliberately override this with their
+        // isolated, token-free home in `injected` below.
+        environment.GROK_HOME = sharedGrokHome();
         for (const [name, value] of Object.entries(injected)) {
             if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name) || typeof value !== 'string') {
                 throw new Error('Unsafe provider environment entry.');

@@ -21,6 +21,8 @@ export interface TranscriptEntry {
     kind: 'user' | 'assistant' | 'system' | 'plan' | 'tool' | 'permission' | 'diff' | 'error';
     text?: string;
     payload?: AgentHostEvent;
+    /** Stable grouping key for every visible event produced by one prompt. */
+    activityTurnId?: string;
     /** Completion metadata attached to the final Agent reply for this turn. */
     turnElapsedMs?: number;
     turnStopReason?: string;
@@ -59,6 +61,13 @@ export class AgentViewModel {
     transcript: TranscriptEntry[] = [];
     protected readonly toolEntries = new Map<string, TranscriptEntry>();
     protected readonly diffEntries = new Map<string, TranscriptEntry>();
+    /**
+     * Histories created before turn IDs were persisted are reconstructed from
+     * their user/turn-completed boundaries. Ordinals are reset for each replay,
+     * which keeps the derived keys deterministic across session switches.
+     */
+    protected readonly legacyActivityTurnIds = new Map<string, string>();
+    protected readonly legacyActivityTurnOrdinals = new Map<string, number>();
     pendingPermissions = new Map<string, PermissionRequestEvent>();
     /**
      * `undefined` follows the backend's initial selection, `null` represents a
@@ -82,6 +91,7 @@ export class AgentViewModel {
     }
 
     protected accept(event: AgentHostEvent, notify = true): void {
+        let liveActivityStarted = false;
         if (event.kind === 'snapshot') {
             this.applySnapshot(event.snapshot);
             if (event.snapshot.phase === 'crashed') {
@@ -99,6 +109,9 @@ export class AgentViewModel {
             // user conversation. Keep those legacy records out of the chat;
             // unknown ACP extensions are compatibility details, not messages.
             if (event.role === 'system' && event.text.startsWith('Ignored compatible ACP extension:')) return;
+            const activityTurnId = event.role === 'user' && !event.turnId
+                ? this.startLegacyActivityTurn(event.sessionId)
+                : this.activityTurnId(event);
             const last = this.transcript[this.transcript.length - 1];
             const lastHasAttachments = last?.payload?.kind === 'text-delta'
                 && Boolean(last.payload.attachments?.length);
@@ -108,24 +121,36 @@ export class AgentViewModel {
                 && last?.kind === event.role
                 && last.payload
                 && 'sessionId' in last.payload
-                && last.payload.sessionId === event.sessionId) {
+                && last.payload.sessionId === event.sessionId
+                && last.activityTurnId === activityTurnId) {
                 last.text = `${last.text ?? ''}${event.text}`;
             } else {
-                this.transcript.push({ id: this.id('text'), kind: event.role, text: event.text, payload: event });
+                this.transcript.push({
+                    id: this.id('text'),
+                    kind: event.role,
+                    text: event.text,
+                    payload: event,
+                    activityTurnId
+                });
             }
         } else if (event.kind === 'permission-request') {
             // Permission prompts must surface even for background multi-session
             // tabs; otherwise a concurrent turn can stall forever.
             this.pendingPermissions.set(event.requestId, event);
             if (this.isVisibleSession(event.sessionId)) {
-                this.transcript.push({ id: event.requestId, kind: 'permission', payload: event });
+                this.transcript.push({
+                    id: event.requestId,
+                    kind: 'permission',
+                    payload: event,
+                    activityTurnId: this.activityTurnId(event)
+                });
             }
         } else if (event.kind === 'tool-call') {
             if (!this.isVisibleSession(event.sessionId)) return;
-            this.upsertTool(event);
+            liveActivityStarted = this.upsertTool(event);
         } else if (event.kind === 'plan') {
             if (!this.isVisibleSession(event.sessionId)) return;
-            this.upsertPlan(event);
+            liveActivityStarted = this.upsertPlan(event);
         } else if (event.kind === 'diff') {
             if (!this.isVisibleSession(event.sessionId)) return;
             this.upsertDiff(event);
@@ -136,15 +161,18 @@ export class AgentViewModel {
                 [event.sessionId]: event.context
             };
         } else if (event.kind === 'turn-completed') {
+            const activityTurnId = this.activityTurnId(event);
             this.finalizeSessionActivity(
                 event.sessionId,
-                event.stopReason === 'cancelled' ? 'cancelled' : event.stopReason === 'error' ? 'failed' : 'completed'
+                event.stopReason === 'cancelled' ? 'cancelled' : event.stopReason === 'error' ? 'failed' : 'completed',
+                activityTurnId
             );
             if (this.isVisibleSession(event.sessionId) && Number.isFinite(event.elapsedMs) && (event.elapsedMs ?? -1) >= 0) {
                 const finalReply = [...this.transcript].reverse().find(entry =>
                     entry.kind === 'assistant'
                     && entry.payload?.kind === 'text-delta'
                     && entry.payload.sessionId === event.sessionId
+                    && entry.activityTurnId === activityTurnId
                     && entry.turnElapsedMs === undefined
                 );
                 if (finalReply) {
@@ -152,6 +180,7 @@ export class AgentViewModel {
                     finalReply.turnStopReason = event.stopReason;
                 }
             }
+            this.finishLegacyActivityTurn(event.sessionId);
             this.clearPendingPermissions(event.sessionId);
         } else if (event.kind === 'error') {
             if (event.sessionId && !this.isVisibleSession(event.sessionId)) return;
@@ -159,14 +188,23 @@ export class AgentViewModel {
                 id: this.id('error'),
                 kind: 'error',
                 text: friendlyAgentErrorMessage(event.message),
-                payload: event
+                payload: event,
+                ...(event.sessionId ? { activityTurnId: this.activityTurnId({
+                    sessionId: event.sessionId,
+                    turnId: event.turnId
+                }) } : {})
             });
             if (event.code === 'SIDECAR_CRASHED') {
                 this.clearPendingPermissions();
             }
         }
         if (notify) {
-            if (isFrameBatchedEvent(event)) {
+            if (liveActivityStarted) {
+                // A new running operation is a user-visible lifecycle edge,
+                // not output noise. Publish it immediately; subsequent text,
+                // parameter and terminal updates can stay frame-batched.
+                this.notifyChangeImmediately();
+            } else if (isFrameBatchedEvent(event)) {
                 this.scheduleChangeNotification();
             } else {
                 this.notifyChangeImmediately();
@@ -220,25 +258,30 @@ export class AgentViewModel {
         }
     }
 
-    protected upsertTool(event: ToolCallEvent): void {
-        const key = this.toolEntryKey(event.sessionId, event.toolCallId);
+    protected upsertTool(event: ToolCallEvent): boolean {
+        const activityTurnId = this.activityTurnId(event);
+        const key = this.toolEntryKey(event.sessionId, event.toolCallId, activityTurnId);
         const existing = this.toolEntries.get(key);
         if (existing) {
             const previous = existing.payload?.kind === 'tool-call' ? existing.payload : undefined;
             if (!previous) {
                 existing.payload = event;
-                return;
+                return isActiveToolStatus(event.status);
             }
+            const previouslyActive = isActiveToolStatus(previous.status);
             const toolKind = (!event.toolKind || event.toolKind === 'other') && previous.toolKind && previous.toolKind !== 'other'
                 ? previous.toolKind
                 : event.toolKind;
             const toolNamespace = event.toolNamespace ?? previous.toolNamespace;
             const presentation = mergeToolPresentation(previous.presentation, event.presentation);
             const locations = event.locations ?? previous.locations;
+            const status = monotonicToolStatus(previous.status, event.status);
+            const startedAt = event.startedAt ?? previous.startedAt;
+            const elapsedMs = this.resolveToolElapsedMs(status, startedAt, event.elapsedMs ?? previous.elapsedMs);
             existing.payload = {
                 ...previous,
                 ...event,
-                status: monotonicToolStatus(previous.status, event.status),
+                status,
                 title: isMachineToolTitle(event.title, event.toolCallId)
                     && !isMachineToolTitle(previous.title, previous.toolCallId)
                     ? previous.title
@@ -250,14 +293,37 @@ export class AgentViewModel {
                 ...(toolNamespace ? { toolNamespace } : {}),
                 ...(presentation ? { presentation } : {}),
                 ...(locations ? { locations } : {}),
+                ...(startedAt ? { startedAt } : {}),
+                ...(elapsedMs !== undefined ? { elapsedMs } : {}),
                 input: event.input ?? previous.input,
                 output: event.output ?? previous.output
             };
+            const next = existing.payload as ToolCallEvent;
+            return !previouslyActive && isActiveToolStatus(next.status);
         } else {
-            const entry: TranscriptEntry = { id: key, kind: 'tool', payload: event };
+            const elapsedMs = this.resolveToolElapsedMs(event.status, event.startedAt, event.elapsedMs);
+            const normalized = elapsedMs === undefined ? event : { ...event, elapsedMs };
+            const entry: TranscriptEntry = { id: key, kind: 'tool', payload: normalized, activityTurnId };
             this.transcript.push(entry);
             this.toolEntries.set(key, entry);
+            return isActiveToolStatus(event.status);
         }
+    }
+
+    protected resolveToolElapsedMs(
+        status: ToolCallEvent['status'],
+        startedAt: string | undefined,
+        elapsedMs: number | undefined
+    ): number | undefined {
+        if (Number.isFinite(elapsedMs) && (elapsedMs ?? -1) >= 0) return Math.round(elapsedMs!);
+        if (!isTerminalToolStatus(status) || !startedAt) return undefined;
+        const startedAtMs = Date.parse(startedAt);
+        return Number.isFinite(startedAtMs) ? Math.max(0, Math.round(this.now() - startedAtMs)) : undefined;
+    }
+
+    /** Test seam for deterministic lifecycle durations. */
+    protected now(): number {
+        return Date.now();
     }
 
     /**
@@ -267,7 +333,8 @@ export class AgentViewModel {
      */
     protected finalizeSessionActivity(
         sessionId: string,
-        outcome: SessionRecord['status']
+        outcome: SessionRecord['status'],
+        activityTurnId?: string
     ): void {
         const terminalToolStatus: ToolCallEvent['status'] = outcome === 'completed'
             ? 'completed'
@@ -276,12 +343,23 @@ export class AgentViewModel {
                 : 'failed';
         for (const entry of this.toolEntries.values()) {
             const tool = entry.payload?.kind === 'tool-call' ? entry.payload : undefined;
-            if (!tool || tool.sessionId !== sessionId || !['pending', 'running'].includes(tool.status)) continue;
-            entry.payload = { ...tool, status: terminalToolStatus };
+            if (!tool
+                || tool.sessionId !== sessionId
+                || (activityTurnId !== undefined && entry.activityTurnId !== activityTurnId)
+                || !['pending', 'running'].includes(tool.status)) continue;
+            const elapsedMs = this.resolveToolElapsedMs(terminalToolStatus, tool.startedAt, tool.elapsedMs);
+            entry.payload = {
+                ...tool,
+                status: terminalToolStatus,
+                ...(elapsedMs !== undefined ? { elapsedMs } : {})
+            };
         }
         for (const entry of this.transcript) {
             const plan = entry.payload?.kind === 'plan' ? entry.payload : undefined;
-            if (!plan || plan.sessionId !== sessionId || !plan.entries.some(item => item.status === 'in-progress')) continue;
+            if (!plan
+                || plan.sessionId !== sessionId
+                || (activityTurnId !== undefined && entry.activityTurnId !== activityTurnId)
+                || !plan.entries.some(item => item.status === 'in-progress')) continue;
             entry.payload = {
                 ...plan,
                 entries: plan.entries.map(item => item.status === 'in-progress'
@@ -291,23 +369,32 @@ export class AgentViewModel {
         }
     }
 
-    protected upsertPlan(event: Extract<AgentHostEvent, { kind: 'plan' }>): void {
+    protected upsertPlan(event: Extract<AgentHostEvent, { kind: 'plan' }>): boolean {
+        const activityTurnId = this.activityTurnId(event);
         const existing = this.transcript.find(entry =>
-            entry.kind === 'plan' && entry.payload?.kind === 'plan' && entry.payload.sessionId === event.sessionId
+            entry.kind === 'plan'
+            && entry.payload?.kind === 'plan'
+            && entry.payload.sessionId === event.sessionId
+            && entry.activityTurnId === activityTurnId
         );
+        const nextActive = event.entries.some(item => item.status === 'in-progress');
         if (existing) {
             const previous = existing.payload as Extract<AgentHostEvent, { kind: 'plan' }>;
+            const previousActive = previous.entries.some(item => item.status === 'in-progress');
             existing.payload = {
                 ...event,
                 ...(event.title ? {} : { title: previous.title })
             };
+            return !previousActive && nextActive;
         } else {
-            this.transcript.push({ id: this.id('plan'), kind: 'plan', payload: event });
+            this.transcript.push({ id: this.id('plan'), kind: 'plan', payload: event, activityTurnId });
+            return nextActive;
         }
     }
 
     protected upsertDiff(event: DiffEvent): void {
-        const key = this.diffEntryKey(event);
+        const activityTurnId = this.activityTurnId(event);
+        const key = this.diffEntryKey(event, activityTurnId);
         const existing = this.diffEntries.get(key);
         if (existing) {
             // ACP commonly reports the same file content once while a tool is
@@ -317,7 +404,7 @@ export class AgentViewModel {
             existing.payload = event;
             return;
         }
-        const entry: TranscriptEntry = { id: this.id('diff'), kind: 'diff', payload: event };
+        const entry: TranscriptEntry = { id: this.id('diff'), kind: 'diff', payload: event, activityTurnId };
         this.transcript.push(entry);
         this.diffEntries.set(key, entry);
     }
@@ -342,11 +429,13 @@ export class AgentViewModel {
 
     addUserMessage(sessionId: string, text: string, attachments?: AgentAttachmentSummary[]): void {
         if (!this.isVisibleSession(sessionId)) return;
+        const activityTurnId = this.startLegacyActivityTurn(sessionId);
         this.transcript.push({
             id: this.id('user'),
             kind: 'user',
             text,
-            payload: { kind: 'text-delta', sessionId, role: 'user', text, attachments }
+            payload: { kind: 'text-delta', sessionId, role: 'user', text, attachments },
+            activityTurnId
         });
         this.notifyChangeImmediately();
     }
@@ -356,7 +445,9 @@ export class AgentViewModel {
         this.upsertSession(session);
         this.snapshot.activeSessionId = session.appSessionId;
         this.clearTranscript();
-        this.pendingPermissions.clear();
+        // Permission requests belong to running turns, not to the currently
+        // visible transcript. Keep background-session requests in the global
+        // permission dock when the user changes tabs.
         this.notifyChangeImmediately();
     }
 
@@ -372,16 +463,19 @@ export class AgentViewModel {
         this.selectedSessionOverride = null;
         this.snapshot.activeSessionId = undefined;
         this.clearTranscript();
-        this.pendingPermissions.clear();
+        // A new conversation must not strand a permission request issued by
+        // another session which is still running in the background.
         this.notifyChangeImmediately();
     }
 
     loadHistory(events: AgentHostEvent[]): void {
         this.clearTranscript();
-        this.pendingPermissions.clear();
+        const livePermissionIds = new Set(this.pendingPermissions.keys());
         for (const event of events) {
             this.accept(event, false);
-            if (event.kind === 'permission-request') this.pendingPermissions.delete(event.requestId);
+            if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
+                this.pendingPermissions.delete(event.requestId);
+            }
         }
         this.notifyChangeImmediately();
     }
@@ -391,10 +485,12 @@ export class AgentViewModel {
         this.upsertSession(session);
         this.snapshot.activeSessionId = session.appSessionId;
         this.clearTranscript();
-        this.pendingPermissions.clear();
+        const livePermissionIds = new Set(this.pendingPermissions.keys());
         for (const event of events) {
             this.accept(event, false);
-            if (event.kind === 'permission-request') this.pendingPermissions.delete(event.requestId);
+            if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
+                this.pendingPermissions.delete(event.requestId);
+            }
         }
         this.notifyChangeImmediately();
     }
@@ -501,14 +597,15 @@ export class AgentViewModel {
         return this.selectedSessionOverride === undefined;
     }
 
-    protected toolEntryKey(sessionId: string, toolCallId: string): string {
-        return `${sessionId}:${toolCallId}`;
+    protected toolEntryKey(sessionId: string, toolCallId: string, activityTurnId: string): string {
+        return `${activityTurnId}:${sessionId}:${toolCallId}`;
     }
 
-    protected diffEntryKey(event: DiffEvent): string {
+    protected diffEntryKey(event: DiffEvent, activityTurnId: string): string {
         if (event.sessionId && event.toolCallId && event.path && event.oldHash && event.newHash) {
             const normalizedPath = new Path(event.path).normalize().toString();
             return `content:${JSON.stringify([
+                activityTurnId,
                 event.sessionId,
                 event.toolCallId,
                 normalizedPath,
@@ -519,13 +616,44 @@ export class AgentViewModel {
         // Incomplete legacy events cannot be proven equivalent by content.
         // Fall back to their persisted identity so separate real edits are
         // never swallowed merely because they target the same path.
-        return `identity:${JSON.stringify([event.sessionId, event.diffId])}`;
+        return `identity:${JSON.stringify([activityTurnId, event.sessionId, event.diffId])}`;
+    }
+
+    /**
+     * Returns a persisted turn key when available, otherwise reconstructs one
+     * for legacy JSONL streams. A legacy prefix (history beginning mid-turn)
+     * is intentionally valid so truncated histories still form one card.
+     */
+    protected activityTurnId(event: { sessionId: string; turnId?: string }): string {
+        if (event.turnId) {
+            // Do not let a partially upgraded history leak a preceding legacy
+            // orphan into the first explicitly identified turn.
+            this.legacyActivityTurnIds.delete(event.sessionId);
+            return `activity:${event.sessionId}:${event.turnId}`;
+        }
+        const current = this.legacyActivityTurnIds.get(event.sessionId);
+        if (current) return current;
+        return this.startLegacyActivityTurn(event.sessionId);
+    }
+
+    protected startLegacyActivityTurn(sessionId: string): string {
+        const ordinal = (this.legacyActivityTurnOrdinals.get(sessionId) ?? 0) + 1;
+        this.legacyActivityTurnOrdinals.set(sessionId, ordinal);
+        const activityTurnId = `activity:${sessionId}:legacy-${ordinal}`;
+        this.legacyActivityTurnIds.set(sessionId, activityTurnId);
+        return activityTurnId;
+    }
+
+    protected finishLegacyActivityTurn(sessionId: string): void {
+        this.legacyActivityTurnIds.delete(sessionId);
     }
 
     protected clearTranscript(): void {
         this.transcript = [];
         this.toolEntries.clear();
         this.diffEntries.clear();
+        this.legacyActivityTurnIds.clear();
+        this.legacyActivityTurnOrdinals.clear();
     }
 
     protected id(prefix: string): string {
@@ -539,6 +667,14 @@ function isFrameBatchedEvent(event: AgentHostEvent): boolean {
         || event.kind === 'plan'
         || event.kind === 'diff'
         || event.kind === 'context-usage';
+}
+
+function isActiveToolStatus(status: ToolCallEvent['status']): boolean {
+    return status === 'pending' || status === 'running';
+}
+
+function isTerminalToolStatus(status: ToolCallEvent['status']): boolean {
+    return status === 'completed' || status === 'failed' || status === 'rejected';
 }
 
 function monotonicToolStatus(

@@ -1568,6 +1568,80 @@ form.xora-provider-form,
     font-size: 10px;
 }
 
+.xora-live-turn {
+    --xora-tool-accent: var(--theia-focusBorder, #3794ff);
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+    min-height: 48px;
+    box-sizing: border-box;
+    align-items: center;
+    gap: 9px;
+    margin: 7px var(--xora-agent-pad) 3px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--xora-tool-accent) 30%, var(--theia-widget-border));
+    border-radius: 10px;
+    background:
+        linear-gradient(110deg, color-mix(in srgb, var(--xora-tool-accent) 9%, transparent), transparent 62%),
+        color-mix(in srgb, var(--theia-editorWidget-background) 72%, transparent);
+}
+
+.xora-live-turn-icon {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--xora-tool-accent) 34%, transparent);
+    border-radius: 8px;
+    color: var(--xora-tool-accent);
+    background: color-mix(in srgb, var(--xora-tool-accent) 10%, transparent);
+}
+
+.xora-live-turn-icon .codicon {
+    font-size: 13px;
+}
+
+.xora-live-turn-copy {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.xora-live-turn-copy strong,
+.xora-live-turn-copy > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-live-turn-copy strong {
+    color: var(--theia-foreground);
+    font-size: 11.5px;
+    font-weight: 600;
+}
+
+.xora-live-turn-copy > span {
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+}
+
+.xora-live-turn-time,
+.xora-activity-elapsed {
+    font-variant-numeric: tabular-nums;
+}
+
+.xora-live-turn-time {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.xora-live-turn-time .codicon {
+    font-size: 10px;
+}
+
 .xora-message-header button {
     display: grid;
     width: 24px;
@@ -1614,6 +1688,24 @@ form.xora-provider-form,
 .xora-pending-send-state .codicon,
 .xora-pending-attachment-count .codicon {
     font-size: 11px;
+}
+
+.xora-pending-cancel {
+    margin-left: auto;
+    padding: 1px 5px;
+    border: 0;
+    border-radius: 5px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
+.xora-pending-cancel:hover,
+.xora-pending-cancel:focus-visible {
+    color: var(--theia-foreground);
+    background: var(--theia-toolbar-hoverBackground);
+    outline: none;
 }
 
 .xora-message-text {
@@ -1777,6 +1869,27 @@ form.xora-provider-form,
     line-height: 15px;
 }
 
+.xora-tool-group-current {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 5px;
+}
+
+.xora-tool-group-current .xora-tool-category-list {
+    flex: 0 0 auto;
+}
+
+.xora-tool-group-operation {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--theia-descriptionForeground);
+    font-size: 10px;
+    line-height: 15px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .xora-activity-summary::-webkit-details-marker,
 .xora-inline-diff > summary::-webkit-details-marker {
     display: none;
@@ -1795,6 +1908,10 @@ form.xora-provider-form,
 .xora-tool-status {
     font-size: 11px;
     white-space: nowrap;
+}
+
+.xora-activity-elapsed {
+    color: color-mix(in srgb, currentColor 82%, var(--theia-descriptionForeground));
 }
 
 .xora-tool-status-running,
@@ -3382,6 +3499,14 @@ form.xora-provider-form,
 
     .xora-agent-heading-icon {
         display: none;
+    }
+
+    .xora-live-turn {
+        grid-template-columns: 28px minmax(0, 1fr);
+    }
+
+    .xora-live-turn-time {
+        grid-column: 2;
     }
 
     .xora-agent-popover {

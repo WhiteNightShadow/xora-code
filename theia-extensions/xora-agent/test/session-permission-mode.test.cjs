@@ -39,6 +39,7 @@ function hostHarness(root) {
     host.runtimeProviderEpoch = session.providerRuntimeEpoch;
     host.sidecarVersion = session.sidecarVersion;
     host.phase = 'ready';
+    host.activePrompts = new Map([[session.appSessionId, {}]]);
     host.loadedSessionIds = new Set([session.appSessionId]);
     host.restoringSessionCounts = new Map();
     host.acpSessionLookup = new Map([[session.acpSessionId, session.appSessionId]]);
@@ -228,7 +229,7 @@ test('full access rejects paths outside the workspace, including a missing file 
     }
 });
 
-test('global full access never bypasses active-session or workspace-trust checks', async () => {
+test('global full access follows the outstanding turn across tabs and never bypasses workspace trust', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whitenight-permission-'));
     try {
         const { host, session } = hostHarness(root);
@@ -236,10 +237,18 @@ test('global full access never bypasses active-session or workspace-trust checks
         host.activeSessionId = 'another-session';
         assert.deepEqual(
             await host.handlePermissionRequest(permissionParams(session)),
-            { outcome: { outcome: 'cancelled' } }
+            { outcome: { outcome: 'selected', optionId: 'allow-this-time' } },
+            'opening another conversation must not cancel a background turn permission'
         );
 
-        host.activeSessionId = session.appSessionId;
+        host.activePrompts.delete(session.appSessionId);
+        assert.deepEqual(
+            await host.handlePermissionRequest(permissionParams(session)),
+            { outcome: { outcome: 'cancelled' } },
+            'a session without an outstanding turn cannot gain a new permission continuation'
+        );
+
+        host.activePrompts.set(session.appSessionId, {});
         host.isWorkspaceTrusted = () => false;
         assert.deepEqual(
             await host.handlePermissionRequest(permissionParams(session)),

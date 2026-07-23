@@ -575,10 +575,11 @@ test('managed subscription auth events fold into one final epoch before the RPC 
 
     const result = await manager.coordinateSubscriptionAuthentication(source, async () => {
         timeline.push('operation');
-        manager.observeGrokHomeChange('oauth-state.json');
-        // Coalesced writes from one managed login/logout transaction must not
-        // be mistaken for separate external authentication changes.
-        manager.observeGrokHomeChange('credentials.json');
+        manager.observeGrokHomeChange('auth.json.lock');
+        // Only the final auth.json rename represents the managed credential
+        // write. Lock and temporary files must not create extra invalidations.
+        manager.observeGrokHomeChange('auth.json.123.tmp');
+        manager.observeGrokHomeChange('auth.json');
         return 'done';
     });
     timeline.push('rpc-returned');
@@ -589,8 +590,8 @@ test('managed subscription auth events fold into one final epoch before the RPC 
     assert.equal(manager.grokHomeNotification, undefined);
     assert.equal(manager.grokManagedAuthenticationNotificationPending, false);
     assert.equal(manager.subscriptionAuthenticationMutationActive, false);
-    assert.ok(timeline.indexOf('source-shared:false') < timeline.indexOf('rpc-returned'));
-    assert.ok(timeline.indexOf('peer-shared:false') < timeline.indexOf('rpc-returned'));
+    assert.equal(timeline.includes('source-shared:false'), false);
+    assert.equal(timeline.includes('peer-shared:false'), false);
 
     // There must be no delayed self-event left that can retire a session made
     // immediately after the authentication RPC resolves.
@@ -621,7 +622,7 @@ test('a real subscription auth event outside a managed transaction still rotates
     manager.subscriptionAuthenticationMutationActive = false;
     manager.grokHomeNotificationDelayMs = 4;
 
-    manager.observeGrokHomeChange('external-auth.json');
+    manager.observeGrokHomeChange('auth.json');
     await new Promise(resolve => setTimeout(resolve, 12));
 
     assert.equal(rotations, 1);
@@ -634,6 +635,115 @@ test('a real subscription auth event outside a managed transaction still rotates
         },
         { shared: true }
     ]);
+});
+
+function subscriptionWatcherFixture(active = false) {
+    const manager = Object.create(AgentHostManager.prototype);
+    let rotations = 0;
+    let authCacheInvalidations = 0;
+    const received = [];
+    const service = Object.create(GrokAgentHostService.prototype);
+    service.providerId = 'grok-subscription';
+    service.supervisor = { running: active };
+    service.acp = active ? {} : undefined;
+    service.managementChild = undefined;
+    service.notifyProviderRuntimeInvalidated = change => received.push(change);
+    service.notifySharedGrokStateChanged = changed => received.push({ shared: changed });
+    manager.services = new Set([service]);
+    manager.providers = {
+        rotateRuntimeEpoch: providerId => {
+            rotations += 1;
+            assert.equal(providerId, 'grok-subscription');
+        },
+        invalidateSubscriptionAuthStatus: () => { authCacheInvalidations += 1; }
+    };
+    manager.grokHomeNotification = undefined;
+    manager.grokAuthenticationNotificationPending = false;
+    manager.grokManagedAuthenticationNotificationPending = false;
+    manager.grokManagedAuthenticationEventsObserved = false;
+    manager.subscriptionAuthenticationMutationActive = false;
+    manager.grokHomeNotificationDelayMs = 4;
+    return {
+        manager,
+        counters: () => ({ rotations, authCacheInvalidations, received })
+    };
+}
+
+test('the shared-home watcher ignores ambiguous and non-authentication Windows file events', async () => {
+    const fixture = subscriptionWatcherFixture(false);
+
+    for (const filename of [
+        undefined,
+        'auth.json.lock',
+        'auth.json.4f733c9d.tmp',
+        'mcp_credentials.json'
+    ]) {
+        fixture.manager.observeGrokHomeChange(filename);
+    }
+    await new Promise(resolve => setTimeout(resolve, 12));
+
+    assert.deepEqual(fixture.counters(), {
+        rotations: 0,
+        authCacheInvalidations: 0,
+        received: []
+    });
+    assert.equal(fixture.manager.grokHomeNotification, undefined);
+});
+
+test('an active subscription runtime token refresh does not retire its own epoch or session', async () => {
+    const fixture = subscriptionWatcherFixture(true);
+
+    // Grok Build refreshes this file while ACP is running. Treating the write
+    // as a login/account switch makes Windows invalidate the runtime that just
+    // performed the refresh and leaves the UI stuck at “初始化中”.
+    fixture.manager.observeGrokHomeChange('auth.json');
+    fixture.manager.observeGrokHomeChange('auth.json');
+    await new Promise(resolve => setTimeout(resolve, 12));
+
+    assert.deepEqual(fixture.counters(), {
+        rotations: 0,
+        authCacheInvalidations: 0,
+        received: []
+    });
+});
+
+test('a delayed Windows auth.json event after managed login cannot invalidate the fresh epoch', async () => {
+    const fixture = subscriptionWatcherFixture(false);
+    fixture.manager.managedSubscriptionAuthenticationGraceMs = 1_000;
+    fixture.manager.lastManagedSubscriptionAuthenticationAt = Date.now();
+
+    // Windows may deliver the final rename after the CLI process and the
+    // coordinator have both completed. It still belongs to that managed login.
+    fixture.manager.observeGrokHomeChange('auth.json');
+    await new Promise(resolve => setTimeout(resolve, 12));
+
+    assert.deepEqual(fixture.counters(), {
+        rotations: 0,
+        authCacheInvalidations: 0,
+        received: []
+    });
+});
+
+test('an exact external auth.json change without an active subscription runtime invalidates once', async () => {
+    const fixture = subscriptionWatcherFixture(false);
+
+    // Windows commonly reports both rename and change for one atomic replace.
+    fixture.manager.observeGrokHomeChange('auth.json');
+    fixture.manager.observeGrokHomeChange('auth.json');
+    await new Promise(resolve => setTimeout(resolve, 12));
+
+    assert.deepEqual(fixture.counters(), {
+        rotations: 1,
+        authCacheInvalidations: 1,
+        received: [
+            {
+                providerId: 'grok-subscription',
+                reason: 'subscription-auth',
+                invalidateSession: true
+            },
+            { shared: true }
+        ]
+    });
 });
 
 test('a Grok TOML write failure cannot replace relay metadata or its credential', () => {

@@ -8,7 +8,7 @@
   </p>
 
   <p>
-    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.1%20Alpha-f59e0b?style=flat-square" alt="v0.1 Alpha" /></a>
+    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.0%20Alpha-f59e0b?style=flat-square" alt="v0.2.0 Alpha" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/build%20targets-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="Build targets: macOS Windows Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
@@ -19,7 +19,7 @@
     <a href="#快速开始">快速开始</a> ·
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
-    <a href="#v010-release-notes">v0.1.0 Release Notes</a> ·
+    <a href="#v020-release-notes">v0.2.0 Release Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
     <a href="#参与项目">参与项目</a> ·
     <a href="#问题反馈与交流">问题反馈与交流</a>
@@ -33,13 +33,15 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 它不是简单地把终端嵌进窗口：Grok Build 作为固定版本的 sidecar 由 Electron 主进程托管，前端通过 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol/agent-client-protocol) 接收流式消息、计划、工具调用、权限请求和会话事件。凭据、进程和最终权限裁决不会交给渲染页面。
 
 > [!IMPORTANT]
-> Xora Code 当前处于 **v0.1 Alpha**。核心桌面工作区和 Agent 流程已经可用，但兼容来源 MCP 汇总、组件在线更新和正式签名发行仍在完善。Preview 安装包未经平台正式签名，仅适合开发、测试与提前体验，请勿用于生产环境。
+> Xora Code 当前处于 **v0.2.0 Alpha**。核心桌面工作区、并发会话、模型接入与可审查 Agent 流程已经可用，但扩展运行期热刷新、组件在线更新和正式签名发行仍在完善。Preview 安装包未经平台正式签名，仅适合开发、测试与提前体验，请勿用于生产环境。
 
 ## 为什么是 Xora Code
 
 - **桌面优先**：项目树、编辑器、搜索、Diff、终端和 Agent 固定在同一个工作台中。
 - **围绕 Grok Build**：保留 Grok Build 的代码理解、文件操作、命令执行、网络搜索与扩展能力，并通过 ACP 提供图形界面。
-- **过程可见**：计划、文件读写、搜索、终端、网络、Skills、MCP 和 Plugins 操作按类型展示，不让 Agent 在黑盒里工作。
+- **过程可见**：计划、文件读写、搜索、终端、网络、Skills、MCP 和 Plugins 操作按类型展示；同一轮的多个工具与文件变更会合并成一个稳定活动组，并显示当前操作、状态与耗时。
+- **多会话并行**：不同会话可以同时工作；每个会话独立保存草稿、附件与消息队列，切换项目或历史不会互相覆盖。
+- **低等待体验**：打开项目即预热 Agent Runtime，首个回复片段优先显示，高频流式更新合并到浏览器帧，减少首发等待、界面闪屏和历史切换卡顿。
 - **用户掌控**：支持请求审批与完全访问两种应用级权限模式；选择会跨项目、会话、窗口和应用重启保持，敏感操作仍由 Electron 主进程进行最终裁决。
 - **开放源码**：桌面应用、ACP 客户端、Agent UI、权限策略、会话存储、构建和发布脚本均在本仓库开放。
 
@@ -47,23 +49,28 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 
 | 能力 | 说明 |
 | --- | --- |
-| **完整编码工作区** | 打开文件夹或多根工作区，使用项目树、Monaco 编辑器、文件搜索、原生 Diff、终端、任务、SCM 和设置；切换目录后 Explorer 会自动恢复，不需要手动执行 `View: Explorer`。 |
-| **流式 Agent 对话** | 实时显示回复、Plan、工具活动、终端输出、错误与任务状态；首个回复片段立即呈现，后续片段合并刷新，兼顾响应速度与渲染稳定性。 |
+| **完整编码工作区** | 打开文件夹或多根工作区，使用项目树、Monaco 编辑器、文件搜索、原生 Diff、终端、任务、SCM 和设置；精简桌面外壳保留核心区域，右侧 Xora Code 面板始终可用，切换目录后 Explorer 自动恢复。 |
+| **流式 Agent 对话** | 实时显示回复、Plan、工具活动、终端输出、错误与任务状态；首个回复片段立即呈现，后续片段按帧合并刷新，减少连续 Markdown 重排和活动区闪屏。 |
 | **理解并修改项目** | Agent 可以读取和搜索项目、修改文件、执行命令、运行测试，并将变更集中到可审查的 Diff 视图。 |
-| **活动与变更审阅** | 按文件、搜索、终端、网络、Skill、MCP、Plugin 分类查看操作；支持打开差异和基于文件哈希的安全撤销。 |
+| **轮次化活动与变更审阅** | 同一条用户任务产生的 Plan、工具和多个文件变更共享稳定轮次 ID，并合并成一个「Agent 活动」；可按文件、搜索、终端、网络、Skill、MCP、Plugin 筛选，支持文件定位、查看差异和基于哈希的安全撤销。 |
+| **多会话与消息队列** | 不同会话可并行执行；同一会话可连续提交多条等待消息，并可单独取消队列中的消息。编辑框文字、图片和重试状态均按会话隔离。 |
 | **权限模式** | 默认逐项请求审批，也可开启完全访问；模式由应用级设置统一管理并持久化到本机，所有项目、会话和窗口保持一致。 |
-| **会话与本地历史** | 每次打开或重新打开项目都会进入干净的新会话页；历史事件以脱敏 JSONL 保存在本地，可由用户手动恢复，崩溃后不会自动重放任务。 |
+| **会话与本地历史** | 打开项目时优先恢复该工作区最近一次会话；也可随时新建、重命名或切换历史。事件以脱敏 JSONL 保存在本地，常用历史会缓存在 renderer 中以加快切换，崩溃后绝不自动重放任务。 |
 | **原生上下文压缩** | 复用 Grok Build 0.2.102 的自动上下文压缩机制；界面仅展示 Runtime 提供的真实 Token 元数据和压缩状态，不在桌面端按字符数推算。 |
-| **Grok 订阅与自定义模型** | 支持 Grok 订阅登录，以及可编辑 Base URL、API Key、模型 ID 和上下文窗口的自定义模型服务。 |
+| **Grok 订阅与自定义模型** | 设置页只保留 Grok 订阅和自定义模型服务；支持编辑 Base URL、API Key、模型 ID、上下文窗口与后端搜索，并可从兼容端点获取模型列表。 |
 | **兼容模型服务** | 自定义 Provider 支持 OpenAI Responses、OpenAI Chat Completions 与 Anthropic Messages 协议，所有模型仍通过 Grok Build 运行。 |
-| **图片上下文** | 可以选择或粘贴 PNG、JPEG、WebP 图片；仅在当前 ACP Runtime 明确声明图片能力时发送。 |
-| **Skills / MCP / Plugins（Preview）** | 通过“Xora Code 面板右上角齿轮 → Agent 设置”进入，支持 Skill 启停与 `SKILL.md`、MCP 配置与诊断、Plugin/Marketplace 安全安装流程；兼容来源汇总仍在完善。 |
+| **全局模型选择** | 在设置中切换订阅或自定义 Provider 后，所有项目与窗口统一采用当前模型服务；可继续的历史会话会安全重绑，不兼容或恢复失败的记录保留为只读历史。 |
+| **中文输入与图片上下文** | 对话输入、会话重命名完整支持中文 IME；可以选择或粘贴 PNG、JPEG、WebP 图片，且仅在当前 ACP Runtime 明确声明图片能力时发送。 |
+| **语言与代码高亮** | 安装包内置常用 VS Code 语法插件，覆盖 JS/TS、C/C++、Python、JSON、Markdown、HTML/CSS、Shell、YAML、XML、SQL、Go、Rust、Java、Dockerfile 等；Agent 回复代码块可选择跟随主题、GitHub、Monokai 或 One Dark 高亮风格。 |
+| **Skills / MCP / Plugins（Preview）** | 通过“Xora Code 面板右上角齿轮 → Agent 设置”管理 Skill、MCP 和 Plugin；支持 Skill 启停与打开 `SKILL.md`、MCP 多源列表/健康诊断/密钥引用，以及要求固定提交和二次确认的 Plugin/Marketplace 流程。对话框输入 `/` 还可快速选择文件、MCP 与技能。 |
+| **跨平台 Runtime** | 项目打开后立即启动或恢复 Grok Build 待机环境；ACP 初始化使用 45 秒发布级超时和有界冷启动恢复。macOS、Windows、Linux 共用明确的 Grok Home 解析与认证状态同步策略。 |
 
 ## 使用方式
 
-1. **打开项目**：选择单个文件夹或多根工作区，并确认 Agent 的主工作目录。每次打开都会从新会话页开始；需要继续旧任务时，可从本地历史手动恢复。
-2. **连接模型**：在设置中登录 Grok 订阅，或添加带 Base URL、API Key 和模型 ID 的自定义模型服务。
-3. **描述任务**：在右侧 Xora Code 面板输入目标，审阅计划、工具活动、权限请求和最终 Diff。
+1. **打开项目**：选择单个文件夹或多根工作区，并确认 Agent 主工作目录。Xora Code 会立即预热 Runtime，并恢复该项目最近一次本地会话；使用 `+` 可开始干净的新会话。
+2. **连接模型**：在设置中登录 Grok 订阅，或添加带 Base URL、API Key、协议和模型 ID 的自定义模型服务。这里的选择是应用级默认值，会同步到所有项目和会话。
+3. **描述任务**：在右侧 Xora Code 面板输入目标；任务执行中仍可切换到其他会话，或继续为当前会话加入等待消息。
+4. **审阅结果**：查看按轮次合并的 Agent 活动、操作耗时、权限请求和文件 Diff；文件卡片可直接定位到项目树，并支持哈希保护的安全撤销。
 
 发送任务前，Xora Code 会先执行 Save All。若文件无法保存，任务不会开始，避免 Agent 读取到与编辑器不一致的磁盘状态。
 
@@ -71,11 +78,13 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 
 | 方式 | 适用场景 | 说明 |
 | --- | --- | --- |
-| **Grok 订阅** | 已使用 Grok CLI / Grok Build 的用户 | 浏览器登录和退出完全交给 Grok Build，并与本机 `~/.grok` 共享状态。 |
-| **自定义模型服务** | 使用 API Key、官方接口或可信中转站 | 可修改 Base URL、API Key、协议、模型 ID 与上下文窗口。 |
+| **Grok 订阅** | 已使用 Grok CLI / Grok Build 的用户 | 浏览器登录和退出完全交给 Grok Build，并与本机 Grok Home 共享状态；Electron 使用明确的跨平台路径解析与文件监听同步外部认证变化。 |
+| **自定义模型服务** | 使用 API Key、官方接口或可信中转站 | 可修改 Base URL、API Key、协议、模型 ID、上下文窗口与后端搜索，保存后即可设为应用当前服务。 |
 | **自定义 Provider** | 使用兼容服务或内部网关 | 支持 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages。 |
 
 API Key 使用 Electron `safeStorage` 保存，不会回显到页面、日志或 Theia 设置。Linux 检测到不安全的密钥存储后仅允许当前会话使用。
+
+Provider 与模型选择是应用级状态，而不是某个对话的临时属性。切换时会先等待或取消活跃 turn，再隔离旧 Runtime，并在可能时为历史记录安全绑定新的 ACP 会话；不兼容或恢复失败的记录保留为只读历史，绝不自动重放旧 Prompt。
 
 ## 技术架构
 
@@ -106,9 +115,11 @@ flowchart LR
 | [Grok Build](https://github.com/xai-org/grok-build) | 提供编码 Agent Runtime、工具、Skills、MCP 和 Plugins 能力。 |
 | [ACP](https://github.com/agentclientprotocol/agent-client-protocol) | 连接桌面客户端与 Agent，传输会话、流式内容、工具和权限事件。 |
 
-Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.1 的实际 Runtime 由 Grok Build 提供。
+Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.0 的实际 Runtime 由 Grok Build 提供。
 
-对话流沿端到端链路做了轻量调度：首个 Assistant 文本片段收到后立即跨进程呈现，后续高频片段再按短周期批量刷新，减少首字等待和连续 Markdown 重排。上下文整理则完全复用 Grok Build 0.2.102 的原生机制，Xora Code 只适配并展示 ACP 扩展事件，不在桌面端另造摘要或估算 Token。
+对话流沿端到端链路做了轻量调度：项目打开即预热 Runtime；首个 Assistant 文本片段收到后立即跨进程呈现，后续高频片段再按浏览器帧批量刷新，减少首字等待和连续 Markdown 重排。不同会话使用独立的发送队列并可并行工作，同一会话则保持 ACP Prompt 串行顺序。
+
+每次 Prompt 都由 Electron 生成并持久化稳定 `turnId`。user、Plan、工具、Diff、Assistant 与完成事件因此可以在实时流、历史恢复和会话切换后保持同一活动边界；旧版 JSONL 没有 `turnId` 时，renderer 会根据 user / turn-completed 边界兼容推断。上下文整理完全复用 Grok Build 0.2.102 的原生机制，Xora Code 只适配并展示真实 Token 与压缩事件，不在桌面端另造摘要或按字符数估算。
 
 ## 安全与权限
 
@@ -125,44 +136,78 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 
 ### 已可体验
 
-- Theia + Electron 桌面工作区及固定右侧 Agent 面板
-- 打开或切换目录后的 Explorer 自动恢复，以及始终从新会话页开始的项目体验
-- Grok Build ACP 初始化、认证、新建/加载会话、流式任务和取消
-- Plan、工具活动、权限审批、Diff、安全撤销和图片输入
-- 应用级持久权限模式，以及低延迟首片段流式输出
+- 精简的 Theia + Electron 桌面工作区、自动恢复的 Explorer 与固定右侧 Xora Code 面板
+- 打开项目自动恢复最近会话、新建/重命名/切换历史，以及按会话隔离的文字与图片草稿
+- 多会话并行、单会话多消息排队、等待消息取消和后台权限请求处理
+- 项目打开即预热 Grok Build、45 秒 ACP 初始化上限、有界冷启动恢复和低延迟首片段输出
+- Plan、按轮次合并的工具活动、操作耗时、权限审批、Diff、文件定位与安全撤销
 - Grok Build 原生自动上下文压缩、真实 Token 占用与压缩状态展示
-- Grok 订阅、自定义 API 服务、Base URL、Provider 与模型选择
-- Skills、MCP、Plugins 的设置入口与安全管理边界
+- Grok 订阅与自定义 API Provider、兼容中转站、模型获取及应用级全局模型同步
+- 中文 IME 会话输入/重命名，以及受 ACP 能力约束的图片粘贴和文件选择
+- 随安装包校验并分发的常用语言语法插件，以及四种 Agent 代码块高亮风格
+- Skills、MCP、Plugins 的设置管理、健康诊断、对话快捷选择与安全边界
 - macOS、Windows、Linux 的构建配置和 CI 矩阵
 
 ### 仍在完善
 
-- 合并 Grok 原生配置与 Claude/Cursor 兼容来源的最终生效 MCP 列表
-- Skills / MCP / Plugins 在 Agent 运行期间的无中断刷新体验
+- Skills / MCP / Plugins 在 Agent 运行期间的无中断刷新、更多 OAuth/远程传输兼容与 Marketplace 体验
+- 超大历史与超长单轮工具列表的进一步虚拟化，以及更多真实项目性能基准
 - 两套 Ed25519 更新信任锚、平台代码签名、macOS 公证与正式 Release 发布
 
-> Preview 构建不代表稳定版或生产就绪版本。登录状态由 Grok Build 与共享的 `~/.grok` 管理；Xora Code 会在启动时读取实际认证状态，而不会以“自动恢复旧会话”代替明确的新会话体验。
+> Preview 构建不代表稳定版或生产就绪版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
 
-## v0.1.0 Release Notes
+## v0.2.0 Release Notes
 
-`v0.1.0` 是 Xora Code 的首个 Alpha / Preview 源码基线，重点是打通可审查的桌面 Agent 主流程，并建立后续正式发行所需的安全与工程边界。
+`v0.2.0` 在首个桌面 Agent 基线上集中迭代了会话并发、冷启动性能、活动可见性、模型一致性与跨平台认证。目标是让“打开项目、输入任务、查看过程、切换会话”成为连续且无需等待用户理解内部 Runtime 状态的体验。
 
 > [!NOTE]
-> 本节描述仓库中 `0.1.0` 的已实现范围，不代表已发布正式稳定版。具体 Preview 安装包应以对应 GitHub Prerelease 中记录的源码提交、构建链接和 SHA-256 校验信息为准。
+> 本节描述仓库中 `0.2.0` 的已实现范围，不代表已发布正式稳定版。具体 Preview 安装包应以对应 GitHub Prerelease 中记录的源码提交、构建链接和 SHA-256 校验信息为准。
 
-### 版本亮点
+### Agent 与会话
 
-- **桌面编码工作台**：基于 Eclipse Theia 与 Electron 集成项目树、Monaco 编辑器、搜索、Diff、终端、任务和 SCM，并提供固定的 Xora Code Agent 面板。
-- **Grok Build + ACP**：由 Electron 主进程托管固定版本的 Grok Build sidecar，支持 ACP 初始化、认证、新建/加载会话、流式任务、取消、Plan、工具活动与权限请求。
-- **模型接入**：支持 Grok 订阅和自定义 Provider；自定义服务可配置 Base URL、API Key、模型 ID、上下文窗口，以及 OpenAI Responses、OpenAI Chat Completions 或 Anthropic Messages 协议。
-- **可审查的 Agent 体验**：首个 Assistant 文本片段优先呈现，后续高频片段批量刷新；文件、搜索、终端、网络与扩展活动分类展示，并可查看 Diff、执行哈希保护的安全撤销。
-- **本地会话与上下文**：默认从干净的新会话页开始，可手动恢复脱敏后的本地历史；支持 Runtime 原生 Token/压缩状态和能力受控的 PNG、JPEG、WebP 图片输入。
-- **扩展管理预览**：提供 Skills 启停、MCP 配置与诊断，以及要求固定提交和明确确认的 Plugin / Marketplace 安装入口。
-- **安全边界**：密钥由 Electron `safeStorage` 管理，权限在主进程最终裁决；Workspace Trust、路径与符号链接边界、Provider 网络访问、日志脱敏和会话身份均采用 fail-closed 检查。
-- **可复现工程基线**：固定 Node.js、Yarn、Theia、Electron、Grok Build 与 Rust 版本，并提供 ACP、Runtime、UI、安全、sidecar 和发行脚本测试。
+- **最近会话自动恢复**：打开项目后直接显示该工作区最后一次会话；新建会话仍保持一键可达，历史恢复失败时保留只读本地记录。
+- **多会话同时进行**：每个会话拥有独立执行 lane，不同会话可以并行发送和接收；后台任务不会因为用户查看另一个会话而失去所有权。
+- **单会话消息队列**：同一会话可以连续提交多条任务，按照 FIFO 顺序交给 Grok Build；等待中的单条消息可取消，正在执行的任务继续使用 ACP cancel。
+- **会话级草稿**：文本、图片、错误重试和队列状态均绑定具体会话；A → B → A 切换不会互相覆盖编辑框内容。
+- **更快的历史切换**：最近历史保留有界 renderer 缓存，JSONL 回放只触发一次视图通知，并合并加载期间的增量事件。
+
+### 性能与稳定性
+
+- **打开项目即准备**：Runtime 在工作区附加后立即预热，而不是等用户第一次发送；首次任务复用已经就绪的 Runtime 和已加载会话。
+- **有界 ACP 冷启动**：桌面初始化上限统一为 45 秒，携带冷启动提示，并只对后台预热进行一次有界恢复；用户 Prompt 永不自动重放。
+- **首片段优先**：首个 Assistant 文本立即跨 Electron 边界显示，后续碎片按固定短窗口和浏览器帧合并，减少首字延迟与渲染抖动。
+- **会话切换隔离**：历史加载、Provider 切换、重命名和并发状态更新使用 generation/revision 防护，迟到事件不能把当前页面切回旧会话。
+
+### 活动、文件与上下文
+
+- **一轮一个活动组**：Electron 为每条 Prompt 持久化 `turnId`；同一轮中交错出现的工具、文本和多个文件 Diff 只显示一个「Agent 活动」，下一轮才创建新组。
+- **旧历史兼容**：没有 `turnId` 的旧 JSONL 会根据 user / turn-completed 顺序推断轮次；Provider 在不同轮次复用 `toolCallId` 也不会串组或吞掉 Diff。
+- **操作状态与耗时**：正在分析、执行工具、生成回复和等待审批都有明确状态；工具完成、失败或取消后冻结真实耗时，不再长期显示“活动中”。
+- **紧凑变更卡片**：多个文件连续展示在同一活动下，保留文件路径、增删行、项目树定位、原生 Diff、补丁展开和哈希保护的安全撤销。
+- **原生上下文管理**：直接显示 Grok Build 报告的 Token、上下文窗口、压缩次数和最近压缩结果，不使用字符数伪造占用。
+
+### 模型、认证与输入
+
+- **简化服务入口**：设置页只保留 Grok 订阅和自定义模型服务，移除容易误导的旧内置 xAI/Grok API 入口。
+- **兼容中转站**：自定义 Provider 支持 Base URL、API Key、协议、模型 ID、上下文窗口、后端搜索和 `/models` 获取；百万级上下文按安全整数原样保存。
+- **应用级模型一致性**：设置中选择的订阅、自定义 Provider 与模型是全局默认值，跨项目和窗口保持一致；切换凭据时由 backend 安全重启 Runtime，可继续的历史会话会重绑，不兼容记录保留只读。
+- **跨平台订阅状态**：macOS、Windows、Linux 使用同一显式 Grok Home 规则；外部 CLI 登录变化由 Electron 协调并广播，不由 renderer 猜测认证文件。
+- **中文与图片**：对话和会话重命名支持 IME 组合态；支持 PNG、JPEG、WebP 的选择与粘贴，原始图片数据不会写入会话日志。
+
+### 扩展、安全与桌面体验
+
+- **Skills / MCP / Plugins**：提供最终生效 Skill、MCP 多源列表与诊断、Plugin/Marketplace 管理；在对话框输入 `/` 可快速选择文件、MCP 和技能。
+- **内置语言支持**：启动和打包前校验常用 VS Code builtin grammars，避免新安装后代码文件退化为纯文本；该能力只承诺语法高亮和随内置包提供的基础语言特性，不等同于为每种语言内置完整 LSP 或调试器。
+- **Agent 代码高亮**：回复中的多语言 fenced code block 支持默认（跟随主题）、GitHub、Monokai 和 One Dark 四种风格，并在本地记住选择。
+- **活动标签**：文件、项目搜索、终端、测试、网络、Skill、MCP、Plugin 和子 Agent 使用结构化标签，而不是把内部 call ID 直接展示给用户。
+- **全局权限模式**：请求审批 / 完全访问跨项目、会话、窗口和重启保持；后台会话的权限请求不会因切换标签而丢失。
+- **精简固定布局**：采用无边框窗口策略，macOS 保留交通灯，Windows/Linux 保留系统窗口控制和可拖拽区域；隐藏 Open Editors、状态栏等冗余元素，保持 Explorer、编辑器与 Xora Code 三个核心区域。
+- **低干扰反馈**：高频操作结果优先显示在 Agent 面板内，不再依赖连续的右下角全局 Toast；Workspace Trust、目录提示和主要交互文案完成中文化。
+- **安全边界**：密钥由 Electron `safeStorage` 管理，Workspace Trust、路径/符号链接、Provider 网络访问、日志脱敏和权限裁决保持 fail-closed。
 
 ### 构建与发行准备
 
+- 仓库版本与各工作区统一为 `0.2.0`，依赖基线继续精确锁定。
 - Preview CI 在原生 Runner 上构建 macOS arm64/x64、Windows x64 和 Linux x64 产物，并为每个平台重新构建、校验和 smoke test 固定的 Grok Build sidecar。
 - Preview 以不可覆盖的 GitHub Prerelease 发布，不会标记为 Latest，也不会生成正式更新清单或签名文件。
 - 正式 Release 工作流已包含平台签名、公证、SBOM、第三方 notices 和 Ed25519 更新清单门禁；缺少任一必需凭据时会拒绝发布。
@@ -170,7 +215,7 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 ### 已知限制
 
 - 当前仍是 Alpha：Preview 产物没有完整平台签名，不适合生产环境或高风险项目。
-- Grok 原生配置与 Claude / Cursor 兼容来源的 MCP 汇总，以及 Skills / MCP / Plugins 的运行期无中断刷新仍在完善。
+- Skills / MCP / Plugins 的运行期无中断刷新、更多 OAuth/远程服务兼容仍在完善。
 - 仓库内尚未提供 sidecar 更新信任所需的 Ed25519 公钥；平台签名与更新签名私钥必须由发布环境单独提供。在这些门禁实际通过前，签名组件更新和正式 Release 都不可用。
 - Browser 目标仅用于 Fake Agent、契约测试和前端调试，不是可替代 Electron 桌面应用的产品版本。
 
@@ -186,6 +231,10 @@ Xora Code 将试用构建与正式分发严格分开，避免未签名产物被�
 Preview 页面会明确标注版本和提交，不会覆盖正式版更新通道。请在安装前核对 Release 说明与校验信息，并自行评估 Alpha 软件风险。
 
 ## 快速开始
+
+### 下载 Preview
+
+可从 [GitHub Releases](https://github.com/WhiteNightShadow/xora-code/releases) 获取 macOS、Windows 与 Linux 的 Preview 构建。请优先选择与系统和架构匹配的 Prerelease 资产，并在安装前核对 Release 页面中的源码提交、SHA-256 与未签名风险说明。
 
 ### 环境要求
 
@@ -204,6 +253,9 @@ nvm use
 corepack enable
 corepack prepare yarn@1.22.22 --activate
 yarn install --frozen-lockfile --non-interactive
+
+# 下载并校验编辑器内置语言插件
+yarn download:plugins
 
 yarn build
 yarn start:electron

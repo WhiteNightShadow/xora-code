@@ -388,6 +388,62 @@ test('workspace activation restores the latest local conversation across A-B-A a
     assert.equal(prewarms, 4);
 });
 
+test('rapid tool completion keeps Agent activity roots collapsed and structurally stable', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    widget.toolDisclosure = new Map();
+    const entry = {
+        id: 'tool-session-a-edit-1',
+        kind: 'tool',
+        payload: {
+            kind: 'tool-call',
+            sessionId: 'session-a',
+            toolCallId: 'edit-1',
+            title: 'Edit file',
+            toolName: 'apply_patch',
+            status: 'running',
+            startedAt: '2026-07-23T00:00:00.000Z',
+            presentation: {
+                action: 'file-write',
+                source: 'builtin',
+                targetLabel: 'lab-pages.ts'
+            }
+        }
+    };
+
+    widget.agentPaneView = 'conversation';
+    const runningGroup = widget.renderTranscript([entry])[0];
+    entry.payload = { ...entry.payload, status: 'completed', elapsedMs: 1_250 };
+    const completedGroup = widget.renderTranscript([entry])[0];
+
+    assert.equal(runningGroup.type, 'details');
+    assert.equal(runningGroup.key, completedGroup.key);
+    assert.equal(runningGroup.props.open, false);
+    assert.equal(completedGroup.props.open, false);
+    assert.equal(runningGroup.props.children[1], undefined, 'a running summary must not transiently mount its large body');
+    assert.match(JSON.stringify(runningGroup), /修改文件 · lab-pages\.ts/);
+
+    widget.agentPaneView = 'activity';
+    const firstActivityCard = widget.renderTranscript([entry])[0];
+    const secondEntry = {
+        ...entry,
+        id: 'tool-session-a-test-2',
+        payload: {
+            ...entry.payload,
+            toolCallId: 'test-2',
+            title: 'Run tests',
+            toolName: 'run_tests',
+            presentation: { action: 'test', source: 'builtin' }
+        }
+    };
+    const activityCards = widget.renderTranscript([entry, secondEntry]);
+    assert.equal(activityCards.length, 2);
+    assert.equal(firstActivityCard.type, activityCards[0].type);
+    assert.equal(firstActivityCard.key, activityCards[0].key,
+        'adding a second activity must not replace the first card with a new group root');
+    assert.equal(activityCards[0].props.open, false);
+});
+
 test('late session and snapshot events cannot steal a workspace fresh page', () => {
     const model = new AgentViewModel();
     const previous = session('a', 'idle', { workspaceRoot: '/fixture' });
@@ -423,33 +479,50 @@ test('tool updates are keyed by session as well as ACP call id', () => {
     assert.deepEqual(model.transcript.map(entry => entry.payload.sessionId), ['a', 'b']);
 });
 
-test('the latest A-B-A activation wins even when an older load completes last', async () => {
+test('two unloaded sessions hydrate concurrently while only the latest activation takes focus', async () => {
+    const { host, requests } = hostHarness();
+
+    const firstA = host.loadSession('a');
+    const latestB = host.loadSession('b');
+
+    assert.equal(requests.length, 2, 'each unloaded session must begin hydration without waiting for the other');
+    assert.deepEqual(requests.map(request => request.params.sessionId), ['acp-a', 'acp-b']);
+
+    requests[1].completion.resolve({});
+    const loadedB = await latestB;
+    assert.equal(loadedB.appSessionId, 'b');
+    assert.equal(host.activeSessionId, 'b');
+    assert.ok(host.loadedSessionIds.has('b'));
+
+    requests[0].completion.resolve({});
+    const loadedA = await firstA;
+    assert.equal(loadedA.appSessionId, 'a');
+    assert.deepEqual([...host.loadedSessionIds].sort(), ['a', 'b']);
+    assert.equal(host.activeSessionId, 'b', 'late background hydration must not steal the latest visible tab');
+});
+
+test('A-B-A activation coalesces A hydration and the final A intent wins', async () => {
     const { host, requests } = hostHarness();
 
     const firstA = host.loadSession('a');
     const middleB = host.loadSession('b');
     const latestA = host.loadSession('a');
 
-    await Promise.resolve();
-    if (requests.length === 3) {
-        // Concurrent implementations must ignore the stale B activation when
-        // its sidecar response arrives after the final A request.
-        requests[0].completion.resolve({});
-        await Promise.resolve();
-        requests[2].completion.resolve({});
-        await Promise.resolve();
-        requests[1].completion.resolve({});
-    } else {
-        // A serialized implementation is also valid. Resolve each request as
-        // it is issued so all three activation intents can finish.
-        for (let index = 0; index < 3; index += 1) {
-            while (!requests[index]) await new Promise(resolve => setImmediate(resolve));
-            requests[index].completion.resolve({});
-            await new Promise(resolve => setImmediate(resolve));
-        }
-    }
-    await Promise.allSettled([firstA, middleB, latestA]);
+    assert.equal(requests.length, 2, 'the second A intent must reuse its in-flight session/load');
+    assert.deepEqual(requests.map(request => request.params.sessionId), ['acp-a', 'acp-b']);
 
+    // Finish B first to prove its completion cannot override the later A
+    // activation, then release the single shared A hydration.
+    requests[1].completion.resolve({});
+    await middleB;
+    assert.equal(host.activeSessionId, undefined, 'a stale B activation must not take focus');
+
+    requests[0].completion.resolve({});
+    const [loadedFirstA, loadedLatestA] = await Promise.all([firstA, latestA]);
+
+    assert.equal(loadedFirstA.appSessionId, 'a');
+    assert.equal(loadedLatestA.appSessionId, 'a');
+    assert.deepEqual([...host.loadedSessionIds].sort(), ['a', 'b']);
     assert.equal(host.activeSessionId, 'a');
 });
 
@@ -474,6 +547,11 @@ test('a same-Provider runtime restart never reuses the previous sidecar load', a
     const { host, requests } = hostHarness();
 
     const oldRuntimeLoad = host.loadSession('a');
+    const obsoleteLoad = assert.rejects(
+        oldRuntimeLoad,
+        /runtime changed while restoring/i,
+        'a restore bound to the replaced process must fail instead of marking the new runtime hydrated'
+    );
     assert.equal(requests.length, 1);
 
     // Simulate a sidecar replacement that retained the same workspace,
@@ -487,7 +565,7 @@ test('a same-Provider runtime restart never reuses the previous sidecar load', a
     assert.equal(requests[1].method, 'session/load');
     requests[0].completion.resolve({});
     requests[1].completion.resolve({});
-    await Promise.all([oldRuntimeLoad, newRuntimeLoad]);
+    await Promise.all([obsoleteLoad, newRuntimeLoad]);
 
     assert.equal(host.activeSessionId, 'a');
     assert.ok(host.loadedSessionIds.has('a'));
@@ -695,6 +773,64 @@ test('repeated running and completed tool diffs create one persisted event and r
     assert.equal(beforeImages, 1);
     assert.equal(host.revertableDiffs.size, 1);
     assert.equal(host.emittedDiffKeys.size, 1);
+});
+
+test('backend tool clocks are session-isolated, monotonic and freeze at completion', () => {
+    const { host } = hostHarness();
+    const emitted = [];
+    host.emit = event => emitted.push(event);
+
+    host.acceptToolUpdate('session-a', {
+        toolCallId: 'same-id', title: 'Run command', status: 'running'
+    }, 'tool_call');
+    host.acceptToolUpdate('session-b', {
+        toolCallId: 'same-id', title: 'Edit file', status: 'running'
+    }, 'tool_call');
+    host.acceptToolUpdate('session-a', {
+        toolCallId: 'same-id', title: 'Run command', status: 'completed'
+    }, 'tool_call_update');
+    host.acceptToolUpdate('session-a', {
+        toolCallId: 'same-id', title: 'Late update', status: 'running'
+    }, 'tool_call_update');
+
+    const sessionA = emitted.filter(event => event.kind === 'tool-call' && event.sessionId === 'session-a');
+    const sessionB = emitted.filter(event => event.kind === 'tool-call' && event.sessionId === 'session-b');
+    assert.deepEqual(sessionA.map(event => event.status), ['running', 'completed', 'completed']);
+    assert.equal(sessionA[0].startedAt, sessionA[1].startedAt);
+    assert.equal(sessionA[1].elapsedMs, sessionA[2].elapsedMs);
+    assert.equal(Number.isSafeInteger(sessionA[1].elapsedMs), true);
+    assert.equal(sessionB.length, 1);
+    assert.notEqual(sessionA[0].startedAt, undefined);
+    assert.notEqual(sessionB[0].startedAt, undefined);
+
+    host.clearToolActivityTimings('session-a');
+    assert.equal([...host.toolActivityTimingState().keys()].some(key => key.startsWith('session-a\0')), false);
+    assert.equal([...host.toolActivityTimingState().keys()].some(key => key.startsWith('session-b\0')), true);
+});
+
+test('new files produce a zero-line removal diff instead of a phantom minus one', () => {
+    const { host } = hostHarness();
+    const emitted = [];
+    host.workspaceRoot = '/fixture';
+    host.emittedDiffKeys = new Set();
+    host.revertableDiffs = new Map();
+    host.safeWorkspaceFile = candidate => path.normalize(candidate);
+    host.sessions.saveBeforeImage = () => ({ path: '/history/empty', hash: 'empty-hash' });
+    host.emit = event => emitted.push(event);
+
+    host.acceptToolUpdate('session-a', {
+        toolCallId: 'create-1',
+        title: 'Create file',
+        status: 'completed',
+        content: [{ type: 'diff', path: 'new.ts', oldText: '', newText: 'one\ntwo\n' }]
+    }, 'tool_call_update');
+
+    const diff = emitted.find(event => event.kind === 'diff').diff;
+    const tool = emitted.find(event => event.kind === 'tool-call');
+    assert.equal(tool.elapsedMs, undefined, 'a terminal-only notification must not invent a duration');
+    assert.doesNotMatch(diff, /^-$/m);
+    assert.equal(diff.split(/\r?\n/).filter(line => line.startsWith('-') && !line.startsWith('---')).length, 0);
+    assert.equal(diff.split(/\r?\n/).filter(line => line.startsWith('+') && !line.startsWith('+++')).length, 2);
 });
 
 test('the backend diff dedupe guard remains bounded', () => {
@@ -1513,7 +1649,7 @@ test('a new session can load ACP models before its first prompt', async () => {
     await widget.loadModelOptions();
     await widget.selectModel(undefined, 'grok-fixture');
 
-    assert.deepEqual(timeline, ['start', 'refresh', 'refresh']);
+    assert.deepEqual(timeline, ['start', 'refresh']);
     assert.equal(widget.modelOptionsLoading, false);
     assert.equal(widget.newSessionModel, 'grok-fixture');
 });
@@ -1908,6 +2044,290 @@ test('the first send reuses a ready prewarm and creates a session without redund
     assert.equal(widget.sendPreparationPreview, undefined);
 });
 
+test('composer text and images are restored independently for each conversation', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const a = session('a');
+    const b = session('b');
+    const snapshot = runtimeSnapshot('/fixture', [a, b], a.appSessionId);
+    const imageA = { id: 'image-a', mimeType: 'image/png', data: 'YQ==', byteSize: 1, previewUrl: 'blob:a' };
+    const imageB = { id: 'image-b', mimeType: 'image/png', data: 'Yg==', byteSize: 1, previewUrl: 'blob:b' };
+
+    widget.model = { snapshot };
+    widget.roots = ['/fixture'];
+    widget.prompt = 'A 会话草稿';
+    widget.draftImages = [imageA];
+    widget.imageReadGeneration = 0;
+    widget.imageReadsInFlight = 0;
+    widget.pendingImageBytes = 0;
+    widget.imageAnnouncement = '';
+    widget.closeSlashMenu = () => undefined;
+    widget.textarea = null;
+    widget.activeComposerLaneKey = widget.promptLaneKey('/fixture', snapshot.providerId, a.appSessionId);
+    widget.storeActiveComposerDraft();
+
+    snapshot.activeSessionId = b.appSessionId;
+    const bKey = widget.promptLaneKey('/fixture', snapshot.providerId, b.appSessionId);
+    widget.activateComposerLane(bKey);
+    widget.prompt = 'B 会话草稿';
+    widget.draftImages = [imageB];
+    widget.storeActiveComposerDraft();
+
+    snapshot.activeSessionId = a.appSessionId;
+    widget.activateComposerLane(widget.promptLaneKey('/fixture', snapshot.providerId, a.appSessionId));
+    assert.equal(widget.prompt, 'A 会话草稿');
+    assert.deepEqual(widget.draftImages.map(image => image.id), ['image-a']);
+
+    snapshot.activeSessionId = b.appSessionId;
+    widget.activateComposerLane(bKey);
+    assert.equal(widget.prompt, 'B 会话草稿');
+    assert.deepEqual(widget.draftImages.map(image => image.id), ['image-b']);
+});
+
+test('one conversation sends queued prompts in FIFO order and can cancel one queued item', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const active = session('active');
+    const snapshot = runtimeSnapshot('/fixture', [active], active.appSessionId);
+    const firstGate = deferred();
+    const calls = [];
+
+    widget.prompt = '第一条';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.model = { snapshot };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.service = {
+        sendPrompt: async request => {
+            calls.push(request.text);
+            if (request.text === '第一条') await firstGate.promise;
+        }
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.update = () => undefined;
+    widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', snapshot.providerId, active.appSessionId));
+
+    const first = widget.send();
+    widget.prompt = '第二条（取消）';
+    const second = widget.send();
+    widget.prompt = '第三条';
+    const third = widget.send();
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(calls, ['第一条']);
+    const lane = widget.currentPromptLane(false);
+    assert.deepEqual(lane.queue.map(item => item.text), ['第二条（取消）', '第三条']);
+    await widget.cancelPromptItem(lane.queue[0].id);
+    await second;
+    assert.deepEqual(lane.queue.map(item => item.text), ['第三条']);
+
+    firstGate.resolve();
+    await Promise.all([first, third]);
+    assert.deepEqual(calls, ['第一条', '第三条']);
+});
+
+test('different conversations can send concurrently without sharing a preparation state', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const a = session('a');
+    const b = session('b');
+    const snapshot = runtimeSnapshot('/fixture', [a, b], a.appSessionId);
+    const gates = { A: deferred(), B: deferred() };
+    const calls = [];
+
+    widget.prompt = 'A';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.closeSlashMenu = () => undefined;
+    widget.model = { snapshot };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.service = {
+        sendPrompt: async request => {
+            calls.push(`${request.sessionId}:${request.text}`);
+            await gates[request.text].promise;
+        }
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.update = () => undefined;
+    for (const current of [a, b]) {
+        widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', snapshot.providerId, current.appSessionId));
+    }
+
+    const sendingA = widget.send();
+    await new Promise(resolve => setImmediate(resolve));
+    snapshot.activeSessionId = b.appSessionId;
+    widget.activateComposerLane(widget.promptLaneKey('/fixture', snapshot.providerId, b.appSessionId));
+    widget.prompt = 'B';
+    const sendingB = widget.send();
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(calls, ['a:A', 'b:B']);
+    assert.equal(widget.currentPromptLane(false).active.text, 'B');
+    assert.equal(widget.submission.text, 'B', 'visible preparation mirrors only the selected conversation');
+
+    gates.A.resolve();
+    gates.B.resolve();
+    await Promise.all([sendingA, sendingB]);
+});
+
+test('the session rename widget preserves a Chinese IME candidate until composition has fully ended', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    let guardTimer;
+    let commits = 0;
+    let prevented = 0;
+    let stopped = 0;
+    const originalSetTimeout = global.window.setTimeout;
+    const originalClearTimeout = global.window.clearTimeout;
+    global.window.setTimeout = callback => {
+        guardTimer = callback;
+        return 42;
+    };
+    global.window.clearTimeout = () => { guardTimer = undefined; };
+    try {
+        widget.renameDraft = '';
+        widget.renameImeComposing = true;
+        widget.renameImeCompositionJustEnded = false;
+        widget.renameImeCompositionGuardTimer = undefined;
+        widget.commitSessionRename = () => { commits += 1; };
+        const event = (isComposing, keyCode) => ({
+            key: 'Enter',
+            nativeEvent: { isComposing, keyCode },
+            preventDefault: () => { prevented += 1; },
+            stopPropagation: () => { stopped += 1; }
+        });
+
+        widget.handleSessionRenameKeyDown(event(true, 229), 'active');
+        assert.equal(commits, 0, 'candidate-selection Enter must not rename the session');
+
+        widget.endSessionRenameComposition('中文输入法会话');
+        assert.equal(widget.renameDraft, '中文输入法会话');
+        widget.handleSessionRenameKeyDown(event(false, 13), 'active');
+        assert.equal(commits, 0, 'the compositionend Enter task must still be ignored');
+        assert.equal(typeof guardTimer, 'function');
+
+        guardTimer();
+        widget.handleSessionRenameKeyDown(event(false, 13), 'active');
+        assert.equal(commits, 1, 'a later plain Enter commits the complete Chinese title');
+        assert.equal(prevented, 1);
+        assert.equal(stopped, 1);
+    } finally {
+        global.window.setTimeout = originalSetTimeout;
+        global.window.clearTimeout = originalClearTimeout;
+    }
+});
+
+test('an in-flight Chinese session rename does not block sending or roll back a newer lifecycle event', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const renameResult = deferred();
+    const timeline = [];
+    const current = session('active', 'completed', {
+        title: '中文会话',
+        updatedAt: '2026-07-19T00:02:00.000Z'
+    });
+    const staleRenameResponse = session('active', 'running', {
+        title: '中文会话',
+        updatedAt: '2026-07-19T00:01:00.000Z'
+    });
+    const snapshot = runtimeSnapshot('/fixture', [current], current.appSessionId);
+
+    widget.renamingSessionId = current.appSessionId;
+    widget.renameDraft = '  中文会话  ';
+    widget.renameImeComposing = false;
+    widget.renameImeCompositionJustEnded = false;
+    widget.renameImeCompositionGuardTimer = undefined;
+    widget.prompt = '重命名后继续发送';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.submission = undefined;
+    widget.sendPreparationInFlight = false;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.sessionLoadGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.runtimePrewarmTimer = undefined;
+    widget.retryablePrompt = undefined;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.model = {
+        snapshot,
+        updateSession: updated => {
+            timeline.push(`model-update:${updated.status}`);
+            snapshot.sessions = [updated];
+        }
+    };
+    widget.commandService = {
+        executeCommand: async () => { timeline.push('save-all'); }
+    };
+    widget.service = {
+        renameSession: async (_sessionId, title) => {
+            timeline.push(`rename:${title}`);
+            return renameResult.promise;
+        },
+        startRuntime: async () => {
+            timeline.push('unexpected-runtime-start');
+            return snapshot;
+        },
+        loadSession: async () => {
+            timeline.push('unexpected-session-load');
+            return current;
+        },
+        sendPrompt: async request => {
+            timeline.push(`prompt:${request.sessionId}:${request.text}`);
+        }
+    };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.update = () => timeline.push(`paint:${widget.renamingSessionId ?? 'closed'}`);
+    widget.hydratedSessionKeyState().add(widget.agentContextKey(
+        snapshot.workspaceRoot,
+        snapshot.providerId,
+        current.appSessionId
+    ));
+
+    const renaming = widget.commitSessionRename(current.appSessionId);
+    assert.equal(widget.renamingSessionId, undefined, 'the editor must close before rename IPC resolves');
+    assert.equal(widget.renameDraft, '');
+    assert.deepEqual(timeline.slice(0, 2), ['paint:closed', 'rename:中文会话']);
+
+    await widget.send();
+    assert.ok(timeline.includes('prompt:active:重命名后继续发送'),
+        'rename IPC must not own the composer send mutex');
+    assert.equal(widget.submission, undefined);
+    assert.equal(widget.sendPreparationInFlight, false);
+
+    renameResult.resolve(staleRenameResponse);
+    await renaming;
+
+    assert.equal(snapshot.sessions[0].status, 'completed');
+    assert.equal(snapshot.sessions[0].updatedAt, current.updatedAt);
+    assert.equal(timeline.some(entry => entry.startsWith('model-update:')), false,
+        'the stale rename result must not roll lifecycle state back to running');
+    assert.equal(timeline.includes('unexpected-runtime-start'), false);
+    assert.equal(timeline.includes('unexpected-session-load'), false);
+});
+
 test('a Provider switch during send preparation never carries old draft images into the new service', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
@@ -1972,6 +2392,7 @@ test('cached local history becomes visible before ACP session restore completes'
 
     widget.sessionLoadGeneration = 0;
     widget.agentContextGeneration = 0;
+    widget.sessionHistoryCatchup = new Map();
     widget.roots = ['/fixture'];
     widget.openPopover = 'history';
     widget.sessionLoading = false;
@@ -2015,6 +2436,7 @@ test('reopening a cached hydrated history performs no JSONL or ACP round trip', 
 
     widget.sessionLoadGeneration = 0;
     widget.agentContextGeneration = 0;
+    widget.sessionHistoryCatchup = new Map();
     widget.roots = ['/fixture'];
     widget.openPopover = 'history';
     widget.sessionLoading = false;
@@ -2065,6 +2487,7 @@ test('a loadSession metadata notification preserves history cache across A-B-A n
 
     widget.sessionLoadGeneration = 0;
     widget.agentContextGeneration = 0;
+    widget.sessionHistoryCatchup = new Map();
     widget.roots = ['/fixture'];
     widget.sessionLoading = false;
     widget.submission = undefined;
@@ -2118,6 +2541,7 @@ test('a project context change invalidates an in-flight widget session restore',
 
     widget.sessionLoadGeneration = 0;
     widget.agentContextGeneration = 0;
+    widget.sessionHistoryCatchup = new Map();
     widget.roots = ['/fixture'];
     widget.openPopover = 'history';
     widget.sessionLoading = false;

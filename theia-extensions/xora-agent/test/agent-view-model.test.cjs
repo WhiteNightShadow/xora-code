@@ -76,7 +76,7 @@ function animationFrameHarness(model) {
     };
 }
 
-test('live text, tool, plan and diff updates publish once per animation frame', () => {
+test('stream noise stays frame-batched while new running activity publishes immediately', () => {
     const model = new AgentViewModel();
     const frames = animationFrameHarness(model);
     let changes = 0;
@@ -92,11 +92,14 @@ test('live text, tool, plan and diff updates publish once per animation frame', 
         toolName: 'filesystem/read_file',
         status: 'running'
     });
+    assert.equal(changes, 1, 'the first running tool must become visible immediately');
+    assert.equal(frames.scheduled.size, 0, 'the immediate activity edge cancels the pending text frame');
     model.accept({
         kind: 'plan',
         sessionId: 'session-a',
         entries: [{ id: 'inspect', text: 'Inspect', status: 'in-progress' }]
     });
+    assert.equal(changes, 2, 'the first in-progress plan must become visible immediately');
     model.accept({
         kind: 'diff',
         sessionId: 'session-a',
@@ -105,17 +108,52 @@ test('live text, tool, plan and diff updates publish once per animation frame', 
         diff: '-before\n+after'
     });
 
-    assert.equal(changes, 0, 'state reduction should not force an intermediate paint');
-    assert.equal(frames.scheduled.size, 1, 'one frame should own the entire burst');
+    assert.equal(frames.scheduled.size, 1, 'non-lifecycle output still uses one frame');
     assert.equal(model.transcript.find(entry => entry.kind === 'assistant').text, 'Hello world');
     frames.flushNext();
-    assert.equal(changes, 1);
+    assert.equal(changes, 3);
 
     model.accept({ kind: 'text-delta', sessionId: 'session-a', role: 'assistant', text: '!' });
     assert.equal(frames.scheduled.size, 1, 'the next burst should use a new frame');
     frames.flushNext();
     disposable.dispose();
+    assert.equal(changes, 4);
+});
+
+test('running tool lifecycle paints before its terminal update and keeps one card', () => {
+    const model = new AgentViewModel();
+    const frames = animationFrameHarness(model);
+    let changes = 0;
+    const disposable = model.onDidChange(() => changes++);
+
+    model.accept({
+        kind: 'tool-call',
+        sessionId: 'session-a',
+        toolCallId: 'tool-a',
+        title: 'Read file',
+        toolName: 'filesystem/read_file',
+        status: 'running'
+    });
+    assert.equal(changes, 1);
+    assert.equal(model.transcript.filter(entry => entry.kind === 'tool').length, 1);
+    assert.equal(model.transcript.find(entry => entry.kind === 'tool').payload.status, 'running');
+
+    model.accept({
+        kind: 'tool-call',
+        sessionId: 'session-a',
+        toolCallId: 'tool-a',
+        title: 'Read file',
+        toolName: 'filesystem/read_file',
+        status: 'completed',
+        output: 'done'
+    });
+    assert.equal(changes, 1, 'terminal details may settle on the next frame');
+    assert.equal(frames.scheduled.size, 1);
+    frames.flushNext();
     assert.equal(changes, 2);
+    assert.equal(model.transcript.filter(entry => entry.kind === 'tool').length, 1);
+    assert.equal(model.transcript.find(entry => entry.kind === 'tool').payload.status, 'completed');
+    disposable.dispose();
 });
 
 test('critical events cancel a pending frame and notify immediately without a stale callback', () => {
@@ -258,6 +296,31 @@ test('showing a selected session history also publishes exactly one change', () 
     assert.ok(frames.cancelled.includes(pendingId));
     assert.equal(model.snapshot.activeSessionId, 'session-a');
     assert.deepEqual(model.transcript.map(entry => entry.text), ['restored history']);
+});
+
+test('background permission requests survive session switches, new drafts and history restores', () => {
+    const model = new AgentViewModel();
+    const sessionA = session('session-a', 'running');
+    const sessionB = session('session-b', 'idle');
+    model.snapshot.sessions = [sessionA, sessionB];
+    model.setSession(sessionA);
+    model.accept(permission('permission-a', 'session-a'));
+
+    model.setSession(sessionB);
+    assert.deepEqual([...model.pendingPermissions.keys()], ['permission-a']);
+
+    model.startNewSession();
+    assert.deepEqual([...model.pendingPermissions.keys()], ['permission-a']);
+
+    model.showSessionHistory(sessionB, [
+        { kind: 'text-delta', sessionId: 'session-b', role: 'assistant', text: 'restored B' },
+        permission('historic-permission-b', 'session-b')
+    ]);
+    assert.deepEqual(
+        [...model.pendingPermissions.keys()],
+        ['permission-a'],
+        'a historical permission card must not become live, while A remains actionable in the background'
+    );
 });
 
 test('attachment text events stay isolated from adjacent messages with the same role', () => {
@@ -406,6 +469,64 @@ test('tool completion updates retain readable metadata from the initial call', (
     });
 });
 
+test('tool activity duration starts immediately, freezes on completion and never revives', () => {
+    const model = new AgentViewModel();
+    let now = Date.parse('2026-07-23T10:00:00.000Z');
+    model.now = () => now;
+    model.accept({
+        kind: 'tool-call',
+        sessionId: 'session-a',
+        toolCallId: 'long-file-edit',
+        title: '修改文件',
+        toolName: 'apply_patch',
+        status: 'running',
+        startedAt: new Date(now).toISOString()
+    });
+
+    now += 3_100;
+    model.accept({
+        kind: 'tool-call',
+        sessionId: 'session-a',
+        toolCallId: 'long-file-edit',
+        title: '修改文件',
+        toolName: 'apply_patch',
+        status: 'completed'
+    });
+    now += 7_000;
+    model.accept({
+        kind: 'tool-call',
+        sessionId: 'session-a',
+        toolCallId: 'long-file-edit',
+        title: 'late running update',
+        toolName: 'tool',
+        status: 'running'
+    });
+
+    assert.equal(model.transcript.length, 1);
+    assert.equal(model.transcript[0].payload.status, 'completed');
+    assert.equal(model.transcript[0].payload.elapsedMs, 3_100);
+    assert.equal(model.transcript[0].payload.startedAt, '2026-07-23T10:00:00.000Z');
+});
+
+test('turn completion freezes elapsed time for a tool missing its terminal update', () => {
+    const model = new AgentViewModel();
+    let now = Date.parse('2026-07-23T10:00:00.000Z');
+    model.now = () => now;
+    model.snapshot.sessions = [session('session-a', 'running')];
+    model.setSession(session('session-a', 'running'));
+    model.accept({
+        kind: 'tool-call', sessionId: 'session-a', toolCallId: 'pending', title: 'Search', toolName: 'search',
+        status: 'running', startedAt: new Date(now).toISOString()
+    });
+    now += 2_600;
+
+    model.accept({ kind: 'turn-completed', sessionId: 'session-a', stopReason: 'end_turn', elapsedMs: 2_600 });
+
+    const tool = model.transcript.find(entry => entry.kind === 'tool').payload;
+    assert.equal(tool.status, 'completed');
+    assert.equal(tool.elapsedMs, 2_600);
+});
+
 test('terminal turns keep tool status monotonic, finish lingering activity and attach AI elapsed time', () => {
     const model = new AgentViewModel();
     model.snapshot.sessions = [session('session-a', 'running')];
@@ -473,6 +594,102 @@ test('identical running and completed file diffs are merged by semantic content'
     assert.equal(diffs.length, 1);
     assert.equal(diffs[0].payload.diffId, 'diff-completed');
     assert.equal(diffs[0].payload.oldPath, '/history/before-completed');
+});
+
+test('persisted turn ids keep interleaved tools in one activity and isolate reused tool and diff identities', () => {
+    const model = new AgentViewModel();
+    const sharedDiff = {
+        kind: 'diff',
+        sessionId: 'session-a',
+        toolCallId: 'edit-shared',
+        path: 'src/shared.ts',
+        oldHash: 'old-shared',
+        newHash: 'new-shared',
+        diff: '-before\n+after'
+    };
+
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: 'session-a', turnId: 'turn-1', role: 'user', text: 'first turn' },
+        {
+            kind: 'tool-call', sessionId: 'session-a', turnId: 'turn-1', toolCallId: 'edit-shared',
+            title: 'Edit shared', toolName: 'apply_patch', status: 'completed'
+        },
+        { ...sharedDiff, turnId: 'turn-1', diffId: 'diff-shared-turn-1' },
+        {
+            kind: 'tool-call', sessionId: 'session-a', turnId: 'turn-1', toolCallId: 'edit-second',
+            title: 'Edit second', toolName: 'apply_patch', status: 'completed'
+        },
+        {
+            kind: 'diff', sessionId: 'session-a', turnId: 'turn-1', toolCallId: 'edit-second',
+            diffId: 'diff-second', path: 'src/second.ts', oldHash: 'old-second', newHash: 'new-second',
+            diff: '-old second\n+new second'
+        },
+        { kind: 'turn-completed', sessionId: 'session-a', turnId: 'turn-1', stopReason: 'end_turn' },
+        { kind: 'text-delta', sessionId: 'session-a', turnId: 'turn-2', role: 'user', text: 'second turn' },
+        {
+            kind: 'tool-call', sessionId: 'session-a', turnId: 'turn-2', toolCallId: 'edit-shared',
+            title: 'Edit shared again', toolName: 'apply_patch', status: 'completed'
+        },
+        { ...sharedDiff, turnId: 'turn-2', diffId: 'diff-shared-turn-2' },
+        { kind: 'turn-completed', sessionId: 'session-a', turnId: 'turn-2', stopReason: 'end_turn' }
+    ]);
+
+    const tools = model.transcript.filter(entry => entry.kind === 'tool');
+    const diffs = model.transcript.filter(entry => entry.kind === 'diff');
+    assert.equal(tools.length, 3, 'a reused toolCallId must remain visible in its later turn');
+    assert.equal(diffs.length, 3, 'the same semantic diff must remain visible when it belongs to a later turn');
+    assert.equal(tools[0].activityTurnId, 'activity:session-a:turn-1');
+    assert.equal(tools[1].activityTurnId, tools[0].activityTurnId,
+        'tool -> diff -> tool -> diff in one turn must share one activity group');
+    assert.equal(diffs[0].activityTurnId, tools[0].activityTurnId);
+    assert.equal(diffs[1].activityTurnId, tools[0].activityTurnId);
+    assert.equal(tools[2].activityTurnId, 'activity:session-a:turn-2');
+    assert.equal(diffs[2].activityTurnId, tools[2].activityTurnId);
+    assert.notEqual(tools[2].activityTurnId, tools[0].activityTurnId);
+});
+
+test('legacy history infers activity turns from user messages and turn completion boundaries', () => {
+    const model = new AgentViewModel();
+    const legacyDiff = {
+        kind: 'diff',
+        sessionId: 'session-a',
+        toolCallId: 'legacy-edit',
+        path: 'src/legacy.ts',
+        oldHash: 'legacy-old',
+        newHash: 'legacy-new',
+        diff: '-legacy before\n+legacy after'
+    };
+
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: 'session-a', role: 'user', text: 'legacy first turn' },
+        {
+            kind: 'tool-call', sessionId: 'session-a', toolCallId: 'legacy-edit',
+            title: 'Legacy edit', toolName: 'apply_patch', status: 'completed'
+        },
+        { ...legacyDiff, diffId: 'legacy-diff-1' },
+        {
+            kind: 'tool-call', sessionId: 'session-a', toolCallId: 'legacy-follow-up',
+            title: 'Legacy follow-up', toolName: 'apply_patch', status: 'completed'
+        },
+        { kind: 'turn-completed', sessionId: 'session-a', stopReason: 'end_turn' },
+        { kind: 'text-delta', sessionId: 'session-a', role: 'user', text: 'legacy second turn' },
+        {
+            kind: 'tool-call', sessionId: 'session-a', toolCallId: 'legacy-edit',
+            title: 'Legacy edit again', toolName: 'apply_patch', status: 'completed'
+        },
+        { ...legacyDiff, diffId: 'legacy-diff-2' },
+        { kind: 'turn-completed', sessionId: 'session-a', stopReason: 'end_turn' }
+    ]);
+
+    const tools = model.transcript.filter(entry => entry.kind === 'tool');
+    const diffs = model.transcript.filter(entry => entry.kind === 'diff');
+    assert.equal(tools.length, 3);
+    assert.equal(diffs.length, 2, 'legacy turns must not deduplicate the same edit across turn boundaries');
+    assert.equal(tools[0].activityTurnId, 'activity:session-a:legacy-1');
+    assert.equal(tools[1].activityTurnId, tools[0].activityTurnId);
+    assert.equal(diffs[0].activityTurnId, tools[0].activityTurnId);
+    assert.equal(tools[2].activityTurnId, 'activity:session-a:legacy-2');
+    assert.equal(diffs[1].activityTurnId, tools[2].activityTurnId);
 });
 
 test('incomplete diff identities remain separate and transcript resets clear dedupe state', () => {

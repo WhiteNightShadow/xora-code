@@ -25,6 +25,12 @@ export interface AgentModelChoiceGroup {
 
 const MODEL_CHOICE_PREFIX = 'xora-model:';
 
+/** Keep upstream model ids intact on the wire while presenting stable product copy. */
+export function agentModelDisplayName(modelId: string, advertisedName?: string): string {
+    if (advertisedName && advertisedName !== modelId) return advertisedName;
+    return modelId === 'grok-build' ? 'Grok Build' : advertisedName ?? modelId;
+}
+
 /**
  * A model id is not globally unique: two relay profiles can both target
  * `grok-4.5`. Keep the Provider identity in the DOM value without exposing
@@ -141,10 +147,11 @@ function choice(
     advertised?: AgentModelOption,
     fallbackLabel?: string
 ): AgentModelChoice {
+    const candidateLabel = fallbackLabel ?? advertised?.name;
     return {
         providerId: provider.id,
         modelId,
-        label: fallbackLabel ?? advertised?.name ?? modelId,
+        label: agentModelDisplayName(modelId, candidateLabel),
         value: encodeAgentModelChoice(provider.id, modelId)
     };
 }

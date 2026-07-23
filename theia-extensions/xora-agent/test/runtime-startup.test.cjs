@@ -5,6 +5,7 @@ const { performance } = require('node:perf_hooks');
 const test = require('node:test');
 
 const { GrokSidecarSupervisor } = require('../lib/electron-main/sidecar-supervisor');
+const { resolveSharedGrokHome, sharedGrokHome } = require('../lib/electron-main/shared-grok-home');
 
 function widgetClass() {
     require.extensions['.css'] = () => undefined;
@@ -251,4 +252,60 @@ test('every production sidecar environment disables telemetry and implicit compa
     assert.equal(environment.XORA_CODE, '1');
     assert.equal(environment.GROK_CURSOR_MCPS_ENABLED, 'false');
     assert.equal(environment.GROK_CLAUDE_MCPS_ENABLED, 'false');
+});
+
+test('subscription CLI and ACP commands receive one explicit shared Grok home', () => {
+    // Windows desktop launches can inherit HOME from one shell and USERPROFILE
+    // from another account/profile. Neither variable may independently choose
+    // where the login command and the ACP runtime persist subscription state.
+    assert.equal(
+        resolveSharedGrokHome({
+            HOME: 'D:\\conflicting-posix-home',
+            USERPROFILE: 'E:\\conflicting-windows-profile'
+        }, 'C:\\Users\\fixture', 'win32'),
+        'C:\\Users\\fixture\\.grok'
+    );
+    assert.equal(
+        resolveSharedGrokHome({
+            HOME: '/tmp/conflicting-home',
+            USERPROFILE: 'C:\\conflicting-profile'
+        }, '/Users/fixture', 'darwin'),
+        '/Users/fixture/.grok'
+    );
+    assert.equal(
+        resolveSharedGrokHome({
+            HOME: '/tmp/conflicting-home',
+            USERPROFILE: 'C:\\conflicting-profile'
+        }, '/home/fixture', 'linux'),
+        '/home/fixture/.grok'
+    );
+    assert.equal(
+        resolveSharedGrokHome({ GROK_HOME: '/opt/xora/shared-grok' }, '/home/fixture', 'linux'),
+        '/opt/xora/shared-grok'
+    );
+
+    const supervisor = Object.create(GrokSidecarSupervisor.prototype);
+    const environment = supervisor.commandEnvironment();
+    assert.equal(environment.GROK_HOME, sharedGrokHome());
+    assert.ok(path.isAbsolute(environment.GROK_HOME), 'GROK_HOME must be absolute before spawning Grok');
+});
+
+test('an isolated API Provider can override the shared Grok home explicitly', () => {
+    const supervisor = Object.create(GrokSidecarSupervisor.prototype);
+    const providerHome = path.resolve('/fixture/xora-provider-home');
+    const environment = supervisor.commandEnvironment({ GROK_HOME: providerHome });
+
+    assert.equal(environment.GROK_HOME, providerHome);
+});
+
+test('the watcher, registry and process supervisor share one Grok-home resolver', () => {
+    for (const file of [
+        'agent-host-manager.ts',
+        'provider-registry.ts',
+        'sidecar-supervisor.ts'
+    ]) {
+        const source = fs.readFileSync(path.join(__dirname, '../src/electron-main', file), 'utf8');
+        assert.match(source, /sharedGrokHome/iu, `${file} must use the shared resolver`);
+        assert.doesNotMatch(source, /join\(homedir\(\),\s*['"]\.grok['"]\)/u);
+    }
 });
