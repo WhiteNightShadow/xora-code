@@ -5,7 +5,20 @@
 
 const path = require('node:path');
 const { app } = require('electron');
+const { normalizeDevelopmentLaunchArgv } = require('./dev-launch-normalizer');
 const { migrateLegacyData } = require('./xora-data-migration');
+
+// Keep automated/local development launches product-shaped. Playwright's
+// Electron launcher omits process.defaultApp, which otherwise makes Theia
+// parse this wrapper as a workspace path. Naming the app before safeStorage is
+// first consulted also avoids creating a generic "Electron" Keychain identity.
+normalizeDevelopmentLaunchArgv({
+    argv: process.argv,
+    defaultApp: process.defaultApp,
+    isPackaged: app.isPackaged,
+    entryPath: __filename
+});
+if (!app.isPackaged) app.setName('Xora Code');
 
 // Bind every backend singleton to Xora Code's data root before Theia starts.
 // Existing data is copied once, never deleted, and explicit CLI overrides keep

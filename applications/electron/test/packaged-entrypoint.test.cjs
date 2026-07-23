@@ -22,6 +22,67 @@ test('the packaged Electron wrapper starts the bundled Theia main process', () =
     assert.doesNotMatch(wrapper, /require\(['"]\.\.\/src-gen\/backend\//u);
 });
 
+test('development automation never treats the Electron entrypoint as a workspace', () => {
+    const { normalizeDevelopmentLaunchArgv } = require('../scripts/dev-launch-normalizer');
+    const entry = path.join(applicationRoot, 'scripts', 'theia-electron-main.js');
+    const workspace = path.join(applicationRoot, '..', '..');
+    const automated = ['Electron', entry, '--electronUserData=/tmp/xora', workspace];
+
+    assert.equal(normalizeDevelopmentLaunchArgv({
+        argv: automated,
+        defaultApp: undefined,
+        isPackaged: false,
+        entryPath: entry
+    }), true);
+    assert.deepEqual(automated, ['Electron', '--electronUserData=/tmp/xora', workspace]);
+
+    const playwright = [
+        'Electron',
+        '--inspect=0',
+        '--remote-debugging-port=0',
+        entry,
+        '--electronUserData=/tmp/xora',
+        workspace
+    ];
+    assert.equal(normalizeDevelopmentLaunchArgv({
+        argv: playwright,
+        defaultApp: true,
+        isPackaged: false,
+        entryPath: entry
+    }), true);
+    assert.deepEqual(playwright, ['Electron', entry, '--electronUserData=/tmp/xora', workspace]);
+
+    const normalDevelopment = ['Electron', entry, workspace];
+    assert.equal(normalizeDevelopmentLaunchArgv({
+        argv: normalDevelopment,
+        defaultApp: true,
+        isPackaged: false,
+        entryPath: entry
+    }), false);
+    assert.deepEqual(normalDevelopment, ['Electron', entry, workspace]);
+
+    const packaged = ['/Applications/Xora Code.app/Contents/MacOS/Xora Code', workspace];
+    assert.equal(normalizeDevelopmentLaunchArgv({
+        argv: packaged,
+        defaultApp: undefined,
+        isPackaged: true,
+        entryPath: entry
+    }), false);
+    assert.deepEqual(packaged, ['/Applications/Xora Code.app/Contents/MacOS/Xora Code', workspace]);
+});
+
+test('development wrapper uses the Xora identity and supports non-blocking isolated secret storage', () => {
+    const wrapper = fs.readFileSync(path.join(applicationRoot, 'scripts', 'theia-electron-main.js'), 'utf8');
+    const vault = fs.readFileSync(
+        path.resolve(applicationRoot, '..', '..', 'theia-extensions/xora-agent/src/electron-main/secret-vault.ts'),
+        'utf8'
+    );
+
+    assert.match(wrapper, /app\.setName\(['"]Xora Code['"]\)/u);
+    assert.match(vault, /!app\.isPackaged && process\.env\.XORA_DISABLE_SAFE_STORAGE === ['"]1['"]/u);
+    assert.match(vault, /if \(!fs\.existsSync\(this\.filePath\)\) \{\s*return undefined;/u);
+});
+
 test('packaging relies on Theia bundles instead of shipping the workspace node_modules tree', () => {
     const builderConfiguration = fs.readFileSync(
         path.join(applicationRoot, 'electron-builder.yml'),

@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { parse: parseToml } = require('smol-toml');
 
 const { FakeAgentHostService } = require('../lib/node/fake-agent-host-service');
 const { GrokAgentHostService } = require('../lib/electron-main/grok-agent-host-service');
@@ -126,9 +127,10 @@ test('configured xAI relays use a secret-free managed Grok model and profile-sco
     // override model env_key / XAI_API_KEY on third-party base_url hosts.
     assert.match(source, /ensureApiProviderGrokHome/);
     assert.match(source, /GROK_HOME:\s*this\.ensureApiProviderGrokHome\(profile\)/);
-    // Desktop must not block ACP initialize on a remote model-catalog fetch.
-    assert.match(source, /remote_fetch\s*=\s*false/);
-    assert.match(source, /ensureModelsRemoteFetchDisabled/);
+    // App-owned API homes keep ACP initialize off the remote catalogue. The
+    // shared subscription home must remain untouched for external Grok CLIs.
+    assert.match(source, /'\[features\]'[\s\S]*'remote_fetch = false'/);
+    assert.doesNotMatch(source, /ensureModelsRemoteFetchDisabled|upsertModelsRemoteFetchDisabled/);
     assert.match(source, /\[XAI_MANAGED_ENVIRONMENT\]:\s*key/);
     assert.match(source, /XAI_API_KEY:\s*key/);
     assert.match(managedToml, /profile\.kind === 'xai-api-key' \? XAI_MANAGED_MODEL_ID : profile\.id/);
@@ -151,6 +153,57 @@ test('configured xAI relays use a secret-free managed Grok model and profile-sco
     assert.match(host, /probeProviderModels/);
     assert.match(host, /requestProviderModelCatalog/);
     assert.match(host, /withProviderEnvironment\(provider\.id, \(providerEnvironment, currentProvider, runtimeEpoch\)[\s\S]*this\.runtimeProviderEpoch = runtimeEpoch[\s\S]*supervisor\.launch\(root, environment\)/);
+});
+
+test('isolated API-provider homes disable remote fetch in the Grok features table', t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-home-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.providerGrokHomesRoot = () => root;
+    const profile = {
+        id: 'xora-fixture-relay',
+        name: 'Fixture relay',
+        kind: 'custom',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-relay-model',
+        contextWindow: 1_000_000,
+        backendSearch: true,
+        secretRef: 'provider:xora-fixture-relay'
+    };
+
+    const home = registry.ensureApiProviderGrokHome(profile);
+    const config = fs.readFileSync(path.join(home, 'config.toml'), 'utf8');
+    const parsed = parseToml(config);
+
+    assert.equal(parsed.features?.remote_fetch, false);
+    assert.equal(parsed.models, undefined, 'remote_fetch must not be emitted under the ignored [models] table');
+    assert.equal(parsed.model?.['xora-fixture-relay']?.model, 'grok-relay-model');
+    assert.equal(parsed.model?.['xora-fixture-relay']?.base_url, 'https://relay.example.invalid/v1');
+});
+
+test('starting a subscription runtime never rewrites the shared Grok configuration', t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-shared-grok-config-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const configPath = path.join(root, 'config.toml');
+    const original = '[features]\nremote_fetch = true\n# owned by external Grok CLI\n';
+    fs.writeFileSync(configPath, original, { mode: 0o600 });
+
+    const registry = Object.create(ProviderRegistry.prototype);
+    registry.grokConfigPath = configPath;
+    registry.metadataLockPath = path.join(root, 'providers.lock');
+    registry.withFileLock = (_lock, _message, operation) => operation();
+    registry.readMetadata = () => ({ schemaVersion: 1, providers: [] });
+    registry.get = id => id === 'grok-subscription' ? {
+        id,
+        name: 'Grok 订阅',
+        kind: 'grok-subscription',
+        managed: true
+    } : undefined;
+
+    assert.deepEqual(registry.environment('grok-subscription'), {});
+    assert.equal(fs.readFileSync(configPath, 'utf8'), original);
 });
 
 test('managed Grok relay TOML preserves a one-million-token Responses profile exactly', () => {

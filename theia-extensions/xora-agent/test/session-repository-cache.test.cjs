@@ -73,3 +73,69 @@ test('mutating a returned session snapshot cannot corrupt the repository cache',
         fs.rmSync(root, { recursive: true, force: true });
     }
 });
+
+test('history reads reuse parsed JSONL and only parse bytes appended by another window', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-event-cache-'));
+    const appSessionId = '00000000-0000-4000-8000-000000000011';
+    const historyPath = path.join(root, `${appSessionId}.jsonl`);
+    const envelope = text => `${JSON.stringify({
+        schemaVersion: 1,
+        timestamp: '2026-07-23T00:00:00.000Z',
+        event: { kind: 'text-delta', sessionId: appSessionId, role: 'assistant', text }
+    })}\n`;
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(historyPath, envelope('first'));
+
+    const repository = new AgentSessionRepository(root);
+    const originalReadSync = fs.readSync;
+    const requestedLengths = [];
+    fs.readSync = function (...args) {
+        requestedLengths.push(args[3]);
+        return originalReadSync.apply(this, args);
+    };
+    try {
+        assert.deepEqual(repository.readEvents(appSessionId).map(event => event.text), ['first']);
+        const readsAfterFirstParse = requestedLengths.length;
+        assert.deepEqual(repository.readEvents(appSessionId).map(event => event.text), ['first']);
+        assert.equal(requestedLengths.length, readsAfterFirstParse, 'unchanged JSONL must not be read or parsed twice');
+
+        const appended = envelope('from another window');
+        fs.appendFileSync(historyPath, appended);
+        assert.deepEqual(repository.readEvents(appSessionId).map(event => event.text), ['first', 'from another window']);
+        assert.equal(requestedLengths.at(-1), Buffer.byteLength(appended), 'only the externally appended suffix is read');
+    } finally {
+        fs.readSync = originalReadSync;
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('history reads include pending events without forcing fsync and shutdown remains durable', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-pending-history-'));
+    const appSessionId = '00000000-0000-4000-8000-000000000012';
+    const repository = new AgentSessionRepository(root);
+    const originalFsyncSync = fs.fsyncSync;
+    let fsyncs = 0;
+    fs.fsyncSync = function (...args) {
+        fsyncs += 1;
+        return originalFsyncSync.apply(this, args);
+    };
+    try {
+        repository.appendEvent(appSessionId, {
+            kind: 'text-delta', sessionId: appSessionId, role: 'assistant', text: 'not flushed yet'
+        });
+        assert.deepEqual(repository.readEvents(appSessionId).map(event => event.text), ['not flushed yet']);
+        assert.equal(fsyncs, 0, 'switching history must not turn a pending stream batch into a synchronous fsync');
+    } finally {
+        fs.fsyncSync = originalFsyncSync;
+        repository.dispose();
+    }
+
+    try {
+        const rebuilt = new AgentSessionRepository(root);
+        assert.deepEqual(rebuilt.readEvents(appSessionId).map(event => event.text), ['not flushed yet']);
+        rebuilt.dispose();
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});

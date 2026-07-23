@@ -12,8 +12,7 @@ import {
     MANAGED_BLOCK_END as BLOCK_END,
     MANAGED_BLOCK_START as BLOCK_START,
     removeMarkedManagedBlocksFromToml,
-    removeModelTablesFromToml,
-    upsertModelsRemoteFetchDisabled
+    removeModelTablesFromToml
 } from './provider-toml';
 import { SecretVault } from './secret-vault';
 
@@ -151,7 +150,7 @@ export class ProviderRegistry {
         return profiles.map(profile => profile.kind === 'grok-subscription' ? profile : {
             ...profile,
             credentialConfigured: !this.isProviderUpdateBlocked(profile.id)
-                && !!this.vault.get(profile.secretRef ?? `provider:${profile.id}`)
+                && this.vault.has(profile.secretRef ?? `provider:${profile.id}`)
         });
     }
 
@@ -355,7 +354,7 @@ export class ProviderRegistry {
             this.commitProviderUpdate(previousFile, file, input.id, 'provider:xai-api-key', credential);
             return {
                 ...this.xaiProfile(file),
-                credentialConfigured: !!this.vault.get('provider:xai-api-key')
+                credentialConfigured: this.vault.has('provider:xai-api-key')
             };
         }
         if (input.managed || input.kind !== 'custom') {
@@ -387,7 +386,7 @@ export class ProviderRegistry {
             this.rotateRuntimeEpochUnlocked(file, profile.id);
         }
         this.commitProviderUpdate(previousFile, file, profile.id, profile.secretRef!, credential);
-        return { ...profile, credentialConfigured: !!this.vault.get(profile.secretRef!) };
+        return { ...profile, credentialConfigured: this.vault.has(profile.secretRef!) };
     }
 
     /**
@@ -686,9 +685,9 @@ export class ProviderRegistry {
             throw new Error(`Unknown provider profile: ${profileId}`);
         }
         if (profile.kind === 'grok-subscription') {
-            // Shared ~/.grok still owns OIDC auth.json. Disable remote catalog
-            // fetch so initialize cannot stall 45–60s on a slow auth.x.ai hop.
-            this.ensureModelsRemoteFetchDisabled(this.grokConfigPath);
+            // Subscription state belongs to Grok Build and external Grok CLI
+            // processes. In particular, do not silently change feature flags
+            // in the shared ~/.grok/config.toml from the runtime launch path.
             return { profile, environment: {} };
         }
         if (this.isProviderUpdateBlocked(profile.id)) {
@@ -712,12 +711,9 @@ export class ProviderRegistry {
                     GROK_HOME: this.ensureApiProviderGrokHome(profile),
                     XAI_API_KEY: key
                 }
-                : (() => {
-                    // Legacy key-only path still uses shared ~/.grok (and any
-                    // OIDC auth.json there). Keep initialize off the network.
-                    this.ensureModelsRemoteFetchDisabled(this.grokConfigPath);
-                    return { XAI_API_KEY: key };
-                })();
+                // Legacy key-only mode still uses shared ~/.grok. Launching a
+                // runtime must not rewrite that Grok/CLI-owned configuration.
+                : { XAI_API_KEY: key };
             if (profile.model && profile.backendSearch === true) {
                 // Grok resolves the web-search sampler independently from the
                 // active ACP model. A process-scoped pin keeps it on this
@@ -773,10 +769,11 @@ export class ProviderRegistry {
             '[ui]',
             'permission_mode = "always-approve"',
             '',
-            // Grok blocks ACP initialize while refreshing the remote model
-            // catalogue when remote_fetch is true (default). Desktop already
-            // supplies the catalog via managed [model.*] tables below.
-            '[models]',
+            // Grok 0.2.102 reads this gate from [features], not [models]. The
+            // isolated home is owned by Xora Code and already supplies its
+            // complete model definition below, so no startup catalog request
+            // is needed before ACP initialize can answer.
+            '[features]',
             'remote_fetch = false',
             '',
             this.managedToml(profile),
@@ -818,28 +815,6 @@ export class ProviderRegistry {
             /* Electron app may be unavailable in unit tests. */
         }
         return path.join(os.tmpdir(), 'xora-code-provider-grok-homes');
-    }
-
-    /**
-     * Grok Build 0.2.102 holds ACP `initialize` until an optional online model
-     * catalog refresh finishes when `[models].remote_fetch` is true (default).
-     * On constrained networks that wait regularly exceeds the desktop
-     * handshake budget and surfaces as `initialize timed out after …ms` on
-     * every platform. Force `remote_fetch = false` so initialize returns from
-     * the local/bundled catalogue (custom providers still inject their own
-     * `[model.*]` tables).
-     */
-    protected ensureModelsRemoteFetchDisabled(configPath: string): void {
-        try {
-            fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
-            const before = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
-            const after = upsertModelsRemoteFetchDisabled(before);
-            if (after === before) return;
-            this.atomicWrite(configPath, after, 0o600);
-        } catch {
-            // Best effort: a locked or unreadable config must not block launch.
-            // The raised initialize timeout remains the fallback safety net.
-        }
     }
 
     credential(profileId: string): string | undefined {

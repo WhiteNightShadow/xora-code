@@ -325,7 +325,13 @@ export type AgentHostEvent =
     | PermissionRequestEvent
     | DiffEvent
     | { kind: 'context-usage'; sessionId: string; context: AgentSessionContext }
-    | { kind: 'turn-completed'; sessionId: string; stopReason?: string }
+    | {
+        kind: 'turn-completed';
+        sessionId: string;
+        stopReason?: string;
+        /** Monotonic ACP prompt duration measured by Electron main. */
+        elapsedMs?: number;
+    }
     | { kind: 'error'; sessionId?: string; code: string; message: string; recoverable: boolean };
 
 export interface ManagementResult {

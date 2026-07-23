@@ -14,6 +14,13 @@ export class SecretVault {
     protected readonly lockPath = path.join(app.getPath('userData'), 'security', '.secrets.lock');
 
     isPersistentStorageAvailable(): boolean {
+        // Automated development profiles can deliberately run without the
+        // user's login Keychain. Never let that test-only setup trigger a
+        // blocking macOS "keychain not found" dialog; packaged builds ignore
+        // this environment switch so credentials cannot be downgraded there.
+        if (!app.isPackaged && process.env.XORA_DISABLE_SAFE_STORAGE === '1') {
+            return false;
+        }
         if (!safeStorage.isEncryptionAvailable()) {
             return false;
         }
@@ -22,6 +29,14 @@ export class SecretVault {
             return backend !== 'basic_text' && backend !== 'unknown';
         }
         return true;
+    }
+
+    /** Checks encrypted credential presence without opening macOS Keychain. */
+    has(secretRef: string): boolean {
+        this.assertRef(secretRef);
+        if (this.sessionValues.has(secretRef)) return true;
+        if (!fs.existsSync(this.filePath)) return false;
+        return typeof this.readFile().values[secretRef] === 'string';
     }
 
     set(secretRef: string, value: string): void {
@@ -49,6 +64,12 @@ export class SecretVault {
         const inMemory = this.sessionValues.get(secretRef);
         if (inMemory !== undefined) {
             return inMemory;
+        }
+        // Fresh profiles have no encrypted payload to decrypt. This cheap
+        // guard keeps application startup and Provider listing independent of
+        // Keychain availability; safeStorage is consulted only when needed.
+        if (!fs.existsSync(this.filePath)) {
+            return undefined;
         }
         if (!this.isPersistentStorageAvailable()) {
             return undefined;

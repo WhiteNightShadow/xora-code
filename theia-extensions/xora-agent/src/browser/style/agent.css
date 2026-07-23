@@ -1547,6 +1547,27 @@ form.xora-provider-form,
     font-size: 11px;
 }
 
+.xora-message-meta,
+.xora-message-duration {
+    display: inline-flex;
+    align-items: center;
+}
+
+.xora-message-meta {
+    gap: 5px;
+}
+
+.xora-message-duration {
+    gap: 3px;
+    color: color-mix(in srgb, var(--theia-descriptionForeground) 88%, transparent);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.xora-message-duration .codicon {
+    font-size: 10px;
+}
+
 .xora-message-header button {
     display: grid;
     width: 24px;
@@ -2123,6 +2144,54 @@ form.xora-provider-form,
     overflow: auto;
     padding: 0 var(--xora-agent-pad) 8px;
     background: linear-gradient(to bottom, transparent, var(--theia-sideBar-background) 16px);
+}
+
+.xora-agent-inline-notice {
+    display: grid;
+    z-index: 3;
+    grid-template-columns: 16px minmax(0, 1fr) 22px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    margin: 0 var(--xora-agent-pad) 4px;
+    padding: 7px 8px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 70%, transparent);
+    border-radius: 8px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 88%, transparent);
+    box-shadow: 0 3px 12px color-mix(in srgb, #000 12%, transparent);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.xora-agent-inline-notice.tone-warning > .codicon {
+    color: var(--theia-charts-yellow, #cca700);
+}
+
+.xora-agent-inline-notice.tone-error > .codicon {
+    color: var(--theia-errorForeground);
+}
+
+.xora-agent-inline-notice button {
+    display: grid;
+    width: 22px;
+    height: 22px;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    cursor: pointer;
+}
+
+.xora-agent-inline-notice button:hover {
+    color: var(--theia-foreground);
+    background: var(--theia-toolbar-hoverBackground);
+}
+
+.xora-session-restore-pending {
+    min-height: min(320px, 58%);
 }
 
 .xora-permission-card {

@@ -406,6 +406,47 @@ test('tool completion updates retain readable metadata from the initial call', (
     });
 });
 
+test('terminal turns keep tool status monotonic, finish lingering activity and attach AI elapsed time', () => {
+    const model = new AgentViewModel();
+    model.snapshot.sessions = [session('session-a', 'running')];
+    model.setSession(session('session-a', 'running'));
+    model.accept({ kind: 'text-delta', sessionId: 'session-a', role: 'assistant', text: '完成结果' });
+    model.accept({
+        kind: 'tool-call', sessionId: 'session-a', toolCallId: 'done', title: 'Read', toolName: 'read', status: 'completed'
+    });
+    model.accept({
+        kind: 'tool-call', sessionId: 'session-a', toolCallId: 'done', title: 'Read output', toolName: 'read', status: 'running', output: 'late'
+    });
+    model.accept({
+        kind: 'tool-call', sessionId: 'session-a', toolCallId: 'lingering', title: 'Search', toolName: 'search', status: 'running'
+    });
+    model.accept({
+        kind: 'plan', sessionId: 'session-a', entries: [{ id: 'finish', text: 'Finish', status: 'in-progress' }]
+    });
+
+    model.accept({ kind: 'turn-completed', sessionId: 'session-a', stopReason: 'end_turn', elapsedMs: 1_234 });
+
+    const tools = model.transcript.filter(entry => entry.kind === 'tool').map(entry => entry.payload);
+    assert.deepEqual(tools.map(tool => tool.status), ['completed', 'completed']);
+    assert.equal(model.transcript.find(entry => entry.kind === 'plan').payload.entries[0].status, 'completed');
+    const reply = model.transcript.find(entry => entry.kind === 'assistant');
+    assert.equal(reply.turnElapsedMs, 1_234);
+    assert.equal(reply.turnStopReason, 'end_turn');
+});
+
+test('cancelled sessions settle unfinished tools instead of leaving activity running', () => {
+    const model = new AgentViewModel();
+    model.snapshot.sessions = [session('session-a', 'running')];
+    model.setSession(session('session-a', 'running'));
+    model.accept({
+        kind: 'tool-call', sessionId: 'session-a', toolCallId: 'pending', title: 'Execute', toolName: 'execute', status: 'pending'
+    });
+
+    model.accept({ kind: 'session', session: session('session-a', 'cancelled') });
+
+    assert.equal(model.transcript.find(entry => entry.kind === 'tool').payload.status, 'rejected');
+});
+
 test('identical running and completed file diffs are merged by semantic content', () => {
     const model = new AgentViewModel();
     const running = {

@@ -335,53 +335,57 @@ test('explicit old-Provider history stays visible while Electron rebinds it to t
     assert.deepEqual(model.transcript.map(entry => entry.text), ['保留的历史内容']);
 });
 
-test('workspace activation keeps history but pins a clean page across A-B-A and same-root reopen', () => {
+test('workspace activation restores the latest local conversation across A-B-A and deduplicates same-root events', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
     const model = new AgentViewModel();
-    const sessionA = session('a', 'completed', { workspaceRoot: '/workspace-a' });
+    const sessionAOld = session('a-old', 'completed', { workspaceRoot: '/workspace-a', updatedAt: '2026-01-01T00:00:00.000Z' });
+    const sessionA = session('a', 'completed', { workspaceRoot: '/workspace-a', updatedAt: '2026-02-01T00:00:00.000Z' });
     const sessionB = session('b', 'completed', { workspaceRoot: '/workspace-b' });
     let prewarms = 0;
+    const opened = [];
 
-    model.accept({ kind: 'snapshot', snapshot: runtimeSnapshot('/workspace-a', [sessionA, sessionB], 'a') });
-    model.setSession(sessionA);
-    model.loadHistory([
-        { kind: 'text-delta', sessionId: 'a', role: 'assistant', text: 'history A' }
-    ]);
+    model.accept({ kind: 'snapshot', snapshot: runtimeSnapshot('/workspace-a', [sessionA, sessionB, sessionAOld], undefined) });
+    model.refresh = async () => undefined;
     widget.model = model;
     widget.roots = ['/workspace-a'];
-    widget.openPopover = 'history';
-    widget.agentPaneView = 'activity';
-    widget.activityFilter = 'tools';
+    widget.workspaceRestoreGeneration = 0;
+    widget.agentContextGeneration = 0;
+    widget.sessionLoadGeneration = 0;
     widget.invalidateAgentContext = () => undefined;
     widget.requestRuntimePrewarm = () => { prewarms += 1; };
     widget.update = () => undefined;
-
-    const activate = (root, staleActiveSessionId) => {
-        widget.activateWorkspace([root]);
-        model.accept({
-            kind: 'snapshot',
-            snapshot: runtimeSnapshot(root, [sessionA, sessionB], staleActiveSessionId)
-        });
-        assert.equal(model.snapshot.activeSessionId, undefined);
-        assert.equal(model.transcript.length, 0);
-        assert.deepEqual(model.snapshot.sessions.map(candidate => candidate.appSessionId), ['a', 'b']);
+    widget.workspaceTrustGuard = {
+        selectWorkspaceRoot: async root => {
+            model.snapshot.workspaceRoot = root;
+            model.snapshot.activeSessionId = undefined;
+        }
+    };
+    widget.openSession = async selected => {
+        opened.push(selected.appSessionId);
+        model.showSessionHistory(selected, [{
+            kind: 'text-delta', sessionId: selected.appSessionId, role: 'assistant', text: `history ${selected.appSessionId}`
+        }]);
     };
 
-    activate('/workspace-b', 'b');
-    activate('/workspace-a', 'a');
-    model.showSessionHistory(sessionA, [
-        { kind: 'text-delta', sessionId: 'a', role: 'assistant', text: 'manually restored A' }
-    ]);
-    assert.equal(model.snapshot.activeSessionId, 'a');
-    assert.deepEqual(model.transcript.map(entry => entry.text), ['manually restored A']);
-    // A workspace event is an activation boundary even when Theia reports the
-    // same canonical root again.
-    activate('/workspace-a', 'a');
+    const activate = async root => {
+        widget.activateWorkspace([root]);
+        await widget.workspaceRestorePromise;
+    };
 
-    assert.equal(prewarms, 3);
-    assert.equal(widget.openPopover, undefined);
-    assert.equal(widget.agentPaneView, 'conversation');
+    await activate('/workspace-a');
+    assert.equal(model.snapshot.activeSessionId, 'a');
+    assert.deepEqual(model.transcript.map(entry => entry.text), ['history a']);
+
+    // Duplicate root discovery from refreshRoots must not reopen the session.
+    await activate('/workspace-a');
+    await activate('/workspace-b');
+    assert.equal(model.snapshot.activeSessionId, 'b');
+    await activate('/workspace-a');
+    assert.equal(model.snapshot.activeSessionId, 'a');
+
+    assert.deepEqual(opened, ['a', 'b', 'a']);
+    assert.equal(prewarms, 4);
 });
 
 test('late session and snapshot events cannot steal a workspace fresh page', () => {
@@ -447,6 +451,46 @@ test('the latest A-B-A activation wins even when an older load completes last', 
     await Promise.allSettled([firstA, middleB, latestA]);
 
     assert.equal(host.activeSessionId, 'a');
+});
+
+test('prewarm and Send coalesce one in-flight restore for the same session', async () => {
+    const { host, requests } = hostHarness();
+
+    const prewarm = host.loadSession('a');
+    const sendGuard = host.loadSession('a');
+
+    assert.equal(requests.length, 1, 'the same activation intent must issue only one ACP session/load');
+    assert.equal(requests[0].method, 'session/load');
+    requests[0].completion.resolve({});
+    const [first, second] = await Promise.all([prewarm, sendGuard]);
+
+    assert.equal(first.appSessionId, 'a');
+    assert.equal(second.appSessionId, 'a');
+    assert.equal(host.activeSessionId, 'a');
+    assert.ok(host.loadedSessionIds.has('a'));
+});
+
+test('a same-Provider runtime restart never reuses the previous sidecar load', async () => {
+    const { host, requests } = hostHarness();
+
+    const oldRuntimeLoad = host.loadSession('a');
+    assert.equal(requests.length, 1);
+
+    // Simulate a sidecar replacement that retained the same workspace,
+    // Provider and credential epoch. runtimeGeneration is the remaining hard
+    // process-identity boundary.
+    host.runtimeGeneration += 1;
+    host.loadedSessionIds.clear();
+    const newRuntimeLoad = host.loadSession('a');
+
+    assert.equal(requests.length, 2, 'the restarted sidecar requires its own ACP session/load');
+    assert.equal(requests[1].method, 'session/load');
+    requests[0].completion.resolve({});
+    requests[1].completion.resolve({});
+    await Promise.all([oldRuntimeLoad, newRuntimeLoad]);
+
+    assert.equal(host.activeSessionId, 'a');
+    assert.ok(host.loadedSessionIds.has('a'));
 });
 
 test('ACP replay updates are ignored while a session is being restored', () => {
@@ -1530,10 +1574,8 @@ test('a stale cross-Provider model event is ignored because service switching be
 
     await widget.selectModel(undefined, encodeAgentModelChoice('xora-relay', 'xora-relay'));
 
-    assert.deepEqual(timeline, [
-        'info:模型服务已变化，请在设置中确认当前服务后重新选择模型。',
-        'refresh-snapshot'
-    ]);
+    assert.deepEqual(timeline, ['refresh-snapshot']);
+    assert.match(widget.inlineNotice.message, /模型服务已变化/);
     assert.equal(widget.newSessionModel, undefined);
     assert.equal(widget.modelOptionsLoading, false);
 });
@@ -1716,7 +1758,7 @@ test('project prewarm hydrates an active history session before its next prompt'
             providerId: 'grok-subscription',
             activeSessionId: 'session-a',
             models: [],
-            sessions: [],
+            sessions: [session('session-a')],
             permissionMode: 'request-approval'
         },
         refresh: async () => {
@@ -1736,6 +1778,7 @@ test('project prewarm hydrates an active history session before its next prompt'
     widget.update = () => undefined;
 
     await widget.prewarmRuntime('/fixture', 'grok-subscription', 'fixture-key');
+    await widget.hydrateActiveSessionInBackground();
 
     assert.deepEqual(timeline, ['start', 'refresh', 'load:session-a']);
     assert.equal(widget.activeSessionHydrationKey, '/fixture\u0000grok-subscription\u0000session-a');
@@ -1784,13 +1827,14 @@ test('a workspace fresh page prewarms the runtime without loading prior history'
     assert.equal(widget.runtimePrewarmRequested, false);
 });
 
-test('the first send from a workspace fresh page creates a session instead of loading history', async () => {
+test('the first send reuses a ready prewarm and creates a session without redundant runtime or history RPCs', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
     const timeline = [];
     const prior = session('prior', 'completed', { workspaceRoot: '/fixture' });
     const created = session('created', 'idle', { workspaceRoot: '/fixture' });
     const snapshot = runtimeSnapshot('/fixture', [prior], undefined);
+    const refreshed = deferred();
 
     widget.prompt = 'inspect this project';
     widget.draftImages = [];
@@ -1806,7 +1850,10 @@ test('the first send from a workspace fresh page creates a session instead of lo
     widget.textarea = null;
     widget.model = {
         snapshot,
-        refresh: async () => undefined,
+        refresh: async () => {
+            timeline.push('refresh');
+            await refreshed.promise;
+        },
         startNewSession: () => { snapshot.activeSessionId = undefined; },
         setSession: selected => {
             snapshot.sessions.unshift(selected);
@@ -1840,23 +1887,31 @@ test('the first send from a workspace fresh page creates a session instead of lo
     };
     widget.update = () => undefined;
 
-    await widget.send();
+    const sending = widget.send();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(timeline, ['refresh', 'save-all'],
+        'Save All and the authoritative Provider refresh should overlap');
+    assert.equal(widget.sendPreparationPreview.text, 'inspect this project',
+        'the clicked task should be visible before the Provider refresh resolves');
+    refreshed.resolve();
+    await sending;
 
     assert.deepEqual(timeline, [
-        'runtime:/fixture:grok-subscription',
+        'refresh',
         'save-all',
         'session/new',
         'session/prompt:created'
     ]);
     assert.equal(snapshot.activeSessionId, 'created');
     assert.equal(snapshot.sessions.some(candidate => candidate.appSessionId === 'prior'), true);
+    assert.equal(widget.sendPreparationPreview, undefined);
 });
 
 test('a Provider switch during send preparation never carries old draft images into the new service', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
     const timeline = [];
-    const notices = [];
     const snapshot = runtimeSnapshot('/fixture', [], undefined);
 
     widget.prompt = '解释图片';
@@ -1896,11 +1951,8 @@ test('a Provider switch during send preparation never carries old draft images i
         },
         sendPrompt: async () => timeline.push('session/prompt')
     };
-    widget.messages = {
-        info: message => notices.push(message),
-        warn: () => undefined,
-        error: () => undefined
-    };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
     widget.update = () => undefined;
 
     await widget.send();
@@ -1908,7 +1960,7 @@ test('a Provider switch during send preparation never carries old draft images i
     assert.deepEqual(timeline, ['refresh']);
     assert.equal(widget.prompt, '解释图片', 'text remains as a draft in the new Provider');
     assert.equal(widget.submission, undefined);
-    assert.match(notices.join('\n'), /重新添加图片/);
+    assert.match(widget.inlineNotice.message, /重新添加图片/);
 });
 
 test('cached local history becomes visible before ACP session restore completes', async () => {
@@ -1952,6 +2004,110 @@ test('cached local history becomes visible before ACP session restore completes'
     await opening;
 
     assert.equal(visibleBeforeRestore, true, `timeline before restore: ${timeline.join(' -> ')}`);
+});
+
+test('reopening a cached hydrated history performs no JSONL or ACP round trip', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const record = session('a', 'completed');
+    const history = [{ kind: 'text-delta', sessionId: 'a', role: 'assistant', text: 'cached A' }];
+    const timeline = [];
+
+    widget.sessionLoadGeneration = 0;
+    widget.agentContextGeneration = 0;
+    widget.roots = ['/fixture'];
+    widget.openPopover = 'history';
+    widget.sessionLoading = false;
+    widget.model = {
+        snapshot: {
+            phase: 'ready',
+            activeSessionId: undefined,
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription',
+            sessions: [record]
+        },
+        showSessionHistory: (selected, events) => {
+            widget.model.snapshot.activeSessionId = selected.appSessionId;
+            timeline.push(`visible:${events[0]?.text ?? 'empty'}`);
+        },
+        updateSession: () => timeline.push('session-ready')
+    };
+    widget.service = {
+        getSessionHistory: async () => {
+            timeline.push('history-rpc');
+            return history;
+        },
+        loadSession: async () => {
+            timeline.push('load-rpc');
+            return record;
+        }
+    };
+    widget.messages = { error: () => timeline.push('error') };
+    widget.update = () => undefined;
+    widget.followTranscript = () => undefined;
+
+    widget.cacheSessionHistory(record, history);
+    widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', 'grok-subscription', 'a'));
+    await widget.openSession(record);
+
+    assert.deepEqual(timeline, ['visible:cached A', 'session-ready']);
+    assert.equal(widget.sessionLoading, false);
+});
+
+test('a loadSession metadata notification preserves history cache across A-B-A navigation', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const record = session('a', 'completed');
+    const loaded = { ...record, updatedAt: '2026-07-19T00:01:00.000Z', status: 'idle' };
+    const history = [{ kind: 'text-delta', sessionId: 'a', role: 'assistant', text: 'durable A' }];
+    let historyReads = 0;
+    let sessionLoads = 0;
+
+    widget.sessionLoadGeneration = 0;
+    widget.agentContextGeneration = 0;
+    widget.roots = ['/fixture'];
+    widget.sessionLoading = false;
+    widget.submission = undefined;
+    widget.model = {
+        snapshot: {
+            phase: 'ready',
+            activeSessionId: undefined,
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription',
+            sessions: [record]
+        },
+        showSessionHistory: selected => {
+            widget.model.snapshot.activeSessionId = selected.appSessionId;
+        },
+        updateSession: updated => {
+            widget.model.snapshot.sessions = [updated];
+        }
+    };
+    widget.service = {
+        getSessionHistory: async () => {
+            historyReads += 1;
+            return history;
+        },
+        loadSession: async () => {
+            sessionLoads += 1;
+            // Mirrors Electron's notification ordering: metadata can arrive
+            // before the loadSession RPC result reaches the renderer.
+            widget.acceptAgentEvent({ kind: 'session', session: loaded });
+            return loaded;
+        }
+    };
+    widget.messages = { error: () => assert.fail('history restore must not fail') };
+    widget.update = () => undefined;
+    widget.followTranscript = () => undefined;
+
+    await widget.openSession(record);
+    // Simulate visiting B/new page and then returning to A. The loaded record
+    // is the updatedAt authority published by the first restore.
+    widget.model.snapshot.activeSessionId = undefined;
+    await widget.openSession(loaded);
+
+    assert.equal(historyReads, 1, 'returning to A must reuse the migrated transcript cache');
+    assert.equal(sessionLoads, 1, 'returning to A must reuse the hydrated ACP session');
 });
 
 test('a project context change invalidates an in-flight widget session restore', async () => {

@@ -120,6 +120,10 @@ test('image capability true emits exact ACP image blocks and persists metadata o
         }]
     });
     assert.equal(JSON.stringify(userEvent).includes(image.data), false);
+    const completion = events.find(event => event.kind === 'turn-completed');
+    assert.equal(completion.stopReason, 'end_turn');
+    assert.equal(Number.isSafeInteger(completion.elapsedMs), true);
+    assert.ok(completion.elapsedMs >= 0);
 });
 
 test('validator rejects non-canonical base64, unsupported MIME and MIME magic mismatch', () => {

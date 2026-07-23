@@ -71,39 +71,3 @@ export function removeModelTableFromToml(source: string, catalogId: string): str
     }
     return result;
 }
-
-/**
- * Ensure `[models].remote_fetch = false` so Grok Build does not block ACP
- * initialize on a remote model-catalog HTTP round-trip. Idempotent.
- */
-export function upsertModelsRemoteFetchDisabled(source: string): string {
-    const text = source ?? '';
-    if (/^\s*remote_fetch\s*=\s*false\s*(?:#.*)?$/m.test(text)) {
-        return text;
-    }
-    if (/^\s*remote_fetch\s*=/m.test(text)) {
-        return text.replace(/^\s*remote_fetch\s*=\s*[^\n\r]*/m, 'remote_fetch = false');
-    }
-    const modelsHeader = /^\[models\]\s*(?:#.*)?$/m.exec(text);
-    if (modelsHeader && modelsHeader.index !== undefined) {
-        const headerEnd = modelsHeader.index + modelsHeader[0].length;
-        let insertAt = headerEnd;
-        if (text[insertAt] === '\r') insertAt += 1;
-        if (text[insertAt] === '\n') insertAt += 1;
-        return `${text.slice(0, insertAt)}remote_fetch = false\n${text.slice(insertAt)}`;
-    }
-    const block = [
-        '',
-        '# >>> Xora Code desktop tuning >>>',
-        '# Keep ACP initialize off the network (remote model catalogue fetch).',
-        '[models]',
-        'remote_fetch = false',
-        '# <<< Xora Code desktop tuning <<<',
-        ''
-    ].join('\n');
-    if (!text.trim()) {
-        return `${block.trimStart()}`;
-    }
-    const needsNl = text.endsWith('\n') ? '' : '\n';
-    return `${text}${needsNl}${block}`;
-}

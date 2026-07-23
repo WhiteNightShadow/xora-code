@@ -112,16 +112,23 @@ test('renders the supported subset with React nodes and escapes hostile HTML', (
     assert.match(html, /<strong>加粗<\/strong>/);
     assert.match(html, /xora-agent-markdown-inline-code/);
     assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
-    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    // Syntax highlighting may wrap punctuation and literals in safe spans, so
+    // assert the escaped token sequence rather than requiring one contiguous
+    // text node. The stronger invariant below still rejects real HTML nodes.
+    assert.match(html, /<code[^>]*>[\s\S]*&lt;[\s\S]*script[\s\S]*alert[\s\S]*&lt;[\s\S]*\/[\s\S]*script/);
     assert.doesNotMatch(html, /<script>|<img/);
 
     const implementation = fs.readFileSync(path.join(__dirname, '../src/browser/agent-markdown.tsx'), 'utf8');
-    assert.doesNotMatch(implementation, /dangerouslySetInnerHTML/);
+    const highlighter = fs.readFileSync(path.join(__dirname, '../src/browser/agent-code-highlight.ts'), 'utf8');
+    assert.match(implementation, /const html = highlightCodeToHtml\(block\.code, language\)/);
+    assert.match(implementation, /dangerouslySetInnerHTML=\{\{ __html: html \}\}/);
+    assert.match(highlighter, /escapeHtml\(token\.text\)/,
+        'every syntax-highlight token must be escaped before entering the React HTML boundary');
 });
 
 test('marks an unfinished fenced block for streaming presentation', () => {
     const html = renderToStaticMarkup(React.createElement(AgentMarkdown, { text: '```\npartial' }));
-    assert.match(html, /class="xora-agent-markdown-code is-streaming"/);
+    assert.match(html, /class="[^"]*\bxora-agent-markdown-code\b[^"]*\bis-streaming\b[^"]*"/);
     assert.match(html, /data-streaming="true"/);
     assert.match(html, />partial<\/code>/);
 });

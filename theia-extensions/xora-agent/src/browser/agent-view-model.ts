@@ -21,6 +21,9 @@ export interface TranscriptEntry {
     kind: 'user' | 'assistant' | 'system' | 'plan' | 'tool' | 'permission' | 'diff' | 'error';
     text?: string;
     payload?: AgentHostEvent;
+    /** Completion metadata attached to the final Agent reply for this turn. */
+    turnElapsedMs?: number;
+    turnStopReason?: string;
 }
 
 @injectable()
@@ -87,6 +90,7 @@ export class AgentViewModel {
         } else if (event.kind === 'session') {
             this.upsertSession(event.session);
             if (['completed', 'cancelled', 'failed', 'read-only'].includes(event.session.status)) {
+                this.finalizeSessionActivity(event.session.appSessionId, event.session.status);
                 this.clearPendingPermissions(event.session.appSessionId);
             }
         } else if (event.kind === 'text-delta') {
@@ -132,6 +136,22 @@ export class AgentViewModel {
                 [event.sessionId]: event.context
             };
         } else if (event.kind === 'turn-completed') {
+            this.finalizeSessionActivity(
+                event.sessionId,
+                event.stopReason === 'cancelled' ? 'cancelled' : event.stopReason === 'error' ? 'failed' : 'completed'
+            );
+            if (this.isVisibleSession(event.sessionId) && Number.isFinite(event.elapsedMs) && (event.elapsedMs ?? -1) >= 0) {
+                const finalReply = [...this.transcript].reverse().find(entry =>
+                    entry.kind === 'assistant'
+                    && entry.payload?.kind === 'text-delta'
+                    && entry.payload.sessionId === event.sessionId
+                    && entry.turnElapsedMs === undefined
+                );
+                if (finalReply) {
+                    finalReply.turnElapsedMs = Math.round(event.elapsedMs!);
+                    finalReply.turnStopReason = event.stopReason;
+                }
+            }
             this.clearPendingPermissions(event.sessionId);
         } else if (event.kind === 'error') {
             if (event.sessionId && !this.isVisibleSession(event.sessionId)) return;
@@ -218,6 +238,7 @@ export class AgentViewModel {
             existing.payload = {
                 ...previous,
                 ...event,
+                status: monotonicToolStatus(previous.status, event.status),
                 title: isMachineToolTitle(event.title, event.toolCallId)
                     && !isMachineToolTitle(previous.title, previous.toolCallId)
                     ? previous.title
@@ -236,6 +257,37 @@ export class AgentViewModel {
             const entry: TranscriptEntry = { id: key, kind: 'tool', payload: event };
             this.transcript.push(entry);
             this.toolEntries.set(key, entry);
+        }
+    }
+
+    /**
+     * ACP implementations occasionally omit a terminal tool update, or send
+     * a content-only update after completion. A terminal turn/session is the
+     * final authority that no pending activity remains visible.
+     */
+    protected finalizeSessionActivity(
+        sessionId: string,
+        outcome: SessionRecord['status']
+    ): void {
+        const terminalToolStatus: ToolCallEvent['status'] = outcome === 'completed'
+            ? 'completed'
+            : outcome === 'cancelled' || outcome === 'read-only'
+                ? 'rejected'
+                : 'failed';
+        for (const entry of this.toolEntries.values()) {
+            const tool = entry.payload?.kind === 'tool-call' ? entry.payload : undefined;
+            if (!tool || tool.sessionId !== sessionId || !['pending', 'running'].includes(tool.status)) continue;
+            entry.payload = { ...tool, status: terminalToolStatus };
+        }
+        for (const entry of this.transcript) {
+            const plan = entry.payload?.kind === 'plan' ? entry.payload : undefined;
+            if (!plan || plan.sessionId !== sessionId || !plan.entries.some(item => item.status === 'in-progress')) continue;
+            entry.payload = {
+                ...plan,
+                entries: plan.entries.map(item => item.status === 'in-progress'
+                    ? { ...item, status: outcome === 'completed' ? 'completed' as const : 'failed' as const }
+                    : item)
+            };
         }
     }
 
@@ -487,6 +539,15 @@ function isFrameBatchedEvent(event: AgentHostEvent): boolean {
         || event.kind === 'plan'
         || event.kind === 'diff'
         || event.kind === 'context-usage';
+}
+
+function monotonicToolStatus(
+    previous: ToolCallEvent['status'],
+    incoming: ToolCallEvent['status']
+): ToolCallEvent['status'] {
+    if (previous === 'completed' || previous === 'failed' || previous === 'rejected') return previous;
+    if (previous === 'running' && incoming === 'pending') return 'running';
+    return incoming;
 }
 
 function mergeToolPresentation(

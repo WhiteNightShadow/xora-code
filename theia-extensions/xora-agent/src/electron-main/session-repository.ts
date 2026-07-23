@@ -9,12 +9,39 @@ interface SessionIndex {
     sessions: SessionRecord[];
 }
 
+interface PendingEventBatch {
+    lines: string[];
+    events: AgentHostEvent[];
+    bytes: number;
+}
+
+interface EventFileCache {
+    device: number;
+    inode: number;
+    /** Number of file bytes represented by events/trailingPartial. */
+    size: number;
+    events: AgentHostEvent[];
+    /** A cross-process append can be observed between write syscalls. */
+    trailingPartial: string;
+}
+
+const MAX_EVENT_LOG_BYTES = 16 * 1024 * 1024;
+const MAX_CACHED_EVENTS = 5000;
+const MAX_CACHED_SESSIONS = 12;
+
 /** Crash-safe, renderer-independent index plus redacted append-only event logs. */
 export class AgentSessionRepository {
     protected readonly root: string;
     protected readonly indexPath: string;
     protected readonly lockPath: string;
-    protected readonly pendingEvents = new Map<string, { lines: string[]; bytes: number }>();
+    protected readonly pendingEvents = new Map<string, PendingEventBatch>();
+    /**
+     * Parsed JSONL belongs in the Electron backend, but reparsing up to 16 MiB
+     * on every history switch blocks the renderer RPC. Cache only the durable
+     * file prefix and validate it with inode + size on every read. Pending
+     * events stay separate so a history read never has to force an fsync.
+     */
+    protected readonly eventCache = new Map<string, EventFileCache>();
     protected flushTimer: ReturnType<typeof setTimeout> | undefined;
     /**
      * Runtime snapshots are emitted frequently while an Agent is streaming.
@@ -135,6 +162,7 @@ export class AgentSessionRepository {
             removed = true;
         });
         if (!removed) return false;
+        this.eventCache.delete(appSessionId);
         const historyPath = path.join(this.root, `${appSessionId}.jsonl`);
         try {
             fs.rmSync(historyPath, { force: true });
@@ -160,8 +188,9 @@ export class AgentSessionRepository {
             timestamp: new Date().toISOString(),
             event: redacted
         })}\n`;
-        const pending = this.pendingEvents.get(appSessionId) ?? { lines: [], bytes: 0 };
+        const pending = this.pendingEvents.get(appSessionId) ?? { lines: [], events: [], bytes: 0 };
         pending.lines.push(line);
+        pending.events.push(redacted);
         pending.bytes += Buffer.byteLength(line);
         this.pendingEvents.set(appSessionId, pending);
         if (pending.lines.length >= 64 || pending.bytes >= 64 * 1024 || !['text-delta', 'plan', 'tool-call'].includes(event.kind)) {
@@ -207,35 +236,80 @@ export class AgentSessionRepository {
 
     readEvents(appSessionId: string): AgentHostEvent[] {
         if (!/^[0-9a-f-]{36}$/i.test(appSessionId)) throw new Error('Unsafe session identifier.');
-        this.flushEvents(appSessionId);
         const target = path.join(this.root, `${appSessionId}.jsonl`);
+        let durable: AgentHostEvent[] = [];
         try {
             const stat = fs.statSync(target);
-            const maximum = 16 * 1024 * 1024;
-            const start = Math.max(0, stat.size - maximum);
-            const length = stat.size - start;
-            const descriptor = fs.openSync(target, 'r');
-            let contents: string;
-            try {
-                const buffer = Buffer.alloc(length);
-                fs.readSync(descriptor, buffer, 0, length, start);
-                contents = buffer.toString('utf8');
-            } finally {
-                fs.closeSync(descriptor);
+            const cached = this.eventCache.get(appSessionId);
+            const canReadIncrementally = !!cached
+                && cached.device === stat.dev
+                && cached.inode === stat.ino
+                && stat.size >= cached.size
+                && stat.size - cached.size <= MAX_EVENT_LOG_BYTES;
+            if (canReadIncrementally && cached) {
+                const appended = this.readEventFileRange(target, cached.size, stat.size - cached.size);
+                const parsed = parseStoredEventChunk(
+                    `${cached.trailingPartial}${appended}`,
+                    appSessionId,
+                    false
+                );
+                cached.size = stat.size;
+                cached.events = [...cached.events, ...parsed.events].slice(-MAX_CACHED_EVENTS);
+                cached.trailingPartial = parsed.trailingPartial;
+                durable = cached.events;
+                this.touchEventCache(appSessionId, cached);
+            } else {
+                const start = Math.max(0, stat.size - MAX_EVENT_LOG_BYTES);
+                const contents = this.readEventFileRange(target, start, stat.size - start);
+                const parsed = parseStoredEventChunk(contents, appSessionId, start > 0);
+                const next: EventFileCache = {
+                    device: stat.dev,
+                    inode: stat.ino,
+                    size: stat.size,
+                    events: parsed.events.slice(-MAX_CACHED_EVENTS),
+                    trailingPartial: parsed.trailingPartial
+                };
+                durable = next.events;
+                this.touchEventCache(appSessionId, next);
             }
-            if (start > 0) contents = contents.slice(contents.indexOf('\n') + 1);
-            return contents.split('\n').flatMap(line => {
-                if (!line.trim()) return [];
-                try {
-                    const envelope = JSON.parse(line) as { event?: unknown };
-                    return isStoredEvent(envelope.event, appSessionId) ? [envelope.event] : [];
-                } catch {
-                    return [];
-                }
-            }).slice(-5000);
         } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-            throw error;
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            this.eventCache.delete(appSessionId);
+        }
+        // A renderer history read is not a durability boundary. The scheduled
+        // 250 ms append remains crash-safe (write + fsync), while the user can
+        // immediately see this process's latest stream fragment without a disk
+        // flush on the latency-sensitive session-switch path.
+        const pending = this.pendingEvents.get(appSessionId)?.events ?? [];
+        return [...durable, ...pending]
+            .slice(-MAX_CACHED_EVENTS)
+            .map(event => ({ ...event }));
+    }
+
+    protected readEventFileRange(target: string, start: number, length: number): string {
+        if (length <= 0) return '';
+        const descriptor = fs.openSync(target, 'r');
+        try {
+            const buffer = Buffer.allocUnsafe(length);
+            let offset = 0;
+            while (offset < length) {
+                const bytesRead = fs.readSync(descriptor, buffer, offset, length - offset, start + offset);
+                if (bytesRead <= 0) break;
+                offset += bytesRead;
+            }
+            return buffer.subarray(0, offset).toString('utf8');
+        } finally {
+            fs.closeSync(descriptor);
+        }
+    }
+
+    protected touchEventCache(appSessionId: string, cache: EventFileCache): void {
+        this.eventCache.delete(appSessionId);
+        this.eventCache.set(appSessionId, cache);
+        while (this.eventCache.size > MAX_CACHED_SESSIONS) {
+            const oldest = this.eventCache.keys().next().value as string | undefined;
+            if (!oldest) break;
+            this.eventCache.delete(oldest);
         }
     }
 
@@ -546,10 +620,37 @@ function fsyncDirectory(directory: string): void {
     }
 }
 
+function parseStoredEventChunk(
+    rawContents: string,
+    appSessionId: string,
+    discardLeadingPartial: boolean
+): { events: AgentHostEvent[]; trailingPartial: string } {
+    let contents = rawContents;
+    if (discardLeadingPartial) {
+        const firstNewline = contents.indexOf('\n');
+        contents = firstNewline >= 0 ? contents.slice(firstNewline + 1) : '';
+    }
+    const terminated = contents.endsWith('\n');
+    const lines = contents.split('\n');
+    const trailingPartial = terminated ? '' : (lines.pop() ?? '');
+    const events: AgentHostEvent[] = [];
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+            const envelope = JSON.parse(line) as { event?: unknown };
+            if (isStoredEvent(envelope.event, appSessionId)) events.push(envelope.event);
+        } catch {
+            // A corrupt historical line is isolated; later valid events remain
+            // readable and append-only recovery never rewrites the source log.
+        }
+    }
+    return { events, trailingPartial };
+}
+
 function isStoredEvent(value: unknown, appSessionId: string): value is AgentHostEvent {
     if (!value || typeof value !== 'object') return false;
     const event = value as { kind?: unknown; sessionId?: unknown };
-    const kinds = ['text-delta', 'plan', 'tool-call', 'permission-request', 'diff', 'turn-completed', 'error'];
+    const kinds = ['text-delta', 'plan', 'tool-call', 'permission-request', 'diff', 'context-usage', 'turn-completed', 'error'];
     return typeof event.kind === 'string' && kinds.includes(event.kind) &&
         (event.sessionId === appSessionId || (event.kind === 'error' && event.sessionId === undefined));
 }

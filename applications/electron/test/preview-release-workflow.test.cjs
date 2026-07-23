@@ -53,7 +53,11 @@ test('preview build keeps native Grok and Windows ACP/auth cleanup as release bl
 });
 
 test('preview packaging creates installers without formal signing or update manifests', () => {
-    assert.equal(packageJson.scripts['package:preview:installers'], 'node scripts/package-preview-installers.js');
+    assert.equal(
+        packageJson.scripts['package:preview:installers'],
+        'node scripts/ensure-plugins.js && node scripts/package-preview-installers.js',
+        'preview installers must stage the bundled language plugins before packaging'
+    );
     for (const fragment of ['--mac', 'dmg', 'zip', '--win', 'nsis', '--linux', 'AppImage', 'deb']) {
         assert.ok(packager.includes(`'${fragment}'`), `missing preview target ${fragment}`);
     }

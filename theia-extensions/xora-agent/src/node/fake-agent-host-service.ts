@@ -212,6 +212,7 @@ export class FakeAgentHostService implements AgentHostService {
     }
 
     async sendPrompt(request: PromptRequest): Promise<void> {
+        const promptStartedAt = Date.now();
         const session = this.requireSession(request.sessionId);
         if (typeof request.text !== 'string') throw new Error('Prompt text must be a string.');
         if (request.attachments !== undefined && !Array.isArray(request.attachments)) {
@@ -393,7 +394,9 @@ export class FakeAgentHostService implements AgentHostService {
             await new Promise<void>(resolve => this.pendingPermissions.set(permissionId, { sessionId: request.sessionId, resolve }));
         }
         if (this.requireSession(request.sessionId).status === 'cancelled') {
-            this.client?.onAgentEvent({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'cancelled' });
+            this.client?.onAgentEvent({
+                kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'cancelled', elapsedMs: Date.now() - promptStartedAt
+            });
             return;
         }
         this.client?.onAgentEvent({
@@ -409,7 +412,9 @@ export class FakeAgentHostService implements AgentHostService {
         session.status = 'completed';
         session.updatedAt = new Date().toISOString();
         this.client?.onAgentEvent({ kind: 'session', session });
-        this.client?.onAgentEvent({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'end_turn' });
+        this.client?.onAgentEvent({
+            kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'end_turn', elapsedMs: Date.now() - promptStartedAt
+        });
     }
 
     async cancel(sessionId: string): Promise<void> {

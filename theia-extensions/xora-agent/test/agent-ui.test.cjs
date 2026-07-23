@@ -95,7 +95,7 @@ test('Agent composer and transcript include the interaction safeguards used by t
     assert.match(source, /protected composerGate\(snapshot: RuntimeSnapshot\)/);
     assert.match(source, /草稿会保留/);
     const gateStart = source.indexOf('protected composerGate(snapshot: RuntimeSnapshot)');
-    const gateEnd = source.indexOf('protected renderRuntimeNotice', gateStart);
+    const gateEnd = source.indexOf('protected requestRuntimePrewarm', gateStart);
     const gate = source.slice(gateStart, gateEnd);
     assert.doesNotMatch(gate, /workspaceTrusted|kind: 'trust'|starting|initializing|draining|updating/,
         'runtime lifecycle states must not reject the first Send');
@@ -103,12 +103,18 @@ test('Agent composer and transcript include the interaction safeguards used by t
     assert.match(source, /this\.requestRuntimePrewarm\(true\)/);
     assert.match(source, /!root \|\| !snapshot\.workspaceAttached/);
     assert.doesNotMatch(source, /!snapshot\.workspaceTrusted\s*\?\s*this\.renderTrust\(\)/);
-    assert.match(source, /const \[, preparedRuntime\] = await Promise\.all\(/);
-    assert.match(source, /const runtimePromise = this\.service\.startRuntime\(\{[\s\S]*?workspaceRoot: root,[\s\S]*?providerId: submission\.providerId/);
-    assert.doesNotMatch(source, /runtimeNeedsStart/,
-        'Send must revalidate a renderer-ready runtime with the Electron backend');
+    assert.match(source, /const \[saveAll, preparedRuntime\] = await Promise\.all\(\[saveAllPromise, runtimePromise\]\)/);
+    assert.match(source, /const runtimeReusable = runtime\.workspaceAttached[\s\S]*?runtime\.phase === 'ready'/);
+    assert.match(source, /runtimeReusable[\s\S]*?Promise\.resolve\(runtime\)[\s\S]*?this\.service\.startRuntime\(\{/);
+    assert.ok(
+        source.indexOf('await this.model.refresh();', source.indexOf('protected async send('))
+            < source.indexOf('const runtimeReusable =', source.indexOf('protected async send(')),
+        'the renderer may reuse prewarm only after an authoritative Electron snapshot read'
+    );
     assert.match(source, /正在连接，随后发送/);
-    assert.match(source, /protected renderPendingSubmission\(submission: PromptSubmission\)/);
+    assert.match(source, /protected renderPendingSubmission\(submission: Pick<PromptSubmission, 'text' \| 'attachments'>\)/);
+    assert.match(source, /this\.sendPreparationPreview = \{ text: preparedText, attachments: preparedAttachments \}/,
+        'the optimistic user bubble must paint before warm-send preparation finishes');
     assert.match(source, /任务已接收，正在发送/);
     assert.match(source, /submission\.userEventReceived = true/);
     assert.match(source, /event\.kind === 'text-delta' && event\.role === 'user'/);
@@ -172,7 +178,8 @@ test('image submissions and session restores stay bound to their original Agent 
     assert.match(source, /const targetContextKey = this\.agentContextKey\([\s\S]*session\.workspaceRoot,[\s\S]*this\.model\.snapshot\.providerId,[\s\S]*session\.appSessionId/);
     assert.doesNotMatch(source, /此历史仅供查看，请新建会话/);
     assert.match(source, /generation !== this\.sessionLoadGeneration \|\| this\.imageDraftContextKey\(\) !== targetContextKey/);
-    assert.match(source, /this\.observedAgentContextKey = targetContextKey;\s*this\.model\.showSessionHistory\(session, history\)/);
+    assert.match(source, /this\.observedAgentContextKey = targetContextKey;\s*this\.model\.showSessionHistory\(session, cachedHistory \?\? \[\]\)/);
+    assert.match(source, /if \(!cachedHistory\) \{[\s\S]*?getSessionHistory\(session\.appSessionId\)[\s\S]*?showSessionHistory\(session, history\)/);
     assert.ok(sendSource.indexOf('this.model.startNewSession()') < sendSource.indexOf('this.service.createSession({'));
     assert.match(source, /if \(previewWasConsumed\) this\.dismissImagePreviewAfterContentRemoval\(\)/);
 });

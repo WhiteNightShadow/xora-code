@@ -82,6 +82,14 @@ interface PendingAssistantTextDelta {
     timer: NodeJS.Timeout;
 }
 
+interface PendingSessionLoad {
+    activationGeneration: number;
+    runtimeGeneration: number;
+    providerId: string;
+    providerEpoch: string;
+    promise: Promise<SessionRecord>;
+}
+
 /** Electron-main-only notification; never crosses the renderer RPC boundary. */
 export interface ProviderRuntimeInvalidation {
     providerId: string;
@@ -115,11 +123,11 @@ const MAX_EMITTED_DIFF_KEYS = 2048;
 // Markdown parse per token. Do not debounce this timer: a continuous stream
 // must still reach the renderer at a steady cadence.
 const ASSISTANT_TEXT_BATCH_INTERVAL_MS = 28;
-// Desktop must feel as snappy as the Grok CLI: initialize is expected to
-// finish well under 30s once remote model-catalog fetch is disabled for the
-// sidecar (see ProviderRegistry `remote_fetch = false`). Do not paper over
-// regressions by raising this budget — a hang past 30s is a startup bug.
-const ACP_INITIALIZE_TIMEOUT_MS = 30_000;
+// Keep the release-grade upper bound aligned with the packaged sidecar smoke
+// test. App-owned API-provider homes disable Grok's optional startup catalog
+// fetch, while subscription homes remain Grok/CLI-owned and may still need a
+// bounded authentication refresh on a cold network.
+const ACP_INITIALIZE_TIMEOUT_MS = 45_000;
 
 /** One instance is created for each Electron renderer connection/window. */
 export class GrokAgentHostService implements AgentHostService {
@@ -135,6 +143,8 @@ export class GrokAgentHostService implements AgentHostService {
     protected readonly acpSessionLookup = new Map<string, string>();
     /** Sessions already hydrated inside the current sidecar process. */
     protected readonly loadedSessionIds = new Set<string>();
+    /** Coalesces duplicate restore requests from prewarm, tab activation and Send. */
+    protected pendingSessionLoads: Map<string, PendingSessionLoad> | undefined = new Map();
     /** Assistant-only stream batches waiting to cross renderer IPC and JSONL. */
     protected readonly pendingAssistantTextDeltas = new Map<string, PendingAssistantTextDelta>();
     /** Sessions whose current turn already delivered its latency-critical first assistant chunk. */
@@ -804,9 +814,49 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async loadSession(appSessionId: string): Promise<SessionRecord> {
+        const selectedProvider = this.providers.selectedProviderId();
+        const selectedProviderEpoch = this.providers.runtimeEpoch(selectedProvider);
+        const pendingLoads = this.pendingSessionLoadState();
+        const pending = pendingLoads.get(appSessionId);
+        // Background hydration, explicit tab activation and Send can converge
+        // on the same session within one event-loop turn. Reuse that exact ACP
+        // restore only while no newer A -> B activation or Provider epoch has
+        // superseded it. This preserves latest-intent ordering and credentials.
+        if (pending
+            && pending.activationGeneration === this.sessionLoadGeneration
+            && pending.runtimeGeneration === this.runtimeGeneration
+            && pending.providerId === selectedProvider
+            && pending.providerEpoch === selectedProviderEpoch) {
+            return pending.promise;
+        }
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
         const activationGeneration = ++this.sessionLoadGeneration;
+        let boundRuntimeGeneration = this.runtimeGeneration;
+        let entry: PendingSessionLoad | undefined;
+        const task = this.loadSessionUncoalesced(appSessionId, activationGeneration, generation => {
+            boundRuntimeGeneration = generation;
+            if (entry) entry.runtimeGeneration = generation;
+        });
+        const promise = task.finally(() => {
+            if (pendingLoads.get(appSessionId) === entry) pendingLoads.delete(appSessionId);
+        });
+        entry = {
+            activationGeneration,
+            runtimeGeneration: boundRuntimeGeneration,
+            providerId: selectedProvider,
+            providerEpoch: selectedProviderEpoch,
+            promise
+        };
+        pendingLoads.set(appSessionId, entry);
+        return promise;
+    }
+
+    protected async loadSessionUncoalesced(
+        appSessionId: string,
+        activationGeneration: number,
+        bindRuntimeGeneration: (generation: number) => void
+    ): Promise<SessionRecord> {
         const record = this.sessions.get(appSessionId);
         if (!record) {
             throw new Error('Unknown Xora Code session.');
@@ -859,6 +909,10 @@ export class GrokAgentHostService implements AgentHostService {
                 return synchronized;
             }
             restoreRuntimeGeneration = this.runtimeGeneration;
+            // Bind coalescing to the exact sidecar that will receive
+            // session/load. A same-Provider crash/restart must not let Send
+            // await an obsolete Promise and then prompt an unhydrated process.
+            bindRuntimeGeneration(restoreRuntimeGeneration);
             this.beginSessionRestore(appSessionId);
             try {
                 const result = await this.requireReady().request<Record<string, unknown>>('session/load', {
@@ -907,11 +961,20 @@ export class GrokAgentHostService implements AgentHostService {
                 this.loadedSessionIds.add(appSessionId);
                 const restoredModel = latestGlobalModel ?? this.selectedModel;
                 if (restoredModel) this.selectedModel = restoredModel;
-                const loaded = this.sessions.update(appSessionId, {
-                    status: 'idle',
-                    sidecarVersion: this.sidecarVersion,
-                    ...(restoredModel ? { model: restoredModel } : {})
-                });
+                const currentRecord = this.sessions.get(appSessionId) ?? record;
+                const requiresDurableUpdate = currentRecord.status !== 'idle'
+                    || currentRecord.sidecarVersion !== this.sidecarVersion
+                    || (!!restoredModel && currentRecord.model !== restoredModel);
+                // A repeated history activation is descriptive, not a new
+                // durable state transition. Avoid lock + temp file + two fsyncs
+                // when the already-restored index record is byte-equivalent.
+                const loaded = requiresDurableUpdate
+                    ? this.sessions.update(appSessionId, {
+                        status: 'idle',
+                        sidecarVersion: this.sidecarVersion,
+                        ...(restoredModel ? { model: restoredModel } : {})
+                    })
+                    : currentRecord;
                 this.activeSessionId = appSessionId;
                 this.emit({ kind: 'session', session: loaded });
                 this.emitSnapshot();
@@ -945,6 +1008,11 @@ export class GrokAgentHostService implements AgentHostService {
                 throw reconnectError;
             }
         }
+    }
+
+    /** Keeps prototype-only migration and focused test harnesses compatible. */
+    protected pendingSessionLoadState(): Map<string, PendingSessionLoad> {
+        return this.pendingSessionLoads ?? (this.pendingSessionLoads = new Map<string, PendingSessionLoad>());
     }
 
     async getSessionHistory(appSessionId: string): Promise<AgentHostEvent[]> {
@@ -1072,6 +1140,11 @@ export class GrokAgentHostService implements AgentHostService {
         });
         const running = this.sessions.update(request.sessionId, { status: 'running' });
         this.emit({ kind: 'session', session: running });
+        // Measure only the actual ACP turn. Startup, authentication, Save All
+        // and session hydration are Xora orchestration latency and must not be
+        // presented as model response time.
+        const promptStartedAt = process.hrtime.bigint();
+        const elapsedMs = (): number => Number((process.hrtime.bigint() - promptStartedAt) / 1_000_000n);
         try {
             const prompt = [
                 ...(request.text.length ? [{ type: 'text' as const, text: request.text }] : []),
@@ -1091,17 +1164,18 @@ export class GrokAgentHostService implements AgentHostService {
             const status = stopReason === 'cancelled' ? 'cancelled' : 'completed';
             const finished = this.sessions.update(request.sessionId, { status });
             this.emit({ kind: 'session', session: finished });
-            this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason });
+            this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason, elapsedMs: elapsedMs() });
         } catch (error) {
             if ((error instanceof AcpCancelledError || asRecord(error)?.kind === 'cancelled') && this.phase !== 'crashed') {
                 const cancelled = this.sessions.update(request.sessionId, { status: 'cancelled' });
                 this.emit({ kind: 'session', session: cancelled });
-                this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'cancelled' });
+                this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'cancelled', elapsedMs: elapsedMs() });
                 return;
             }
             const failed = this.sessions.update(request.sessionId, { status: 'failed' });
             this.emit({ kind: 'session', session: failed });
             this.emitError('PROMPT_FAILED', error, true, request.sessionId);
+            this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'error', elapsedMs: elapsedMs() });
             throw error;
         } finally {
             this.flushAssistantTextDeltas(request.sessionId);
