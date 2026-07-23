@@ -231,7 +231,7 @@ test('desktop ACP initialize uses cold-start hints and a release-grade timeout',
         assert.ok(declaration, `initialize timeout constant ${timeoutToken} must have a numeric declaration`);
         timeoutMs = Number(declaration[1].replaceAll('_', ''));
     }
-    assert.equal(timeoutMs, 45_000, 'desktop initialize must stay aligned with the release smoke timeout');
+    assert.equal(timeoutMs, 30_000, 'desktop initialize must stay fast; do not paper over catalog hangs with a long timeout');
 });
 
 test('every production sidecar environment disables telemetry and implicit compatibility MCP discovery', () => {

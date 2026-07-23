@@ -126,6 +126,9 @@ test('configured xAI relays use a secret-free managed Grok model and profile-sco
     // override model env_key / XAI_API_KEY on third-party base_url hosts.
     assert.match(source, /ensureApiProviderGrokHome/);
     assert.match(source, /GROK_HOME:\s*this\.ensureApiProviderGrokHome\(profile\)/);
+    // Desktop must not block ACP initialize on a remote model-catalog fetch.
+    assert.match(source, /remote_fetch\s*=\s*false/);
+    assert.match(source, /ensureModelsRemoteFetchDisabled/);
     assert.match(source, /\[XAI_MANAGED_ENVIRONMENT\]:\s*key/);
     assert.match(source, /XAI_API_KEY:\s*key/);
     assert.match(managedToml, /profile\.kind === 'xai-api-key' \? XAI_MANAGED_MODEL_ID : profile\.id/);

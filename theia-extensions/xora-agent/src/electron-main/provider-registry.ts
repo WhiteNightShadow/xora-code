@@ -12,7 +12,8 @@ import {
     MANAGED_BLOCK_END as BLOCK_END,
     MANAGED_BLOCK_START as BLOCK_START,
     removeMarkedManagedBlocksFromToml,
-    removeModelTablesFromToml
+    removeModelTablesFromToml,
+    upsertModelsRemoteFetchDisabled
 } from './provider-toml';
 import { SecretVault } from './secret-vault';
 
@@ -685,6 +686,9 @@ export class ProviderRegistry {
             throw new Error(`Unknown provider profile: ${profileId}`);
         }
         if (profile.kind === 'grok-subscription') {
+            // Shared ~/.grok still owns OIDC auth.json. Disable remote catalog
+            // fetch so initialize cannot stall 45–60s on a slow auth.x.ai hop.
+            this.ensureModelsRemoteFetchDisabled(this.grokConfigPath);
             return { profile, environment: {} };
         }
         if (this.isProviderUpdateBlocked(profile.id)) {
@@ -708,7 +712,12 @@ export class ProviderRegistry {
                     GROK_HOME: this.ensureApiProviderGrokHome(profile),
                     XAI_API_KEY: key
                 }
-                : { XAI_API_KEY: key };
+                : (() => {
+                    // Legacy key-only path still uses shared ~/.grok (and any
+                    // OIDC auth.json there). Keep initialize off the network.
+                    this.ensureModelsRemoteFetchDisabled(this.grokConfigPath);
+                    return { XAI_API_KEY: key };
+                })();
             if (profile.model && profile.backendSearch === true) {
                 // Grok resolves the web-search sampler independently from the
                 // active ACP model. A process-scoped pin keeps it on this
@@ -764,10 +773,26 @@ export class ProviderRegistry {
             '[ui]',
             'permission_mode = "always-approve"',
             '',
+            // Grok blocks ACP initialize while refreshing the remote model
+            // catalogue when remote_fetch is true (default). Desktop already
+            // supplies the catalog via managed [model.*] tables below.
+            '[models]',
+            'remote_fetch = false',
+            '',
             this.managedToml(profile),
             ''
         ].join('\n');
-        this.atomicWrite(path.join(root, 'config.toml'), config, 0o600);
+        const configPath = path.join(root, 'config.toml');
+        // Avoid rewriting identical config on every launch — Grok's config
+        // watcher would otherwise re-run startup work that the CLI never pays
+        // for when it reuses a warm process.
+        let previous = '';
+        try {
+            if (fs.existsSync(configPath)) previous = fs.readFileSync(configPath, 'utf8');
+        } catch { /* rewrite below */ }
+        if (previous !== config) {
+            this.atomicWrite(configPath, config, 0o600);
+        }
 
         // Reuse user skills from the real Grok home when present (read-only).
         const sharedSkills = path.join(os.homedir(), '.grok', 'skills');
@@ -793,6 +818,28 @@ export class ProviderRegistry {
             /* Electron app may be unavailable in unit tests. */
         }
         return path.join(os.tmpdir(), 'xora-code-provider-grok-homes');
+    }
+
+    /**
+     * Grok Build 0.2.102 holds ACP `initialize` until an optional online model
+     * catalog refresh finishes when `[models].remote_fetch` is true (default).
+     * On constrained networks that wait regularly exceeds the desktop
+     * handshake budget and surfaces as `initialize timed out after …ms` on
+     * every platform. Force `remote_fetch = false` so initialize returns from
+     * the local/bundled catalogue (custom providers still inject their own
+     * `[model.*]` tables).
+     */
+    protected ensureModelsRemoteFetchDisabled(configPath: string): void {
+        try {
+            fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
+            const before = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+            const after = upsertModelsRemoteFetchDisabled(before);
+            if (after === before) return;
+            this.atomicWrite(configPath, after, 0o600);
+        } catch {
+            // Best effort: a locked or unreadable config must not block launch.
+            // The raised initialize timeout remains the fallback safety net.
+        }
     }
 
     credential(profileId: string): string | undefined {

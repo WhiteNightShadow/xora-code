@@ -115,10 +115,11 @@ const MAX_EMITTED_DIFF_KEYS = 2048;
 // Markdown parse per token. Do not debounce this timer: a continuous stream
 // must still reach the renderer at a steady cadence.
 const ASSISTANT_TEXT_BATCH_INTERVAL_MS = 28;
-// Keep the desktop handshake aligned with the release smoke contract. Grok
-// may refresh its remote model catalogue during a cold start, so 30 seconds
-// was too aggressive under ordinary network variance.
-const ACP_INITIALIZE_TIMEOUT_MS = 45_000;
+// Desktop must feel as snappy as the Grok CLI: initialize is expected to
+// finish well under 30s once remote model-catalog fetch is disabled for the
+// sidecar (see ProviderRegistry `remote_fetch = false`). Do not paper over
+// regressions by raising this budget — a hang past 30s is a startup bug.
+const ACP_INITIALIZE_TIMEOUT_MS = 30_000;
 
 /** One instance is created for each Electron renderer connection/window. */
 export class GrokAgentHostService implements AgentHostService {
