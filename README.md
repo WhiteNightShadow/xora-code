@@ -1,10 +1,11 @@
 <div align="center">
-  <img src="applications/electron/resources/icons/1024x1024.png" width="112" alt="Xora Code 图标" />
+  <img src="applications/electron/resources/icons/1024x1024.png" width="112" alt="Xora Code - open-source Grok desktop app icon" />
   <h1>Xora Code</h1>
-  <p><strong>开源、模型中立的桌面编程 Agent IDE</strong></p>
+  <p><strong>开源的 Grok 桌面应用与编程 Agent 客户端</strong></p>
+  <p><strong>Open-source Grok desktop app and coding agent powered by Grok Build</strong></p>
   <p>
-    基于 Eclipse Theia、Electron、ACP 与 Grok Build，<br />
-    把项目理解、代码修改、终端执行与可审查的 Agent 工作流放进同一个桌面工作台。
+    基于 Grok Build、Eclipse Theia、Electron 与 ACP，<br />
+    在 macOS、Windows 和 Linux 上提供项目理解、代码修改、终端执行与可审查的 Agent 工作流。
   </p>
 
   <p>
@@ -28,14 +29,18 @@
 
 ---
 
-Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能力带入完整的桌面编码环境。你可以一边浏览项目、编辑代码和使用终端，一边让 Agent 分析代码库、制定计划、调用工具并完成改动；所有关键操作都通过清晰的活动记录、Diff 和权限请求呈现。
+Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) 构建的开源 Grok 桌面应用，也是面向编程场景的 Grok Build GUI 客户端。它把项目树、代码编辑器、终端、流式 Agent 对话、Plan、工具活动、Diff 审阅和权限控制集中在同一个桌面工作台中。
 
-它不是简单地把终端嵌进窗口：Grok Build 作为固定版本的 sidecar 由 Electron 主进程托管，前端通过 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol/agent-client-protocol) 接收流式消息、计划、工具调用、权限请求和会话事件。凭据、进程和最终权限裁决不会交给渲染页面。
+**Xora Code is an open-source Grok desktop app and Grok Build desktop client for macOS, Windows and Linux.** It is designed for developers who want a visual, project-oriented way to use Grok for code understanding, editing, terminal tasks and reviewable Agent workflows.
+
+它不是简单地把终端嵌进窗口：固定版本的 Grok Build sidecar 由 Electron 主进程托管，前端通过 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol/agent-client-protocol) 接收流式消息、计划、工具调用、权限请求和会话事件。凭据、进程和最终权限裁决不会交给渲染页面；UI 与会话协议仍保持 Agent 中立，并支持通过 Grok Build 接入兼容模型服务。
+
+> Xora Code 是由社区独立维护的开源项目，不是 xAI 官方客户端，与 xAI 不存在隶属、赞助或背书关系。“Grok”与“Grok Build”仅用于准确描述本项目集成的上游软件及互操作能力。
 
 > [!IMPORTANT]
 > Xora Code 当前处于 **v0.2.1 Alpha**。核心桌面工作区、并发会话、模型接入与可审查 Agent 流程已经可用，但扩展运行期热刷新、组件在线更新和正式签名发行仍在完善。Preview 安装包未经平台正式签名，仅适合开发、测试与提前体验，请勿用于生产环境。
 
-## 为什么是 Xora Code
+## 为什么选择 Xora Code 作为 Grok 桌面端
 
 - **桌面优先**：项目树、编辑器、搜索、Diff、终端和 Agent 固定在同一个工作台中。
 - **围绕 Grok Build**：保留 Grok Build 的代码理解、文件操作、命令执行、网络搜索与扩展能力，并通过 ACP 提供图形界面。
@@ -418,7 +423,9 @@ Xora Code 希望成为一个由社区共同建设的开放桌面 Agent 工作台
 
 ## 问题反馈与交流
 
-使用中遇到问题、想反馈 bug、或交流逆向思路，欢迎加微信或进群反馈：
+产品使用、功能建议和兼容性问题请优先通过 [GitHub Issues](https://github.com/WhiteNightShadow/xora-code/issues) 反馈，便于公开追踪、复现与协作解决。
+
+需要中文社区交流时，也可以通过微信联系：
 
 **微信号：** `han8888v8888`（加好友请备注「xora-code」）
 

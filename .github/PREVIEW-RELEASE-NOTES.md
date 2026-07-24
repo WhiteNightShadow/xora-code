@@ -2,6 +2,8 @@
 
 > ⚠️ **这是供测试与验收使用的未签名预览版，不是正式稳定版。** 请仅从本仓库的 GitHub Release 下载，并在安装前核对随附的 SHA-256。
 
+Xora Code 是一款由社区独立维护的开源 Grok 桌面应用，基于 Grok Build、Eclipse Theia、Electron 与 ACP，为 macOS、Windows 和 Linux 提供可视化的编程 Agent 工作流。本项目不是 xAI 官方客户端，与 xAI 无隶属、赞助或背书关系。
+
 - 源码提交：`{{FULL_SHA}}`
 - Preview 标识：`{{TAG}}`
 - 构建记录：{{RUN_URL}}
@@ -9,7 +11,7 @@
 
 ## 本次预览重点
 
-- **桌面 Agent 工作台**：将项目树、Monaco 编辑器、搜索、Diff、终端与固定的 Xora Code Agent 面板放在同一界面。
+- **Grok 桌面 Agent 工作台**：将项目树、Monaco 编辑器、搜索、Diff、终端与固定的 Xora Code Agent 面板放在同一界面。
 - **Grok Build + ACP**：支持认证、新建/恢复会话、流式回复、Plan、工具活动、权限请求、取消和崩溃处理。
 - **订阅与自定义模型**：支持 Grok 订阅，以及可配置 Base URL、API Key、模型 ID 和上下文窗口的 OpenAI Responses、OpenAI Chat Completions 与 Anthropic Messages 兼容服务。
 - **全局模型一致性**：在设置中切换订阅或自定义 Provider 后，Agent 选择器、新会话、历史会话与其他项目统一采用当前配置。

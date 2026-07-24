@@ -2,13 +2,29 @@
   "name": "xora-code",
   "version": "0.2.1",
   "private": true,
-  "description": "An open-source, model-neutral desktop Agent IDE built on Eclipse Theia, Electron, and ACP, with first-class Grok Build integration.",
+  "description": "An open-source Grok desktop app and Grok Build GUI client built with Eclipse Theia, Electron, and ACP.",
   "author": {
     "name": "Xora Code contributors",
     "email": "WhiteNightShadow@users.noreply.github.com"
   },
   "homepage": "https://github.com/WhiteNightShadow/xora-code",
   "license": "Apache-2.0",
+  "keywords": [
+    "grok",
+    "grok-build",
+    "grok-desktop",
+    "grok-client",
+    "grok-build-gui",
+    "coding-agent",
+    "ai-coding-agent",
+    "agentic-ide",
+    "agent-client-protocol",
+    "acp",
+    "mcp",
+    "electron",
+    "eclipse-theia",
+    "desktop-app"
+  ],
   "packageManager": "yarn@1.22.22",
   "engines": {
     "node": ">=24 <25",

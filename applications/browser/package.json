@@ -2,7 +2,7 @@
   "name": "@xora-code/browser-app",
   "version": "0.2.1",
   "private": true,
-  "description": "An open-source, model-neutral desktop Agent IDE built on Eclipse Theia, Electron, and ACP, with first-class Grok Build integration.",
+  "description": "Browser development target for the open-source Xora Code Grok desktop app and Grok Build GUI client.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=24 <25",
