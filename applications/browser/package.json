@@ -1,6 +1,6 @@
 {
   "name": "@xora-code/browser-app",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "An open-source, model-neutral desktop Agent IDE built on Eclipse Theia, Electron, and ACP, with first-class Grok Build integration.",
   "license": "Apache-2.0",
@@ -59,8 +59,8 @@
     "@theia/variable-resolver": "1.73.1",
     "@theia/vsx-registry": "1.73.1",
     "@theia/workspace": "1.73.1",
-    "@xora-code/agent": "0.2.0",
-    "@xora-code/product-extension": "0.2.0",
+    "@xora-code/agent": "0.2.1",
+    "@xora-code/product-extension": "0.2.1",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

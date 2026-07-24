@@ -25,9 +25,16 @@ interface EventFileCache {
     trailingPartial: string;
 }
 
+interface DiffImagePathCache {
+    /** Identity of the containing directory; additions/removals invalidate paths. */
+    directorySignature: string;
+    paths: Map<string, string | undefined>;
+}
+
 const MAX_EVENT_LOG_BYTES = 16 * 1024 * 1024;
 const MAX_CACHED_EVENTS = 5000;
 const MAX_CACHED_SESSIONS = 12;
+const MAX_CACHED_DIFF_PATHS = MAX_CACHED_EVENTS * 2;
 
 /** Crash-safe, renderer-independent index plus redacted append-only event logs. */
 export class AgentSessionRepository {
@@ -42,6 +49,15 @@ export class AgentSessionRepository {
      * events stay separate so a history read never has to force an fsync.
      */
     protected readonly eventCache = new Map<string, EventFileCache>();
+    /**
+     * Diff history can contain hundreds of repeated cards. Resolving both
+     * snapshots with lstat on every cached history read made session switches
+     * synchronously scale with the number of cards. Keep the hash-derived
+     * result per session and invalidate it when the private diff directory
+     * changes, so a read performs at most one directory lstat before using the
+     * already validated paths.
+     */
+    protected readonly diffImagePathCache = new Map<string, DiffImagePathCache>();
     protected flushTimer: ReturnType<typeof setTimeout> | undefined;
     /**
      * Runtime snapshots are emitted frequently while an Agent is streaming.
@@ -163,6 +179,7 @@ export class AgentSessionRepository {
         });
         if (!removed) return false;
         this.eventCache.delete(appSessionId);
+        this.diffImagePathCache.delete(appSessionId);
         const historyPath = path.join(this.root, `${appSessionId}.jsonl`);
         try {
             fs.rmSync(historyPath, { force: true });
@@ -281,9 +298,11 @@ export class AgentSessionRepository {
         // immediately see this process's latest stream fragment without a disk
         // flush on the latency-sensitive session-switch path.
         const pending = this.pendingEvents.get(appSessionId)?.events ?? [];
-        return [...durable, ...pending]
-            .slice(-MAX_CACHED_EVENTS)
-            .map(event => ({ ...event }));
+        const visible = [...durable, ...pending].slice(-MAX_CACHED_EVENTS);
+        const diffCache = visible.some(event => event.kind === 'diff')
+            ? this.prepareDiffImagePathCache(appSessionId)
+            : undefined;
+        return visible.map(event => this.restoreDiffImagePaths(appSessionId, event, diffCache));
     }
 
     protected readEventFileRange(target: string, start: number, length: number): string {
@@ -318,10 +337,15 @@ export class AgentSessionRepository {
             throw new Error('Unsafe session identifier.');
         }
         const hash = crypto.createHash('sha256').update(contents).digest('hex');
-        const extension = path.extname(relativePath).replace(/[^.A-Za-z0-9_-]/g, '').slice(0, 16);
+        const extension = this.diffImageExtension(relativePath);
         const directory = path.join(this.root, 'diffs', appSessionId);
         fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-        const target = path.join(directory, `${hash}${extension || '.before'}`);
+        // A bare SHA-256 immediately following the UUID directory can form one
+        // long Base64-shaped run (`uuid-tail/<hash>`). The generic diagnostic
+        // redactor correctly removes that run, but doing so used to corrupt the
+        // renderer's Diff URI. A non-Base64 separator keeps the trusted digest
+        // independently recognizable and therefore intact after redaction.
+        const target = path.join(directory, `before-${hash}${extension}`);
         if (!fs.existsSync(target)) {
             const descriptor = fs.openSync(target, 'wx', 0o600);
             try {
@@ -333,8 +357,116 @@ export class AgentSessionRepository {
         } else {
             const stat = fs.lstatSync(target);
             if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Refusing an unsafe Agent diff history path.');
+            if (this.fileSha256(target) !== hash) {
+                throw new Error('Refusing a corrupted Agent diff history snapshot.');
+            }
         }
+        // A newly written immutable snapshot changes the set of valid paths.
+        // The next history read will rebuild only this session's path cache.
+        this.diffImagePathCache.delete(appSessionId);
         return { path: target, hash };
+    }
+
+    /**
+     * Rebuild content-addressed Diff paths instead of trusting a path stored in
+     * JSONL. Besides keeping history portable across the redaction boundary,
+     * this repairs v0.2.0 events whose bare hash filename was replaced with
+     * `[REDACTED_BINARY_PAYLOAD]`. Legacy snapshots remain readable in place.
+     */
+    protected restoreDiffImagePaths(
+        appSessionId: string,
+        event: AgentHostEvent,
+        cache: DiffImagePathCache | undefined
+    ): AgentHostEvent {
+        if (event.kind !== 'diff') return { ...event };
+        const oldPath = event.oldHash
+            ? this.findDiffImage(appSessionId, event.path, event.oldHash, cache)
+            : undefined;
+        const newPath = event.newHash
+            ? this.findDiffImage(appSessionId, event.path, event.newHash, cache)
+            : undefined;
+        const { oldPath: _storedOldPath, newPath: _storedNewPath, ...safeEvent } = event;
+        return {
+            ...safeEvent,
+            ...(oldPath ? { oldPath } : {}),
+            ...(newPath ? { newPath } : {})
+        };
+    }
+
+    protected findDiffImage(
+        appSessionId: string,
+        relativePath: string,
+        hash: string,
+        cache: DiffImagePathCache | undefined
+    ): string | undefined {
+        if (!/^[0-9a-f]{64}$/i.test(hash)) return undefined;
+        const extension = this.diffImageExtension(relativePath);
+        const cacheKey = `${hash.toLowerCase()}\0${extension}`;
+        if (cache?.paths.has(cacheKey)) {
+            const cached = cache.paths.get(cacheKey);
+            this.touchDiffImagePath(cache, cacheKey, cached);
+            return cached;
+        }
+        const directory = path.join(this.root, 'diffs', appSessionId);
+        let resolved: string | undefined;
+        for (const filename of [`before-${hash}${extension}`, `${hash}${extension}`]) {
+            const candidate = path.join(directory, filename);
+            try {
+                const stat = fs.lstatSync(candidate);
+                if (!stat.isSymbolicLink() && stat.isFile() && this.fileSha256(candidate) === hash.toLowerCase()) {
+                    resolved = candidate;
+                    break;
+                }
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            }
+        }
+        if (cache) this.touchDiffImagePath(cache, cacheKey, resolved);
+        return resolved;
+    }
+
+    protected prepareDiffImagePathCache(appSessionId: string): DiffImagePathCache {
+        const directory = path.join(this.root, 'diffs', appSessionId);
+        let directorySignature = 'missing';
+        try {
+            const stat = fs.lstatSync(directory);
+            if (stat.isSymbolicLink() || !stat.isDirectory()) {
+                throw new Error('Refusing an unsafe Agent diff history directory.');
+            }
+            directorySignature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        const previous = this.diffImagePathCache.get(appSessionId);
+        const cache = previous?.directorySignature === directorySignature
+            ? previous
+            : { directorySignature, paths: new Map<string, string | undefined>() };
+        this.diffImagePathCache.delete(appSessionId);
+        this.diffImagePathCache.set(appSessionId, cache);
+        while (this.diffImagePathCache.size > MAX_CACHED_SESSIONS) {
+            const oldest = this.diffImagePathCache.keys().next().value as string | undefined;
+            if (!oldest) break;
+            this.diffImagePathCache.delete(oldest);
+        }
+        return cache;
+    }
+
+    protected touchDiffImagePath(cache: DiffImagePathCache, key: string, value: string | undefined): void {
+        cache.paths.delete(key);
+        cache.paths.set(key, value);
+        while (cache.paths.size > MAX_CACHED_DIFF_PATHS) {
+            const oldest = cache.paths.keys().next().value as string | undefined;
+            if (!oldest) break;
+            cache.paths.delete(oldest);
+        }
+    }
+
+    protected diffImageExtension(relativePath: string): string {
+        return path.extname(relativePath).replace(/[^.A-Za-z0-9_-]/g, '').slice(0, 16) || '.before';
+    }
+
+    protected fileSha256(target: string): string {
+        return crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
     }
 
     protected readIndex(): SessionIndex {
@@ -436,6 +568,10 @@ function cloneIndex(index: SessionIndex): SessionIndex {
 
 export function deepRedact<T>(value: T, exactSecrets: readonly string[] = []): T {
     const secretName = /(?:api[-_]?key|authorization|cookie|password|secret|token)/i;
+    // Context accounting uses token-shaped field names too. Keep only the
+    // exact numeric lifecycle fields Grok publishes; a string under the same
+    // key is still treated as credential-shaped data and removed.
+    const safeTokenAccountingNames = new Set(['totaltokens', 'tokensused', 'tokensbefore', 'tokensafter']);
     const secretValue = /(?:bearer\s+[A-Za-z0-9._~+/=-]{8,}|(?:sk|xai)-[A-Za-z0-9_-]{12,})/gi;
     // A sidecar must not be able to copy an ACP image payload into diagnostic
     // stderr or an error event. Canonical image Base64 is one long opaque run.
@@ -444,7 +580,13 @@ export function deepRedact<T>(value: T, exactSecrets: readonly string[] = []): T
     // hexadecimal runs are opaque data too and must not bypass redaction.
     const opaqueBinaryValue = /[A-Za-z0-9+/]{64,}={0,2}/g;
     const visit = (candidate: unknown, key?: string): unknown => {
-        if (key && secretName.test(key)) {
+        const normalizedKey = key?.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const safeTokenAccounting = normalizedKey !== undefined
+            && safeTokenAccountingNames.has(normalizedKey)
+            && typeof candidate === 'number'
+            && Number.isSafeInteger(candidate)
+            && candidate >= 0;
+        if (key && secretName.test(key) && !safeTokenAccounting) {
             return '[REDACTED]';
         }
         if (typeof candidate === 'string') {

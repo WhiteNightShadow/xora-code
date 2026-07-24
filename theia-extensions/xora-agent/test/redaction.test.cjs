@@ -26,6 +26,30 @@ test('diagnostic redaction permits only exact 64-character hexadecimal digests',
     }
 });
 
+test('context token counters survive redaction without weakening credential fields', () => {
+    assert.deepEqual(deepRedact({
+        totalTokens: 42000,
+        tokens_used: 170000,
+        tokensBefore: 170000,
+        tokensAfter: 42000,
+        accessToken: 'credential',
+        nested: {
+            tokensAfter: 'credential-shaped-string',
+            apiKey: 'secret'
+        }
+    }), {
+        totalTokens: 42000,
+        tokens_used: 170000,
+        tokensBefore: 170000,
+        tokensAfter: 42000,
+        accessToken: '[REDACTED]',
+        nested: {
+            tokensAfter: '[REDACTED]',
+            apiKey: '[REDACTED]'
+        }
+    });
+});
+
 test('streaming diagnostic redaction removes Base64 across arbitrary chunks', () => {
     const input = `request={"data":"${image}"}\n`;
     const chunkings = [

@@ -320,7 +320,10 @@ export interface DiffEvent {
     turnId?: string;
     toolCallId?: string;
     path: string;
+    /** Immutable content-addressed snapshot captured before the Agent edit. */
     oldPath?: string;
+    /** Immutable content-addressed snapshot captured after the Agent edit. */
+    newPath?: string;
     oldHash?: string;
     newHash?: string;
     diff: string;

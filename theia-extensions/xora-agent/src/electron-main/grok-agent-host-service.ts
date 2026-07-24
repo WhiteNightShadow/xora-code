@@ -73,6 +73,7 @@ interface ModelState {
 interface RevertableDiff {
     targetPath: string;
     beforePath: string;
+    expectedBeforeHash: string;
     expectedNewHash: string;
 }
 
@@ -450,7 +451,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.0' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.1' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -458,7 +459,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.2.0'
+                    clientVersion: '0.2.1'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
@@ -1395,7 +1396,15 @@ export class GrokAgentHostService implements AgentHostService {
         if (currentHash !== candidate.expectedNewHash) {
             throw new Error('The file changed after the Agent edit. A conflict Diff was opened; nothing was overwritten.');
         }
+        const beforeStat = fs.lstatSync(candidate.beforePath);
+        if (beforeStat.isSymbolicLink() || !beforeStat.isFile()) {
+            throw new Error('The Agent snapshot is not a regular file. Nothing was overwritten.');
+        }
         const before = fs.readFileSync(candidate.beforePath);
+        const beforeHash = crypto.createHash('sha256').update(before).digest('hex');
+        if (beforeHash !== candidate.expectedBeforeHash) {
+            throw new Error('The Agent snapshot failed its integrity check. Nothing was overwritten.');
+        }
         const temporary = `${target}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.xora-revert`;
         const descriptor = fs.openSync(temporary, 'wx', stat.mode & 0o777);
         try {
@@ -2367,8 +2376,14 @@ export class GrokAgentHostService implements AgentHostService {
                             continue;
                         }
                         const before = this.sessions.saveBeforeImage(appSessionId, changedPath, oldText);
+                        const after = this.sessions.saveBeforeImage(appSessionId, changedPath, newText);
                         const diffId = crypto.randomUUID();
-                        this.revertableDiffs.set(diffId, { targetPath, beforePath: before.path, expectedNewHash: newHash });
+                        this.revertableDiffs.set(diffId, {
+                            targetPath,
+                            beforePath: before.path,
+                            expectedBeforeHash: before.hash,
+                            expectedNewHash: newHash
+                        });
                         this.rememberEmittedDiff(diffKey);
                         this.emit({
                             kind: 'diff',
@@ -2377,6 +2392,7 @@ export class GrokAgentHostService implements AgentHostService {
                             toolCallId,
                             path: changedPath,
                             oldPath: before.path,
+                            newPath: after.path,
                             oldHash: before.hash,
                             newHash,
                             diff: unifiedDiff(changedPath, oldText, newText)

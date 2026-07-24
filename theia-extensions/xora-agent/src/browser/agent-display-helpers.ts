@@ -12,7 +12,7 @@ import { agentModelDisplayName } from './agent-model-options';
 type ToolTitleSource = Pick<ToolCallEvent,
     'title' | 'toolCallId' | 'toolName' | 'toolKind' | 'toolNamespace' | 'presentation' | 'locations' | 'input'>;
 
-export type AgentActivityFilter = 'all' | 'files' | 'search' | 'terminal' | 'web' | 'skill' | 'mcp' | 'plugin' | 'other';
+export type AgentActivityFilter = 'all' | 'files' | 'search' | 'terminal' | 'web' | 'agent' | 'skill' | 'mcp' | 'plugin' | 'other';
 
 export interface AgentToolDisplay {
     action: AgentToolAction;
@@ -101,7 +101,7 @@ const ACTION_DISPLAYS: Record<AgentToolAction, {
     test: { label: '运行测试', badge: '测试', iconClass: 'codicon-beaker', tone: 'test', filter: 'terminal' },
     browser: { label: '操作浏览器', badge: '网络', iconClass: 'codicon-browser', tone: 'web', filter: 'web' },
     plan: { label: '更新计划', badge: '规划', iconClass: 'codicon-checklist', tone: 'plan', filter: 'other' },
-    subagent: { label: '运行子 Agent', badge: 'Agent', iconClass: 'codicon-organization', tone: 'agent', filter: 'other' },
+    subagent: { label: '运行子 Agent', badge: 'Agent', iconClass: 'codicon-organization', tone: 'agent', filter: 'agent' },
     other: { label: '执行工具', badge: '工具', iconClass: 'codicon-tools', tone: 'other', filter: 'other' }
 };
 
@@ -185,6 +185,21 @@ export function presentAgentTool(tool: ToolTitleSource): AgentToolDisplay {
             detailLabel: sourceName || target ? '插件提供的能力' : undefined,
             iconClass: 'codicon-extensions',
             tone: 'plugin',
+            readOnly: presentation.readOnly
+        };
+    }
+    if (presentation.action === 'subagent') {
+        const operation = subagentOperationLabel(tool);
+        const task = target ?? subagentTaskLabel(tool.input);
+        return {
+            action: presentation.action,
+            source: presentation.source,
+            filter: actionDisplay.filter,
+            badgeLabel: actionDisplay.badge,
+            title: task ? `${operation} · ${task}` : operation,
+            detailLabel: subagentDetailLabel(tool),
+            iconClass: actionDisplay.iconClass,
+            tone: actionDisplay.tone,
             readOnly: presentation.readOnly
         };
     }
@@ -341,7 +356,8 @@ function legacyToolPresentation(tool: ToolTitleSource): AgentToolPresentation {
         action = 'browser';
     } else if (/^(?:plan|enter_plan|exit_plan|goal_update)$/.test(kind)) {
         action = 'plan';
-    } else if (/^(?:task|background_task_action|wait_tasks_action|kill_task_action)$/.test(kind)) {
+    } else if (/^(?:task|background_task_action|wait_tasks_action|kill_task_action)$/.test(kind)
+        || /(?:^|[\/.:_-])(?:spawn_subagent|background_task_action|wait_tasks_action|kill_task_action)(?:$|[\/.:_-])/.test(identity)) {
         action = 'subagent';
     }
 
@@ -368,6 +384,35 @@ function legacyToolPresentation(tool: ToolTitleSource): AgentToolPresentation {
         sourceLabel,
         operationLabel: source === 'mcp' ? mcpParts?.tool : undefined
     };
+}
+
+/**
+ * Grok publishes child work through ordinary ACP tool calls. Keep the
+ * renderer model Agent-neutral while still distinguishing start, wait and
+ * cancel operations in the activity timeline.
+ */
+function subagentOperationLabel(tool: ToolTitleSource): string {
+    const identity = normalizeToolName(`${tool.toolKind ?? ''}/${tool.toolName}`);
+    if (/(?:^|[\/.:_-])wait_tasks_action(?:$|[\/.:_-])/.test(identity)) return '等待后台任务';
+    if (/(?:^|[\/.:_-])kill_task_action(?:$|[\/.:_-])/.test(identity)) return '停止后台任务';
+    if (/(?:^|[\/.:_-])background_task_action(?:$|[\/.:_-])/.test(identity)) return '启动后台任务';
+    return '运行子 Agent';
+}
+
+function subagentDetailLabel(tool: ToolTitleSource): string | undefined {
+    const identity = normalizeToolName(`${tool.toolKind ?? ''}/${tool.toolName}`);
+    if (/(?:^|[\/.:_-])wait_tasks_action(?:$|[\/.:_-])/.test(identity)) return '正在汇总子任务结果';
+    if (/(?:^|[\/.:_-])kill_task_action(?:$|[\/.:_-])/.test(identity)) return '取消指定的子任务';
+    if (/(?:^|[\/.:_-])background_task_action(?:$|[\/.:_-])/.test(identity)) return '后台任务由 Agent Runtime 调度';
+    return undefined;
+}
+
+function subagentTaskLabel(input: unknown): string | undefined {
+    const record = inputRecord(input);
+    return safeDisplayFragment(inputString(record, [
+        'subagent_type', 'subagentType', 'agent', 'agent_name', 'agentName',
+        'description', 'task', 'name'
+    ]));
 }
 
 function inputRecord(input: unknown): Record<string, unknown> | undefined {

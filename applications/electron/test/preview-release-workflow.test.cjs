@@ -21,6 +21,7 @@ const repositoryRoot = path.resolve(__dirname, '..', '..', '..');
 const workflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/preview-release.yml'), 'utf8');
 const notes = fs.readFileSync(path.join(repositoryRoot, '.github/PREVIEW-RELEASE-NOTES.md'), 'utf8');
 const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'applications/electron/package.json'), 'utf8'));
+const applicationVersion = packageJson.version;
 const builderConfiguration = fs.readFileSync(path.join(repositoryRoot, 'applications/electron/electron-builder.yml'), 'utf8');
 const packager = fs.readFileSync(path.join(repositoryRoot, 'applications/electron/scripts/package-preview-installers.js'), 'utf8');
 const macHook = fs.readFileSync(path.join(repositoryRoot, 'applications/electron/scripts/preview-after-pack.js'), 'utf8');
@@ -126,22 +127,20 @@ test('packager strips signing credentials and stages only target installers plus
     const dist = path.join(root, 'dist');
     const output = path.join(root, 'output');
     fs.mkdirSync(dist);
-    fs.writeFileSync(path.join(dist, 'Xora Code-0.1.0-mac-arm64.dmg'), 'dmg');
-    fs.writeFileSync(path.join(dist, 'Xora Code-0.1.0-mac-arm64.zip'), 'zip');
+    fs.writeFileSync(path.join(dist, `Xora Code-${applicationVersion}-mac-arm64.dmg`), 'dmg');
+    fs.writeFileSync(path.join(dist, `Xora Code-${applicationVersion}-mac-arm64.zip`), 'zip');
     fs.writeFileSync(path.join(dist, 'latest-mac.yml'), 'ignored');
 
     assert.deepEqual(selectArtifacts(dist, TARGETS['darwin-arm64']), [
-        'Xora Code-0.1.0-mac-arm64.dmg',
-        'Xora Code-0.1.0-mac-arm64.zip'
+        `Xora Code-${applicationVersion}-mac-arm64.dmg`,
+        `Xora Code-${applicationVersion}-mac-arm64.zip`
     ]);
     stagePreviewAssets(dist, output, 'darwin-arm64', TARGETS['darwin-arm64'], { commit: 'abc123' });
     const staged = fs.readdirSync(output).sort();
     assert.ok(staged.includes('SHA256SUMS-darwin-arm64.txt'));
-    assert.ok(staged.includes('Xora-Code-0.1.0-darwin-arm64-PREVIEW.json'));
-    assert.match(
-        fs.readFileSync(path.join(output, 'SHA256SUMS-darwin-arm64.txt'), 'utf8'),
-        /Xora-Code-0\.1\.0-darwin-arm64-PREVIEW\.json/u
-    );
+    const metadataName = `Xora-Code-${applicationVersion}-darwin-arm64-PREVIEW.json`;
+    assert.ok(staged.includes(metadataName));
+    assert.ok(fs.readFileSync(path.join(output, 'SHA256SUMS-darwin-arm64.txt'), 'utf8').includes(metadataName));
     assert.equal(staged.includes('latest-mac.yml'), false);
 
     fs.writeFileSync(path.join(dist, 'grok-sidecar-update.json'), '{}');
@@ -151,7 +150,7 @@ test('packager strips signing credentials and stages only target installers plus
 test('packager rejects a build path in final installer executables and redacts its value', t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-preview-final-scan-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const installer = path.join(root, 'Xora Code-0.1.0-win-x64.exe');
+    const installer = path.join(root, `Xora Code-${applicationVersion}-win-x64.exe`);
     fs.writeFileSync(installer, String.raw`debug=D:\Users\private-builder\work\xora\installer.cc`);
 
     let error;

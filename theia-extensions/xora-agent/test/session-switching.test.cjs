@@ -169,6 +169,36 @@ test('an inactive session status update does not steal the active selection', ()
     assert.deepEqual(model.transcript.map(entry => entry.text), ['History B']);
 });
 
+test('file review opens immutable before and after snapshots in the native Theia Diff editor', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const opened = [];
+    const notices = [];
+    widget.model = { snapshot: { workspaceRoot: '/fixture' } };
+    widget.diffService = {
+        openDiffEditor: async (...args) => opened.push(args)
+    };
+    widget.showInlineNotice = (...args) => notices.push(args);
+
+    await widget.openDiff({
+        kind: 'diff',
+        diffId: 'diff-a',
+        sessionId: 'a',
+        path: 'src/example.ts',
+        oldPath: '/history/before-example.ts',
+        newPath: '/history/after-example.ts',
+        oldHash: 'a'.repeat(64),
+        newHash: 'b'.repeat(64),
+        diff: '-before\n+after'
+    });
+
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0][0].path.fsPath(), '/history/before-example.ts');
+    assert.equal(opened[0][1].path.fsPath(), '/history/after-example.ts');
+    assert.equal(opened[0][2], 'example.ts（Agent 修改）');
+    assert.deepEqual(notices, []);
+});
+
 test('a stale runtime snapshot cannot clear a locally created session before its first prompt', () => {
     const model = new AgentViewModel();
     const created = session('created', 'idle', {
@@ -742,7 +772,7 @@ test('oversized tool input is omitted before renderer IPC and history persistenc
     assert.ok(JSON.stringify(emitted[0].input).length < 500);
 });
 
-test('repeated running and completed tool diffs create one persisted event and revert handle', () => {
+test('repeated running and completed tool diffs create one event with immutable before and after snapshots', () => {
     const { host } = hostHarness();
     const emitted = [];
     let beforeImages = 0;
@@ -770,9 +800,39 @@ test('repeated running and completed tool diffs create one persisted event and r
     }, 'tool_call_update');
 
     assert.equal(emitted.filter(event => event.kind === 'diff').length, 1);
-    assert.equal(beforeImages, 1);
+    const diff = emitted.find(event => event.kind === 'diff');
+    assert.equal(beforeImages, 2);
+    assert.equal(diff.oldPath, '/history/before-1');
+    assert.equal(diff.newPath, '/history/before-2');
     assert.equal(host.revertableDiffs.size, 1);
     assert.equal(host.emittedDiffKeys.size, 1);
+});
+
+test('safe revert refuses a before-image whose content no longer matches its recorded hash', async t => {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const crypto = require('node:crypto');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-safe-revert-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const targetPath = path.join(root, 'edited.ts');
+    const beforePath = path.join(root, 'before.ts');
+    const before = 'const value = "before";\n';
+    const after = 'const value = "after";\n';
+    fs.writeFileSync(targetPath, after);
+    fs.writeFileSync(beforePath, 'tampered snapshot\n');
+
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.workspaceRoot = root;
+    host.safeWorkspaceFile = candidate => candidate;
+    host.revertableDiffs = new Map([['diff-integrity', {
+        targetPath,
+        beforePath,
+        expectedBeforeHash: crypto.createHash('sha256').update(before).digest('hex'),
+        expectedNewHash: crypto.createHash('sha256').update(after).digest('hex')
+    }]]);
+
+    await assert.rejects(host.revertDiff('diff-integrity'), /snapshot failed its integrity check/u);
+    assert.equal(fs.readFileSync(targetPath, 'utf8'), after, 'the workspace file must remain unchanged');
 });
 
 test('backend tool clocks are session-isolated, monotonic and freeze at completion', () => {
@@ -2602,4 +2662,118 @@ test('a maximum-sized history is reduced with one notification and a bounded vie
     // This budget covers reduction only. DOM rendering needs its own windowing
     // or incremental-render contract in the widget.
     assert.ok(elapsed < 750, `history reduction took ${elapsed.toFixed(1)} ms`);
+});
+
+test('transcript follows committed output only while the reader remains near the bottom', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    let updates = 0;
+    let scrollTop = 600;
+    const node = {
+        scrollHeight: 1_000,
+        clientHeight: 300,
+        get scrollTop() { return scrollTop; },
+        set scrollTop(value) { scrollTop = Math.min(value, this.scrollHeight - this.clientHeight); }
+    };
+    widget.agentPaneView = 'conversation';
+    widget.stickToBottom = true;
+    widget.newOutputAvailable = false;
+    widget.transcriptFollowPending = false;
+    widget.transcriptOutputPending = false;
+    widget.update = () => updates++;
+
+    // A stream update is applied against the DOM height from the completed
+    // React commit and remains pinned to the latest message.
+    widget.followTranscript(true);
+    widget.bindTranscriptNode(node);
+    assert.equal(scrollTop, 700);
+    assert.equal(widget.newOutputAvailable, false);
+
+    // A deliberate upward scroll detaches follow mode. Later stream commits
+    // must preserve the reader's position and expose an explicit return chip.
+    scrollTop = 280;
+    widget.onTranscriptScroll(node);
+    assert.equal(widget.stickToBottom, false);
+    node.scrollHeight = 1_200;
+    widget.followTranscript(true);
+    widget.bindTranscriptNode(node);
+    assert.equal(scrollTop, 280, 'new output must not steal an intentionally scrolled viewport');
+    assert.equal(widget.newOutputAvailable, true);
+    assert.equal(updates, 1);
+
+    // Clicking the chip resumes live follow immediately.
+    widget.transcriptNode = node;
+    widget.scrollToBottom();
+    assert.equal(scrollTop, 900);
+    assert.equal(widget.stickToBottom, true);
+    assert.equal(widget.newOutputAvailable, false);
+});
+
+test('a compact pure-empty conversation keeps the welcome panel at its top', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    let scrollTop = 60;
+    const node = {
+        scrollHeight: 413,
+        clientHeight: 353,
+        get scrollTop() { return scrollTop; },
+        set scrollTop(value) { scrollTop = value; }
+    };
+    widget.agentPaneView = 'conversation';
+    widget.stickToBottom = true;
+    widget.newOutputAvailable = false;
+    widget.transcriptFollowPending = true;
+    widget.transcriptOutputPending = false;
+    widget.model = { transcript: [], snapshot: {} };
+    widget.visiblePendingSubmissions = () => [];
+    widget.update = () => undefined;
+
+    widget.bindTranscriptNode(node);
+    assert.equal(scrollTop, 0);
+});
+
+test('metadata-only runtime changes do not masquerade as unread Agent messages', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    widget.model = {
+        snapshot: { activeSessionId: 'a', phase: 'ready' },
+        transcript: [{ id: 'assistant-a', kind: 'assistant', text: '正在处理' }]
+    };
+    widget.observedTranscriptSignature = widget.transcriptOutputSignature();
+
+    widget.model.snapshot.phase = 'initializing';
+    assert.equal(widget.observeTranscriptOutput(), false);
+
+    widget.model.transcript[0].text += '。';
+    assert.equal(widget.observeTranscriptOutput(), true);
+    assert.equal(widget.observeTranscriptOutput(), false, 'one committed delta is announced only once');
+});
+
+test('same-length tool progress updates still count as new transcript output', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    widget.model = {
+        snapshot: { activeSessionId: 'a', phase: 'ready' },
+        transcript: [{
+            id: 'tool-a',
+            kind: 'tool',
+            payload: {
+                kind: 'tool-call',
+                sessionId: 'a',
+                toolCallId: 'tool-a',
+                title: '执行命令',
+                toolName: 'terminal',
+                status: 'running',
+                output: 'step 1/9'
+            }
+        }]
+    };
+    widget.observedTranscriptSignature = widget.transcriptOutputSignature();
+
+    widget.model.transcript[0].payload = {
+        ...widget.model.transcript[0].payload,
+        output: 'step 2/9'
+    };
+    assert.equal(widget.observeTranscriptOutput(), true);
+    assert.equal(widget.observeTranscriptOutput(), false, 'the replacement payload is announced only once');
 });

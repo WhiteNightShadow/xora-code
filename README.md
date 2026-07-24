@@ -8,7 +8,7 @@
   </p>
 
   <p>
-    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.0%20Alpha-f59e0b?style=flat-square" alt="v0.2.0 Alpha" /></a>
+    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.1%20Alpha-f59e0b?style=flat-square" alt="v0.2.1 Alpha" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/build%20targets-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="Build targets: macOS Windows Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
@@ -19,7 +19,7 @@
     <a href="#快速开始">快速开始</a> ·
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
-    <a href="#v020-release-notes">v0.2.0 Release Notes</a> ·
+    <a href="#v021-release-notes">v0.2.1 Release Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
     <a href="#参与项目">参与项目</a> ·
     <a href="#问题反馈与交流">问题反馈与交流</a>
@@ -33,7 +33,7 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 它不是简单地把终端嵌进窗口：Grok Build 作为固定版本的 sidecar 由 Electron 主进程托管，前端通过 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol/agent-client-protocol) 接收流式消息、计划、工具调用、权限请求和会话事件。凭据、进程和最终权限裁决不会交给渲染页面。
 
 > [!IMPORTANT]
-> Xora Code 当前处于 **v0.2.0 Alpha**。核心桌面工作区、并发会话、模型接入与可审查 Agent 流程已经可用，但扩展运行期热刷新、组件在线更新和正式签名发行仍在完善。Preview 安装包未经平台正式签名，仅适合开发、测试与提前体验，请勿用于生产环境。
+> Xora Code 当前处于 **v0.2.1 Alpha**。核心桌面工作区、并发会话、模型接入与可审查 Agent 流程已经可用，但扩展运行期热刷新、组件在线更新和正式签名发行仍在完善。Preview 安装包未经平台正式签名，仅适合开发、测试与提前体验，请勿用于生产环境。
 
 ## 为什么是 Xora Code
 
@@ -50,13 +50,13 @@ Xora Code 将 [Grok Build](https://github.com/xai-org/grok-build) 的 Agent 能�
 | 能力 | 说明 |
 | --- | --- |
 | **完整编码工作区** | 打开文件夹或多根工作区，使用项目树、Monaco 编辑器、文件搜索、原生 Diff、终端、任务、SCM 和设置；精简桌面外壳保留核心区域，右侧 Xora Code 面板始终可用，切换目录后 Explorer 自动恢复。 |
-| **流式 Agent 对话** | 实时显示回复、Plan、工具活动、终端输出、错误与任务状态；首个回复片段立即呈现，后续片段按帧合并刷新，减少连续 Markdown 重排和活动区闪屏。 |
+| **流式 Agent 对话** | 实时显示回复、Plan、工具活动、终端输出、错误与任务状态；首个回复片段立即呈现，后续片段按帧合并刷新。发送后回到底部，位于底部时实时跟随；上滑阅读时不抢位置，并以「有新消息 · 回到底部」提示恢复跟随。 |
 | **理解并修改项目** | Agent 可以读取和搜索项目、修改文件、执行命令、运行测试，并将变更集中到可审查的 Diff 视图。 |
-| **轮次化活动与变更审阅** | 同一条用户任务产生的 Plan、工具和多个文件变更共享稳定轮次 ID，并合并成一个「Agent 活动」；可按文件、搜索、终端、网络、Skill、MCP、Plugin 筛选，支持文件定位、查看差异和基于哈希的安全撤销。 |
+| **轮次化活动与变更审阅** | 同一条用户任务产生的 Plan、工具和多个文件变更共享稳定轮次 ID，并合并成一个「Agent 活动」；可按文件、搜索、终端、网络、Skill、MCP、Plugin、子 Agent 筛选。文件修改保存不可变前后快照，使用 Theia 原生双栏 Diff，恢复与安全撤销均做哈希校验。 |
 | **多会话与消息队列** | 不同会话可并行执行；同一会话可连续提交多条等待消息，并可单独取消队列中的消息。编辑框文字、图片和重试状态均按会话隔离。 |
 | **权限模式** | 默认逐项请求审批，也可开启完全访问；模式由应用级设置统一管理并持久化到本机，所有项目、会话和窗口保持一致。 |
 | **会话与本地历史** | 打开项目时优先恢复该工作区最近一次会话；也可随时新建、重命名或切换历史。事件以脱敏 JSONL 保存在本地，常用历史会缓存在 renderer 中以加快切换，崩溃后绝不自动重放任务。 |
-| **原生上下文压缩** | 复用 Grok Build 0.2.102 的自动上下文压缩机制；界面仅展示 Runtime 提供的真实 Token 元数据和压缩状态，不在桌面端按字符数推算。 |
+| **原生上下文压缩** | 复用 Grok Build 0.2.102 的自动上下文压缩；展示 Token、压缩状态、耗时与累计次数，并持久化到会话历史。压缩是否触发由 Grok Build 根据上下文窗口决定，桌面端不按字符数推算。 |
 | **Grok 订阅与自定义模型** | 设置页只保留 Grok 订阅和自定义模型服务；支持编辑 Base URL、API Key、模型 ID、上下文窗口与后端搜索，并可从兼容端点获取模型列表。 |
 | **兼容模型服务** | 自定义 Provider 支持 OpenAI Responses、OpenAI Chat Completions 与 Anthropic Messages 协议，所有模型仍通过 Grok Build 运行。 |
 | **全局模型选择** | 在设置中切换订阅或自定义 Provider 后，所有项目与窗口统一采用当前模型服务；可继续的历史会话会安全重绑，不兼容或恢复失败的记录保留为只读历史。 |
@@ -115,7 +115,7 @@ flowchart LR
 | [Grok Build](https://github.com/xai-org/grok-build) | 提供编码 Agent Runtime、工具、Skills、MCP 和 Plugins 能力。 |
 | [ACP](https://github.com/agentclientprotocol/agent-client-protocol) | 连接桌面客户端与 Agent，传输会话、流式内容、工具和权限事件。 |
 
-Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.0 的实际 Runtime 由 Grok Build 提供。
+Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.1 的实际 Runtime 由 Grok Build 提供。
 
 对话流沿端到端链路做了轻量调度：项目打开即预热 Runtime；首个 Assistant 文本片段收到后立即跨进程呈现，后续高频片段再按浏览器帧批量刷新，减少首字等待和连续 Markdown 重排。不同会话使用独立的发送队列并可并行工作，同一会话则保持 ACP Prompt 串行顺序。
 
@@ -140,8 +140,11 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - 打开项目自动恢复最近会话、新建/重命名/切换历史，以及按会话隔离的文字与图片草稿
 - 多会话并行、单会话多消息排队、等待消息取消和后台权限请求处理
 - 项目打开即预热 Grok Build、45 秒 ACP 初始化上限、有界冷启动恢复和低延迟首片段输出
-- Plan、按轮次合并的工具活动、操作耗时、权限审批、Diff、文件定位与安全撤销
-- Grok Build 原生自动上下文压缩、真实 Token 占用与压缩状态展示
+- **对话智能滚动**（`v0.2.1`）：发送后回到底部；位于底部时实时跟随；上滑后不抢位置，并显示「有新消息 · 回到底部」
+- Plan、按轮次合并的工具活动、操作耗时、权限审批、文件定位与安全撤销
+- **不可变 Diff 快照 + Theia 原生双栏 Diff**（`v0.2.1`）：修改前后快照、恢复与安全撤销哈希校验，历史记录兼容 `v0.2.0`
+- Grok Build 原生自动上下文压缩，以及 Token、压缩状态、耗时与累计次数展示（事件持久化到会话历史）
+- **子 Agent 活动可见性**（`v0.2.1`）：识别启动 / 等待 / 停止等后台任务，可在「活动 → 子 Agent」筛选并随历史恢复
 - Grok 订阅与自定义 API Provider、兼容中转站、模型获取及应用级全局模型同步
 - 中文 IME 会话输入/重命名，以及受 ACP 能力约束的图片粘贴和文件选择
 - 随安装包校验并分发的常用语言语法插件，以及四种 Agent 代码块高亮风格
@@ -152,9 +155,41 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 
 - Skills / MCP / Plugins 在 Agent 运行期间的无中断刷新、更多 OAuth/远程传输兼容与 Marketplace 体验
 - 超大历史与超长单轮工具列表的进一步虚拟化，以及更多真实项目性能基准
+- 子 Agent 独立控制台与逐个取消能力（当前仅活动可见；整轮取消仍是主要控制方式）
 - 两套 Ed25519 更新信任锚、平台代码签名、macOS 公证与正式 Release 发布
 
 > Preview 构建不代表稳定版或生产就绪版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
+
+## v0.2.1 Release Notes
+
+`v0.2.1` 聚焦长任务中的连续阅读与审查体验：让流式回复保持在用户期望的位置，让每一次文件变更都能稳定打开可复核的双栏差异，并把原生上下文压缩与后台子 Agent 任务从“内部能力”变成可验证、可查看的界面状态。
+
+> [!NOTE]
+> 本节描述仓库中 `0.2.1` 的已实现范围，不代表已发布正式稳定版。具体 Preview 安装包应以对应 GitHub Prerelease 中记录的源码提交、构建链接和 SHA-256 校验信息为准。
+
+### 对话跟随与长任务阅读
+
+- **智能跟随最新消息**：发送任务后对话自动落到底部；用户仍处于底部时，流式文本、活动和高度变化会持续跟随，无需反复手动滚动。
+- **尊重主动阅读**：用户上滑查看旧内容后不再强制跳回底部；新输出继续实时接收，并通过「有新消息 · 回到底部」入口提示，一键恢复跟随。
+- **会话隔离**：跟随状态、未读提示和滚动决策只属于当前显示的会话，后台会话的更新不会抢走当前阅读位置。
+
+### Diff、上下文与子 Agent
+
+- **可靠的双栏 Diff**：每次 Agent 修改都会保存不可变的修改前/修改后内容快照；「查看差异」使用 Theia 原生 Diff 编辑器打开对应版本，不受文件后续再次修改影响。恢复快照及执行安全撤销前会重新校验内容哈希，损坏或被替换的快照不会覆盖工作区文件。
+- **历史 Diff 修复**：恢复历史时会依据文件哈希重建安全快照路径，兼容 `v0.2.0` 已生成的修改前快照；旧记录会尽力与当前工作区文件比较，`v0.2.1` 新记录则使用不可变的前后快照精确复现当次改动。快照不存在时会在 Agent 面板内给出明确错误，而不是点击无响应。
+- **原生自动压缩**：由 Grok Build 0.2.102 根据上下文窗口决定并执行压缩；Xora Code 接收并持久化开始、完成、失败和取消事件，展示压缩前后 Token、耗时与累计次数。已验证事件路径与脱敏 JSONL 往返；未做「消耗超大真实上下文强制触发阈值」的端到端压测。
+- **子 Agent 活动可见性**：识别 Grok Build 的启动、等待和停止子任务工具，并可在「活动 → 子 Agent」中单独筛选、随会话历史恢复。当前属于活动可见性：可查看任务调用、状态与历史，暂无独立子任务控制台或逐个取消按钮；取消当前整轮任务仍是主要控制方式。
+
+### 版本与验证
+
+- 仓库、桌面应用、工作区包和 ACP 客户端标识统一更新为 `0.2.1`。
+- Grok Build sidecar 继续锁定 `0.2.102`；本次升级不迁移 Grok Home 或认证文件，本地历史与 Diff 快照采用向后兼容的数据格式演进。
+- 验证基线：全仓 9 个工作区测试通过；Agent 测试 295/295；`yarn build` 与 Electron 构建通过；1600×900 / 1280×720 真实浏览器交互验证通过。
+
+### 本版已知限制
+
+- 自动压缩的触发与执行由 Grok Build 0.2.102 控制；桌面端保证事件展示与历史持久化，不保证任意对话都会触发压缩。
+- 子 Agent 尚无独立控制台或单任务取消；请使用当前轮次的整体取消控制后台子任务。
 
 ## v0.2.0 Release Notes
 

@@ -227,9 +227,12 @@ test('Agent activity uses progressive disclosure and keeps permission decisions 
     assert.match(source, /const groupId = entry\.activityTurnId \?\? `entry:\$\{entry\.id\}`/);
     assert.match(source, /const renderedTurns = new Set<string>\(\)/,
         'the activity pane must retain one stable keyed root per turn');
-    assert.match(source, /this\.agentPaneView === 'changes' \|\| this\.followTranscriptFrame !== undefined/,
+    assert.match(source, /ref=\{node => this\.bindTranscriptNode\(node\)\}/,
+        'live output must follow only after the concurrent React tree has committed');
+    assert.match(source, /this\.followTranscript\(transcriptChanged\);/,
         'the activity pane must follow new live operations');
-    assert.match(source, /this\.agentPaneView === 'activity' \? '有新活动' : '有新输出'/);
+    assert.match(source, /有新消息 · 回到底部/);
+    assert.match(source, /有新活动 · 回到底部/);
 });
 
 test('tool updates separated by diffs render as one activity group per turn', () => {
@@ -482,6 +485,8 @@ test('Agent output renders safe Markdown and groups categorized tool activity', 
     assert.match(source, /活动/);
     assert.match(source, /变更/);
     assert.match(source, /summarizeToolCategories\(tools\)/);
+    assert.match(source, /\{ id: 'agent', label: '子 Agent' \}/,
+        'background and child-Agent tools need an independent activity filter');
     assert.match(source, /expanded \? <div className='xora-activity-body'>/);
     assert.match(source, /categories\.map\(category => <span key=\{category\.filter\}>/);
     assert.match(source, /this\.renderToolGroup\([\s\S]*?toolsByTurn\.get\(groupId\)[\s\S]*?this\.agentPaneView === 'conversation',[\s\S]*?groupId/);

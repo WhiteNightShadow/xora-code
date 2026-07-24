@@ -24,6 +24,7 @@ import {
 
 const directory = path.dirname(new URL(import.meta.url).pathname);
 const sbomRoot = path.resolve(directory, "..");
+const applicationVersion = JSON.parse(fs.readFileSync(path.resolve(sbomRoot, "..", "..", "package.json"), "utf8")).version;
 
 function temporary(t, name) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
@@ -286,7 +287,7 @@ test("end-to-end wrapper verifies download hash, reuses cache, and updates check
   const cache = path.join(root, "cache");
   fs.mkdirSync(output);
   fs.writeFileSync(lockFile, JSON.stringify(lock));
-  fs.writeFileSync(path.join(output, "SHA256SUMS-linux-x64.txt"), `${"a".repeat(64)}  Xora-Code-0.1.0-linux-amd64.deb\n`);
+  fs.writeFileSync(path.join(output, "SHA256SUMS-linux-x64.txt"), `${"a".repeat(64)}  Xora-Code-${applicationVersion}-linux-amd64.deb\n`);
   let fetches = 0;
   const fetchImpl = async () => {
     fetches += 1;
@@ -318,7 +319,7 @@ test("end-to-end wrapper verifies download hash, reuses cache, and updates check
   await generatePreviewSbom(options, { lockPath: lockFile, fetchImpl, spawnImpl });
   await generatePreviewSbom(options, { lockPath: lockFile, fetchImpl: async () => { throw new Error("cache was not reused"); }, spawnImpl });
   assert.equal(fetches, 1);
-  const sbomName = "Xora-Code-0.1.0-linux-x64.cdx.json";
+  const sbomName = `Xora-Code-${applicationVersion}-linux-x64.cdx.json`;
   assert.ok(fs.existsSync(path.join(output, sbomName)));
   assert.equal(fs.readFileSync(path.join(output, sbomName), "utf8").includes(root), false);
   assert.equal(fs.readFileSync(path.join(output, "SHA256SUMS-linux-x64.txt"), "utf8").split(sbomName).length - 1, 1);

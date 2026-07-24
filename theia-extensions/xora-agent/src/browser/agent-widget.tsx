@@ -1,7 +1,7 @@
 import '../../src/browser/style/agent.css';
 
 import { CommandService, Disposable, MessageService } from '@theia/core/lib/common';
-import { CommonCommands, DiffUris, open, OpenerService, ReactWidget } from '@theia/core/lib/browser';
+import { CommonCommands, open, OpenerService, ReactWidget } from '@theia/core/lib/browser';
 import { FileUri } from '@theia/core/lib/common/file-uri';
 import { isOSX, isWindows } from '@theia/core/lib/common/os';
 import URI from '@theia/core/lib/common/uri';
@@ -18,6 +18,7 @@ import { FileDialogService } from '@theia/filesystem/lib/browser/file-dialog';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { FileNavigatorCommands } from '@theia/navigator/lib/browser/file-navigator-commands';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
+import { DiffService } from '@theia/workspace/lib/browser/diff-service';
 import {
     AgentHostEvent,
     AgentHostService,
@@ -115,6 +116,7 @@ const ACTIVITY_FILTERS: Array<{ id: AgentActivityFilter; label: string }> = [
     { id: 'search', label: '搜索' },
     { id: 'terminal', label: '终端' },
     { id: 'web', label: '网络' },
+    { id: 'agent', label: '子 Agent' },
     { id: 'skill', label: '技能' },
     { id: 'mcp', label: 'MCP' },
     { id: 'plugin', label: '插件' },
@@ -176,6 +178,9 @@ const RUNTIME_PREWARM_MAX_ATTEMPTS = 2;
  * Electron repository and never trade correctness for cache residency. */
 const SESSION_HISTORY_CACHE_ENTRIES = 3;
 const SESSION_HISTORY_CACHE_MAX_EVENTS = 2_500;
+/** A small cushion prevents trackpad momentum and fractional layout values
+ * from detaching a reader who is still visually at the end of the chat. */
+const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 72;
 
 function sessionProviderLabel(providerId: string, selectedProviderId: string): string {
     if (providerId === selectedProviderId) return '当前模型服务';
@@ -219,6 +224,9 @@ export class XoraAgentWidget extends ReactWidget {
     @inject(FileService)
     protected readonly fileService!: FileService;
 
+    @inject(DiffService)
+    protected readonly diffService!: DiffService;
+
     protected prompt = '';
     protected providers: ProviderProfile[] = [];
     protected roots: string[] = [];
@@ -254,7 +262,19 @@ export class XoraAgentWidget extends ReactWidget {
     protected transcriptNode: HTMLElement | null = null;
     protected stickToBottom = true;
     protected newOutputAvailable = false;
-    protected followTranscriptFrame: number | undefined;
+    /** React 18 may commit a concurrent root after the frame in which
+     * ReactWidget.update() was requested. Apply scrolling from the transcript
+     * ref callback, which runs after that DOM commit, rather than guessing at
+     * the next animation frame. */
+    protected transcriptFollowPending = true;
+    protected transcriptOutputPending = false;
+    protected observedTranscriptSignature = '';
+    /** Tool and plan updates replace their payload object even when the
+     * rendered text happens to keep the same length. Track that identity so a
+     * progress update such as `step 1/9` -> `step 2/9` still wakes live follow
+     * mode (or the unread chip while the reader is reviewing older output). */
+    protected transcriptPayloadRevisions = new WeakMap<object, number>();
+    protected nextTranscriptPayloadRevision = 1;
     protected sessionLoadGeneration = 0;
     protected agentContextGeneration = 0;
     protected sessionLoading = false;
@@ -347,12 +367,14 @@ export class XoraAgentWidget extends ReactWidget {
         this.observedAgentContextKey = this.activeComposerLaneKey;
         this.observedProviderId = this.model.snapshot.providerId;
         this.observedRuntimePhase = this.model.snapshot.phase;
+        this.observedTranscriptSignature = this.transcriptOutputSignature();
         this.toDispose.push(this.model.onDidChange(() => {
+            const transcriptChanged = this.observeTranscriptOutput();
             this.reconcileAgentContext();
             this.reconcileRuntimePrewarmState();
             this.scheduleRuntimePrewarm();
+            this.followTranscript(transcriptChanged);
             this.update();
-            this.followTranscript();
         }));
         this.toDispose.push(this.client.onEvent(event => this.acceptAgentEvent(event)));
         this.toDispose.push(this.workspaceService.onWorkspaceChanged(roots => {
@@ -365,9 +387,6 @@ export class XoraAgentWidget extends ReactWidget {
             }
             if (this.renameImeCompositionGuardTimer !== undefined) {
                 window.clearTimeout(this.renameImeCompositionGuardTimer);
-            }
-            if (this.followTranscriptFrame !== undefined) {
-                window.cancelAnimationFrame(this.followTranscriptFrame);
             }
             if (this.composerResizeFrame !== undefined) {
                 window.cancelAnimationFrame(this.composerResizeFrame);
@@ -521,7 +540,7 @@ export class XoraAgentWidget extends ReactWidget {
                 role='log'
                 aria-label='Agent 会话'
                 aria-busy={this.sessionLoading}
-                ref={node => { this.transcriptNode = node; }}
+                ref={node => this.bindTranscriptNode(node)}
                 onScroll={event => this.onTranscriptScroll(event.currentTarget)}>
                 {this.agentPaneView === 'conversation' && this.model.transcript.length === 0 && !pendingSubmissions.length
                     ? this.workspaceRestorePending ? this.renderWorkspaceRestorePending() : this.renderEmpty()
@@ -545,8 +564,12 @@ export class XoraAgentWidget extends ReactWidget {
                 {snapshot.message ? this.renderRuntimeNotice(snapshot.message) : undefined}
                 {this.retryablePrompt ? this.renderRetry(this.retryablePrompt) : undefined}
             </section>
-            {this.agentPaneView !== 'changes' && this.newOutputAvailable ? <button className='xora-jump-latest' onClick={() => this.scrollToBottom()}>
-                <span className='codicon codicon-arrow-down' /> {this.agentPaneView === 'activity' ? '有新活动' : '有新输出'}
+            {this.agentPaneView !== 'changes' && this.newOutputAvailable ? <button
+                className='xora-jump-latest'
+                aria-label={this.agentPaneView === 'activity' ? '有新活动，回到底部' : '有新消息，回到底部'}
+                title='回到底部'
+                onClick={() => this.scrollToBottom()}>
+                <span className='codicon codicon-arrow-down' /> {this.agentPaneView === 'activity' ? '有新活动 · 回到底部' : '有新消息 · 回到底部'}
             </button> : undefined}
             {pendingPermissions.length ? <aside className='xora-permission-dock' aria-label='等待处理的权限请求'>
                 {pendingPermissions.map(entry => this.renderEntry(entry))}
@@ -904,12 +927,9 @@ export class XoraAgentWidget extends ReactWidget {
                 className={this.activityFilter === filter.id ? 'active' : undefined}
                 onClick={() => {
                     this.activityFilter = filter.id;
-                    this.stickToBottom = true;
                     this.newOutputAvailable = false;
+                    this.followTranscript(false, true);
                     this.update();
-                    requestAnimationFrame(() => {
-                        if (this.transcriptNode) this.transcriptNode.scrollTop = this.transcriptNode.scrollHeight;
-                    });
                 }}>
                 {filter.label}
                 {(counts.get(filter.id) ?? 0) > 0 ? <small>{counts.get(filter.id)}</small> : undefined}
@@ -920,13 +940,12 @@ export class XoraAgentWidget extends ReactWidget {
     protected selectAgentPane(view: AgentPaneView): void {
         if (this.agentPaneView === view) return;
         this.agentPaneView = view;
-        this.stickToBottom = view !== 'changes';
         this.newOutputAvailable = false;
         this.closePopover();
+        if (view !== 'changes') this.followTranscript(false, true);
         this.update();
-        requestAnimationFrame(() => {
-            if (!this.transcriptNode) return;
-            this.transcriptNode.scrollTop = view === 'changes' ? 0 : this.transcriptNode.scrollHeight;
+        if (view === 'changes') requestAnimationFrame(() => {
+            if (this.transcriptNode) this.transcriptNode.scrollTop = 0;
         });
     }
 
@@ -934,7 +953,7 @@ export class XoraAgentWidget extends ReactWidget {
         const empty = this.agentPaneView === 'changes'
             ? { icon: 'codicon-diff', title: '还没有文件变更', body: 'Agent 产生的修改会汇总在这里，可直接打开 Theia 差异视图审查。' }
             : { icon: 'codicon-pulse', title: '暂无此类活动', body: this.activityFilter === 'all'
-                ? '运行任务后，文件、搜索、网络、技能、MCP 与插件操作会按标签记录在这里。'
+                ? '运行任务后，文件、搜索、网络、子 Agent、技能、MCP 与插件操作会按标签记录在这里。'
                 : '当前会话还没有匹配这个标签的操作。' };
         return <div className='xora-pane-empty'>
             <span className={`codicon ${empty.icon}`} />
@@ -2780,28 +2799,106 @@ export class XoraAgentWidget extends ReactWidget {
         }
     }
 
-    protected followTranscript(): void {
-        if (this.agentPaneView === 'changes' || this.followTranscriptFrame !== undefined) return;
-        this.followTranscriptFrame = window.requestAnimationFrame(() => {
-            this.followTranscriptFrame = undefined;
-            const node = this.transcriptNode;
-            if (!node) return;
-            if (this.stickToBottom) {
-                node.scrollTop = node.scrollHeight;
-                if (this.newOutputAvailable) {
-                    this.newOutputAvailable = false;
-                    this.update();
-                }
-            } else if (!this.newOutputAvailable && this.model.transcript.length > 0) {
-                this.newOutputAvailable = true;
+    /**
+     * Marks a transcript update for the next committed React tree. React 18's
+     * concurrent root does not guarantee that the DOM is current in the next
+     * animation-frame callback, which used to make scrolling target the old
+     * scrollHeight and leave the newest reply below the viewport.
+     */
+    protected followTranscript(outputChanged = true, force = false): void {
+        if (this.agentPaneView === 'changes') return;
+        if (force) this.stickToBottom = true;
+        this.transcriptFollowPending = true;
+        this.transcriptOutputPending = this.transcriptOutputPending || outputChanged;
+    }
+
+    /** Callback refs are committed after React has updated the transcript DOM,
+     * so scrollHeight is authoritative here. The inline ref in render is
+     * intentionally renewed on each render to provide this commit hook. */
+    protected bindTranscriptNode(node: HTMLElement | null): void {
+        this.transcriptNode = node;
+        if (!node || !this.transcriptFollowPending || this.agentPaneView === 'changes') return;
+        this.transcriptFollowPending = false;
+        const outputChanged = this.transcriptOutputPending;
+        this.transcriptOutputPending = false;
+        if (this.stickToBottom) {
+            // A compact window can make the welcome panel slightly taller than
+            // its viewport. It is not conversation output, so keep its primary
+            // icon and heading visible instead of "following" an empty bottom.
+            const pureEmptyState = !!this.model
+                && this.model.transcript.length === 0
+                && this.visiblePendingSubmissions().length === 0
+                && !this.model.snapshot.message
+                && !this.retryablePrompt;
+            node.scrollTop = pureEmptyState ? 0 : node.scrollHeight;
+            if (this.newOutputAvailable) {
+                this.newOutputAvailable = false;
                 this.update();
             }
-        });
+        } else if (outputChanged && !this.newOutputAvailable) {
+            this.newOutputAvailable = true;
+            this.update();
+        }
+    }
+
+    /** Runtime/auth/session snapshot changes share AgentViewModel.onDidChange
+     * with real transcript output. Track a compact render signature so those
+     * metadata-only updates do not raise a misleading "new message" chip. */
+    protected observeTranscriptOutput(): boolean {
+        const next = this.transcriptOutputSignature();
+        const changed = next !== this.observedTranscriptSignature;
+        this.observedTranscriptSignature = next;
+        return changed;
+    }
+
+    protected transcriptOutputSignature(): string {
+        const entries = this.model.transcript;
+        const visibleTail = entries.slice(-MAX_RENDERED_TRANSCRIPT_ENTRIES);
+        return `${this.model.snapshot.activeSessionId ?? 'new'}:${entries.length}:${visibleTail
+            .map(entry => this.transcriptEntryOutputSignature(entry))
+            .join('\u001f')}`;
+    }
+
+    protected transcriptEntryOutputSignature(entry: TranscriptEntry): string {
+        const payload = entry.payload;
+        let payloadState = payload
+            ? `${payload.kind}:${this.transcriptPayloadRevision(payload)}`
+            : '';
+        if (payload?.kind === 'tool-call') {
+            payloadState += `:${payload.status}:${payload.elapsedMs ?? ''}:${payload.title}:${this.transcriptValueSize(payload.output)}`;
+        } else if (payload?.kind === 'plan') {
+            payloadState += `:${payload.entries.map(item => `${item.status}:${item.text}`).join(',')}`;
+        } else if (payload?.kind === 'diff') {
+            payloadState += `:${payload.diffId}:${payload.oldHash}:${payload.newHash}:${payload.diff.length}`;
+        } else if (payload?.kind === 'permission-request') {
+            payloadState += `:${payload.requestId}`;
+        }
+        return `${entry.id}:${entry.kind}:${entry.text?.length ?? 0}:${entry.text?.slice(-24) ?? ''}:${entry.turnElapsedMs ?? ''}:${payloadState}`;
+    }
+
+    protected transcriptPayloadRevision(payload: object): number {
+        // Some unit harnesses instantiate the widget from its prototype. Keep
+        // this state lazy so the helper remains deterministic there as well.
+        const revisions = this.transcriptPayloadRevisions
+            ?? (this.transcriptPayloadRevisions = new WeakMap<object, number>());
+        const existing = revisions.get(payload);
+        if (existing !== undefined) return existing;
+        const revision = this.nextTranscriptPayloadRevision ?? 1;
+        this.nextTranscriptPayloadRevision = revision + 1;
+        revisions.set(payload, revision);
+        return revision;
+    }
+
+    protected transcriptValueSize(value: unknown): number {
+        if (typeof value === 'string') return value.length;
+        if (Array.isArray(value)) return value.length;
+        if (value && typeof value === 'object') return Object.keys(value).length;
+        return value === undefined || value === null ? 0 : String(value).length;
     }
 
     protected onTranscriptScroll(node: HTMLElement): void {
         if (this.agentPaneView === 'changes') return;
-        const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 56;
+        const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight <= TRANSCRIPT_BOTTOM_THRESHOLD_PX;
         this.stickToBottom = nearBottom;
         if (nearBottom && this.newOutputAvailable) {
             this.newOutputAvailable = false;
@@ -2812,6 +2909,8 @@ export class XoraAgentWidget extends ReactWidget {
     protected scrollToBottom(): void {
         this.stickToBottom = true;
         this.newOutputAvailable = false;
+        this.transcriptFollowPending = false;
+        this.transcriptOutputPending = false;
         if (this.transcriptNode) this.transcriptNode.scrollTop = this.transcriptNode.scrollHeight;
         this.update();
     }
@@ -3464,7 +3563,9 @@ export class XoraAgentWidget extends ReactWidget {
         }
         this.runtimePrewarmRequested = false;
         this.cancelRuntimePrewarmTimer();
-        this.stickToBottom = true;
+        // Sending is an explicit navigation intent: paint the optimistic user
+        // bubble at the bottom immediately, then keep following the reply.
+        this.followTranscript(true, true);
         this.syncVisiblePromptLane();
         this.update();
         this.syncComposerSubmitButton();
@@ -4158,12 +4259,19 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async openDiff(diff: DiffEvent): Promise<void> {
-        const after = this.workspaceFileUri(diff.path);
+        const after = diff.newPath
+            ? new URI(VSCodeURI.file(diff.newPath))
+            : this.workspaceFileUri(diff.path);
         if (!diff.oldPath || !after) {
+            this.showInlineNotice('无法查看差异：原始文件快照已不可用。', 'error');
             return;
         }
         const before = new URI(VSCodeURI.file(diff.oldPath));
-        await open(this.openerService, DiffUris.encode(before, after, `${diff.path}（Agent 修改）`));
+        try {
+            await this.diffService.openDiffEditor(before, after, `${this.fileLabel(diff.path)}（Agent 修改）`);
+        } catch (error) {
+            this.showInlineNotice(`无法查看 ${this.fileLabel(diff.path)} 的差异：${error instanceof Error ? error.message : String(error)}`, 'error');
+        }
     }
 
     protected async openAndRevealFile(diff: DiffEvent): Promise<void> {
