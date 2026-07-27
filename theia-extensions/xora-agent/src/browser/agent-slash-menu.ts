@@ -218,6 +218,31 @@ export function extractNamedResources(
     data: unknown,
     kind: 'mcp' | 'skill'
 ): Array<{ name: string; detail?: string }> {
+    // Xora's schema-v2 MCP overview deliberately separates discovery,
+    // canonical configuration and current-session readiness. A configured,
+    // enabled server is selectable in a draft conversation before session/new
+    // exists; first send attaches it to ACP. Compatibility-only discoveries
+    // remain hidden until explicitly imported into Xora's canonical config.
+    if (kind === 'mcp' && isJsonObject(data) && data.schemaVersion === 2 && Array.isArray(data.mcpServers)) {
+        return data.mcpServers.flatMap(value => {
+            if (!isJsonObject(value) || value.selectable !== true) return [];
+            const name = stringField(value, ['name', 'serverName', 'id', 'label']);
+            if (!name) return [];
+            const runtimeState = stringField(value, ['runtimeState']);
+            const detail = runtimeState === 'loaded'
+                ? '当前会话已加载'
+                : runtimeState === 'initializing'
+                    ? '正在连接'
+                    : runtimeState === 'reload-required'
+                        ? '等待安全刷新'
+                        : runtimeState === 'setup-required'
+                            ? '需要认证或设置'
+                            : runtimeState === 'unavailable'
+                                ? '当前不可用'
+                                : '发送后自动加载';
+            return [detail ? { name, detail } : { name }];
+        }).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    }
     const names = new Map<string, string | undefined>();
     const nameAliases = kind === 'mcp'
         ? ['name', 'id', 'label', 'serverName', 'mcpName']

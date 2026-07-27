@@ -15,15 +15,31 @@ export interface McpOverviewServer extends JsonObject {
     native?: JsonObject;
     health?: JsonObject;
     discoveredBy: string[];
+    /** Present in Xora's canonical user/project Grok config, not merely discovered from another editor. */
+    configured?: boolean;
+    /** Compatibility-only discoveries must be explicitly imported before Xora can pass them to ACP. */
+    importRequired?: boolean;
+    diagnosticState?: 'not-run' | 'healthy' | 'unhealthy' | 'unknown';
+    runtimeState?: 'not-loaded' | 'initializing' | 'loaded' | 'disabled' | 'setup-required' | 'unavailable' | 'reload-required';
+    /** True only when the active ACP session reports this server ready. */
+    callable?: boolean;
+    /** True when Xora can attach this configured server to the next/current session. */
+    selectable?: boolean;
+    runtime?: {
+        status: string;
+        enabled: boolean;
+        toolCount: number;
+    };
 }
 
 export interface McpManagementOverview extends JsonObject {
-    schemaVersion: 1;
+    schemaVersion: 2;
     mcpServers: McpOverviewServer[];
     sources: {
         inspect: 'ok' | 'error';
         nativeList: 'ok' | 'error';
         doctor: 'ok' | 'error' | 'not-run';
+        runtime: 'loaded' | 'not-loaded' | 'refreshing';
     };
     diagnostics: {
         ran: boolean;
@@ -31,6 +47,21 @@ export interface McpManagementOverview extends JsonObject {
         failingCount?: number;
     };
     warnings: string[];
+}
+
+/** Renderer-safe projection of `_x.ai/mcp/list`; env, headers, tools and error detail never cross IPC. */
+export interface McpRuntimeProjection {
+    sessionId?: string;
+    configuredNames: string[];
+    /** Canonical configured servers that are enabled after user/project merge. */
+    enabledNames?: string[];
+    refreshPending?: boolean;
+    servers: Array<{
+        name: string;
+        status: 'ready' | 'initializing' | 'setuprequired' | 'needsauth' | 'unavailable';
+        enabled: boolean;
+        toolCount: number;
+    }>;
 }
 
 const SECRET_ARGUMENT = /((?:--?|\/)(?:api[-_]?key|access[-_]?key|authorization|cookie|credential|password|secret|token)(?:=|\s+))["']?[^\s"']+["']?/gi;
@@ -192,7 +223,8 @@ function count(data: unknown, aliases: readonly string[]): number | undefined {
 export function mergeMcpManagementResults(
     inspected: ManagementResult,
     nativeList: ManagementResult,
-    doctor?: ManagementResult
+    doctor?: ManagementResult,
+    runtime?: McpRuntimeProjection
 ): ManagementResult {
     const warnings = [
         resultError('无法读取最终生效配置', inspected),
@@ -260,13 +292,89 @@ export function mergeMcpManagementResults(
         }
     }
 
+    const configuredNames = new Set((runtime?.configuredNames ?? [])
+        .map(name => name.trim().toLocaleLowerCase())
+        .filter(Boolean));
+    // Older callers did not project enabledNames. Treat their configured set
+    // as enabled, while current Electron-main projections preserve the exact
+    // disabled_mcp_servers result from RuntimeMcpRegistry.
+    const enabledNames = new Set((runtime?.enabledNames ?? runtime?.configuredNames ?? [])
+        .map(name => name.trim().toLocaleLowerCase())
+        .filter(Boolean));
+    // Keep older callers/tests useful: Grok's native list is itself a canonical
+    // user/project configuration source, whereas inspect-only Cursor/Claude
+    // compatibility entries are discoveries that still require import.
+    if (!runtime && nativeList.ok) {
+        for (const server of ordered) {
+            if (server.discoveredBy.includes('native-list')) {
+                configuredNames.add(server.name.trim().toLocaleLowerCase());
+            }
+        }
+    }
+    // The canonical Xora registry is authoritative even when Grok's inspect
+    // or native list command temporarily omits a newly written server. This is
+    // also what lets a draft conversation offer the server before session/new
+    // exists; the first send will attach the exact privileged descriptor.
+    for (const configuredName of runtime?.configuredNames ?? []) {
+        const safeName = safeString(configuredName);
+        if (!safeName) continue;
+        const server = add({ name: safeName, discoveredBy: ['xora-config'], status: 'unknown' });
+        if (!server.discoveredBy.includes('xora-config')) server.discoveredBy.push('xora-config');
+    }
+    const runtimeByName = new Map((runtime?.servers ?? []).map(server => [
+        server.name.trim().toLocaleLowerCase(), server
+    ]));
+    for (const server of runtime?.servers ?? []) {
+        const key = server.name.trim().toLocaleLowerCase();
+        if (!key || byName.has(key)) continue;
+        const added = add({ name: safeString(server.name) ?? server.name, discoveredBy: ['runtime'], status: 'unknown' });
+        if (!added.discoveredBy.includes('runtime')) added.discoveredBy.push('runtime');
+    }
+    for (const server of ordered) {
+        const key = server.name.trim().toLocaleLowerCase();
+        const runtimeServer = runtimeByName.get(key);
+        const configured = configuredNames.has(key);
+        const canonicallyEnabled = enabledNames.has(key);
+        const healthy = booleanValue(server.health?.healthy);
+        const runtimeState: McpOverviewServer['runtimeState'] = runtimeServer && !runtimeServer.enabled
+            ? 'disabled'
+            : runtimeServer?.status === 'ready'
+            ? 'loaded'
+            : runtimeServer?.status === 'initializing'
+                ? 'initializing'
+                : runtimeServer?.status === 'setuprequired' || runtimeServer?.status === 'needsauth'
+                    ? 'setup-required'
+                    : runtimeServer?.status === 'unavailable'
+                        ? 'unavailable'
+                        : runtime?.refreshPending && configured ? 'reload-required' : 'not-loaded';
+        server.configured = configured;
+        server.importRequired = !configured && server.discoveredBy.includes('inspect');
+        if (configured && runtime) {
+            // The effective Xora user/project merge, including
+            // disabled_mcp_servers, wins over compatibility discovery flags.
+            server.enabled = canonicallyEnabled;
+            server.status = canonicallyEnabled ? 'enabled' : 'disabled';
+        }
+        server.diagnosticState = healthy === true
+            ? 'healthy'
+            : healthy === false ? 'unhealthy' : doctor ? 'unknown' : 'not-run';
+        server.runtimeState = runtimeState;
+        server.callable = runtimeState === 'loaded' && runtimeServer?.enabled === true && server.enabled !== false;
+        server.selectable = configured && server.enabled !== false;
+        if (runtimeServer) {
+            server.runtime = { status: runtimeServer.status, enabled: runtimeServer.enabled, toolCount: runtimeServer.toolCount };
+            if (!server.discoveredBy.includes('runtime')) server.discoveredBy.push('runtime');
+        }
+    }
+
     const overview: McpManagementOverview = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         mcpServers: ordered,
         sources: {
             inspect: inspected.ok ? 'ok' : 'error',
             nativeList: nativeList.ok ? 'ok' : 'error',
-            doctor: doctor ? doctor.ok ? 'ok' : 'error' : 'not-run'
+            doctor: doctor ? doctor.ok ? 'ok' : 'error' : 'not-run',
+            runtime: runtime?.refreshPending ? 'refreshing' : runtime?.sessionId ? 'loaded' : 'not-loaded'
         },
         diagnostics: {
             ran: Boolean(doctor),

@@ -85,6 +85,90 @@ test("times out and supports AbortSignal with an ACP cancellation notification",
   client.close();
 });
 
+test("silently drops late responses for timed-out and cancelled requests", async () => {
+  const input = new PassThrough();
+  const errors: Error[] = [];
+  const client = new AcpClient({
+    write: () => undefined,
+    defaultTimeoutMs: 5,
+    lateResponseTombstoneMs: 1_000,
+  });
+  client.onError((error) => errors.push(error));
+  const consuming = client.consume(input);
+
+  const timedOut = client.startRequest("slow");
+  await assert.rejects(timedOut.promise, AcpTimeoutError);
+  input.write(response(timedOut.id, { tooLate: true }));
+
+  const cancelled = client.startRequest("session/prompt", { sessionId: "s1" }, { timeoutMs: 0 });
+  const cancelledRejection = assert.rejects(cancelled.promise, AcpCancelledError);
+  await cancelled.cancel("user stopped");
+  await cancelledRejection;
+  input.write(response(cancelled.id, { tooLate: true }));
+
+  await tick();
+  assert.deepEqual(errors, []);
+  assert.equal(client.closed, false);
+  input.end();
+  await consuming;
+});
+
+test("bounds and expires late-response tombstones while unknown numeric ids still report", async () => {
+  const input = new PassThrough();
+  const errors: Error[] = [];
+  const ids = [101, 102, 103];
+  const client = new AcpClient({
+    write: () => undefined,
+    defaultTimeoutMs: 0,
+    lateResponseTombstoneMs: 100,
+    maxLateResponseTombstones: 1,
+    createId: () => ids.shift() ?? 999,
+  });
+  client.onError((error) => errors.push(error));
+  const consuming = client.consume(input);
+
+  const first = client.startRequest("first");
+  const firstRejection = assert.rejects(first.promise, AcpCancelledError);
+  await first.cancel();
+  await firstRejection;
+
+  const second = client.startRequest("second");
+  const secondRejection = assert.rejects(second.promise, AcpCancelledError);
+  await second.cancel();
+  await secondRejection;
+
+  input.write(response(first.id, {})); // evicted by the one-entry bound
+  input.write(response(second.id, {})); // retained and ignored
+  await tick();
+  assert.deepEqual(errors.map((error) => (error as AcpUnknownResponseError).requestId), [101]);
+
+  await new Promise((resolve) => setTimeout(resolve, 125));
+  input.write(response(second.id, {})); // expired and now genuinely unknown
+  input.write(response(999, {})); // never issued
+  await tick();
+
+  assert.equal(errors.length, 3);
+  assert.ok(errors.every((error) => error instanceof AcpUnknownResponseError));
+  assert.deepEqual(errors.map((error) => (error as AcpUnknownResponseError).requestId), [101, 102, 999]);
+  input.end();
+  await consuming;
+});
+
+test("does not reuse request ids while a late-response tombstone is active", async () => {
+  const ids = [7, 7];
+  const client = new AcpClient({
+    write: () => undefined,
+    defaultTimeoutMs: 0,
+    createId: () => ids.shift() ?? 8,
+  });
+  const first = client.startRequest("first");
+  const firstRejection = assert.rejects(first.promise, AcpCancelledError);
+  await first.cancel();
+  await firstRejection;
+  assert.throws(() => client.startRequest("second"), /duplicate or recently retired id 7/);
+  client.close();
+});
+
 test("routes notifications and answers inbound permission requests without blocking reads", async () => {
   const input = new PassThrough();
   const writes: string[] = [];
@@ -118,6 +202,106 @@ test("routes notifications and answers inbound permission requests without block
     id: "permission-1",
     result: { outcome: { outcome: "selected", optionId: "allow-once" } },
   });
+  input.end();
+  await consuming;
+});
+
+test("preserves canonical MCP DTOs and leading-underscore extension methods on the wire", async () => {
+  const input = new PassThrough();
+  const writes: string[] = [];
+  const client = new AcpClient({ write: (line) => { writes.push(line); }, defaultTimeoutMs: 0 });
+  const consuming = client.consume(input);
+  const mcpServers = [
+    {
+      name: "fixture-stdio",
+      command: "/fixture/mcp-server",
+      args: ["--stdio"],
+      env: [{ name: "FIXTURE_TOKEN", value: "secret-ref:test" }],
+      _meta: { owner: "xora" },
+    },
+    {
+      type: "http",
+      name: "fixture-http",
+      url: "https://mcp.example.test/http",
+      headers: [{ name: "Authorization", value: "secret-ref:http" }],
+    },
+    {
+      type: "sse",
+      name: "fixture-sse",
+      url: "https://mcp.example.test/sse",
+      headers: [],
+    },
+  ];
+
+  const created = client.startRequest<{ sessionId: string }>("session/new", {
+    cwd: "/fixture/project",
+    mcpServers,
+  });
+  const loaded = client.startRequest("session/load", {
+    sessionId: "fixture-session",
+    cwd: "/fixture/project",
+    mcpServers,
+  });
+  const updated = client.startRequest("_x.ai/session/update_mcp_servers", {
+    sessionId: "fixture-session",
+    mcpServers,
+  });
+  const listed = client.startRequest("_x.ai/mcp/list", {
+    sessionId: "fixture-session",
+    cache: false,
+  });
+  await client.drain();
+
+  const messages = writes.map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(messages.map((message) => message.method), [
+    "session/new",
+    "session/load",
+    "_x.ai/session/update_mcp_servers",
+    "_x.ai/mcp/list",
+  ]);
+  assert.deepEqual((messages[0]?.params as Record<string, unknown>).mcpServers, mcpServers);
+  assert.deepEqual((messages[1]?.params as Record<string, unknown>).mcpServers, mcpServers);
+  assert.deepEqual(messages[2]?.params, { sessionId: "fixture-session", mcpServers });
+  assert.deepEqual(messages[3]?.params, { sessionId: "fixture-session", cache: false });
+
+  input.write(response(created.id, { sessionId: "fixture-session" }));
+  input.write(response(loaded.id, {}));
+  input.write(response(updated.id, { ok: true }));
+  input.write(response(listed.id, { servers: [] }));
+  await Promise.all([created.promise, loaded.promise, updated.promise, listed.promise]);
+  input.end();
+  await consuming;
+});
+
+test("routes Grok MCP readiness notifications without normalizing extension names", async () => {
+  const input = new PassThrough();
+  const received: Array<{ method: string; params: unknown }> = [];
+  const client = new AcpClient({ write: () => undefined, defaultTimeoutMs: 0 });
+  const methods = [
+    "_x.ai/mcp/init_progress",
+    "_x.ai/mcp_initialized",
+    "_x.ai/mcp/tools_changed",
+    "_x.ai/mcp/server_status",
+  ];
+  for (const subscribedMethod of methods) {
+    client.onNotification(subscribedMethod, (params, method) => {
+      received.push({ method, params });
+    });
+  }
+  const consuming = client.consume(input);
+
+  for (const [index, method] of methods.entries()) {
+    input.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      method,
+      params: { sessionId: "fixture-session", sequence: index },
+    })}\n`);
+  }
+  await tick();
+  assert.deepEqual(received, methods.map((method, sequence) => ({
+    method,
+    params: { sessionId: "fixture-session", sequence },
+  })));
   input.end();
   await consuming;
 });

@@ -207,7 +207,7 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
                 });
             }
             if (authenticationChanged || configurationChanged) {
-                service.notifySharedGrokStateChanged(authenticationChanged);
+                service.notifySharedGrokStateChanged(authenticationChanged, configurationChanged);
             }
         }
     }

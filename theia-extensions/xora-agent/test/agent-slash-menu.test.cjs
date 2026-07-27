@@ -67,3 +67,18 @@ test('resourceMenuItems appends manage action', () => {
     assert.equal(items[0].insertText.includes('docs'), true);
     assert.equal(items.at(-1).commandId, 'settings');
 });
+
+test('schema-v2 MCP menu includes configured enabled servers before and after session load', () => {
+    const mcp = extractNamedResources({
+        schemaVersion: 2,
+        mcpServers: [
+            { name: 'ready-browser', transport: 'stdio', runtimeState: 'loaded', callable: true, selectable: true },
+            { name: 'draft-browser', transport: 'http', runtimeState: 'not-loaded', callable: false, selectable: true },
+            { name: 'disabled', transport: 'stdio', runtimeState: 'disabled', callable: false, selectable: false },
+            { name: 'compat-only', transport: 'stdio', importRequired: true, callable: false, selectable: false }
+        ]
+    }, 'mcp');
+    assert.deepEqual(mcp.map(item => item.name), ['draft-browser', 'ready-browser']);
+    assert.equal(mcp.find(item => item.name === 'draft-browser').detail, '发送后自动加载');
+    assert.equal(mcp.find(item => item.name === 'ready-browser').detail, '当前会话已加载');
+});

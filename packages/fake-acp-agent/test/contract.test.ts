@@ -51,6 +51,18 @@ class RpcHarness {
     this.#write({ jsonrpc: "2.0", method, ...(params === undefined ? {} : { params }) });
   }
 
+  async waitForNotification(
+    method: string,
+    predicate: (message: RpcMessage) => boolean = () => true,
+  ): Promise<RpcMessage> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const match = this.notifications.find((message) => message.method === method && predicate(message));
+      if (match) return match;
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error(`Timed out waiting for ${method}`);
+  }
+
   async close(): Promise<void> {
     this.child.stdin.end();
     if (this.child.exitCode === null) await once(this.child, "exit");
@@ -202,6 +214,169 @@ test("rejects session setup before authentication with stable error data", async
         return true;
       },
     );
+  } finally {
+    await rpc.close();
+  }
+});
+
+test("session/new and session/load validate canonical stdio, HTTP and SSE MCP DTOs", async () => {
+  const rpc = new RpcHarness();
+  const mcpServers = [
+    {
+      name: "fixture-stdio",
+      command: "/fixture/mcp-server",
+      args: ["--stdio"],
+      env: [{ name: "FIXTURE_TOKEN", value: "secret-ref:test" }],
+      _meta: { owner: "xora" },
+    },
+    {
+      type: "http",
+      name: "fixture-http",
+      url: "https://mcp.example.test/http",
+      headers: [{ name: "Authorization", value: "secret-ref:http" }],
+    },
+    {
+      type: "sse",
+      name: "fixture-sse",
+      url: "https://mcp.example.test/sse",
+      headers: [],
+    },
+  ];
+  try {
+    await rpc.request("initialize", { protocolVersion: 1 });
+    await rpc.request("authenticate", { methodId: "xai.api_key" });
+    const created = await rpc.request<{ sessionId: string }>("session/new", {
+      cwd: "/fixture/project",
+      mcpServers,
+    });
+    assert.equal(created.sessionId, "fake-session-0001");
+    await rpc.request("session/load", {
+      sessionId: "persisted-with-mcp",
+      cwd: "/fixture/project",
+      mcpServers,
+    });
+
+    await assert.rejects(
+      rpc.request("session/new", {
+        cwd: "/fixture/project",
+        mcpServers: [{
+          type: "stdio",
+          name: "not-canonical",
+          command: "/fixture/mcp-server",
+          args: [],
+          env: [],
+        }],
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: number }).code, -32602);
+        return true;
+      },
+    );
+    await assert.rejects(
+      rpc.request("session/load", {
+        sessionId: "bad-remote",
+        cwd: "/fixture/project",
+        mcpServers: [{
+          type: "http",
+          name: "bad-remote",
+          url: "https://mcp.example.test/http",
+          headers: [{ name: "Authorization", value: 42 }],
+        }],
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code?: number }).code, -32602);
+        return true;
+      },
+    );
+  } finally {
+    await rpc.close();
+  }
+});
+
+test("MCP extensions require the leading underscore and report deterministic readiness", async () => {
+  const rpc = new RpcHarness();
+  try {
+    await rpc.request("initialize", { protocolVersion: 1 });
+    await rpc.request("authenticate", { methodId: "xai.api_key" });
+    const { sessionId } = await rpc.request<{ sessionId: string }>("session/new", {
+      cwd: "/fixture/project",
+      mcpServers: [{
+        name: "old-server",
+        command: "/fixture/old-server",
+        args: [],
+        env: [],
+      }],
+    });
+
+    await assert.rejects(
+      rpc.request("x.ai/mcp/list", { sessionId }),
+      (error: unknown) => {
+        assert.equal((error as { code?: number }).code, -32601);
+        return true;
+      },
+    );
+    await assert.rejects(
+      rpc.request("x.ai/session/update_mcp_servers", { sessionId, mcpServers: [] }),
+      (error: unknown) => {
+        assert.equal((error as { code?: number }).code, -32601);
+        return true;
+      },
+    );
+
+    const replacement = [
+      {
+        name: "fixture-stdio",
+        command: "/fixture/mcp-server",
+        args: ["--stdio"],
+        env: [],
+      },
+      {
+        type: "sse",
+        name: "fixture-sse",
+        url: "https://mcp.example.test/sse",
+        headers: [],
+      },
+    ];
+    assert.deepEqual(
+      await rpc.request("_x.ai/session/update_mcp_servers", { sessionId, mcpServers: replacement }),
+      { ok: true },
+    );
+    await rpc.waitForNotification("_x.ai/mcp/init_progress", (message) => {
+      const params = isRecord(message.params) ? message.params : {};
+      return params.sessionId === sessionId && params.total === 2 && params.connected === 0;
+    });
+
+    const initializing = await rpc.request<{ servers: Array<Record<string, unknown>> }>("_x.ai/mcp/list", {
+      sessionId,
+      cache: false,
+    });
+    assert.deepEqual(initializing.servers.map((server) => server.name), ["fixture-stdio", "fixture-sse"]);
+    assert.ok(initializing.servers.every((server) => {
+      const state = isRecord(server.session) ? server.session : {};
+      return state.status === "initializing" && state.tools === 0;
+    }));
+
+    await rpc.waitForNotification("_x.ai/mcp/tools_changed", (message) => {
+      const params = isRecord(message.params) ? message.params : {};
+      return params.sessionId === sessionId && params.serverName === "fixture-stdio";
+    });
+    await rpc.waitForNotification("_x.ai/mcp/server_status", (message) => {
+      const params = isRecord(message.params) ? message.params : {};
+      return params.sessionId === sessionId && params.name === "fixture-sse" && params.status === "ready";
+    });
+    await rpc.waitForNotification("_x.ai/mcp_initialized", (message) => {
+      const params = isRecord(message.params) ? message.params : {};
+      return params.sessionId === sessionId && params.mcpToolCount === 2;
+    });
+
+    const ready = await rpc.request<{ servers: Array<Record<string, unknown>> }>("_x.ai/mcp/list", {
+      sessionId,
+    });
+    assert.deepEqual(ready.servers.map((server) => server.name), ["fixture-stdio", "fixture-sse"]);
+    assert.ok(ready.servers.every((server) => {
+      const state = isRecord(server.session) ? server.session : {};
+      return state.status === "ready" && state.tools === 1;
+    }));
   } finally {
     await rpc.close();
   }

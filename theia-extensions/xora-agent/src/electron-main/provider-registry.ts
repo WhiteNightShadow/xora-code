@@ -16,6 +16,7 @@ import {
 } from './provider-toml';
 import { SecretVault } from './secret-vault';
 import { sharedGrokHome } from './shared-grok-home';
+import { RuntimeMcpCredentialBinding, RuntimeMcpRegistry } from './runtime-mcp-registry';
 
 // Read the pre-Xora identifiers during the rename transition. New profiles and
 // generated TOML always use the Xora names, but existing profiles must keep
@@ -80,11 +81,12 @@ interface McpCredentialRecord {
     workspaceRoot: string;
     server: string;
     environmentName: string;
+    configIdentity: string;
     secretRef: string;
 }
 
 interface McpCredentialFile {
-    schemaVersion: 1;
+    schemaVersion: 2;
     credentials: McpCredentialRecord[];
 }
 
@@ -630,6 +632,59 @@ export class ProviderRegistry {
                 this.atomicWrite(this.grokConfigPath, after, 0o600);
             }
         });
+        // API Providers use isolated, authentication-free Grok homes. Keep
+        // their allowlisted skill view coherent with the shared subscription
+        // home immediately after an app-owned Skills change.
+        this.refreshCustomProviderSkillViews();
+    }
+
+    /**
+     * Rebuilds the non-secret Skills/Commands view for every custom Provider.
+     * This is public so the shared Grok config watcher can refresh isolated
+     * homes after an external CLI edits the allowlisted skill settings.
+     */
+    refreshCustomProviderSkillViews(): void {
+        this.withFileLock(
+            this.metadataLockPath,
+            'Another Xora Code process is updating Providers. Please retry.',
+            () => {
+                for (const profile of this.readMetadata().providers) {
+                    if (profile.kind === 'custom') this.ensureApiProviderGrokHome(profile);
+                }
+            }
+        );
+    }
+
+    /**
+     * Returns the coherent environment for management commands that must see
+     * the currently selected Provider's isolated Grok home. The returned
+     * object is Electron-main-only and must never cross the renderer boundary.
+     */
+    managementEnvironment(profileId?: string, synchronizeSkills = true): NodeJS.ProcessEnv {
+        return this.withFileLock(
+            this.metadataLockPath,
+            'Another Xora Code process is updating Providers. Please retry.',
+            () => {
+                const file = this.readMetadata();
+                const persisted = file.selectedProviderId;
+                const selected = typeof profileId === 'string'
+                    ? profileId
+                    : persisted && (persisted === 'grok-subscription'
+                        || file.providers.some(profile => profile.id === persisted))
+                        ? persisted
+                        : 'grok-subscription';
+                const profile = this.profileFromFile(file, selected);
+                if (!profile) throw new Error(`Unknown provider profile: ${selected}`);
+                if (profile.kind === 'custom' || (profile.kind === 'xai-api-key' && profile.model)) {
+                    return {
+                        GROK_HOME: synchronizeSkills
+                            ? this.ensureApiProviderGrokHome(profile)
+                            : path.join(this.providerGrokHomesRoot(), profile.id)
+                    };
+                }
+                return {};
+            }
+        );
     }
 
     environment(profileId: string): NodeJS.ProcessEnv {
@@ -758,6 +813,10 @@ export class ProviderRegistry {
         }
         const root = path.join(this.providerGrokHomesRoot(), profile.id);
         fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+        const rootInfo = fs.lstatSync(root);
+        if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
+            throw new Error(`The isolated Grok home for ${profile.name} is unsafe.`);
+        }
         // Never carry OIDC session tokens into the isolated home.
         for (const name of ['auth.json', 'auth.json.lock']) {
             const candidate = path.join(root, name);
@@ -765,6 +824,7 @@ export class ProviderRegistry {
                 if (fs.existsSync(candidate)) fs.rmSync(candidate, { force: true });
             } catch { /* best effort */ }
         }
+        const sharedSkillConfiguration = this.sharedSkillConfigurationToml();
         const config = [
             '# Managed by Xora Code for an isolated API-provider sidecar.',
             '# Do not place auth.json here — OIDC would override env_key.',
@@ -778,6 +838,7 @@ export class ProviderRegistry {
             '[features]',
             'remote_fetch = false',
             '',
+            ...(sharedSkillConfiguration ? [sharedSkillConfiguration, ''] : []),
             this.managedToml(profile),
             ''
         ].join('\n');
@@ -793,19 +854,91 @@ export class ProviderRegistry {
             this.atomicWrite(configPath, config, 0o600);
         }
 
-        // Reuse user skills from the real Grok home when present (read-only).
-        const sharedSkills = path.join(this.grokHomePath ?? sharedGrokHome(), 'skills');
-        const localSkills = path.join(root, 'skills');
-        try {
-            if (fs.existsSync(sharedSkills) && !fs.existsSync(localSkills)) {
-                fs.symlinkSync(sharedSkills, localSkills, 'dir');
-            }
-        } catch { /* skills are optional for API providers */ }
+        // Reuse user-owned extension directories without copying executable
+        // content into app-owned homes. Existing entries are accepted only
+        // when they are links to the exact shared directory; real directories
+        // and links to any other target are never overwritten.
+        this.synchronizeSharedProviderDirectory(root, 'skills');
+        this.synchronizeSharedProviderDirectory(root, 'commands');
 
         if (process.platform !== 'win32') {
             try { fs.chmodSync(root, 0o700); } catch { /* ignore */ }
         }
         return root;
+    }
+
+    /**
+     * Copies only the shared configuration fields that affect skill discovery.
+     * Authentication, hooks, permissions, MCP, plugins, model tables and every
+     * unknown field are deliberately omitted from isolated Provider homes.
+     */
+    protected sharedSkillConfigurationToml(): string {
+        const configPath = this.grokConfigPath
+            ?? path.join(this.grokHomePath ?? sharedGrokHome(), 'config.toml');
+        const source = readTextOrEmpty(configPath);
+        if (!source.trim()) return '';
+        let parsed: unknown;
+        try {
+            parsed = parseToml(source);
+        } catch {
+            // A malformed external configuration must not cause Xora to copy a
+            // partially interpreted or over-broad configuration subset.
+            return '';
+        }
+        const root = tomlObject(parsed);
+        if (!root) return '';
+        const sections: string[] = [];
+        const skills = tomlObject(root.skills);
+        if (skills) {
+            const assignments: string[] = [];
+            for (const key of ['paths', 'ignore', 'disabled'] as const) {
+                const value = tomlStringArray(skills[key]);
+                if (value) assignments.push(`${key} = ${JSON.stringify(value)}`);
+            }
+            if (assignments.length) sections.push(['[skills]', ...assignments].join('\n'));
+        }
+        const compat = tomlObject(root.compat);
+        for (const vendor of ['cursor', 'claude'] as const) {
+            const settings = tomlObject(compat?.[vendor]);
+            if (typeof settings?.skills === 'boolean') {
+                sections.push(`[compat.${vendor}]\nskills = ${settings.skills}`);
+            }
+        }
+        return sections.join('\n\n');
+    }
+
+    protected synchronizeSharedProviderDirectory(providerRoot: string, name: 'skills' | 'commands'): void {
+        const sharedRoot = this.grokHomePath ?? sharedGrokHome();
+        const source = path.join(sharedRoot, name);
+        const target = path.join(providerRoot, name);
+        const targetInfo = lstatOrUndefined(target);
+        if (targetInfo) {
+            if (!targetInfo.isSymbolicLink()) {
+                throw new Error(`Xora Code refused to replace the existing ${name} directory in an isolated Provider home.`);
+            }
+            if (!sameLinkTarget(source, target)) {
+                throw new Error(`Xora Code refused to replace an isolated Provider ${name} link that points outside the shared Grok home.`);
+            }
+            return;
+        }
+
+        const sourceInfo = statOrUndefined(source);
+        if (!sourceInfo) return;
+        if (!sourceInfo.isDirectory()) {
+            throw new Error(`The shared Grok ${name} path is not a directory.`);
+        }
+        try {
+            fs.symlinkSync(source, target, process.platform === 'win32' ? 'junction' : 'dir');
+        } catch (error) {
+            // Another Xora window may have created the same link after our
+            // lstat. Accept only the exact expected target in that race.
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST'
+                && lstatOrUndefined(target)?.isSymbolicLink()
+                && sameLinkTarget(source, target)) {
+                return;
+            }
+            throw error;
+        }
     }
 
     protected providerGrokHomesRoot(): string {
@@ -844,13 +977,25 @@ export class ProviderRegistry {
     }
 
     mcpEnvironment(workspaceRoot: string): NodeJS.ProcessEnv {
-        const environment: NodeJS.ProcessEnv = {};
-        for (const entry of this.readMcpCredentials().credentials) {
-            if (entry.workspaceRoot !== workspaceRoot) continue;
-            const secret = this.vault.get(entry.secretRef);
-            if (secret) environment[entry.environmentName] = secret;
-        }
-        return environment;
+        const root = this.canonicalMcpWorkspaceRoot(workspaceRoot);
+        const registry = new RuntimeMcpRegistry({ grokHome: this.grokHomePath });
+        return registry.credentialEnvironment(root, this.mcpCredentialBindings(root));
+    }
+
+    /** Privileged bindings are filtered again against canonical config in RuntimeMcpRegistry. */
+    mcpCredentialBindings(workspaceRoot: string): RuntimeMcpCredentialBinding[] {
+        const root = this.canonicalMcpWorkspaceRoot(workspaceRoot);
+        return this.readMcpCredentials().credentials.flatMap(entry => {
+            if (!this.sameMcpWorkspace(entry.workspaceRoot, root)) return [];
+            const value = this.vault.get(entry.secretRef);
+            return value ? [{
+                workspaceRoot: entry.workspaceRoot,
+                server: entry.server,
+                environmentName: entry.environmentName,
+                configIdentity: entry.configIdentity,
+                value
+            }] : [];
+        });
     }
 
     redactionSecrets(): string[] {
@@ -865,49 +1010,77 @@ export class ProviderRegistry {
         });
     }
 
-    saveMcpCredential(workspaceRoot: string, server: string, environmentName: string, secret: string): string {
+    saveMcpCredential(
+        workspaceRoot: string,
+        server: string,
+        environmentName: string,
+        configIdentity: string,
+        secret: string
+    ): string {
         this.assertMcpIdentity(server, environmentName);
+        if (!/^[0-9a-f]{64}$/i.test(configIdentity)) {
+            throw new Error('MCP credential configuration identity is invalid.');
+        }
         if (!secret || Buffer.byteLength(secret, 'utf8') > 16 * 1024) {
             throw new Error('MCP secret must contain 1-16384 UTF-8 bytes.');
         }
-        const secretRef = `mcp:${crypto.createHash('sha256').update(`${workspaceRoot}\0${server}\0${environmentName}`).digest('hex')}`;
+        const root = this.canonicalMcpWorkspaceRoot(workspaceRoot);
+        const secretRef = `mcp:${crypto.createHash('sha256')
+            .update(`${root}\0${server}\0${environmentName}\0${configIdentity}`).digest('hex')}`;
         return this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating MCP credentials. Please retry.', () => {
             const file = this.readMcpCredentials();
-            file.credentials = file.credentials.filter(entry => !(entry.workspaceRoot === workspaceRoot && entry.server === server));
-            file.credentials.push({ workspaceRoot, server, environmentName, secretRef });
+            const replaced = file.credentials.filter(entry => this.sameMcpWorkspace(entry.workspaceRoot, root) && entry.server === server);
+            file.credentials = file.credentials.filter(entry => !(this.sameMcpWorkspace(entry.workspaceRoot, root) && entry.server === server));
+            file.credentials.push({ workspaceRoot: root, server, environmentName, configIdentity, secretRef });
             this.vault.set(secretRef, secret);
             this.atomicWrite(this.mcpCredentialPath, `${JSON.stringify(file, undefined, 2)}\n`, 0o600);
+            for (const entry of replaced) {
+                if (entry.secretRef !== secretRef) this.vault.delete(entry.secretRef);
+            }
             return environmentName;
         });
     }
 
     deleteMcpCredential(workspaceRoot: string, server: string): void {
+        const root = this.canonicalMcpWorkspaceRoot(workspaceRoot);
         this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating MCP credentials. Please retry.', () => {
             const file = this.readMcpCredentials();
-            const removed = file.credentials.filter(entry => entry.workspaceRoot === workspaceRoot && entry.server === server);
+            const removed = file.credentials.filter(entry => this.sameMcpWorkspace(entry.workspaceRoot, root) && entry.server === server);
             if (!removed.length) return;
-            file.credentials = file.credentials.filter(entry => !(entry.workspaceRoot === workspaceRoot && entry.server === server));
+            file.credentials = file.credentials.filter(entry => !(this.sameMcpWorkspace(entry.workspaceRoot, root) && entry.server === server));
             for (const entry of removed) this.vault.delete(entry.secretRef);
             this.atomicWrite(this.mcpCredentialPath, `${JSON.stringify(file, undefined, 2)}\n`, 0o600);
         });
     }
 
-    configureMcpBearerReference(workspaceRoot: string, scope: 'user' | 'project', server: string, environmentName: string): void {
+    configureMcpCredentialReference(
+        workspaceRoot: string,
+        scope: 'user' | 'project',
+        server: string,
+        environmentName: string,
+        transport: 'stdio' | 'http' | 'sse'
+    ): void {
         this.assertMcpIdentity(server, environmentName);
-        const configPath = scope === 'user' ? this.grokConfigPath : path.join(workspaceRoot, '.grok', 'config.toml');
-        // This lock name is intentionally shared with the pre-Xora release.
+        const root = this.canonicalMcpWorkspaceRoot(workspaceRoot);
+        const configPath = scope === 'user' ? this.grokConfigPath : path.join(root, '.grok', 'config.toml');
         const configLock = `${configPath}.whitenight-code.lock`;
         this.withFileLock(configLock, 'Grok MCP configuration is being modified. Please retry.', () => {
             fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
             const before = readTextOrEmpty(configPath);
             this.assertToml(before);
-            const after = this.writeTomlString(before, `mcp_servers.${server}`, 'bearer_token_env_var', environmentName);
+            const after = transport === 'stdio'
+                ? this.writeMcpStdioEnvironmentReference(before, server, environmentName)
+                : this.writeTomlString(before, `mcp_servers.${server}`, 'bearer_token_env_var', environmentName);
             this.assertToml(after);
             if (before !== after) {
                 if (before) this.backupConfig(configPath);
                 this.atomicWrite(configPath, after, 0o600);
             }
         });
+    }
+
+    configureMcpBearerReference(workspaceRoot: string, scope: 'user' | 'project', server: string, environmentName: string): void {
+        this.configureMcpCredentialReference(workspaceRoot, scope, server, environmentName, 'http');
     }
 
     protected profileFromFile(file: ProviderFile, id: string): ProviderProfile | undefined {
@@ -952,17 +1125,19 @@ export class ProviderRegistry {
             throw new Error('This Provider ID is reserved for the built-in xAI API service.');
         }
         const protocols: ProviderProtocol[] = ['openai-responses', 'openai-chat-completions', 'anthropic-messages'];
-        if (!protocols.includes(input.protocol)) {
+        const protocol = input.protocol ?? 'openai-responses';
+        if (!protocols.includes(protocol)) {
             throw new Error('Unsupported custom provider protocol.');
         }
-        if (input.backendSearch === true && input.protocol !== 'openai-responses') {
+        const backendSearch = input.backendSearch ?? protocol === 'openai-responses';
+        if (backendSearch && protocol !== 'openai-responses') {
             throw new Error('服务端联网搜索仅支持 OpenAI Responses 协议。');
         }
         if (!input.baseUrl || !input.model) {
             throw new Error('Base URL and model ID are required.');
         }
         const baseUrl = normalizeProviderBaseUrl(input.baseUrl);
-        const contextWindow = input.contextWindow ?? 1_000_000;
+        const contextWindow = input.contextWindow ?? 500_000;
         if (!Number.isSafeInteger(contextWindow) || contextWindow < 1024) {
             throw new Error('Context window must be a positive integer of at least 1024.');
         }
@@ -970,11 +1145,11 @@ export class ProviderRegistry {
             id: input.id,
             name,
             kind: 'custom',
-            protocol: input.protocol,
+            protocol,
             baseUrl,
             model: this.validateModelId(input.model),
             contextWindow,
-            backendSearch: input.backendSearch === true,
+            backendSearch,
             // Secret references are derived exclusively by Electron main. A
             // renderer must never alias another Provider's vault entry.
             secretRef: `provider:${input.id}`,
@@ -1071,7 +1246,7 @@ export class ProviderRegistry {
             `base_url = ${JSON.stringify(profile.baseUrl)}`,
             `name = ${JSON.stringify(profile.name)}`,
             `api_backend = ${JSON.stringify(backend)}`,
-            `context_window = ${profile.contextWindow ?? 1_000_000}`,
+            `context_window = ${profile.contextWindow ?? 500_000}`,
             `supports_backend_search = ${profile.backendSearch === true}`
         ];
         if (profile.protocol === 'anthropic-messages') {
@@ -1296,6 +1471,26 @@ export class ProviderRegistry {
         return `${source.slice(0, section.bodyStart)}${replaced}${source.slice(section.end)}`;
     }
 
+    protected writeMcpStdioEnvironmentReference(source: string, server: string, environmentName: string): string {
+        const serverTable = `mcp_servers.${server}`;
+        if (!this.tomlSection(source, serverTable)) {
+            throw new Error(`Grok did not create the expected [${serverTable}] MCP table.`);
+        }
+        const environmentTable = `${serverTable}.env`;
+        const placeholder = `\${${environmentName}}`;
+        if (this.tomlSection(source, environmentTable)) {
+            return this.writeTomlString(source, environmentTable, environmentName, placeholder);
+        }
+        const serverSection = this.tomlSection(source, serverTable)!;
+        const body = source.slice(serverSection.bodyStart, serverSection.end);
+        if (/^\s*env\s*=/m.test(body)) {
+            throw new Error(`Xora Code cannot safely extend the inline env table for MCP server ${server}. Edit it manually or remove it first.`);
+        }
+        const prefix = source.slice(0, serverSection.end);
+        const separator = prefix.endsWith('\n') ? '\n' : '\n\n';
+        return `${prefix}${separator}[${environmentTable}]\n${environmentName} = ${JSON.stringify(placeholder)}\n${source.slice(serverSection.end)}`;
+    }
+
     protected tomlSection(source: string, table: string): { bodyStart: number; end: number } | undefined {
         const escapedTable = table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const header = new RegExp(`^\\s*\\[${escapedTable}\\]\\s*(?:#.*)?$`, 'm').exec(source);
@@ -1399,16 +1594,48 @@ export class ProviderRegistry {
 
     protected readMcpCredentials(): McpCredentialFile {
         try {
-            const file = JSON.parse(fs.readFileSync(this.mcpCredentialPath, 'utf8')) as McpCredentialFile;
-            if (file.schemaVersion !== 1 || !Array.isArray(file.credentials)) throw new Error();
-            const credentials = file.credentials.filter(entry =>
-                entry && typeof entry.workspaceRoot === 'string' && typeof entry.server === 'string' &&
-                typeof entry.environmentName === 'string' && typeof entry.secretRef === 'string');
-            return { schemaVersion: 1, credentials };
+            const file = JSON.parse(fs.readFileSync(this.mcpCredentialPath, 'utf8')) as {
+                schemaVersion?: unknown;
+                credentials?: unknown;
+            };
+            // v1 records were not bound to the canonical workspace or server
+            // configuration. Never infer a binding: the user must save again.
+            if (file.schemaVersion === 1) return { schemaVersion: 2, credentials: [] };
+            if (file.schemaVersion !== 2 || !Array.isArray(file.credentials)) throw new Error();
+            const credentials = file.credentials.filter((entry): entry is McpCredentialRecord =>
+                entry && typeof entry.workspaceRoot === 'string' && path.isAbsolute(entry.workspaceRoot)
+                && !/[\0\r\n]/.test(entry.workspaceRoot)
+                && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(entry.server)
+                && /^[A-Z][A-Z0-9_]{0,127}$/.test(entry.environmentName)
+                && /^[0-9a-f]{64}$/i.test(entry.configIdentity)
+                && typeof entry.secretRef === 'string' && /^mcp:[0-9a-f]{64}$/i.test(entry.secretRef)) as McpCredentialRecord[];
+            return { schemaVersion: 2, credentials };
         } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { schemaVersion: 1, credentials: [] };
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { schemaVersion: 2, credentials: [] };
             throw new Error('Unable to read MCP credential metadata.');
         }
+    }
+
+    protected canonicalMcpWorkspaceRoot(workspaceRoot: string): string {
+        if (typeof workspaceRoot !== 'string' || !path.isAbsolute(workspaceRoot) || /[\0\r\n]/.test(workspaceRoot)
+            || Buffer.byteLength(workspaceRoot, 'utf8') > 16 * 1024) {
+            throw new Error('MCP credentials require an absolute workspace root.');
+        }
+        try {
+            const root = fs.realpathSync.native(workspaceRoot);
+            if (!fs.statSync(root).isDirectory()) throw new Error();
+            return path.normalize(root);
+        } catch {
+            throw new Error('MCP credentials require an existing workspace directory.');
+        }
+    }
+
+    protected sameMcpWorkspace(left: string, right: string): boolean {
+        const normalizedLeft = path.normalize(left);
+        const normalizedRight = path.normalize(right);
+        return process.platform === 'win32'
+            ? normalizedLeft.toLocaleLowerCase('en-US') === normalizedRight.toLocaleLowerCase('en-US')
+            : normalizedLeft === normalizedRight;
     }
 
     protected assertMcpIdentity(server: string, environmentName: string): void {
@@ -1444,8 +1671,10 @@ export class ProviderRegistry {
         if (!source.trim()) return;
         try {
             parseToml(source);
-        } catch (error) {
-            throw new Error(`Grok config.toml is invalid; Xora Code left it unchanged: ${error instanceof Error ? error.message : String(error)}`);
+        } catch {
+            // Parser diagnostics include the complete offending source line,
+            // which can contain a literal MCP header or environment secret.
+            throw new Error('Grok config.toml is invalid; Xora Code left it unchanged.');
         }
     }
 
@@ -1486,4 +1715,55 @@ function readTextOrEmpty(target: string): string {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
         throw error;
     }
+}
+
+function tomlObject(value: unknown): Record<string, unknown> | undefined {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+}
+
+function tomlStringArray(value: unknown): string[] | undefined {
+    return Array.isArray(value) && value.every(item => typeof item === 'string')
+        ? [...value]
+        : undefined;
+}
+
+function lstatOrUndefined(target: string): fs.Stats | undefined {
+    try {
+        return fs.lstatSync(target);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+    }
+}
+
+function statOrUndefined(target: string): fs.Stats | undefined {
+    try {
+        return fs.statSync(target);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+    }
+}
+
+function sameLinkTarget(expected: string, link: string): boolean {
+    try {
+        return sameFilesystemPath(fs.realpathSync.native(expected), fs.realpathSync.native(link));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        // Preserve a correct broken link when the optional shared directory was
+        // removed. readlinkSync returns a relative target on Unix and an
+        // absolute substitute path for Windows junctions.
+        const configured = fs.readlinkSync(link);
+        return sameFilesystemPath(path.resolve(path.dirname(link), configured), path.resolve(expected));
+    }
+}
+
+function sameFilesystemPath(left: string, right: string): boolean {
+    const normalizedLeft = path.normalize(left);
+    const normalizedRight = path.normalize(right);
+    return process.platform === 'win32'
+        ? normalizedLeft.toLocaleLowerCase() === normalizedRight.toLocaleLowerCase()
+        : normalizedLeft === normalizedRight;
 }

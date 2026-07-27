@@ -82,6 +82,14 @@ export interface AcpClientOptions {
   maxLineBytes?: number;
   /** Maximum number of unanswered outbound requests. Defaults to 1024. */
   maxPendingRequests?: number;
+  /**
+   * How long timed-out or cancelled request ids remain reserved so a late
+   * response can be ignored safely. Defaults to 60 seconds. Zero disables
+   * tombstones.
+   */
+  lateResponseTombstoneMs?: number;
+  /** Maximum number of retained late-response tombstones. Defaults to 2048. */
+  maxLateResponseTombstones?: number;
   /** Useful for deterministic tests; defaults to monotonically increasing integers. */
   createId?: () => JsonRpcId;
 }

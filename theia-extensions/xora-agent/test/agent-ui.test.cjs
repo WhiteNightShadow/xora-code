@@ -469,6 +469,7 @@ test('Agent permission mode is explicit, application-wide and confirmed before f
     assert.match(source, /<option value='request-approval'>请求审批<\/option>/);
     assert.match(source, /<option value='full-access'>完全访问权限<\/option>/);
     assert.match(source, /所有项目、会话和窗口/);
+    assert.match(source, /访问整块磁盘/);
     assert.match(source, /setPermissionMode\(mode\)/);
     assert.doesNotMatch(source, /newSessionPermissionMode/);
     assert.doesNotMatch(source, /permissionMode: this\./);

@@ -234,7 +234,8 @@ function managementWarnings(data: unknown): string[] {
 }
 
 function isMcpOverview(data: unknown): boolean {
-    return isJsonObject(data) && data.schemaVersion === 1 && Array.isArray(data.mcpServers) && isJsonObject(data.sources);
+    return isJsonObject(data) && (data.schemaVersion === 1 || data.schemaVersion === 2)
+        && Array.isArray(data.mcpServers) && isJsonObject(data.sources);
 }
 
 function mcpStatusLabel(value: unknown, enabled: boolean | undefined): string | undefined {
@@ -246,6 +247,29 @@ function mcpStatusLabel(value: unknown, enabled: boolean | undefined): string | 
         case 'disabled': case 'inactive': return '已禁用';
         case 'unknown': return enabled === undefined ? '尚未诊断' : enabled ? '已启用，尚未诊断' : '已禁用';
         default: return displayValue(value) ?? (enabled === undefined ? undefined : enabled ? '已启用' : '已禁用');
+    }
+}
+
+function mcpDiagnosticLabel(value: unknown): string | undefined {
+    switch (stringValue(value)?.toLowerCase()) {
+        case 'healthy': return '诊断正常';
+        case 'unhealthy': return '诊断异常';
+        case 'unknown': return '诊断结果未知';
+        case 'not-run': return '尚未诊断';
+        default: return displayValue(value);
+    }
+}
+
+function mcpRuntimeLabel(value: unknown): string | undefined {
+    switch (stringValue(value)?.toLowerCase()) {
+        case 'loaded': return '当前会话已加载';
+        case 'disabled': return '当前会话已停用';
+        case 'initializing': return '正在连接';
+        case 'setup-required': return '需要完成设置或认证';
+        case 'unavailable': return '当前会话不可用';
+        case 'reload-required': return '配置已变化，等待安全刷新';
+        case 'not-loaded': return '当前会话未加载';
+        default: return displayValue(value);
     }
 }
 
@@ -268,6 +292,8 @@ export class AgentManagementWidget extends ReactWidget {
     protected result: ManagementResult | undefined;
     protected loading = false;
     protected discoveredModels = new Map<string, string[]>();
+    /** Uncontrolled form values that must survive model-catalog remounts. */
+    protected modelDrafts = new Map<string, string>();
     protected codeHighlightStyle: AgentCodeHighlightStyle = 'default';
     protected componentUpdate: ComponentUpdateStatus | undefined;
     protected runtimeSnapshot: RuntimeSnapshot | undefined;
@@ -375,7 +401,7 @@ export class AgentManagementWidget extends ReactWidget {
         switch (this.tab) {
             case 'providers': return '选择 Agent 当前使用的服务，登录 Grok 订阅，或配置 API 地址、密钥和模型。密钥不会写入 Theia 设置。';
             case 'skills': return '查看并管理 Grok 配置和当前项目最终生效的技能。';
-            case 'mcp': return '管理 MCP 服务及其连接健康状态。';
+            case 'mcp': return '统一管理 Xora MCP 配置，并分别查看发现来源、连接诊断和当前会话加载状态。已配置且启用的服务可在 Agent 菜单中选择，首次发送时会自动加载。';
             case 'plugins': return '管理已安装的插件和插件市场；可执行来源需要明确授权。';
         }
     }
@@ -421,17 +447,21 @@ export class AgentManagementWidget extends ReactWidget {
                 <summary>添加自定义 API 服务</summary>
                 <form onSubmit={event => this.addProvider(event)}>
                     <label>显示名称<input required name='name' /></label>
-                    <label>协议<select name='protocol' defaultValue='openai-chat-completions'>
-                        <option value='openai-chat-completions'>OpenAI Chat Completions（多数中转站）</option>
+                    <label>协议<select name='protocol' defaultValue='openai-responses'>
                         <option value='openai-responses'>OpenAI Responses（xAI 官方/兼容站）</option>
+                        <option value='openai-chat-completions'>OpenAI Chat Completions（多数中转站）</option>
                         <option value='anthropic-messages'>Anthropic Messages</option>
                     </select></label>
-                    <p className='xora-muted'>协议需与中转站文档一致。多数中转仅支持 Chat Completions；选错时对话可能失败并提示 Internal error。</p>
+                    <p className='xora-muted'>默认使用 Responses；若中转站仅兼容 Chat Completions，请按其文档切换。</p>
                     <label>Base URL<input required name='baseUrl' type='url' placeholder='https://api.example.com/v1' /></label>
-                    {this.renderModelIdField('add', undefined, undefined)}
-                    <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue='1000000' /></label>
+                    {this.renderModelIdField(
+                        'add',
+                        this.modelDrafts.get('add'),
+                        this.discoveredModels.get('add')
+                    )}
+                    <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue='500000' /></label>
                     <label className='xora-provider-checkbox'>
-                        <input name='backendSearch' type='checkbox' />
+                        <input name='backendSearch' type='checkbox' defaultChecked />
                         <span>启用服务端联网搜索（仅 Responses 协议有效）</span>
                     </label>
                     <label>API 密钥<input required name='apiKey' type='password' autoComplete='off' /></label>
@@ -516,8 +546,8 @@ export class AgentManagementWidget extends ReactWidget {
                 </select></label>
                 <p className='xora-muted'>若对话失败并出现 Internal error，请先核对协议是否与中转站一致；多数中转仅支持 Chat Completions。</p>
                 <label>Base URL<input required name='baseUrl' type='url' defaultValue={provider.baseUrl} /></label>
-                {this.renderModelIdField(provider.id, provider.model, models)}
-                <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 1000000} /></label>
+                {this.renderModelIdField(provider.id, this.modelDrafts.get(provider.id) ?? provider.model, models)}
+                <label>上下文窗口<input required name='contextWindow' type='number' min='1024' step='1' defaultValue={provider.contextWindow ?? 500000} /></label>
                 <label className='xora-provider-checkbox'>
                     <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch === true} />
                     <span>启用服务端联网搜索（仅 Responses 协议有效）</span>
@@ -629,13 +659,29 @@ export class AgentManagementWidget extends ReactWidget {
         const vendor = displayValue(fieldValue(entry.value, ['vendor', 'provider', 'originVendor']));
         const source = displayValue(fieldValue(entry.value, ['url', 'command', 'target', 'endpoint']))
             ?? (entry.nameHint ? stringValue(entry.value) : undefined);
+        const configured = booleanValue(fieldValue(entry.value, ['configured']));
+        const importRequired = booleanValue(fieldValue(entry.value, ['importRequired']));
+        const callable = booleanValue(fieldValue(entry.value, ['callable']));
+        const selectable = booleanValue(fieldValue(entry.value, ['selectable']));
+        const diagnostic = mcpDiagnosticLabel(fieldValue(entry.value, ['diagnosticState']));
+        const runtime = mcpRuntimeLabel(fieldValue(entry.value, ['runtimeState']));
+        const runtimeDetails = fieldValue(entry.value, ['runtime']);
+        const toolCountValue = fieldValue(runtimeDetails, ['toolCount']);
+        const toolCount = typeof toolCountValue === 'number' ? `${toolCountValue} 个` : undefined;
         return <article key={`mcp-${index}-${name}`} className='xora-card xora-integration-card'>
             {this.renderEntryHeader(name, enabled)}
             {this.renderFields([
+                ['发现状态', '已发现'],
+                ['Xora 配置', configured === true ? '已配置' : importRequired === true ? '待导入' : configured === false ? '未配置' : undefined],
+                ['连接诊断', diagnostic],
+                ['当前会话', runtime],
+                ['Agent 菜单', selectable === undefined ? undefined : selectable ? '可选择' : '不显示'],
+                ['Agent 可调用', callable === undefined ? undefined : callable ? '可以' : '不可以'],
+                ['已加载工具', toolCount],
                 ['传输方式', transport],
                 ['配置来源', vendor],
                 ['作用域', scope],
-                ['状态', status],
+                ['配置状态', status],
                 ['命令 / URL', source]
             ])}
             {this.renderRawDetails(entry.value)}
@@ -852,6 +898,8 @@ export class AgentManagementWidget extends ReactWidget {
         try {
             await this.service.saveProvider(provider, String(form.get('apiKey')));
             formElement.reset();
+            this.discoveredModels.delete('add');
+            this.modelDrafts.delete('add');
             try {
                 await this.service.selectProvider(provider.id);
             } catch (error) {
@@ -900,6 +948,7 @@ export class AgentManagementWidget extends ReactWidget {
         };
         try {
             await this.service.saveProvider(provider, optionalCredential(form.get('apiKey')));
+            this.modelDrafts.delete(provider.id);
             const password = formElement.elements.namedItem('apiKey');
             if (password instanceof HTMLInputElement) password.value = '';
             try {
@@ -923,6 +972,7 @@ export class AgentManagementWidget extends ReactWidget {
         try {
             await this.service.deleteProvider(provider.id);
             this.discoveredModels.delete(provider.id);
+            this.modelDrafts.delete(provider.id);
             await this.refresh();
             this.messages.info(`已删除模型服务“${provider.name}”。`);
         } catch (error) {
@@ -937,6 +987,7 @@ export class AgentManagementWidget extends ReactWidget {
         try {
             await this.service.clearProviderCredential(provider.id);
             this.discoveredModels.delete(provider.id);
+            this.modelDrafts.delete(provider.id);
             await this.refresh();
             this.messages.info(`已清除“${provider.name}”的 API 密钥。`);
         } catch (error) {
@@ -1008,6 +1059,7 @@ export class AgentManagementWidget extends ReactWidget {
                     defaultValue={currentModel}
                     placeholder={hasCatalog ? '从列表选择或直接输入模型 ID' : '例如 gpt-4.1 / claude-sonnet-4'}
                     autoComplete='off'
+                    onInput={event => this.modelDrafts.set(providerKey, event.currentTarget.value)}
                 />
                 {hasCatalog ? <datalist id={listId} key={`datalist-${providerKey}-${catalogRevision}`}>
                     {models!.map(id => <option key={id} value={id} />)}
@@ -1025,6 +1077,7 @@ export class AgentManagementWidget extends ReactWidget {
                         const input = form?.elements.namedItem('model');
                         if (input instanceof HTMLInputElement) {
                             input.value = value;
+                            this.modelDrafts.set(providerKey, value);
                             input.dispatchEvent(new Event('input', { bubbles: true }));
                         }
                         // Reset so the same model can be re-picked after manual edit.
@@ -1047,7 +1100,8 @@ export class AgentManagementWidget extends ReactWidget {
                         if (form) void this.discoverModelsFromForm(form, 'add');
                         return;
                     }
-                    void this.discoverModels(providerKey);
+                    const form = (event.currentTarget as HTMLElement).closest('form');
+                    void this.discoverModels(providerKey, form ?? undefined);
                 }}>
                 获取模型
             </button>
@@ -1061,14 +1115,21 @@ export class AgentManagementWidget extends ReactWidget {
         this.messages.info(`已切换 Agent 代码高亮风格：${AGENT_CODE_HIGHLIGHT_STYLES.find(item => item.id === style)?.label ?? style}`);
     }
 
-    protected async discoverModels(providerId: string): Promise<void> {
+    protected async discoverModels(providerId: string, form?: HTMLFormElement): Promise<void> {
+        const modelInput = form?.elements.namedItem('model');
+        const currentModel = modelInput instanceof HTMLInputElement ? modelInput.value.trim() : '';
         try {
             this.loading = true;
             this.update();
             const models = await this.service.fetchProviderModels(providerId);
-            this.discoveredModels.set(providerId, models.map(model => model.id));
+            const modelIds = models.map(model => model.id);
+            this.discoveredModels.set(providerId, modelIds);
+            const selectedModel = currentModel || modelIds[0] || '';
+            if (selectedModel) this.modelDrafts.set(providerId, selectedModel);
             this.messages.info(models.length
-                ? `已获取 ${models.length} 个可用模型：可在「快速选择」中点选，或在模型 ID 中输入。`
+                ? currentModel
+                    ? `已获取 ${models.length} 个可用模型，可在「快速选择」中切换。`
+                    : `已获取 ${models.length} 个可用模型，已自动填入 ${selectedModel}。`
                 : '服务没有返回可用模型，请手动输入模型 ID。');
         } catch (error) {
             this.messages.error(`无法获取模型：${friendlyAgentErrorMessage(error)}`);
@@ -1083,7 +1144,8 @@ export class AgentManagementWidget extends ReactWidget {
         const data = new FormData(form);
         const baseUrl = String(data.get('baseUrl') ?? '').trim();
         const apiKey = String(data.get('apiKey') ?? '').trim();
-        const protocol = String(data.get('protocol') ?? 'openai-chat-completions') as ProviderProtocol;
+        const protocol = String(data.get('protocol') ?? 'openai-responses') as ProviderProtocol;
+        const currentModel = String(data.get('model') ?? '').trim();
         if (!baseUrl) {
             this.messages.warn('请先填写 Base URL，再获取模型列表。');
             return;
@@ -1096,9 +1158,14 @@ export class AgentManagementWidget extends ReactWidget {
             this.loading = true;
             this.update();
             const models = await this.service.probeProviderModels({ protocol, baseUrl, apiKey });
-            this.discoveredModels.set(catalogKey, models.map(model => model.id));
+            const modelIds = models.map(model => model.id);
+            this.discoveredModels.set(catalogKey, modelIds);
+            const selectedModel = currentModel || modelIds[0] || '';
+            if (selectedModel) this.modelDrafts.set(catalogKey, selectedModel);
             this.messages.info(models.length
-                ? `已获取 ${models.length} 个可用模型：可在「快速选择」中点选，或在模型 ID 中输入。`
+                ? currentModel
+                    ? `已获取 ${models.length} 个可用模型，可在「快速选择」中切换。`
+                    : `已获取 ${models.length} 个可用模型，已自动填入 ${selectedModel}。`
                 : '服务没有返回可用模型，请手动输入模型 ID。');
         } catch (error) {
             this.messages.error(`无法获取模型：${friendlyAgentErrorMessage(error)}`);

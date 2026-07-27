@@ -143,8 +143,10 @@ test('untrusted projects retain the global preference without receiving an execu
 test('production runtime gates project MCP injection on native workspace trust', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/electron-main/grok-agent-host-service.ts'), 'utf8');
 
-    assert.match(source, /if \(this\.isWorkspaceTrusted\(root\)\) \{\s*projectMcpEnvironment = this\.providers\.mcpEnvironment\(root\)/);
-    assert.match(source, /Trust-state failures are fail-closed for project MCP/);
+    assert.match(source, /if \(!this\.isWorkspaceTrusted\(workspaceRoot\)\) \{/);
+    assert.match(source, /const credentials = this\.providers\.mcpCredentialBindings\(workspaceRoot\)/);
+    assert.doesNotMatch(source, /projectMcpEnvironment/,
+        'stored MCP secrets must not be injected into the global sidecar process environment');
     assert.match(source, /if \(!this\.attachedWorkspaceRoots\.has\(root\)\)/);
     assert.doesNotMatch(source, /Trust this project before starting the Agent runtime/);
 });

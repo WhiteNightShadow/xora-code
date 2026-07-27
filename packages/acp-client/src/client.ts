@@ -43,6 +43,8 @@ interface PendingRequest {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_LINE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PENDING = 1024;
+const DEFAULT_LATE_RESPONSE_TOMBSTONE_MS = 60_000;
+const DEFAULT_MAX_LATE_RESPONSE_TOMBSTONES = 2048;
 const ANY_METHOD = "*";
 
 export class AcpClient {
@@ -50,8 +52,11 @@ export class AcpClient {
   readonly #defaultTimeoutMs: number;
   readonly #maxLineBytes: number;
   readonly #maxPendingRequests: number;
+  readonly #lateResponseTombstoneMs: number;
+  readonly #maxLateResponseTombstones: number;
   readonly #createId: () => JsonRpcId;
   readonly #pending = new Map<JsonRpcId, PendingRequest>();
+  readonly #lateResponseTombstones = new Map<JsonRpcId, number>();
   readonly #notificationHandlers = new Map<string, Set<NotificationHandler>>();
   readonly #requestHandlers = new Map<string, RequestHandler>();
   readonly #errorHandlers = new Set<ErrorHandler>();
@@ -74,6 +79,14 @@ export class AcpClient {
     this.#maxPendingRequests = validatePositiveInteger(
       options.maxPendingRequests ?? DEFAULT_MAX_PENDING,
       "maxPendingRequests",
+    );
+    this.#lateResponseTombstoneMs = validateNonNegativeInteger(
+      options.lateResponseTombstoneMs ?? DEFAULT_LATE_RESPONSE_TOMBSTONE_MS,
+      "lateResponseTombstoneMs",
+    );
+    this.#maxLateResponseTombstones = validatePositiveInteger(
+      options.maxLateResponseTombstones ?? DEFAULT_MAX_LATE_RESPONSE_TOMBSTONES,
+      "maxLateResponseTombstones",
     );
     this.#createId = options.createId ?? (() => this.#nextId++);
   }
@@ -125,7 +138,10 @@ export class AcpClient {
 
     const id = this.#createId();
     assertId(id);
-    if (this.#pending.has(id)) throw new AcpProtocolError(`createId() returned duplicate id ${String(id)}`);
+    this.#pruneLateResponseTombstones();
+    if (this.#pending.has(id) || this.#lateResponseTombstones.has(id)) {
+      throw new AcpProtocolError(`createId() returned duplicate or recently retired id ${String(id)}`);
+    }
     const timeoutMs = validateNonNegativeInteger(
       options.timeoutMs ?? this.#defaultTimeoutMs,
       "timeoutMs",
@@ -257,6 +273,7 @@ export class AcpClient {
   #handleResponse(response: JsonRpcResponse): void {
     const pending = this.#pending.get(response.id);
     if (!pending) {
+      if (this.#isLateResponseTombstone(response.id)) return;
       // Grok Build / Grok CLI may emit extension lifecycle acknowledgements
       // (for example `skills-reload` after login) as response-shaped messages
       // whose string ids were never issued by this client. Treat those as
@@ -355,6 +372,7 @@ export class AcpClient {
   async #cancelPending(pending: PendingRequest, error: AcpCancelledError | AcpTimeoutError): Promise<void> {
     if (this.#pending.get(pending.id) !== pending) return;
     this.#cleanupPending(pending);
+    this.#rememberLateResponseTombstone(pending.id);
     pending.reject(error);
     if (!pending.cancellation || this.#closedError) return;
     const notification = resolveCancellation(pending.cancellation, pending.id);
@@ -377,6 +395,31 @@ export class AcpClient {
     if (pending.timer) clearTimeout(pending.timer);
     if (pending.abortSignal && pending.abortHandler) {
       pending.abortSignal.removeEventListener("abort", pending.abortHandler);
+    }
+  }
+
+  #rememberLateResponseTombstone(id: JsonRpcId): void {
+    if (this.#lateResponseTombstoneMs === 0) return;
+    const now = Date.now();
+    this.#pruneLateResponseTombstones(now);
+    this.#lateResponseTombstones.delete(id);
+    this.#lateResponseTombstones.set(id, now + this.#lateResponseTombstoneMs);
+    while (this.#lateResponseTombstones.size > this.#maxLateResponseTombstones) {
+      const oldest = this.#lateResponseTombstones.keys().next();
+      if (oldest.done) break;
+      this.#lateResponseTombstones.delete(oldest.value);
+    }
+  }
+
+  #isLateResponseTombstone(id: JsonRpcId): boolean {
+    this.#pruneLateResponseTombstones();
+    return this.#lateResponseTombstones.has(id);
+  }
+
+  #pruneLateResponseTombstones(now = Date.now()): void {
+    for (const [id, expiresAt] of this.#lateResponseTombstones) {
+      if (expiresAt > now) continue;
+      this.#lateResponseTombstones.delete(id);
     }
   }
 

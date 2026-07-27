@@ -45,7 +45,8 @@ import { normalizeWindowsFilesystemPath } from '../common/workspace-path';
 import { ProviderRegistry } from './provider-registry';
 import { validatePromptImageAttachments } from './prompt-image-attachments';
 import { normalizeProviderBaseUrl, providerModelsEndpoint, requestProviderJson } from './provider-network';
-import { mergeMcpManagementResults } from './mcp-management';
+import { McpRuntimeProjection, mergeMcpManagementResults } from './mcp-management';
+import { RuntimeMcpRegistry, RuntimeMcpSnapshot } from './runtime-mcp-registry';
 import { AgentSessionRepository, deepRedact } from './session-repository';
 import { GrokSidecarSupervisor } from './sidecar-supervisor';
 import { SidecarUpdateCoordinator } from './sidecar-update-coordinator';
@@ -96,6 +97,22 @@ interface ToolActivityTiming {
     startedNanos: bigint;
     status: ToolCallEvent['status'];
     elapsedMs?: number;
+}
+
+interface RuntimeMcpServerState {
+    name: string;
+    status: 'ready' | 'initializing' | 'setuprequired' | 'needsauth' | 'unavailable';
+    enabled: boolean;
+    toolCount: number;
+}
+
+interface HistoryRebindOptions {
+    /** False while the caller already owns the lifecycle lock. */
+    allowRuntimeRestart?: boolean;
+    /** Pins every fallback-restored session to one canonical recovery snapshot. */
+    mcpSnapshot?: RuntimeMcpSnapshot;
+    /** Defer the global fingerprint commit until a multi-session recovery succeeds. */
+    acceptMcpSnapshot?: boolean;
 }
 
 /** Electron-main-only notification; never crosses the renderer RPC boundary. */
@@ -189,7 +206,45 @@ export class GrokAgentHostService implements AgentHostService {
     protected sessionLoadGeneration = 0;
     protected currentSecrets: string[] = [];
     /** Last explicit MCP health check, isolated to its canonical workspace. */
-    protected mcpDoctorSnapshot: { workspaceRoot: string; result: ManagementResult } | undefined;
+    protected mcpDoctorSnapshot: { workspaceRoot: string; fingerprint: string; result: ManagementResult } | undefined;
+    /** One canonical user/project MCP resolver shared by every model Provider. */
+    protected runtimeMcpRegistry: RuntimeMcpRegistry | undefined = new RuntimeMcpRegistry();
+    /** Secret-free identity of the MCP list currently applied to this sidecar. */
+    protected runtimeMcpFingerprint: string | undefined;
+    protected runtimeMcpConfiguredNames: string[] = [];
+    /** Canonical configured servers that survive disabled_mcp_servers merging. */
+    protected runtimeMcpEnabledNames: string[] = [];
+    /** Safe projection of Grok's per-session MCP readiness; raw env/header/detail never leaves main. */
+    protected sessionMcpStates: Map<string, RuntimeMcpServerState[]> | undefined = new Map();
+    protected mcpConfigurationRefreshPending = false;
+    protected skillsRefreshPending = false;
+    protected integrationRefreshScheduled = false;
+    /** Serializes prompt admission with executable integration mutations. */
+    protected integrationMutationTail: Promise<void> = Promise.resolve();
+    /**
+     * Session creation/restoration are integration readers: they may run in
+     * parallel, but a configuration writer must wait until every pinned ACP
+     * request has committed its snapshot. New readers wait behind a queued
+     * writer, so a steady stream of history hydration cannot starve refresh.
+     */
+    protected integrationReaders = new Set<Promise<unknown>>();
+    protected mcpStatusRefreshTimer: NodeJS.Timeout | undefined;
+    /** At most one potentially expensive `_x.ai/mcp/list` sweep may run per window. */
+    protected mcpStatusRefreshInFlight: Promise<void> | undefined;
+    /** Coalesces lifecycle changes that arrive while the current sweep is running. */
+    protected mcpStatusRefreshQueued = false;
+    protected lastMcpStatusRefreshCompletedAt = 0;
+    /** Session-specific lifecycle notifications never trigger a sweep of every hydrated tab. */
+    protected mcpStatusRefreshSessionIds = new Set<string>();
+    /**
+     * Grok can emit the same lifecycle state more than once (and some builds
+     * emit it while answering `mcp/list`). Remember only a secret-free semantic
+     * projection so duplicate notifications cannot create a polling loop.
+     */
+    protected mcpLifecycleSignals = new Map<string, string>();
+    protected projectGrokConfigPath: string | undefined;
+    protected projectGrokConfigListener: ((current: fs.Stats, previous: fs.Stats) => void) | undefined;
+    protected projectGrokConfigDebounce: NodeJS.Timeout | undefined;
     /** Persistent trust alone never enables a newly connected window. */
     protected readonly theiaTrustedRoots = new Set<string>();
     /** Canonical roots currently attached to this Theia window, independent of trust. */
@@ -275,6 +330,11 @@ export class GrokAgentHostService implements AgentHostService {
             this.flushAssistantTextDeltas();
             ++this.sessionLoadGeneration;
             this.mcpDoctorSnapshot = undefined;
+            this.runtimeMcpFingerprint = undefined;
+            this.runtimeMcpConfiguredNames = [];
+            this.runtimeMcpEnabledNames = [];
+            this.sessionMcpStateMap().clear();
+            this.mcpConfigurationRefreshPending = false;
             // Selecting a root is deliberately not a trust assertion. The
             // browser must follow with Theia's resolved workspace decision.
             this.theiaTrustedRoots.clear();
@@ -288,6 +348,7 @@ export class GrokAgentHostService implements AgentHostService {
             }
         }
         this.workspaceRoot = canonical;
+        if (workspaceChanged) this.watchProjectGrokConfiguration(canonical);
         const active = this.activeSessionId ? this.sessions.get(this.activeSessionId) : undefined;
         if (!active || active.workspaceRoot !== canonical) {
             this.activeSessionId = undefined;
@@ -333,6 +394,15 @@ export class GrokAgentHostService implements AgentHostService {
             permission.resolve({ outcome: { outcome: 'cancelled' } });
         }
         this.pendingPermissions.clear();
+        // Keep the transport warm, but revoke executable integrations from
+        // every hydrated session. Running turns are cancelled first; their
+        // normal finally path then performs the empty-list refresh.
+        this.mcpConfigurationRefreshPending = true;
+        this.skillsRefreshPending = true;
+        for (const prompt of this.activePrompts?.values?.() ?? []) {
+            void prompt.cancel('Workspace trust was revoked').catch(() => undefined);
+        }
+        if (this.runtimeMcpRegistry && this.acp) this.scheduleIntegrationRefresh();
         let persistenceError: unknown;
         try {
             this.security.synchronizeTrust(canonicalRoots, false);
@@ -383,6 +453,7 @@ export class GrokAgentHostService implements AgentHostService {
 
         const generation = ++this.runtimeGeneration;
         this.loadedSessionIds.clear();
+        this.sessionMcpStateMap().clear();
         this.runtimeProviderEpoch = undefined;
         this.workspaceRoot = root;
         this.providerId = provider.id;
@@ -392,25 +463,16 @@ export class GrokAgentHostService implements AgentHostService {
         this.emitSnapshot();
 
         try {
-            let projectMcpEnvironment: NodeJS.ProcessEnv = {};
-            try {
-                if (this.isWorkspaceTrusted(root)) {
-                    projectMcpEnvironment = this.providers.mcpEnvironment(root);
-                }
-            } catch {
-                // Trust-state failures are fail-closed for project MCP, but
-                // they do not prevent the transport from waiting for input.
-            }
             // Capture the Provider epoch under the same writer lock as the
             // credential/TOML snapshot and process spawn. The lock is released
             // immediately after spawn; ACP initialize may legitimately wait on
             // the network and must not block settings in another window.
             const launch = this.providers.withProviderEnvironment(provider.id, (providerEnvironment, currentProvider, runtimeEpoch) => {
                 provider = currentProvider;
-                const environment = {
-                    ...projectMcpEnvironment,
-                    ...providerEnvironment
-                };
+                // App-managed MCP credentials are intentionally absent from the
+                // sidecar process environment. RuntimeMcpRegistry binds each one
+                // to a single canonical server descriptor during session setup.
+                const environment = { ...providerEnvironment };
                 // Only credentials belong in the exact-value redaction set.
                 // The launch environment also contains safe routing values
                 // such as GROK_WEB_SEARCH_MODEL=<custom provider id>. Treating
@@ -451,7 +513,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.1' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.2' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -459,7 +521,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.2.1'
+                    clientVersion: '0.2.2'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
@@ -563,6 +625,21 @@ export class GrokAgentHostService implements AgentHostService {
         this.assistantStreamState().clear();
         ++this.runtimeGeneration;
         this.loadedSessionIds.clear();
+        this.sessionMcpStateMap().clear();
+        this.runtimeMcpFingerprint = undefined;
+        this.runtimeMcpConfiguredNames = [];
+        this.runtimeMcpEnabledNames = [];
+        this.mcpConfigurationRefreshPending = false;
+        this.skillsRefreshPending = false;
+        if (this.mcpStatusRefreshTimer) {
+            clearTimeout(this.mcpStatusRefreshTimer);
+            this.mcpStatusRefreshTimer = undefined;
+        }
+        this.mcpStatusRefreshQueued = false;
+        this.mcpStatusRefreshInFlight = undefined;
+        this.lastMcpStatusRefreshCompletedAt = 0;
+        this.mcpStatusRefreshSessionIdState().clear();
+        this.mcpLifecycleSignalState().clear();
         this.intentionalStop = true;
         this.phase = 'draining';
         this.emitSnapshot();
@@ -661,6 +738,15 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async createSession(request: CreateSessionRequest): Promise<SessionRecord> {
+        return this.withCurrentIntegrationRead(request.workspaceRoot, snapshot =>
+            this.createSessionWithIntegrationsLocked(request, snapshot));
+    }
+
+    /** Caller owns an integration read lease with the current config applied. */
+    protected async createSessionWithIntegrationsLocked(
+        request: CreateSessionRequest,
+        mcpSnapshot: RuntimeMcpSnapshot
+    ): Promise<SessionRecord> {
         // A new ACP session is an ordering boundary even if the previous turn's
         // final text arrived less than one batching window ago.
         this.flushAssistantTextDeltas();
@@ -718,7 +804,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (effectiveModel) meta.modelId = effectiveModel;
         const params: Record<string, unknown> = {
             cwd: root,
-            mcpServers: [],
+            mcpServers: mcpSnapshot.mcpServers,
             ...(Object.keys(meta).length ? { _meta: meta } : {})
         };
         if (this.supportsAdditionalDirectories && request.additionalDirectories?.length) {
@@ -734,6 +820,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (typeof result.sessionId !== 'string' || !result.sessionId) {
             throw new Error('Grok returned an invalid ACP session ID.');
         }
+        this.acceptRuntimeMcpSnapshot(mcpSnapshot);
         const createdModelState = modelStateFrom(result);
         this.acceptModelState(createdModelState, false);
         // `_meta.modelId` on session/new is only a request hint. Grok Build
@@ -827,6 +914,7 @@ export class GrokAgentHostService implements AgentHostService {
             return record;
         }
         this.loadedSessionIds.add(record.appSessionId);
+        this.scheduleMcpStatusRefresh();
         if (activationGeneration === this.sessionLoadGeneration) {
             this.activeSessionId = record.appSessionId;
         }
@@ -845,6 +933,8 @@ export class GrokAgentHostService implements AgentHostService {
         const activationGeneration = ++this.sessionLoadGeneration;
         const selectedProvider = this.providers.selectedProviderId();
         const selectedProviderEpoch = this.providers.runtimeEpoch(selectedProvider);
+        const storedSession = this.sessions.get(appSessionId);
+        if (!storedSession) throw new Error('Unknown Xora Code session.');
         const pendingLoads = this.pendingSessionLoadState();
         let entry = pendingLoads.get(appSessionId);
         // Background hydration, explicit tab activation and Send can converge
@@ -859,10 +949,12 @@ export class GrokAgentHostService implements AgentHostService {
             this.assistantStreamState().clear();
             let boundRuntimeGeneration = this.runtimeGeneration;
             let createdEntry: PendingSessionLoad | undefined;
-            const task = this.loadSessionUncoalesced(appSessionId, generation => {
-                boundRuntimeGeneration = generation;
-                if (createdEntry) createdEntry.runtimeGeneration = generation;
-            });
+            const task = this.withCurrentIntegrationRead(storedSession.workspaceRoot, snapshot =>
+                this.loadSessionUncoalesced(appSessionId, generation => {
+                    boundRuntimeGeneration = generation;
+                    if (createdEntry) createdEntry.runtimeGeneration = generation;
+                }, snapshot)
+            );
             const promise = task.finally(() => {
                 if (pendingLoads.get(appSessionId) === createdEntry) pendingLoads.delete(appSessionId);
             });
@@ -882,6 +974,7 @@ export class GrokAgentHostService implements AgentHostService {
             && loaded.providerId === this.providerId) {
             this.activeSessionId = appSessionId;
             if (loaded.model) this.selectedModel = loaded.model;
+            this.scheduleMcpStatusRefresh();
             this.emitSnapshot();
         }
         return loaded;
@@ -889,7 +982,8 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected async loadSessionUncoalesced(
         appSessionId: string,
-        bindRuntimeGeneration: (generation: number) => void
+        bindRuntimeGeneration: (generation: number) => void,
+        mcpSnapshot: RuntimeMcpSnapshot
     ): Promise<SessionRecord> {
         const record = this.sessions.get(appSessionId);
         if (!record) {
@@ -906,7 +1000,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (!record.acpSessionId
             || record.providerId !== globallySelectedProvider
             || recordEpoch !== selectedProviderEpoch) {
-            return this.rebindHistoryToCurrentProvider(record);
+            return this.rebindHistoryToCurrentProvider(record, { mcpSnapshot });
         }
         this.knownSessionIds.add(appSessionId);
         this.acpSessionLookup.set(record.acpSessionId, appSessionId);
@@ -946,7 +1040,7 @@ export class GrokAgentHostService implements AgentHostService {
                 const result = await this.requireReady().request<Record<string, unknown>>('session/load', {
                     sessionId: record.acpSessionId,
                     cwd: record.workspaceRoot,
-                    mcpServers: [],
+                    mcpServers: mcpSnapshot.mcpServers,
                     ...(globallySelectedModel ? { _meta: { modelId: globallySelectedModel } } : {})
                 }, { timeoutMs: 60_000 });
                 if (restoreRuntimeGeneration !== this.runtimeGeneration) {
@@ -958,7 +1052,7 @@ export class GrokAgentHostService implements AgentHostService {
                     || latestProviderEpoch !== recordEpoch
                     || this.runtimeProviderEpoch !== recordEpoch) {
                     this.notifyProviderDefaultsChanged();
-                    return this.rebindHistoryToCurrentProvider(record);
+                    return this.rebindHistoryToCurrentProvider(record, { mcpSnapshot });
                 }
                 const latestGlobalModel = this.defaultModelId(record.providerId);
                 const restoredModelState = modelStateFrom(result);
@@ -982,10 +1076,12 @@ export class GrokAgentHostService implements AgentHostService {
                         || this.providers.runtimeEpoch(record.providerId) !== recordEpoch
                         || this.defaultModelId(record.providerId) !== latestGlobalModel) {
                         this.notifyProviderDefaultsChanged();
-                        return this.rebindHistoryToCurrentProvider(record);
+                        return this.rebindHistoryToCurrentProvider(record, { mcpSnapshot });
                     }
                 }
                 this.loadedSessionIds.add(appSessionId);
+                this.acceptRuntimeMcpSnapshot(mcpSnapshot);
+                this.scheduleMcpStatusRefresh();
                 const restoredModel = latestGlobalModel ?? this.selectedModel;
                 if (restoredModel) this.selectedModel = restoredModel;
                 const currentRecord = this.sessions.get(appSessionId) ?? record;
@@ -1018,7 +1114,7 @@ export class GrokAgentHostService implements AgentHostService {
                 // A missing/expired remote ACP session should not turn the
                 // local conversation into a dead end. Attach a fresh session
                 // to the same local history; never replay the stored prompts.
-                return await this.rebindHistoryToCurrentProvider(record);
+                return await this.rebindHistoryToCurrentProvider(record, { mcpSnapshot });
             } catch (reconnectError) {
                 if (this.redactError(reconnectError) === 'AUTHENTICATION_REQUIRED') {
                     throw reconnectError;
@@ -1088,6 +1184,7 @@ export class GrokAgentHostService implements AgentHostService {
         this.flushAssistantTextDeltas(appSessionId);
         this.assistantStreamState().delete(appSessionId);
         this.loadedSessionIds.delete(appSessionId);
+        this.sessionMcpStateMap().delete(appSessionId);
         this.knownSessionIds.delete(appSessionId);
         this.sessionContexts.delete(appSessionId);
         this.contextEventHighwaters.delete(appSessionId);
@@ -1105,7 +1202,7 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async sendPrompt(request: PromptRequest): Promise<void> {
-        const acp = this.requireReady();
+        this.requireReady();
         const record = this.sessions.get(request.sessionId);
         if (!record?.acpSessionId || record.status === 'read-only') {
             throw new Error('The selected session cannot accept prompts.');
@@ -1151,43 +1248,85 @@ export class GrokAgentHostService implements AgentHostService {
         }
         const images = validatePromptImageAttachments(request.attachments);
         if (!request.text.length && !images.blocks.length) throw new Error('A prompt cannot be empty.');
-        // Reset before the user event so this turn's first assistant fragment
-        // crosses Electron IPC and JSONL immediately. Later fragments retain
-        // the fixed batching window that prevents renderer churn.
-        this.clearToolActivityTimings(request.sessionId);
-        this.flushAssistantTextDeltas(request.sessionId);
-        this.assistantStreamState().delete(request.sessionId);
-        const turnId = crypto.randomUUID();
-        this.activeTurnIdState().set(request.sessionId, turnId);
-        this.emit({
-            kind: 'text-delta',
-            sessionId: request.sessionId,
-            role: 'user',
-            text: request.text,
-            ...(images.summaries.length ? { attachments: images.summaries } : {})
-        });
-        const running = this.sessions.update(request.sessionId, { status: 'running' });
-        this.emit({ kind: 'session', session: running });
-        // Measure only the actual ACP turn. Startup, authentication, Save All
-        // and session hydration are Xora orchestration latency and must not be
-        // presented as model response time.
-        const promptStartedAt = process.hrtime.bigint();
-        const elapsedMs = (): number => Number((process.hrtime.bigint() - promptStartedAt) / 1_000_000n);
-        try {
+        const admitted = await this.withCurrentIntegrationRead(record.workspaceRoot, async () => {
+            if (this.activePrompts.has(request.sessionId)) {
+                throw new Error('This session already has a running task.');
+            }
+            // Re-read the canonical Xora MCP source before every valid turn.
+            // The shared read lease makes config writes and prompt admission
+            // atomic without blocking another session's hydration.
+            const acp = this.requireReady();
+            const refreshedRecord = this.sessions.get(request.sessionId) ?? record;
+            if (!refreshedRecord.acpSessionId || !this.loadedSessionIds.has(request.sessionId)) {
+                throw new Error('The selected conversation could not be restored after refreshing MCP.');
+            }
+            if (refreshedRecord.providerId !== this.providers.selectedProviderId()
+                || refreshedRecord.providerId !== this.providerId) {
+                this.notifyProviderDefaultsChanged();
+                throw new Error('The application-wide model service changed while MCP was refreshing.');
+            }
+            const refreshedEpoch = refreshedRecord.providerRuntimeEpoch ?? 'legacy-v1';
+            if (refreshedEpoch !== this.runtimeProviderEpoch
+                || refreshedEpoch !== this.providers.runtimeEpoch(refreshedRecord.providerId)) {
+                throw new Error('The Provider changed while MCP was refreshing. Start a new session.');
+            }
+            const refreshedModel = this.defaultModelId(refreshedRecord.providerId);
+            if (refreshedModel && (refreshedRecord.model !== refreshedModel || this.selectedModel !== refreshedModel)) {
+                this.notifyProviderDefaultsChanged();
+                throw new Error('The application-wide model changed while MCP was refreshing.');
+            }
             const prompt = [
                 ...(request.text.length ? [{ type: 'text' as const, text: request.text }] : []),
                 ...images.blocks
             ];
-            const handle = acp.startRequest<Record<string, unknown>>('session/prompt', {
-                sessionId: record.acpSessionId,
-                prompt
-            }, {
-                timeoutMs: 0,
-                cancellation: { method: 'session/cancel', params: { sessionId: record.acpSessionId } }
+            const turnId = crypto.randomUUID();
+            const promptStartedAt = process.hrtime.bigint();
+            // Reset before the user event so this turn's first assistant
+            // fragment crosses Electron IPC and JSONL immediately.
+            this.clearToolActivityTimings(request.sessionId);
+            this.flushAssistantTextDeltas(request.sessionId);
+            this.assistantStreamState().delete(request.sessionId);
+            this.activeTurnIdState().set(request.sessionId, turnId);
+            this.emit({
+                kind: 'text-delta',
+                sessionId: request.sessionId,
+                role: 'user',
+                text: request.text,
+                ...(images.summaries.length ? { attachments: images.summaries } : {})
             });
-            this.activePrompts.set(request.sessionId, handle);
+            const running = this.sessions.update(request.sessionId, { status: 'running' });
+            this.emit({ kind: 'session', session: running });
+            let handle: RequestHandle<Record<string, unknown>>;
+            try {
+                handle = acp.startRequest<Record<string, unknown>>('session/prompt', {
+                    sessionId: refreshedRecord.acpSessionId,
+                    prompt
+                }, {
+                    timeoutMs: 0,
+                    cancellation: { method: 'session/cancel', params: { sessionId: refreshedRecord.acpSessionId } }
+                });
+                this.activePrompts.set(request.sessionId, handle);
+            } catch (error) {
+                const failed = this.sessions.update(request.sessionId, { status: 'failed' });
+                this.emit({ kind: 'session', session: failed });
+                this.activeTurnIdState().delete(request.sessionId);
+                this.emit({
+                    kind: 'turn-completed',
+                    sessionId: request.sessionId,
+                    stopReason: 'error',
+                    elapsedMs: Number((process.hrtime.bigint() - promptStartedAt) / 1_000_000n)
+                });
+                throw error;
+            }
+            return { acpSessionId: refreshedRecord.acpSessionId, handle, promptStartedAt, turnId };
+        });
+        const { handle, promptStartedAt, turnId } = admitted;
+        // Measure only the actual ACP turn. Startup, authentication, Save All
+        // and session hydration are Xora orchestration latency.
+        const elapsedMs = (): number => Number((process.hrtime.bigint() - promptStartedAt) / 1_000_000n);
+        try {
             const result = await handle.promise;
-            this.acceptPromptContextFallback(request.sessionId, record.acpSessionId, result);
+            this.acceptPromptContextFallback(request.sessionId, admitted.acpSessionId, result);
             const stopReason = typeof result.stopReason === 'string' ? result.stopReason : undefined;
             const status = stopReason === 'cancelled' ? 'cancelled' : 'completed';
             const finished = this.sessions.update(request.sessionId, { status });
@@ -1215,6 +1354,9 @@ export class GrokAgentHostService implements AgentHostService {
             this.sessions.flushEvents(request.sessionId);
             if (this.providerDefaultsRefreshPending) {
                 this.scheduleProviderDefaultsRefresh();
+            }
+            if (this.mcpConfigurationRefreshPending || this.skillsRefreshPending) {
+                this.scheduleIntegrationRefresh();
             }
         }
     }
@@ -1247,7 +1389,9 @@ export class GrokAgentHostService implements AgentHostService {
     async setPermissionMode(mode: AgentPermissionMode): Promise<RuntimeSnapshot> {
         // The renderer requests a user preference only. Electron main owns the
         // durable value and remains the sole authority that can auto-resolve an
-        // ACP permission request after checking trust, session and path bounds.
+        // ACP permission request after checking the active session authority.
+        // Full access deliberately removes Xora's workspace path boundary; the
+        // OS and any Grok Build managed policy/sandbox remain authoritative.
         this.security.setAgentPermissionMode(mode);
         this.onPermissionModeChanged();
         this.emitSnapshot();
@@ -1734,7 +1878,14 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.workspaceRoot || !this.isWorkspaceTrusted(this.workspaceRoot)) {
             return { ok: false, error: '请先打开并信任当前项目，再读取 Agent 集成配置。' };
         }
-        return this.runCli(['inspect', '--json'], true, { allowWhileRuntime: true });
+        return this.runCli(['inspect', '--json'], true, {
+            allowWhileRuntime: true,
+            // Skills must be inspected through the same Provider view that the
+            // ACP runtime uses. This environment contains only GROK_HOME.
+            // While a turn is running, read the already materialized view
+            // without rewriting the watched isolated config.
+            injectedEnvironment: this.providers.managementEnvironment(this.providerId, this.activePrompts.size === 0)
+        });
     }
 
     async runManagementCommand(command: 'mcp-list' | 'mcp-doctor' | 'plugin-list' | 'plugin-marketplaces'): Promise<ManagementResult> {
@@ -1761,11 +1912,68 @@ export class GrokAgentHostService implements AgentHostService {
                 if (!value || !['enable', 'disable', 'add', 'remove'].includes(request.action)) {
                     throw new Error('A skill name or scan path is required.');
                 }
-                this.providers.updateSkills(request.action as 'enable' | 'disable' | 'add' | 'remove', value);
-                return { ok: true, data: { changed: true, area: 'skills', action: request.action, value } };
+                return await this.withIntegrationMutation(async () => {
+                    if (this.activePrompts.size > 0) {
+                        return { ok: false, error: '请先等待当前 Agent 任务结束或取消任务，再修改技能配置。' };
+                    }
+                    this.providers.updateSkills(request.action as 'enable' | 'disable' | 'add' | 'remove', value);
+                    this.skillsRefreshPending = true;
+                    await this.withLifecycle(() => this.refreshIntegrationsLocked());
+                    return { ok: true, data: { changed: true, area: 'skills', action: request.action, value } };
+                });
             }
             if (request.area === 'mcp' && request.action === 'doctor') {
                 return this.mcpOverview(true);
+            }
+            if (request.area === 'mcp') {
+                return await this.withIntegrationMutation(async () => {
+                    if (this.activePrompts.size > 0) {
+                        return { ok: false, error: '请先等待当前 Agent 任务结束或取消任务，再修改 MCP 配置。' };
+                    }
+                    const result = await this.runCli(this.managementArgs(request), false, {
+                        // The mutation gate prevents a prompt from being
+                        // admitted while Grok atomically edits canonical TOML.
+                        allowWhileRuntime: true
+                    });
+                    if (!result.ok || !request.name || !this.workspaceRoot) return result;
+                    this.mcpDoctorSnapshot = undefined;
+                    if (request.action === 'remove') {
+                        this.providers.deleteMcpCredential(this.workspaceRoot, request.name);
+                    }
+                    if (request.action === 'add' && request.secretValue) {
+                        const remote = request.transport === 'http' || request.transport === 'sse';
+                        const transport = remote ? request.transport! : 'stdio';
+                        const environmentName = remote
+                            ? `XORA_CODE_MCP_${request.name.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}_TOKEN`
+                            : request.environmentName?.trim();
+                        if (!environmentName) throw new Error('A secret environment name is required for a stdio MCP server.');
+                        this.providers.configureMcpCredentialReference(
+                            this.workspaceRoot,
+                            request.scope === 'user' ? 'user' : 'project',
+                            request.name,
+                            environmentName,
+                            transport
+                        );
+                        const configIdentity = this.runtimeMcpRegistryState().credentialConfigurationIdentity(
+                            this.workspaceRoot,
+                            request.name,
+                            environmentName
+                        );
+                        if (!configIdentity) {
+                            throw new Error('The MCP credential reference is not present in the effective canonical server configuration.');
+                        }
+                        this.providers.saveMcpCredential(
+                            this.workspaceRoot,
+                            request.name,
+                            environmentName,
+                            configIdentity,
+                            request.secretValue
+                        );
+                    }
+                    this.mcpConfigurationRefreshPending = true;
+                    await this.withLifecycle(() => this.refreshIntegrationsLocked());
+                    return result;
+                });
             }
             if ((request.area === 'plugins' && request.action === 'install') ||
                 (request.area === 'marketplaces' && request.action === 'add')) {
@@ -1781,31 +1989,14 @@ export class GrokAgentHostService implements AgentHostService {
                 });
                 if (confirmation.response !== 0) return { ok: false, error: 'Installation cancelled.' };
             }
-            const result = await this.runCli(this.managementArgs(request), false);
-            if (!result.ok || request.area !== 'mcp' || !request.name || !this.workspaceRoot) return result;
-            this.mcpDoctorSnapshot = undefined;
-            if (request.action === 'remove') {
-                this.providers.deleteMcpCredential(this.workspaceRoot, request.name);
-                return result;
-            }
-            if (request.action === 'add' && request.secretValue) {
-                const remote = request.transport === 'http' || request.transport === 'sse';
-                const environmentName = remote
-                    ? `XORA_CODE_MCP_${request.name.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}_TOKEN`
-                    : request.environmentName?.trim();
-                if (!environmentName) throw new Error('A secret environment name is required for a stdio MCP server.');
-                this.providers.saveMcpCredential(this.workspaceRoot, request.name, environmentName, request.secretValue);
-                if (remote) {
-                    this.providers.configureMcpBearerReference(this.workspaceRoot, request.scope === 'user' ? 'user' : 'project', request.name, environmentName);
-                }
-            }
-            return result;
+            return this.runCli(this.managementArgs(request), false);
         } catch (error) {
-            return { ok: false, error: errorMessage(error) };
+            return { ok: false, error: this.redactError(error) };
         }
     }
 
     async dispose(): Promise<void> {
+        this.watchProjectGrokConfiguration(undefined);
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
         this.client = undefined;
@@ -1819,6 +2010,7 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     disposeSync(): void {
+        this.watchProjectGrokConfiguration(undefined);
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
         this.client = undefined;
@@ -1959,11 +2151,22 @@ export class GrokAgentHostService implements AgentHostService {
         this.emitSnapshot();
     }
 
-    notifySharedGrokStateChanged(authenticationChanged = true): void {
+    notifySharedGrokStateChanged(authenticationChanged = true, configurationChanged = true): void {
         if (authenticationChanged) {
             this.grokSubscriptionAuthStatus = 'unknown';
         }
-        this.emitSnapshot('共享的 Grok 配置或登录状态已变化；刷新管理页面后会重新读取。');
+        if (configurationChanged) {
+            this.mcpDoctorSnapshot = undefined;
+            this.mcpConfigurationRefreshPending = true;
+            this.skillsRefreshPending = true;
+            this.scheduleIntegrationRefresh();
+        }
+        // Shared Grok state changes are ordinary synchronization events. The
+        // backend already invalidates authentication state and automatically
+        // reloads Skills/MCP, so a persistent user-facing notice suggests an
+        // action that is neither required nor useful. Errors from the actual
+        // refresh still use the normal recoverable error channel.
+        this.emitSnapshot();
     }
 
     protected publishSubscriptionAuthStatus(status: 'authenticated' | 'unauthenticated'): void {
@@ -1976,6 +2179,15 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected bindAcp(acp: AcpClient): void {
         acp.onNotification('session/update', params => this.acceptSessionUpdate(params));
+        for (const method of [
+            '_x.ai/mcp/init_progress',
+            '_x.ai/mcp_initialized',
+            '_x.ai/mcp/tools_changed',
+            '_x.ai/mcp/server_status',
+            '_x.ai/mcp/servers_updated'
+        ]) {
+            acp.onNotification(method, params => this.acceptMcpLifecycleNotification(method, params));
+        }
         acp.onNotification('_x.ai/model_state_updated', params => {
             const record = asRecord(params);
             const state = asRecord(record?.modelState) as ModelState | undefined;
@@ -1995,6 +2207,9 @@ export class GrokAgentHostService implements AgentHostService {
         });
         acp.onNotification('*', (params, method) => {
             if (method === 'session/update' || method === '_x.ai/model_state_updated') {
+                return;
+            }
+            if (method.startsWith('_x.ai/mcp/')) {
                 return;
             }
             if (method === 'x.ai/session_notification'
@@ -2021,6 +2236,444 @@ export class GrokAgentHostService implements AgentHostService {
             }
             this.emitError('ACP_PROTOCOL_WARNING', error, true);
         });
+    }
+
+    protected runtimeMcpRegistryState(): RuntimeMcpRegistry {
+        return this.runtimeMcpRegistry ?? (this.runtimeMcpRegistry = new RuntimeMcpRegistry());
+    }
+
+    protected sessionMcpStateMap(): Map<string, RuntimeMcpServerState[]> {
+        return this.sessionMcpStates ?? (this.sessionMcpStates = new Map<string, RuntimeMcpServerState[]>());
+    }
+
+    /** Resolve secrets only in Electron main and return them solely to ACP. */
+    protected resolveRuntimeMcpSnapshot(workspaceRoot: string): RuntimeMcpSnapshot {
+        // Focused lifecycle tests and embedders created before MCP injection use
+        // prototype-only hosts without Electron security/supervisor services.
+        // Preserve their ACP-v1 empty-list contract; production construction
+        // always owns every dependency below.
+        if (!this.security || !this.supervisor || !this.providers
+            || typeof this.providers.mcpCredentialBindings !== 'function' || !this.theiaTrustedRoots) {
+            return {
+                mcpServers: [],
+                fingerprint: crypto.createHash('sha256').update('[]').digest('hex'),
+                configuredNames: [],
+                enabledNames: [],
+                redactionValues: []
+            };
+        }
+        if (!this.isWorkspaceTrusted(workspaceRoot)) {
+            return {
+                mcpServers: [],
+                fingerprint: crypto.createHash('sha256').update('[]').digest('hex'),
+                configuredNames: [],
+                enabledNames: [],
+                redactionValues: []
+            };
+        }
+        const environment = this.supervisor.commandEnvironment();
+        const credentials = this.providers.mcpCredentialBindings(workspaceRoot);
+        const snapshot = this.runtimeMcpRegistryState().resolve(workspaceRoot, environment, credentials);
+        // Register before any ACP write: both protocol errors/events and the
+        // sidecar stderr stream may echo a resolved env/header value.
+        this.supervisor.registerRedactionSecrets(snapshot.redactionValues);
+        this.currentSecrets = [...new Set([...(this.currentSecrets ?? []), ...snapshot.redactionValues])]
+            .sort((left, right) => right.length - left.length || (left < right ? -1 : left > right ? 1 : 0));
+        return snapshot;
+    }
+
+    protected acceptRuntimeMcpSnapshot(snapshot: RuntimeMcpSnapshot): void {
+        this.runtimeMcpFingerprint = snapshot.fingerprint;
+        this.runtimeMcpConfiguredNames = [...snapshot.configuredNames];
+        this.runtimeMcpEnabledNames = [...snapshot.enabledNames];
+        this.mcpConfigurationRefreshPending = false;
+    }
+
+    protected acceptMcpLifecycleNotification(method: string, params: unknown): void {
+        const notification = asRecord(params);
+        const acpSessionId = asString(notification?.sessionId);
+        let appSessionId: string | undefined;
+        if (acpSessionId) {
+            appSessionId = this.acpSessionLookup.get(acpSessionId);
+            if (!appSessionId || !this.loadedSessionIds.has(appSessionId)) return;
+        }
+        // Progress, status and tool-change payloads can contain provider error
+        // detail. Never persist or forward them; keep only a bounded semantic
+        // signal and refetch the safe list view when that signal really changed.
+        if (!this.rememberMcpLifecycleSignal(method, notification)) return;
+        this.scheduleMcpStatusRefresh(appSessionId);
+    }
+
+    protected scheduleMcpStatusRefresh(appSessionId?: string): void {
+        if (this.disposed || !this.runtimeMcpRegistry || !this.acp || this.phase !== 'ready') return;
+        if (appSessionId) this.mcpStatusRefreshSessionIdState().add(appSessionId);
+        if (this.mcpStatusRefreshInFlight) {
+            this.mcpStatusRefreshQueued = true;
+            return;
+        }
+        // Leading-edge coalescing avoids starvation when a server emits a long
+        // init-progress burst. A short cooldown also bounds status work when a
+        // buggy sidecar repeats lifecycle notifications indefinitely.
+        if (this.mcpStatusRefreshTimer) return;
+        const lastCompletedAt = Number.isFinite(this.lastMcpStatusRefreshCompletedAt)
+            ? this.lastMcpStatusRefreshCompletedAt : 0;
+        const elapsed = Date.now() - lastCompletedAt;
+        const delay = Math.max(120, 750 - Math.max(0, elapsed));
+        this.mcpStatusRefreshTimer = setTimeout(() => {
+            this.mcpStatusRefreshTimer = undefined;
+            void this.refreshMcpRuntimeStatus().catch(() => undefined);
+        }, delay);
+        this.mcpStatusRefreshTimer.unref();
+    }
+
+    protected async refreshMcpRuntimeStatus(): Promise<void> {
+        if (this.mcpStatusRefreshInFlight) {
+            this.mcpStatusRefreshQueued = true;
+            return this.mcpStatusRefreshInFlight;
+        }
+        const operation = this.queryMcpRuntimeStatus();
+        this.mcpStatusRefreshInFlight = operation;
+        try {
+            await operation;
+        } finally {
+            // stopRuntimeLocked can deliberately detach an old in-flight
+            // request. It must not be allowed to schedule work on the next
+            // runtime generation when it eventually settles.
+            if (this.mcpStatusRefreshInFlight !== operation) return;
+            this.mcpStatusRefreshInFlight = undefined;
+            this.lastMcpStatusRefreshCompletedAt = Date.now();
+            if (this.mcpStatusRefreshQueued) {
+                this.mcpStatusRefreshQueued = false;
+                this.scheduleMcpStatusRefresh();
+            }
+        }
+    }
+
+    protected async queryMcpRuntimeStatus(): Promise<void> {
+        const acp = this.acp;
+        const generation = this.runtimeGeneration;
+        if (!acp || this.phase !== 'ready') return;
+        const requestedSessionIds = [...this.mcpStatusRefreshSessionIdState()];
+        this.mcpStatusRefreshSessionIdState().clear();
+        const prioritizedSessionIds = requestedSessionIds.length > 0
+            ? requestedSessionIds
+            : this.activeSessionId && this.loadedSessionIds.has(this.activeSessionId)
+                ? [this.activeSessionId]
+                : [...this.loadedSessionIds].slice(0, 1);
+        const records = prioritizedSessionIds
+            .filter(appSessionId => this.loadedSessionIds.has(appSessionId))
+            .slice(0, 64)
+            .flatMap(appSessionId => {
+                const record = this.sessions.get(appSessionId);
+                return record?.acpSessionId ? [{ appSessionId, acpSessionId: record.acpSessionId }] : [];
+            });
+        await Promise.all(records.map(async record => {
+            try {
+                const result = await acp.request<Record<string, unknown>>('_x.ai/mcp/list', {
+                    sessionId: record.acpSessionId,
+                    cache: true
+                }, { timeoutMs: 12_000 });
+                if (generation !== this.runtimeGeneration || acp !== this.acp
+                    || !this.loadedSessionIds.has(record.appSessionId)) return;
+                const servers = Array.isArray(result.servers) ? result.servers : [];
+                const safeStates: RuntimeMcpServerState[] = [];
+                for (const candidate of servers.slice(0, 512)) {
+                    const server = asRecord(candidate);
+                    const session = asRecord(server?.session);
+                    const name = asString(server?.name);
+                    const rawStatus = asString(session?.status)?.replace(/[^a-z]/gi, '').toLowerCase();
+                    if (typeof session?.enabled !== 'boolean') continue;
+                    const enabled = session.enabled;
+                    let status: RuntimeMcpServerState['status'] | undefined;
+                    if (session?.authRequired === true) status = 'needsauth';
+                    else if (session?.setupRequired === true) status = 'setuprequired';
+                    else if (rawStatus === 'ready' || rawStatus === 'initializing'
+                        || rawStatus === 'setuprequired' || rawStatus === 'needsauth' || rawStatus === 'unavailable') {
+                        status = rawStatus;
+                    } else if (!enabled) status = 'unavailable';
+                    if (!name || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(name) || !status) continue;
+                    const tools = Array.isArray(session?.tools) ? session.tools : [];
+                    safeStates.push({
+                        name,
+                        status,
+                        enabled,
+                        toolCount: Math.min(tools.filter(tool => asRecord(tool)?.enabled !== false).length, 10_000)
+                    });
+                }
+                this.sessionMcpStateMap().set(record.appSessionId, safeStates);
+            } catch {
+                // A list failure never exposes raw server detail and must not
+                // demote a healthy ACP runtime, but an old ready snapshot must
+                // not remain callable after the authoritative list failed.
+                this.sessionMcpStateMap().delete(record.appSessionId);
+            }
+        }));
+    }
+
+    protected rememberMcpLifecycleSignal(
+        method: string,
+        notification: Record<string, unknown> | undefined
+    ): boolean {
+        const server = asRecord(notification?.server);
+        const session = asRecord(notification?.session);
+        const tools = Array.isArray(notification?.tools)
+            ? notification.tools
+            : Array.isArray(session?.tools) ? session.tools : [];
+        const serverName = asString(notification?.serverName)
+            ?? asString(notification?.name)
+            ?? asString(server?.name)
+            ?? '';
+        const acpSessionId = asString(notification?.sessionId) ?? '';
+        const signal = JSON.stringify({
+            status: asString(notification?.status) ?? asString(server?.status) ?? asString(session?.status) ?? '',
+            enabled: typeof notification?.enabled === 'boolean'
+                ? notification.enabled
+                : typeof session?.enabled === 'boolean' ? session.enabled : undefined,
+            total: asSafeInteger(notification?.total),
+            connected: asSafeInteger(notification?.connected),
+            failed: asSafeInteger(notification?.failed),
+            toolCount: asSafeInteger(notification?.mcpToolCount)
+                ?? Math.min(tools.length, 10_000),
+            toolNames: tools.slice(0, 512).map(tool => asString(asRecord(tool)?.name) ?? '')
+        });
+        const key = `${method}\u0000${acpSessionId}\u0000${serverName}`;
+        const signals = this.mcpLifecycleSignalState();
+        if (signals.get(key) === signal) return false;
+        signals.delete(key);
+        signals.set(key, signal);
+        while (signals.size > 1_024) {
+            const oldest = signals.keys().next().value as string | undefined;
+            if (oldest === undefined) break;
+            signals.delete(oldest);
+        }
+        return true;
+    }
+
+    /** Keeps prototype-only migration and test harnesses backwards compatible. */
+    protected mcpLifecycleSignalState(): Map<string, string> {
+        return this.mcpLifecycleSignals ?? (this.mcpLifecycleSignals = new Map());
+    }
+
+    /** Keeps prototype-only migration and test harnesses backwards compatible. */
+    protected mcpStatusRefreshSessionIdState(): Set<string> {
+        return this.mcpStatusRefreshSessionIds ?? (this.mcpStatusRefreshSessionIds = new Set());
+    }
+
+    protected currentMcpRuntimeProjection(
+        configuredNames?: string[],
+        enabledNames?: string[]
+    ): McpRuntimeProjection {
+        const appSessionId = this.activeSessionId;
+        const loaded = !!appSessionId && this.loadedSessionIds?.has(appSessionId);
+        return {
+            ...(loaded ? { sessionId: appSessionId } : {}),
+            configuredNames: [...(configuredNames ?? this.runtimeMcpConfiguredNames ?? [])],
+            enabledNames: [...(enabledNames ?? this.runtimeMcpEnabledNames ?? [])],
+            refreshPending: this.mcpConfigurationRefreshPending === true,
+            servers: loaded ? [...(this.sessionMcpStateMap().get(appSessionId!) ?? [])] : []
+        };
+    }
+
+    protected scheduleIntegrationRefresh(): void {
+        if (this.disposed || this.integrationRefreshScheduled) return;
+        this.integrationRefreshScheduled = true;
+        const timer = setTimeout(() => {
+            this.integrationRefreshScheduled = false;
+            void this.withIntegrationMutation(() =>
+                this.withLifecycle(() => this.refreshIntegrationsLocked())
+            ).catch(error => {
+                this.emitError('INTEGRATION_REFRESH_FAILED', error, true, this.activeSessionId);
+            });
+        }, 0);
+        timer.unref();
+    }
+
+    protected async ensureRuntimeIntegrationsCurrent(): Promise<void> {
+        if (!this.workspaceRoot || !this.runtimeMcpRegistry) return;
+        const snapshot = this.resolveRuntimeMcpSnapshot(this.workspaceRoot);
+        if (snapshot.fingerprint === this.runtimeMcpFingerprint
+            && !this.mcpConfigurationRefreshPending && !this.skillsRefreshPending) return;
+        this.mcpConfigurationRefreshPending = snapshot.fingerprint !== this.runtimeMcpFingerprint;
+        if (this.activePrompts.size > 0) {
+            throw new Error('MCP 配置已变化，正在等待其他 Agent 任务结束后安全刷新。');
+        }
+        // Re-resolve only after entering the lifecycle queue. A project file
+        // can change while this call is waiting behind startup/session load.
+        await this.withLifecycle(() => this.refreshIntegrationsLocked());
+    }
+
+    protected async refreshIntegrationsLocked(preResolved?: RuntimeMcpSnapshot): Promise<void> {
+        if (this.activePrompts.size > 0) return;
+        const root = this.workspaceRoot;
+        if (!root) return;
+
+        if (this.skillsRefreshPending) {
+            this.providers.refreshCustomProviderSkillViews();
+            if (this.acp && this.phase === 'ready' && this.loadedSessionIds.size > 0) {
+                await this.acp.request('_x.ai/internal/reload_skills', {}, { timeoutMs: 15_000 });
+            }
+            this.skillsRefreshPending = false;
+        }
+
+        const snapshot = preResolved ?? this.resolveRuntimeMcpSnapshot(root);
+        const changed = snapshot.fingerprint !== this.runtimeMcpFingerprint;
+        if (!changed) {
+            this.runtimeMcpConfiguredNames = [...snapshot.configuredNames];
+            this.runtimeMcpEnabledNames = [...snapshot.enabledNames];
+            this.mcpConfigurationRefreshPending = false;
+            return;
+        }
+        if (!this.acp || this.phase !== 'ready' || this.loadedSessionIds.size === 0) {
+            this.acceptRuntimeMcpSnapshot(snapshot);
+            return;
+        }
+
+        const targets = [...this.loadedSessionIds].flatMap(appSessionId => {
+            const record = this.sessions.get(appSessionId);
+            return record?.acpSessionId ? [{ appSessionId, acpSessionId: record.acpSessionId }] : [];
+        });
+        const results = await Promise.allSettled(targets.map(target =>
+            this.requireReady().request('_x.ai/session/update_mcp_servers', {
+                sessionId: target.acpSessionId,
+                mcpServers: snapshot.mcpServers
+            }, { timeoutMs: 45_000 })
+        ));
+        const methodUnsupported = results.some(result => result.status === 'rejected'
+            && result.reason instanceof AcpRemoteError && result.reason.rpcCode === -32601);
+        if (methodUnsupported) {
+            this.mcpConfigurationRefreshPending = true;
+            await this.restartRuntimeForMcpRefresh(targets.map(target => target.appSessionId));
+            return;
+        }
+        const failed = results.flatMap((result, index) => result.status === 'rejected'
+            ? [{ target: targets[index], error: result.reason }]
+            : []);
+        if (failed.length === targets.length && failed.length > 0) {
+            this.mcpConfigurationRefreshPending = true;
+            throw failed[0].error;
+        }
+        // A stale background ACP session must not make every healthy tab retry
+        // this global update forever. Detach only failed targets; opening one
+        // again performs an authoritative session/load with the new list.
+        for (const failure of failed) {
+            this.loadedSessionIds.delete(failure.target.appSessionId);
+            this.sessionMcpStateMap().delete(failure.target.appSessionId);
+        }
+        this.acceptRuntimeMcpSnapshot(snapshot);
+        for (const target of targets) this.sessionMcpStateMap().delete(target.appSessionId);
+        this.scheduleMcpStatusRefresh();
+    }
+
+    protected async restartRuntimeForMcpRefresh(appSessionIds: string[]): Promise<void> {
+        const root = this.workspaceRoot;
+        const providerId = this.providerId;
+        const activeSessionId = this.activeSessionId;
+        if (!root) return;
+        await this.stopRuntimeLocked(500);
+        // stopRuntimeLocked deliberately clears ordinary refresh flags. This
+        // fallback is not complete until the replacement runtime and every
+        // previously hydrated session agree on one canonical snapshot.
+        this.mcpConfigurationRefreshPending = true;
+        await this.startRuntimeLocked({ workspaceRoot: root, providerId });
+        if (this.phase !== 'ready') {
+            this.mcpConfigurationRefreshPending = true;
+            throw new Error('MCP 配置刷新已暂停；Agent 运行时需要先恢复认证。');
+        }
+        const runtimeEpoch = this.runtimeProviderEpoch;
+        const snapshot = this.resolveRuntimeMcpSnapshot(root);
+        const failures: Array<{ appSessionId: string; error: unknown }> = [];
+        for (const appSessionId of appSessionIds) {
+            const record = this.sessions.get(appSessionId);
+            const recordEpoch = record?.providerRuntimeEpoch ?? 'legacy-v1';
+            if (!record) continue;
+            if (record.workspaceRoot !== root || record.providerId !== providerId
+                || recordEpoch !== runtimeEpoch || !this.providerAuthorityIsCurrent(providerId, runtimeEpoch)) {
+                failures.push({
+                    appSessionId,
+                    error: new Error('The Provider changed while this conversation was being restored.')
+                });
+                continue;
+            }
+            this.beginSessionRestore(appSessionId);
+            try {
+                try {
+                    if (!record.acpSessionId) throw new Error('The persisted ACP session id is missing.');
+                    const selectedModel = this.defaultModelId(providerId);
+                    const result = await this.requireReady().request<Record<string, unknown>>('session/load', {
+                        sessionId: record.acpSessionId,
+                        cwd: root,
+                        mcpServers: snapshot.mcpServers,
+                        ...(selectedModel ? { _meta: { modelId: selectedModel } } : {})
+                    }, { timeoutMs: 60_000 });
+                    if (!this.providerAuthorityIsCurrent(providerId, runtimeEpoch)) {
+                        throw new Error('The Provider changed while this conversation was being restored.');
+                    }
+                    const modelState = modelStateFrom(result);
+                    this.acceptModelState(modelState, false);
+                    if (selectedModel && modelState?.currentModelId !== selectedModel) {
+                        await this.requireReady().request('session/set_model', {
+                            sessionId: record.acpSessionId,
+                            modelId: selectedModel
+                        });
+                    }
+                    if (!this.providerAuthorityIsCurrent(providerId, runtimeEpoch)) {
+                        throw new Error('The Provider changed while this conversation was being restored.');
+                    }
+                    this.loadedSessionIds.add(appSessionId);
+                } catch (loadError) {
+                    // Missing/expired remote sessions are recoverable without
+                    // replaying history: attach a fresh ACP session to the same
+                    // local JSONL record. The lifecycle lock is already held,
+                    // so this path must never attempt another runtime restart.
+                    try {
+                        await this.rebindHistoryToCurrentProvider(record, {
+                            allowRuntimeRestart: false,
+                            mcpSnapshot: snapshot,
+                            acceptMcpSnapshot: false
+                        });
+                    } catch (rebindError) {
+                        throw new Error(
+                            `无法恢复会话“${record.title}”：${errorMessage(rebindError || loadError)}`
+                        );
+                    }
+                }
+            } catch (error) {
+                this.loadedSessionIds.delete(appSessionId);
+                this.sessionMcpStateMap().delete(appSessionId);
+                failures.push({ appSessionId, error });
+                this.emitError(
+                    'SESSION_RESTORE_FAILED',
+                    new Error('MCP 刷新后未能恢复此会话；历史内容仍已保留，可重试加载。'),
+                    true,
+                    appSessionId
+                );
+            } finally {
+                this.endSessionRestore(appSessionId);
+            }
+        }
+        if (failures.length > 0) {
+            this.mcpConfigurationRefreshPending = true;
+            const activeFailure = activeSessionId
+                ? failures.find(failure => failure.appSessionId === activeSessionId)
+                : undefined;
+            throw activeFailure?.error ?? failures[0].error;
+        }
+        if (!this.providerAuthorityIsCurrent(providerId, runtimeEpoch)) {
+            this.mcpConfigurationRefreshPending = true;
+            throw new Error('The Provider changed before MCP session recovery completed.');
+        }
+        const latestSnapshot = this.resolveRuntimeMcpSnapshot(root);
+        if (latestSnapshot.fingerprint !== snapshot.fingerprint) {
+            this.mcpConfigurationRefreshPending = true;
+            throw new Error('MCP 配置在会话恢复期间再次变化，请重试刷新。');
+        }
+        this.acceptRuntimeMcpSnapshot(snapshot);
+        for (const appSessionId of appSessionIds) this.sessionMcpStateMap().delete(appSessionId);
+        if (activeSessionId && this.loadedSessionIds.has(activeSessionId)) {
+            this.activeSessionId = activeSessionId;
+            this.emitSnapshot('MCP 配置已刷新，会话已安全恢复。');
+        }
+        this.scheduleMcpStatusRefresh();
     }
 
     protected acceptInitialize(response: InitializeResponse, emitSnapshot = true): void {
@@ -2504,11 +3157,12 @@ export class GrokAgentHostService implements AgentHostService {
                 ? policyPresentation.sourceLabel
                 : asString(rawInput?.server) ?? asString(rawInput?.mcpServer)
         };
-        if (!this.permissionPathsStayInWorkspace(tool, rawInput)) {
+        const permissionMode = this.security.agentPermissionMode();
+        if (permissionMode !== 'full-access' && !this.permissionPathsStayInWorkspace(tool, rawInput)) {
             this.emitError('PERMISSION_BOUNDARY_REJECTED', new Error('The Agent requested access outside the trusted workspace.'), true, appSessionId);
             return { outcome: { outcome: 'cancelled' } };
         }
-        if (this.security.agentPermissionMode() === 'full-access') {
+        if (permissionMode === 'full-access') {
             // Always select allow-once: choosing an ACP allow-always option
             // could create sidecar-owned state that escapes this app session.
             const allowOnce = options.find(option => normalizeOptionKind(option) === 'allow_once');
@@ -2659,7 +3313,10 @@ export class GrokAgentHostService implements AgentHostService {
      * remains one continuous history, but the sidecar receives only a fresh
      * `session/new`; old prompts are deliberately not replayed.
      */
-    protected async rebindHistoryToCurrentProvider(record: SessionRecord): Promise<SessionRecord> {
+    protected async rebindHistoryToCurrentProvider(
+        record: SessionRecord,
+        options: HistoryRebindOptions = {}
+    ): Promise<SessionRecord> {
         const providerId = this.providers.selectedProviderId();
         const root = this.security.canonicalRoot(record.workspaceRoot);
         const requestedEpoch = this.providers.runtimeEpoch(providerId);
@@ -2668,6 +3325,9 @@ export class GrokAgentHostService implements AgentHostService {
             || this.workspaceRoot !== root
             || this.providerId !== providerId
             || this.runtimeProviderEpoch !== requestedEpoch) {
+            if (options.allowRuntimeRestart === false) {
+                throw new Error('The Agent runtime changed while safely reconnecting this conversation.');
+            }
             await this.startRuntime({ workspaceRoot: root, providerId });
         }
         if (this.phase === 'auth-required') {
@@ -2685,9 +3345,10 @@ export class GrokAgentHostService implements AgentHostService {
             && !this.models.some(model => model.id === selectedModel)) {
             throw new Error('The application-wide model is not advertised by this ACP runtime.');
         }
+        const mcpSnapshot = options.mcpSnapshot ?? this.resolveRuntimeMcpSnapshot(root);
         const result = await acp.request<Record<string, unknown>>('session/new', {
             cwd: root,
-            mcpServers: [],
+            mcpServers: mcpSnapshot.mcpServers,
             ...(selectedModel ? { _meta: { modelId: selectedModel } } : {})
         }, { timeoutMs: 30_000 });
         if (typeof result.sessionId !== 'string' || !result.sessionId) {
@@ -2743,6 +3404,8 @@ export class GrokAgentHostService implements AgentHostService {
         this.knownSessionIds.add(record.appSessionId);
         this.acpSessionLookup.set(result.sessionId, record.appSessionId);
         this.loadedSessionIds.add(record.appSessionId);
+        if (options.acceptMcpSnapshot !== false) this.acceptRuntimeMcpSnapshot(mcpSnapshot);
+        this.scheduleMcpStatusRefresh();
         if (resolvedModel) this.selectedModel = resolvedModel;
         this.contextStates().delete(record.appSessionId);
         this.contextEventHighwaters?.delete(record.appSessionId);
@@ -2942,6 +3605,10 @@ export class GrokAgentHostService implements AgentHostService {
         ++this.sessionLoadGeneration;
         this.phase = 'crashed';
         this.loadedSessionIds.clear();
+        this.sessionMcpStateMap().clear();
+        this.runtimeMcpFingerprint = undefined;
+        this.runtimeMcpConfiguredNames = [];
+        this.runtimeMcpEnabledNames = [];
         this.acp?.close(error);
         this.acp = undefined;
         this.runtimeProviderEpoch = undefined;
@@ -2989,7 +3656,8 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected safeWorkspaceFile(candidate: string): string {
-        if (!this.workspaceRoot || !this.isWorkspaceTrusted(this.workspaceRoot)) {
+        const fullAccess = this.security.agentPermissionMode() === 'full-access';
+        if (!this.workspaceRoot || (!fullAccess && !this.isWorkspaceTrusted(this.workspaceRoot))) {
             throw new Error('No trusted workspace is active.');
         }
         if (!candidate || candidate.includes('\0')) {
@@ -3022,17 +3690,19 @@ export class GrokAgentHostService implements AgentHostService {
         } catch {
             throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
         }
-        let workspaceResolved: string;
-        try {
-            workspaceResolved = fs.existsSync(this.workspaceRoot)
-                ? fs.realpathSync.native(this.workspaceRoot)
-                : path.normalize(this.workspaceRoot);
-        } catch {
-            workspaceResolved = path.normalize(this.workspaceRoot);
-        }
-        const relative = path.relative(workspaceResolved, resolved);
-        if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-            throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
+        if (!fullAccess) {
+            let workspaceResolved: string;
+            try {
+                workspaceResolved = fs.existsSync(this.workspaceRoot)
+                    ? fs.realpathSync.native(this.workspaceRoot)
+                    : path.normalize(this.workspaceRoot);
+            } catch {
+                workspaceResolved = path.normalize(this.workspaceRoot);
+            }
+            const relative = path.relative(workspaceResolved, resolved);
+            if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+                throw new Error('Agent changes must resolve to a file inside the trusted workspace.');
+            }
         }
         return resolved;
     }
@@ -3109,12 +3779,54 @@ export class GrokAgentHostService implements AgentHostService {
         return this.theiaTrustedRoots.has(canonical) && this.security.isTrusted(canonical);
     }
 
+    /**
+     * `fs.watchFile` also observes a config that does not exist yet, which is
+     * important for projects that add `.grok/config.toml` after opening. The
+     * callback never reads TOML; privileged parsing remains in the registry.
+     */
+    protected watchProjectGrokConfiguration(root: string | undefined): void {
+        if (this.projectGrokConfigDebounce) {
+            clearTimeout(this.projectGrokConfigDebounce);
+            this.projectGrokConfigDebounce = undefined;
+        }
+        if (this.projectGrokConfigPath && this.projectGrokConfigListener) {
+            fs.unwatchFile(this.projectGrokConfigPath, this.projectGrokConfigListener);
+        }
+        this.projectGrokConfigPath = undefined;
+        this.projectGrokConfigListener = undefined;
+        if (!root) return;
+
+        const configPath = path.join(root, '.grok', 'config.toml');
+        const listener = (current: fs.Stats, previous: fs.Stats): void => {
+            if (current.mtimeMs === previous.mtimeMs
+                && current.size === previous.size
+                && current.ino === previous.ino) return;
+            if (this.projectGrokConfigDebounce) clearTimeout(this.projectGrokConfigDebounce);
+            this.projectGrokConfigDebounce = setTimeout(() => {
+                this.projectGrokConfigDebounce = undefined;
+                if (this.projectGrokConfigPath !== configPath || this.disposed) return;
+                this.mcpDoctorSnapshot = undefined;
+                this.mcpConfigurationRefreshPending = true;
+                this.skillsRefreshPending = true;
+                this.scheduleIntegrationRefresh();
+            }, 120);
+            this.projectGrokConfigDebounce.unref();
+        };
+        this.projectGrokConfigPath = configPath;
+        this.projectGrokConfigListener = listener;
+        fs.watchFile(configPath, { persistent: false, interval: 400 }, listener);
+    }
+
     protected interruptRuntimeForTrustRevocation(): void {
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
         ++this.runtimeGeneration;
         ++this.sessionLoadGeneration;
         this.loadedSessionIds.clear();
+        this.sessionMcpStateMap().clear();
+        this.runtimeMcpFingerprint = undefined;
+        this.runtimeMcpConfiguredNames = [];
+        this.runtimeMcpEnabledNames = [];
         this.intentionalStop = true;
         this.phase = 'draining';
         for (const permission of this.pendingPermissions.values()) {
@@ -3202,6 +3914,79 @@ export class GrokAgentHostService implements AgentHostService {
         }
     }
 
+    protected async withIntegrationMutation<T>(operation: () => Promise<T>): Promise<T> {
+        const previous = this.integrationMutationTail ?? Promise.resolve();
+        let release!: () => void;
+        this.integrationMutationTail = new Promise<void>(resolve => { release = resolve; });
+        await previous.catch(() => undefined);
+        try {
+            // Readers that acquired the previous generation own a pinned MCP
+            // snapshot until their ACP session/new or session/load commits.
+            // No new reader can enter after this writer published its tail.
+            const readers = this.integrationReaderState();
+            while (readers.size > 0) {
+                await Promise.allSettled([...readers]);
+            }
+            return await operation();
+        } finally {
+            release();
+        }
+    }
+
+    protected async withCurrentIntegrationRead<T>(
+        workspaceRoot: string,
+        operation: (snapshot: RuntimeMcpSnapshot) => Promise<T>
+    ): Promise<T> {
+        for (;;) {
+            const result = await this.withIntegrationRead(async () => {
+                const snapshot = this.resolveRuntimeMcpSnapshot(workspaceRoot);
+                const canonicalRoot = this.security && typeof this.security.canonicalRoot === 'function'
+                    ? this.security.canonicalRoot(workspaceRoot)
+                    : path.normalize(workspaceRoot);
+                const sameRuntimeRoot = this.workspaceRoot === canonicalRoot;
+                const staleRuntime = sameRuntimeRoot
+                    && this.runtimeMcpFingerprint !== undefined
+                    && snapshot.fingerprint !== this.runtimeMcpFingerprint;
+                if (this.mcpConfigurationRefreshPending || this.skillsRefreshPending || staleRuntime) {
+                    return { retry: true as const };
+                }
+                // Pin the first session cohort before any ACP request yields.
+                // A second reader that observes a changed file will then wait
+                // for a writer instead of creating a split MCP generation.
+                if (sameRuntimeRoot && this.runtimeMcpFingerprint === undefined
+                    && this.loadedSessionIds.size === 0) {
+                    this.acceptRuntimeMcpSnapshot(snapshot);
+                }
+                return { retry: false as const, value: await operation(snapshot) };
+            });
+            if (!result.retry) return result.value;
+            await this.withIntegrationMutation(() => this.ensureRuntimeIntegrationsCurrent());
+        }
+    }
+
+    protected async withIntegrationRead<T>(operation: () => Promise<T>): Promise<T> {
+        const readers = this.integrationReaderState();
+        for (;;) {
+            const barrier = this.integrationMutationTail
+                ?? (this.integrationMutationTail = Promise.resolve());
+            await barrier.catch(() => undefined);
+            // A writer queued while this continuation was waiting. Joining
+            // the old generation would let it race a stale session snapshot.
+            if (barrier !== this.integrationMutationTail) continue;
+            const task = Promise.resolve().then(operation);
+            readers.add(task);
+            try {
+                return await task;
+            } finally {
+                readers.delete(task);
+            }
+        }
+    }
+
+    protected integrationReaderState(): Set<Promise<unknown>> {
+        return this.integrationReaders ?? (this.integrationReaders = new Set());
+    }
+
     protected managementArgs(request: ManagementRequest): string[] {
         const name = request.name ? safeCliOperand(request.name, 'name') : undefined;
         const source = request.source ? safeCliOperand(request.source, 'source') : undefined;
@@ -3265,26 +4050,66 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     /**
-     * `inspect` is authoritative because it includes compatible Claude/Cursor
-     * sources that `grok mcp list` deliberately omits. Native list and doctor
-     * output only enrich that final effective set. Read-only discovery may run
-     * beside ACP; doctor remains isolated because it starts MCP processes.
+     * The canonical Xora MCP set is resolved by RuntimeMcpRegistry from the
+     * shared Grok config plus the current project's .grok/config.toml. CLI
+     * inspect/list output is discovery metadata only; it must never add an
+     * implicit Cursor/Claude server to an Agent session. Doctor output and the
+     * live ACP projection enrich that canonical set with health/load state.
+     * Read-only discovery may run beside ACP; doctor remains isolated because
+     * it starts MCP processes.
      */
     protected async mcpOverview(runDoctor: boolean): Promise<ManagementResult> {
         const readOnly = { allowWhileRuntime: true } satisfies GrokCommandOptions;
+        let resolved: RuntimeMcpSnapshot | undefined;
+        let configurationWarning: string | undefined;
+        try {
+            if (this.workspaceRoot && this.supervisor && this.providers && this.security) {
+                resolved = this.resolveRuntimeMcpSnapshot(this.workspaceRoot);
+                if ((this.loadedSessionIds?.size ?? 0) > 0 && resolved.fingerprint !== this.runtimeMcpFingerprint) {
+                    this.mcpConfigurationRefreshPending = true;
+                    this.scheduleIntegrationRefresh();
+                } else if ((this.loadedSessionIds?.size ?? 0) === 0) {
+                    this.acceptRuntimeMcpSnapshot(resolved);
+                }
+            }
+        } catch (error) {
+            configurationWarning = `Xora MCP 配置：${errorMessage(error)}`;
+        }
+        // Resolution registers literal/template-derived MCP secrets before a
+        // management command can echo configuration fields to stdout/stderr.
         const inspected = await this.runCli(['inspect', '--json'], true, readOnly);
         const nativeList = await this.runCli(['mcp', 'list', '--json'], true, readOnly);
+        const fingerprint = resolved?.fingerprint ?? this.runtimeMcpFingerprint ?? 'unresolved';
         const cachedDoctor = this.mcpDoctorSnapshot;
         let doctor = cachedDoctor && cachedDoctor.workspaceRoot === this.workspaceRoot
+            && cachedDoctor.fingerprint === fingerprint
             ? cachedDoctor.result
             : undefined;
         if (runDoctor) {
-            doctor = await this.runCli(['mcp', 'doctor', '--json']);
+            doctor = (this.activePrompts?.size ?? 0) > 0
+                ? { ok: false, error: '请先等待当前 Agent 任务结束或取消任务，再运行 MCP 连接诊断。' }
+                : await this.runCli(['mcp', 'doctor', '--json'], true, readOnly);
             if (doctor.ok && this.workspaceRoot) {
-                this.mcpDoctorSnapshot = { workspaceRoot: this.workspaceRoot, result: doctor };
+                this.mcpDoctorSnapshot = { workspaceRoot: this.workspaceRoot, fingerprint, result: doctor };
             }
         }
-        return mergeMcpManagementResults(inspected, nativeList, doctor);
+        if (this.acp && this.phase === 'ready' && this.loadedSessionIds.size > 0) {
+            await this.refreshMcpRuntimeStatus();
+        }
+        const merged = mergeMcpManagementResults(
+            inspected,
+            nativeList,
+            doctor,
+            this.currentMcpRuntimeProjection(
+                resolved?.configuredNames ?? this.runtimeMcpConfiguredNames,
+                resolved?.enabledNames ?? this.runtimeMcpEnabledNames
+            )
+        );
+        if (configurationWarning && merged.ok) {
+            const data = asRecord(merged.data);
+            if (data && Array.isArray(data.warnings)) data.warnings.push(configurationWarning);
+        }
+        return merged;
     }
 
     protected runCli(args: string[], expectJson = true, options: GrokCommandOptions = {}): Promise<ManagementResult> {
@@ -3299,13 +4124,18 @@ export class GrokAgentHostService implements AgentHostService {
         }
         const root = options.cwd ?? this.workspaceRoot ?? process.cwd();
         const binary = this.supervisor.binaryPath();
-        const exactSecrets = options.injectedEnvironment === undefined
-            ? this.providers.redactionSecrets()
-            : Object.values(options.injectedEnvironment).filter((value): value is string => typeof value === 'string' && value.length > 0);
+        // Only MCP-native commands receive config-bound MCP credentials.
+        // Skills/plugin/inspect commands must not inherit executable-service
+        // tokens merely because they run in the same workspace.
+        const injectedEnvironment = options.injectedEnvironment
+            ?? (args[0] === 'mcp' ? this.providers.mcpEnvironment(root) : {});
+        const commandSecrets = Object.values(injectedEnvironment)
+            .filter((value): value is string => typeof value === 'string' && value.length > 0);
+        const exactSecrets = [...new Set([...(this.currentSecrets ?? []), ...commandSecrets])];
         return new Promise(resolve => {
             const child = spawn(binary, ['--no-auto-update', '--cwd', root, ...args], {
                 cwd: root,
-                env: this.supervisor.commandEnvironment(options.injectedEnvironment ?? this.providers.mcpEnvironment(root)),
+                env: this.supervisor.commandEnvironment(injectedEnvironment),
                 shell: false,
                 windowsHide: true,
                 detached: process.platform !== 'win32',
@@ -3404,6 +4234,10 @@ function asString(value: unknown): string | undefined {
 
 function asNumber(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function asSafeInteger(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
 }
 
 function asPositiveSafeInteger(value: unknown): number | undefined {

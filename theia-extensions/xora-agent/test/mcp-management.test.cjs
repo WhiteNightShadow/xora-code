@@ -67,7 +67,80 @@ test('native configuration and doctor health enrich without replacing inspect or
     assert.deepEqual(server.discoveredBy, ['inspect', 'native-list', 'doctor']);
     assert.equal(server.status, 'unhealthy');
     assert.equal(server.health.healthy, false);
+    assert.equal(server.configured, true);
+    assert.equal(server.diagnosticState, 'unhealthy');
+    assert.equal(server.runtimeState, 'not-loaded');
+    assert.equal(server.callable, false);
     assert.equal(result.data.diagnostics.failingCount, 1);
+});
+
+test('runtime readiness is distinct from discovery and diagnosis', () => {
+    const result = mergeMcpManagementResults({
+        ok: true,
+        data: {
+            mcpServers: [
+                { name: 'compat-only', vendor: 'cursor', transport: 'stdio', compatibilityStatus: 'enabled' },
+                { name: 'native-ready', vendor: 'grok', transport: 'stdio', compatibilityStatus: 'enabled' },
+                { name: 'disabled-runtime', vendor: 'grok', transport: 'stdio', compatibilityStatus: 'enabled' }
+            ]
+        }
+    }, {
+        ok: true,
+        data: [
+            { name: 'native-ready', transport: 'stdio', command: 'node' },
+            { name: 'disabled-runtime', transport: 'stdio', command: 'node' }
+        ]
+    }, {
+        ok: true,
+        data: { servers: [{ name: 'native-ready', healthy: true }] }
+    }, {
+        sessionId: 'session-1',
+        configuredNames: ['native-ready', 'disabled-runtime'],
+        enabledNames: ['native-ready'],
+        servers: [
+            { name: 'native-ready', status: 'ready', enabled: true, toolCount: 35 },
+            { name: 'disabled-runtime', status: 'ready', enabled: false, toolCount: 35 }
+        ]
+    });
+
+    assert.equal(result.data.schemaVersion, 2);
+    const compat = result.data.mcpServers.find(server => server.name === 'compat-only');
+    assert.equal(compat.configured, false);
+    assert.equal(compat.importRequired, true);
+    assert.equal(compat.callable, false);
+    const ready = result.data.mcpServers.find(server => server.name === 'native-ready');
+    assert.equal(ready.configured, true);
+    assert.equal(ready.diagnosticState, 'healthy');
+    assert.equal(ready.runtimeState, 'loaded');
+    assert.equal(ready.callable, true);
+    assert.equal(ready.selectable, true);
+    assert.equal(ready.runtime.toolCount, 35);
+    const disabled = result.data.mcpServers.find(server => server.name === 'disabled-runtime');
+    assert.equal(disabled.runtimeState, 'disabled');
+    assert.equal(disabled.callable, false);
+    assert.equal(disabled.selectable, false);
+});
+
+test('canonical configured MCP remains selectable before the first ACP session exists', () => {
+    const result = mergeMcpManagementResults(
+        { ok: true, data: { mcpServers: [] } },
+        { ok: true, data: [] },
+        undefined,
+        {
+            configuredNames: ['camoufox-reverse', 'disabled-server'],
+            enabledNames: ['camoufox-reverse'],
+            servers: []
+        }
+    );
+
+    assert.equal(result.ok, true);
+    const camoufox = result.data.mcpServers.find(server => server.name === 'camoufox-reverse');
+    assert.equal(camoufox.configured, true);
+    assert.equal(camoufox.runtimeState, 'not-loaded');
+    assert.equal(camoufox.callable, false);
+    assert.equal(camoufox.selectable, true);
+    const disabled = result.data.mcpServers.find(server => server.name === 'disabled-server');
+    assert.equal(disabled.selectable, false);
 });
 
 test('partial command failures keep discovered servers and expose safe warnings', () => {
@@ -111,7 +184,7 @@ test('renderer MCP overview removes common secrets from targets and diagnostics'
     assert.equal(redactMcpDisplayText('https://user:pass@example.test/mcp'), 'https://[REDACTED]@example.test/mcp');
 });
 
-test('MCP discovery read commands are allowed beside runtime but doctor stays isolated', async () => {
+test('MCP discovery and explicit doctor are allowed beside an idle runtime', async () => {
     const host = Object.create(GrokAgentHostService.prototype);
     const calls = [];
     host.workspaceRoot = '/fixture';
@@ -131,7 +204,7 @@ test('MCP discovery read commands are allowed beside runtime but doctor stays is
     calls.length = 0;
     const diagnosed = await host.runManagementCommand('mcp-doctor');
     assert.equal(diagnosed.ok, true);
-    assert.deepEqual(calls.map(call => call.options.allowWhileRuntime), [true, true, undefined]);
+    assert.deepEqual(calls.map(call => call.options.allowWhileRuntime), [true, true, true]);
     assert.equal(diagnosed.data.mcpServers[0].status, 'healthy');
 });
 

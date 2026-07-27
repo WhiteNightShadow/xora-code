@@ -750,7 +750,7 @@ export class XoraAgentWidget extends ReactWidget {
                             <label
                                 className={`xora-permission-mode-control${permissionMode === 'full-access' ? ' is-full-access' : ''}`}
                                 title={permissionMode === 'full-access'
-                                    ? '所有项目和会话都会自动批准兼容的 Agent 工具请求'
+                                    ? '所有项目和会话都会自动批准兼容的 Agent 工具请求，并允许访问整块磁盘'
                                     : '所有项目和会话执行敏感操作前都会请求你的批准'}>
                                 <span className='codicon codicon-shield' />
                                 <select
@@ -2409,7 +2409,7 @@ export class XoraAgentWidget extends ReactWidget {
             this.slashLoading = false;
             if (!entries.length) {
                 this.slashError = kind === 'mcp'
-                    ? '未发现 MCP 服务。可在 Agent 设置中添加。'
+                    ? '没有已启用的 Xora MCP 服务。可在 Agent 设置中导入、启用或诊断。'
                     : '未发现技能。可在 Agent 设置中管理 Skill。';
             }
             this.update();
@@ -2757,7 +2757,7 @@ export class XoraAgentWidget extends ReactWidget {
         if (mode === currentMode) return;
         if (mode === 'full-access') {
             const choice = await this.messages.warn(
-                '完全访问会自动批准所有项目、会话和窗口后续的兼容工具请求，包括运行命令和修改文件。此设置会保存到 Xora Code；项目 Trust、工作区路径边界与 Electron 后端安全策略仍然生效。',
+                '完全访问会自动批准所有项目、会话和窗口后续的兼容工具请求，并允许 Agent 读取、修改或删除当前账户有权访问的任意磁盘文件。此设置会保存到 Xora Code；操作系统权限、Grok Build 的 deny 规则、Hooks、沙箱和系统管理策略仍然生效。',
                 '启用完全访问'
             );
             if (choice !== '启用完全访问') {
@@ -2771,7 +2771,7 @@ export class XoraAgentWidget extends ReactWidget {
             await this.service.setPermissionMode(mode);
             await this.model.refresh();
             this.showInlineNotice(mode === 'full-access'
-                ? '所有项目和会话已启用完全访问权限。'
+                ? '已启用完全访问：Agent 可以访问整块磁盘。'
                 : '所有项目和会话已恢复为请求审批。');
         } catch (error) {
             this.showInlineNotice(`无法修改 Agent 全局权限：${error instanceof Error ? error.message : String(error)}`, 'error');

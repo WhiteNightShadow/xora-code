@@ -209,13 +209,12 @@ test('full access fails closed without an ACP allow-once option', async () => {
     }
 });
 
-test('full access rejects paths outside the workspace, including a missing file below a symlink', async () => {
+test('request approval rejects paths outside the workspace, including a missing file below a symlink', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whitenight-permission-root-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'whitenight-permission-outside-'));
     try {
         fs.symlinkSync(outside, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
         const { host, session, emitted } = hostHarness(root);
-        await host.setPermissionMode('full-access');
 
         const result = await host.handlePermissionRequest(permissionParams(session, {
             path: 'escape/not-created-yet.txt'
@@ -223,6 +222,30 @@ test('full access rejects paths outside the workspace, including a missing file 
 
         assert.deepEqual(result, { outcome: { outcome: 'cancelled' } });
         assert.equal(emitted.some(event => event.kind === 'error' && event.code === 'PERMISSION_BOUNDARY_REJECTED'), true);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+    }
+});
+
+test('full access allows absolute paths and symlink targets anywhere on the current account disk', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-full-disk-root-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-full-disk-other-project-'));
+    try {
+        const link = path.join(root, 'other-project');
+        fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+        const { host, session, emitted } = hostHarness(root);
+        await host.setPermissionMode('full-access');
+        const target = path.join(outside, 'not-created-yet.txt');
+        const canonicalOutside = fs.realpathSync.native(outside);
+
+        assert.deepEqual(
+            await host.handlePermissionRequest(permissionParams(session, { path: target })),
+            { outcome: { outcome: 'selected', optionId: 'allow-this-time' } }
+        );
+        assert.equal(host.safeWorkspaceFile(target), path.resolve(canonicalOutside, 'not-created-yet.txt'));
+        assert.equal(host.safeWorkspaceFile(path.join(link, 'through-link.txt')), path.resolve(canonicalOutside, 'through-link.txt'));
+        assert.equal(emitted.some(event => event.kind === 'error' && event.code === 'PERMISSION_BOUNDARY_REJECTED'), false);
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
         fs.rmSync(outside, { recursive: true, force: true });

@@ -50,6 +50,13 @@ function deferred() {
     return { promise, resolve, reject };
 }
 
+async function waitForRequestCount(requests, expected) {
+    for (let attempt = 0; attempt < 20 && requests.length < expected; attempt += 1) {
+        await Promise.resolve();
+    }
+    assert.equal(requests.length, expected);
+}
+
 function hostHarness() {
     // Bypass the real Electron constructor. These tests exercise only the
     // ordering contract of loadSession and never touch disk or launch Grok.
@@ -515,6 +522,7 @@ test('two unloaded sessions hydrate concurrently while only the latest activatio
     const firstA = host.loadSession('a');
     const latestB = host.loadSession('b');
 
+    await waitForRequestCount(requests, 2);
     assert.equal(requests.length, 2, 'each unloaded session must begin hydration without waiting for the other');
     assert.deepEqual(requests.map(request => request.params.sessionId), ['acp-a', 'acp-b']);
 
@@ -538,6 +546,7 @@ test('A-B-A activation coalesces A hydration and the final A intent wins', async
     const middleB = host.loadSession('b');
     const latestA = host.loadSession('a');
 
+    await waitForRequestCount(requests, 2);
     assert.equal(requests.length, 2, 'the second A intent must reuse its in-flight session/load');
     assert.deepEqual(requests.map(request => request.params.sessionId), ['acp-a', 'acp-b']);
 
@@ -562,6 +571,7 @@ test('prewarm and Send coalesce one in-flight restore for the same session', asy
     const prewarm = host.loadSession('a');
     const sendGuard = host.loadSession('a');
 
+    await waitForRequestCount(requests, 1);
     assert.equal(requests.length, 1, 'the same activation intent must issue only one ACP session/load');
     assert.equal(requests[0].method, 'session/load');
     requests[0].completion.resolve({});
@@ -582,6 +592,7 @@ test('a same-Provider runtime restart never reuses the previous sidecar load', a
         /runtime changed while restoring/i,
         'a restore bound to the replaced process must fail instead of marking the new runtime hydrated'
     );
+    await waitForRequestCount(requests, 1);
     assert.equal(requests.length, 1);
 
     // Simulate a sidecar replacement that retained the same workspace,
@@ -591,6 +602,7 @@ test('a same-Provider runtime restart never reuses the previous sidecar load', a
     host.loadedSessionIds.clear();
     const newRuntimeLoad = host.loadSession('a');
 
+    await waitForRequestCount(requests, 2);
     assert.equal(requests.length, 2, 'the restarted sidecar requires its own ACP session/load');
     assert.equal(requests[1].method, 'session/load');
     requests[0].completion.resolve({});

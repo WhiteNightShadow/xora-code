@@ -70,10 +70,12 @@ function copyTreeMissing(source, destination, result = { copied: 0, skipped: 0, 
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
     try {
         fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
-        fs.chmodSync(destination, sourceStat.mode & 0o777);
         fs.utimesSync(destination, sourceStat.atime, sourceStat.mtime);
-        const descriptor = fs.openSync(destination, 'r');
+        // Windows rejects fsync on a read-only file descriptor with EPERM.
+        // Sync through a writable descriptor before restoring the source mode.
+        const descriptor = fs.openSync(destination, 'r+');
         try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+        fs.chmodSync(destination, sourceStat.mode & 0o777);
         result.copied += 1;
     } catch (error) {
         if (!error || error.code !== 'EEXIST') throw error;

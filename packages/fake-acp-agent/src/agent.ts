@@ -24,7 +24,32 @@ interface Session {
   readonly id: string;
   readonly cwd: string;
   modelId: string;
+  mcpServers: McpServerConfig[];
+  mcpState: "initializing" | "ready";
 }
+
+interface McpNameValue {
+  readonly name: string;
+  readonly value: string;
+}
+
+interface McpStdioServerConfig {
+  readonly name: string;
+  readonly command: string;
+  readonly args: string[];
+  readonly env: McpNameValue[];
+  readonly _meta?: Record<string, unknown>;
+}
+
+interface McpRemoteServerConfig {
+  readonly type: "http" | "sse";
+  readonly name: string;
+  readonly url: string;
+  readonly headers: McpNameValue[];
+  readonly _meta?: Record<string, unknown>;
+}
+
+type McpServerConfig = McpStdioServerConfig | McpRemoteServerConfig;
 
 interface ActiveTurn {
   readonly sessionId: string;
@@ -41,6 +66,7 @@ const DEFAULT_MAX_LINE_BYTES = 1024 * 1024;
 const AUTH_REQUIRED = -32001;
 const INVALID_SESSION = -32002;
 const TURN_ALREADY_ACTIVE = -32003;
+const INVALID_PARAMS = -32602;
 
 export class FakeAcpAgent {
   readonly #write;
@@ -142,6 +168,12 @@ export class FakeAcpAgent {
         case "session/set_model":
           await this.#setModel(request);
           break;
+        case "_x.ai/session/update_mcp_servers":
+          await this.#updateMcpServers(request);
+          break;
+        case "_x.ai/mcp/list":
+          await this.#listMcpServers(request);
+          break;
         case "session/cancel":
           this.#cancelSession(request.params);
           await this.#respondResult(request.id, {});
@@ -212,17 +244,21 @@ export class FakeAcpAgent {
   async #newSession(request: JsonRpcRequest): Promise<void> {
     if (!this.#requireAuthenticated(request.id)) return;
     const params = asRecord(request.params);
-    if (!params || typeof params.cwd !== "string" || !Array.isArray(params.mcpServers)) {
-      await this.#respondError(request.id, -32602, "session/new requires cwd and mcpServers");
+    const mcpServers = parseMcpServers(params?.mcpServers);
+    if (!params || typeof params.cwd !== "string" || !mcpServers) {
+      await this.#respondError(request.id, INVALID_PARAMS, "session/new requires cwd and valid mcpServers");
       return;
     }
     const id = sessionIdFixture(++this.#sessionSequence);
     const requestedModel = asRecord(params._meta)?.modelId;
-    this.#sessions.set(id, {
+    const session: Session = {
       id,
       cwd: params.cwd,
       modelId: typeof requestedModel === "string" ? requestedModel : MODEL_STATE_FIXTURE.currentModelId,
-    });
+      mcpServers,
+      mcpState: mcpServers.length === 0 ? "ready" : "initializing",
+    };
+    this.#sessions.set(id, session);
     await this.#respondResult(request.id, {
       sessionId: id,
       modes: {
@@ -233,23 +269,27 @@ export class FakeAcpAgent {
         ],
       },
       configOptions: [modelConfigOption()],
-      _meta: { modelState: modelState(this.#sessions.get(id)!.modelId) },
+      _meta: { modelState: modelState(session.modelId) },
     });
-    await this.#notifyModelState(id, this.#sessions.get(id)!.modelId);
+    await this.#notifyModelState(id, session.modelId);
+    await this.#notifyMcpInitializationStarted(session);
   }
 
   async #loadSession(request: JsonRpcRequest): Promise<void> {
     if (!this.#requireAuthenticated(request.id)) return;
     const params = asRecord(request.params);
-    if (!params || typeof params.sessionId !== "string" || typeof params.cwd !== "string" || !Array.isArray(params.mcpServers)) {
-      await this.#respondError(request.id, -32602, "session/load requires sessionId, cwd and mcpServers");
+    const mcpServers = parseMcpServers(params?.mcpServers);
+    if (!params || typeof params.sessionId !== "string" || typeof params.cwd !== "string" || !mcpServers) {
+      await this.#respondError(request.id, INVALID_PARAMS, "session/load requires sessionId, cwd and valid mcpServers");
       return;
     }
     const requestedModel = asRecord(params._meta)?.modelId;
-    const session = {
+    const session: Session = {
       id: params.sessionId,
       cwd: params.cwd,
       modelId: typeof requestedModel === "string" ? requestedModel : MODEL_STATE_FIXTURE.currentModelId,
+      mcpServers,
+      mcpState: mcpServers.length === 0 ? "ready" : "initializing",
     };
     this.#sessions.set(session.id, session);
     await this.#sessionUpdate(session.id, {
@@ -269,6 +309,7 @@ export class FakeAcpAgent {
       _meta: { modelState: modelState(session.modelId) },
     });
     await this.#notifyModelState(session.id, session.modelId);
+    await this.#notifyMcpInitializationStarted(session);
   }
 
   async #prompt(request: JsonRpcRequest): Promise<void> {
@@ -389,6 +430,128 @@ export class FakeAcpAgent {
     await this.#notifyModelState(sessionId, modelId);
   }
 
+  async #updateMcpServers(request: JsonRpcRequest): Promise<void> {
+    if (!this.#requireAuthenticated(request.id)) return;
+    const params = asRecord(request.params);
+    const sessionId = params?.sessionId;
+    const mcpServers = parseMcpServers(params?.mcpServers);
+    if (typeof sessionId !== "string" || !mcpServers) {
+      await this.#respondError(
+        request.id,
+        INVALID_PARAMS,
+        "_x.ai/session/update_mcp_servers requires sessionId and valid mcpServers",
+      );
+      return;
+    }
+    const session = this.#sessions.get(sessionId);
+    if (!session) {
+      await this.#respondError(request.id, INVALID_SESSION, "Unknown session");
+      return;
+    }
+
+    // This extension replaces the complete client-provided MCP list. It is not
+    // a delta operation, which keeps the fixture aligned with Grok Build.
+    session.mcpServers = mcpServers;
+    session.mcpState = mcpServers.length === 0 ? "ready" : "initializing";
+    await this.#respondResult(request.id, { ok: true });
+    await this.#notifyMcpInitializationStarted(session);
+  }
+
+  async #listMcpServers(request: JsonRpcRequest): Promise<void> {
+    if (!this.#requireAuthenticated(request.id)) return;
+    const params = request.params === undefined ? {} : asRecord(request.params);
+    if (!params ||
+        (params.sessionId !== undefined && typeof params.sessionId !== "string") ||
+        (params.cache !== undefined && typeof params.cache !== "boolean")) {
+      await this.#respondError(
+        request.id,
+        INVALID_PARAMS,
+        "_x.ai/mcp/list accepts optional sessionId and cache parameters",
+      );
+      return;
+    }
+
+    const requestedSessionId = params.sessionId;
+    const session = typeof requestedSessionId === "string"
+      ? this.#sessions.get(requestedSessionId)
+      : [...this.#sessions.values()].at(-1);
+    if (typeof requestedSessionId === "string" && !session) {
+      await this.#respondError(request.id, INVALID_SESSION, "Unknown session");
+      return;
+    }
+    if (!session) {
+      await this.#respondResult(request.id, { servers: [] });
+      return;
+    }
+
+    const finishInitialization = session.mcpState === "initializing";
+    await this.#respondResult(request.id, {
+      servers: session.mcpServers.map((server) => mcpListItem(server, session.mcpState)),
+    });
+
+    // The first list response deliberately exposes `initializing`. Completing
+    // immediately after that response makes readiness ordering deterministic
+    // for contract tests without relying on timers or process scheduling.
+    if (finishInitialization) await this.#completeMcpInitialization(session);
+  }
+
+  async #notifyMcpInitializationStarted(session: Session): Promise<void> {
+    if (session.mcpServers.length === 0) {
+      await this.#send({
+        jsonrpc: "2.0",
+        method: "_x.ai/mcp_initialized",
+        params: { sessionId: session.id, mcpToolCount: 0, elapsedMs: 0 },
+      });
+      return;
+    }
+    await this.#send({
+      jsonrpc: "2.0",
+      method: "_x.ai/mcp/init_progress",
+      params: { sessionId: session.id, total: session.mcpServers.length, connected: 0 },
+    });
+  }
+
+  async #completeMcpInitialization(session: Session): Promise<void> {
+    if (session.mcpState !== "initializing") return;
+    session.mcpState = "ready";
+    let toolCount = 0;
+    for (const server of session.mcpServers) {
+      const tools = [fixtureMcpTool(server.name)];
+      toolCount += tools.length;
+      await this.#send({
+        jsonrpc: "2.0",
+        method: "_x.ai/mcp/tools_changed",
+        params: { sessionId: session.id, serverName: server.name, tools },
+      });
+      await this.#send({
+        jsonrpc: "2.0",
+        method: "_x.ai/mcp/server_status",
+        params: {
+          sessionId: session.id,
+          name: server.name,
+          source: "local",
+          status: "ready",
+          reason: "initialized",
+          tools: null,
+        },
+      });
+    }
+    await this.#send({
+      jsonrpc: "2.0",
+      method: "_x.ai/mcp/init_progress",
+      params: {
+        sessionId: session.id,
+        total: session.mcpServers.length,
+        connected: session.mcpServers.length,
+      },
+    });
+    await this.#send({
+      jsonrpc: "2.0",
+      method: "_x.ai/mcp_initialized",
+      params: { sessionId: session.id, mcpToolCount: toolCount, elapsedMs: 1 },
+    });
+  }
+
   async #cancelledTurn(requestId: JsonRpcId, sessionId: string): Promise<void> {
     await this.#sessionUpdate(sessionId, {
       sessionUpdate: "tool_call_update",
@@ -491,6 +654,104 @@ function createActiveTurn(sessionId: string): ActiveTurn {
     };
   });
   return { sessionId, cancel, cancelNow };
+}
+
+function parseMcpServers(value: unknown): McpServerConfig[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const servers: McpServerConfig[] = [];
+  for (const item of value) {
+    const server = asRecord(item);
+    if (!server || !isNonEmptyString(server.name)) return undefined;
+    const meta = server._meta === undefined ? undefined : asRecord(server._meta);
+    if (server._meta !== undefined && !meta) return undefined;
+
+    if (server.type === "http" || server.type === "sse") {
+      const headers = parseNameValues(server.headers);
+      if (!isNonEmptyString(server.url) || !headers) return undefined;
+      servers.push({
+        type: server.type,
+        name: server.name,
+        url: server.url,
+        headers,
+        ...(meta === undefined ? {} : { _meta: { ...meta } }),
+      });
+      continue;
+    }
+
+    // ACP stdio uses the absence of `type`; accepting `type: "stdio"` here
+    // would hide a wire incompatibility with the pinned Grok Build schema.
+    if (server.type !== undefined || !isNonEmptyString(server.command) ||
+        !isStringArray(server.args)) return undefined;
+    const env = parseNameValues(server.env);
+    if (!env) return undefined;
+    servers.push({
+      name: server.name,
+      command: server.command,
+      args: [...server.args],
+      env,
+      ...(meta === undefined ? {} : { _meta: { ...meta } }),
+    });
+  }
+  return servers;
+}
+
+function parseNameValues(value: unknown): McpNameValue[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values: McpNameValue[] = [];
+  for (const item of value) {
+    const pair = asRecord(item);
+    if (!pair || !isNonEmptyString(pair.name) || typeof pair.value !== "string") return undefined;
+    values.push({ name: pair.name, value: pair.value });
+  }
+  return values;
+}
+
+function mcpListItem(
+  server: McpServerConfig,
+  state: Session["mcpState"],
+): Record<string, unknown> {
+  const session = {
+    enabled: true,
+    status: state,
+    tools: state === "ready" ? 1 : 0,
+    authRequired: false,
+    setupRequired: false,
+  };
+  if ("command" in server) {
+    return {
+      name: server.name,
+      source: "local",
+      type: "stdio",
+      command: server.command,
+      args: [...server.args],
+      env: server.env.map((entry) => ({ ...entry })),
+      session,
+    };
+  }
+  return {
+    name: server.name,
+    source: "local",
+    type: server.type,
+    url: server.url,
+    headers: server.headers.map((entry) => ({ ...entry })),
+    session,
+  };
+}
+
+function fixtureMcpTool(serverName: string): Record<string, unknown> {
+  return {
+    name: "fixture_tool",
+    description: `Deterministic fixture tool for ${serverName}`,
+    enabled: true,
+  };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

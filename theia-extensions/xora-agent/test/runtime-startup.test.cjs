@@ -254,6 +254,29 @@ test('every production sidecar environment disables telemetry and implicit compa
     assert.equal(environment.GROK_CLAUDE_MCPS_ENABLED, 'false');
 });
 
+test('runtime MCP secrets can be registered dynamically before ACP writes them', () => {
+    const supervisor = Object.create(GrokSidecarSupervisor.prototype);
+    supervisor.exactSecrets = [];
+    const log = [];
+    supervisor.appendLog = value => log.push(value);
+
+    supervisor.registerRedactionSecrets(['mcp-runtime-secret', '', 'mcp-runtime-secret']);
+    assert.deepEqual(supervisor.exactSecrets, ['mcp-runtime-secret']);
+
+    const source = 'MCP stderr: mcp-runtime-secret';
+    assert.equal(supervisor.writeRedactedPrefix(source, source.length), source.length);
+    assert.equal(log.join(''), 'MCP stderr: [REDACTED]');
+
+    const before = [...supervisor.exactSecrets];
+    assert.throws(
+        () => supervisor.registerRedactionSecrets(
+            Array.from({ length: 4_096 }, (_, index) => `overflow-${index}`)
+        ),
+        /redaction set is too large/
+    );
+    assert.deepEqual(supervisor.exactSecrets, before, 'a rejected update must be atomic');
+});
+
 test('subscription CLI and ACP commands receive one explicit shared Grok home', () => {
     // Windows desktop launches can inherit HOME from one shell and USERPROFILE
     // from another account/profile. Neither variable may independently choose

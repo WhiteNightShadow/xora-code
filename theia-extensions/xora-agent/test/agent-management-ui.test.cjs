@@ -95,6 +95,9 @@ test('built-in xAI settings are absent while custom API configuration remains co
     assert.match(source, /添加自定义 API 服务/);
     assert.match(source, /name='baseUrl'[^>]*type='url'/);
     assert.match(source, /name='apiKey'[^>]*type='password'/);
+    assert.match(source, /name='protocol' defaultValue='openai-responses'/);
+    assert.match(source, /name='contextWindow'[^>]*defaultValue='500000'/);
+    assert.match(source, /name='backendSearch' type='checkbox' defaultChecked/);
     assert.match(source, /service\.saveProvider\(provider, optionalCredential\(form\.get\('apiKey'\)\)\)/);
     assert.match(source, /await this\.service\.selectProvider\(provider\.id\)/);
 });
@@ -115,6 +118,10 @@ test('model fetch supports draft probe and remounts the model field with a pick 
     assert.match(source, /discoverModelsFromForm/);
     assert.match(source, /快速选择/);
     assert.match(source, /key=\{`model-input-\$\{providerKey\}-/);
+    assert.match(source, /this\.discoveredModels\.get\('add'\)/);
+    assert.match(source, /this\.modelDrafts\.get\('add'\)/);
+    assert.match(source, /const selectedModel = currentModel \|\| modelIds\[0\] \|\| ''/);
+    assert.match(source, /已自动填入 \$\{selectedModel\}/);
     assert.doesNotMatch(source, /providerKey === 'add' \? '请先保存服务后再获取模型列表'/);
 });
 

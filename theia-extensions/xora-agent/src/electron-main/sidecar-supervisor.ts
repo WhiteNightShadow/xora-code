@@ -9,6 +9,8 @@ import { sharedGrokHome } from './shared-grok-home';
 import { sidecarFilesystemError } from './sidecar-errors';
 
 export const EMBEDDED_GROK_VERSION = '0.2.102';
+const MAX_EXACT_REDACTION_VALUES = 4_096;
+const MAX_EXACT_REDACTION_BYTES = 4 * 1024 * 1024;
 
 export interface SidecarLaunch {
     process: ChildProcessWithoutNullStreams;
@@ -37,6 +39,31 @@ export class GrokSidecarSupervisor {
         return this.sanitizedEnvironment(injected);
     }
 
+    /**
+     * Adds secrets learned after process launch (for example resolved MCP
+     * headers/env) to the stderr boundary. Call this before the corresponding
+     * ACP request is written. Values remain registered for the process
+     * lifetime so rotated credentials cannot reappear in later diagnostics.
+     */
+    registerRedactionSecrets(values: Iterable<string>): void {
+        const next = new Set(this.exactSecrets ?? []);
+        let totalBytes = [...next].reduce((sum, value) => sum + Buffer.byteLength(value, 'utf8'), 0);
+        for (const value of values) {
+            if (typeof value !== 'string') {
+                throw new Error('An exact redaction value must be a string.');
+            }
+            if (!value || next.has(value)) continue;
+            const bytes = Buffer.byteLength(value, 'utf8');
+            if (next.size >= MAX_EXACT_REDACTION_VALUES || totalBytes + bytes > MAX_EXACT_REDACTION_BYTES) {
+                throw new Error('The exact redaction set is too large.');
+            }
+            next.add(value);
+            totalBytes += bytes;
+        }
+        this.exactSecrets = [...next].sort((left, right) =>
+            right.length - left.length || (left < right ? -1 : left > right ? 1 : 0));
+    }
+
     terminateProcessTree(child: ChildProcess, force = false): void {
         this.signalTree(child, force ? 'SIGKILL' : 'SIGTERM');
     }
@@ -46,18 +73,28 @@ export class GrokSidecarSupervisor {
             throw new Error('This window already has a Grok sidecar.');
         }
         const binary = this.resolveBinary();
+        this.exactSecrets = [];
+        this.registerRedactionSecrets(
+            Object.values(providerEnvironment).filter((value): value is string =>
+                typeof value === 'string' && value.length > 0)
+        );
         const args = ['--no-auto-update', '--cwd', root, 'agent', '--no-leader', 'stdio'];
-        const child = spawn(binary, args, {
-            cwd: root,
-            env: this.sanitizedEnvironment(providerEnvironment),
-            shell: false,
-            windowsHide: true,
-            detached: process.platform !== 'win32',
-            stdio: ['pipe', 'pipe', 'pipe']
-        });
+        let child: ChildProcessWithoutNullStreams;
+        try {
+            child = spawn(binary, args, {
+                cwd: root,
+                env: this.sanitizedEnvironment(providerEnvironment),
+                shell: false,
+                windowsHide: true,
+                detached: process.platform !== 'win32',
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+        } catch (error) {
+            this.exactSecrets = [];
+            throw error;
+        }
         this.child = child;
         this.stopping = false;
-        this.exactSecrets = [...new Set(Object.values(providerEnvironment).filter((value): value is string => typeof value === 'string' && value.length > 0))];
         this.stderrCarry = '';
         this.stderrDecoder = new StringDecoder('utf8');
         this.stderrOpaqueRedactor = new StreamingOpaquePayloadRedactor();

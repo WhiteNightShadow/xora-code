@@ -1,7 +1,7 @@
 {
   "name": "@xora-code/electron-app",
   "productName": "Xora Code",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "An open-source Grok desktop app and Grok Build GUI client built with Eclipse Theia, Electron, and ACP.",
   "author": {
@@ -92,8 +92,8 @@
     "@theia/variable-resolver": "1.73.1",
     "@theia/vsx-registry": "1.73.1",
     "@theia/workspace": "1.73.1",
-    "@xora-code/agent": "0.2.1",
-    "@xora-code/product-extension": "0.2.1",
+    "@xora-code/agent": "0.2.2",
+    "@xora-code/product-extension": "0.2.2",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

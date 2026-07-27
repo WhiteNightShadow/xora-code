@@ -10,6 +10,23 @@ const { GrokAgentHostService } = require('../lib/electron-main/grok-agent-host-s
 const { ProviderRegistry } = require('../lib/electron-main/provider-registry');
 const { AgentHostManager } = require('../lib/electron-main/agent-host-manager');
 
+test('custom API defaults use Responses, 500k context and backend search', () => {
+    const registry = Object.create(ProviderRegistry.prototype);
+    const profile = registry.validate({
+        id: 'xora-defaults',
+        name: '默认中转站',
+        kind: 'custom',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-relay',
+        secretRef: 'renderer-must-not-control-this',
+        managed: false
+    });
+
+    assert.equal(profile.protocol, 'openai-responses');
+    assert.equal(profile.contextWindow, 500_000);
+    assert.equal(profile.backendSearch, true);
+});
+
 test('credential RPC exposes only configured state and can clear a Provider secret', async () => {
     const service = new FakeAgentHostService();
     const xai = (await service.listProviders()).find(provider => provider.id === 'xai-api-key');

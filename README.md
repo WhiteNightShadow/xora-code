@@ -9,18 +9,20 @@
   </p>
 
   <p>
-    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.1%20Alpha-f59e0b?style=flat-square" alt="v0.2.1 Alpha" /></a>
+    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.2%20Alpha-f59e0b?style=flat-square" alt="v0.2.2 Alpha" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/build%20targets-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="Build targets: macOS Windows Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
   </p>
 
   <p>
+    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v0.2.2"><strong>下载 v0.2.2 Preview</strong></a> ·
     <a href="#主要功能">主要功能</a> ·
+    <a href="#产品界面">产品界面</a> ·
     <a href="#快速开始">快速开始</a> ·
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
-    <a href="#v021-release-notes">v0.2.1 Release Notes</a> ·
+    <a href="#v022-release-notes">v0.2.2 Release Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
     <a href="#参与项目">参与项目</a> ·
     <a href="#问题反馈与交流">问题反馈与交流</a>
@@ -38,7 +40,44 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 > Xora Code 是由社区独立维护的开源项目，不是 xAI 官方客户端，与 xAI 不存在隶属、赞助或背书关系。“Grok”与“Grok Build”仅用于准确描述本项目集成的上游软件及互操作能力。
 
 > [!IMPORTANT]
-> Xora Code 当前处于 **v0.2.1 Alpha**。核心桌面工作区、并发会话、模型接入与可审查 Agent 流程已经可用，但扩展运行期热刷新、组件在线更新和正式签名发行仍在完善。Preview 安装包未经平台正式签名，仅适合开发、测试与提前体验，请勿用于生产环境。
+> Xora Code 当前处于 **v0.2.2 Alpha**。核心桌面工作区、并发会话、模型接入、Skills/MCP 统一配置与可审查 Agent 流程已经可用，但组件在线更新和正式签名发行仍在完善。Preview 安装包未经平台正式签名，仅适合开发、测试与提前体验，请勿用于生产环境。
+
+<p align="center">
+  <img src="docs/images/xora-code-workspace.png" width="1200" alt="Xora Code 深色桌面工作区：项目树、代码编辑器与固定 Agent 面板" />
+</p>
+
+<p align="center"><sub>项目树、代码编辑器与 Grok Agent 固定在同一桌面工作区。截图使用公开示例项目，不包含本地路径、账号或密钥。</sub></p>
+
+## 产品界面
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/xora-code-agent-review.png" alt="Xora Code Agent 计划、活动、文件变更与命令审批" />
+      <p align="center"><strong>可审查的 Agent 工作流</strong><br /><sub>Plan、工具活动、文件变更、耗时与命令审批集中展示。</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/xora-code-mcp-settings.png" alt="Xora Code Skills 与 MCP 统一管理界面" />
+      <p align="center"><strong>统一的 Skills / MCP 管理</strong><br /><sub>查看发现来源、诊断结果、配置状态与当前会话加载状态。</sub></p>
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary><strong>查看完整 Agent 执行流程</strong></summary>
+<br />
+<p align="center">
+  <img src="docs/images/xora-code-agent-workflow.png" width="1200" alt="Xora Code Agent 对话、计划、活动与文件变更完整执行流程" />
+</p>
+</details>
+
+<details>
+<summary><strong>查看模型服务设置</strong></summary>
+<br />
+<p align="center">
+  <img src="docs/images/xora-code-model-settings.png" width="1200" alt="Xora Code Grok 订阅、自定义模型与代码高亮设置" />
+</p>
+</details>
 
 ## 为什么选择 Xora Code 作为 Grok 桌面端
 
@@ -47,7 +86,7 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 - **过程可见**：计划、文件读写、搜索、终端、网络、Skills、MCP 和 Plugins 操作按类型展示；同一轮的多个工具与文件变更会合并成一个稳定活动组，并显示当前操作、状态与耗时。
 - **多会话并行**：不同会话可以同时工作；每个会话独立保存草稿、附件与消息队列，切换项目或历史不会互相覆盖。
 - **低等待体验**：打开项目即预热 Agent Runtime，首个回复片段优先显示，高频流式更新合并到浏览器帧，减少首发等待、界面闪屏和历史切换卡顿。
-- **用户掌控**：支持请求审批与完全访问两种应用级权限模式；选择会跨项目、会话、窗口和应用重启保持，敏感操作仍由 Electron 主进程进行最终裁决。
+- **用户掌控**：支持请求审批与完全访问两种应用级权限模式；选择会跨项目、会话、窗口和应用重启保持。完全访问会自动批准兼容工具请求，并解除 Xora Code 的工作区路径限制。
 - **开放源码**：桌面应用、ACP 客户端、Agent UI、权限策略、会话存储、构建和发布脚本均在本仓库开放。
 
 ## 主要功能
@@ -59,7 +98,7 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 | **理解并修改项目** | Agent 可以读取和搜索项目、修改文件、执行命令、运行测试，并将变更集中到可审查的 Diff 视图。 |
 | **轮次化活动与变更审阅** | 同一条用户任务产生的 Plan、工具和多个文件变更共享稳定轮次 ID，并合并成一个「Agent 活动」；可按文件、搜索、终端、网络、Skill、MCP、Plugin、子 Agent 筛选。文件修改保存不可变前后快照，使用 Theia 原生双栏 Diff，恢复与安全撤销均做哈希校验。 |
 | **多会话与消息队列** | 不同会话可并行执行；同一会话可连续提交多条等待消息，并可单独取消队列中的消息。编辑框文字、图片和重试状态均按会话隔离。 |
-| **权限模式** | 默认逐项请求审批，也可开启完全访问；模式由应用级设置统一管理并持久化到本机，所有项目、会话和窗口保持一致。 |
+| **权限模式** | 默认逐项请求审批，也可开启全磁盘完全访问；模式由应用级设置统一管理并持久化到本机，所有项目、会话和窗口保持一致。 |
 | **会话与本地历史** | 打开项目时优先恢复该工作区最近一次会话；也可随时新建、重命名或切换历史。事件以脱敏 JSONL 保存在本地，常用历史会缓存在 renderer 中以加快切换，崩溃后绝不自动重放任务。 |
 | **原生上下文压缩** | 复用 Grok Build 0.2.102 的自动上下文压缩；展示 Token、压缩状态、耗时与累计次数，并持久化到会话历史。压缩是否触发由 Grok Build 根据上下文窗口决定，桌面端不按字符数推算。 |
 | **Grok 订阅与自定义模型** | 设置页只保留 Grok 订阅和自定义模型服务；支持编辑 Base URL、API Key、模型 ID、上下文窗口与后端搜索，并可从兼容端点获取模型列表。 |
@@ -67,7 +106,7 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 | **全局模型选择** | 在设置中切换订阅或自定义 Provider 后，所有项目与窗口统一采用当前模型服务；可继续的历史会话会安全重绑，不兼容或恢复失败的记录保留为只读历史。 |
 | **中文输入与图片上下文** | 对话输入、会话重命名完整支持中文 IME；可以选择或粘贴 PNG、JPEG、WebP 图片，且仅在当前 ACP Runtime 明确声明图片能力时发送。 |
 | **语言与代码高亮** | 安装包内置常用 VS Code 语法插件，覆盖 JS/TS、C/C++、Python、JSON、Markdown、HTML/CSS、Shell、YAML、XML、SQL、Go、Rust、Java、Dockerfile 等；Agent 回复代码块可选择跟随主题、GitHub、Monokai 或 One Dark 高亮风格。 |
-| **Skills / MCP / Plugins（Preview）** | 通过“Xora Code 面板右上角齿轮 → Agent 设置”管理 Skill、MCP 和 Plugin；支持 Skill 启停与打开 `SKILL.md`、MCP 多源列表/健康诊断/密钥引用，以及要求固定提交和二次确认的 Plugin/Marketplace 流程。对话框输入 `/` 还可快速选择文件、MCP 与技能。 |
+| **Skills / MCP / Plugins（Preview）** | 通过“Xora Code 面板右上角齿轮 → Agent 设置”管理 Skill、MCP 和 Plugin；Skills 与 MCP 使用应用统一配置源，不再随模型 Provider 丢失。支持 Skill 启停、打开 `SKILL.md` 与运行期重载；MCP 提供“已发现 / 诊断正常 / 当前会话已加载”三态、健康诊断、密钥引用和会话热更新。对话框输入 `/` 还可快速选择文件、已加载 MCP 与技能。 |
 | **跨平台 Runtime** | 项目打开后立即启动或恢复 Grok Build 待机环境；ACP 初始化使用 45 秒发布级超时和有界冷启动恢复。macOS、Windows、Linux 共用明确的 Grok Home 解析与认证状态同步策略。 |
 
 ## 使用方式
@@ -120,7 +159,7 @@ flowchart LR
 | [Grok Build](https://github.com/xai-org/grok-build) | 提供编码 Agent Runtime、工具、Skills、MCP 和 Plugins 能力。 |
 | [ACP](https://github.com/agentclientprotocol/agent-client-protocol) | 连接桌面客户端与 Agent，传输会话、流式内容、工具和权限事件。 |
 
-Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.1 的实际 Runtime 由 Grok Build 提供。
+Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.2 的实际 Runtime 由 Grok Build 提供。
 
 对话流沿端到端链路做了轻量调度：项目打开即预热 Runtime；首个 Assistant 文本片段收到后立即跨进程呈现，后续高频片段再按浏览器帧批量刷新，减少首字等待和连续 Markdown 重排。不同会话使用独立的发送队列并可并行工作，同一会话则保持 ACP Prompt 串行顺序。
 
@@ -132,7 +171,7 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - 项目默认受限；未信任项目可以初始化 Agent 待机连接，但不能执行 Agent 工具、终端、任务、MCP、Hooks 或可执行 Plugins，撤销信任会中断正在进行的可执行 Agent 活动。
 - `允许一次` 不会持久化；持久规则会绑定工作区、工具、路径或命令、MCP Server、sidecar 版本和有效期。
 - 请求审批 / 完全访问是应用级偏好，会跨项目、会话、窗口和应用重启保持一致；renderer 不能随会话请求篡改该模式。
-- 完全访问不等于绕过安全边界：Electron backend 仍会检查 Workspace Trust、当前 ACP 会话、工作区路径与符号链接边界，也不会把 sidecar 更新解释为更宽松的授权。
+- 完全访问会解除 Xora Code 的工作区路径和符号链接边界，允许 Agent 操作当前系统账户有权访问的整块磁盘；当前 ACP 会话与 Provider 身份校验仍由 Electron backend 执行，操作系统权限、Grok Build 的 deny 规则、Hooks、沙箱及系统管理策略仍然有效。
 - 自定义 Base URL 会经过协议、地址、DNS rebinding、重定向和响应大小检查，认证信息不会跟随跨域重定向。
 - 会话和诊断日志在落盘前统一脱敏；图片历史只保存安全元数据，不持久化原始 Base64 内容。
 - 安全撤销仅在文件仍匹配 Agent 写入后的 SHA-256 时执行；用户继续编辑后会拒绝覆盖。
@@ -153,17 +192,40 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - Grok 订阅与自定义 API Provider、兼容中转站、模型获取及应用级全局模型同步
 - 中文 IME 会话输入/重命名，以及受 ACP 能力约束的图片粘贴和文件选择
 - 随安装包校验并分发的常用语言语法插件，以及四种 Agent 代码块高亮风格
-- Skills、MCP、Plugins 的设置管理、健康诊断、对话快捷选择与安全边界
+- **Skills / MCP 统一运行时集成**（`v0.2.2`）：用户级与项目级配置统一解析，`session/new`、`session/load` 与历史恢复注入同一份 MCP；切换 Provider 不丢失，变更后热更新当前会话，UI 区分发现、诊断和真实加载状态
 - macOS、Windows、Linux 的构建配置和 CI 矩阵
 
 ### 仍在完善
 
-- Skills / MCP / Plugins 在 Agent 运行期间的无中断刷新、更多 OAuth/远程传输兼容与 Marketplace 体验
+- 更多 MCP OAuth/远程传输兼容、Plugin Marketplace 与扩展签名体验
 - 超大历史与超长单轮工具列表的进一步虚拟化，以及更多真实项目性能基准
 - 子 Agent 独立控制台与逐个取消能力（当前仅活动可见；整轮取消仍是主要控制方式）
 - 两套 Ed25519 更新信任锚、平台代码签名、macOS 公证与正式 Release 发布
 
 > Preview 构建不代表稳定版或生产就绪版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
+
+## v0.2.2 Release Notes
+
+`v0.2.2` 聚焦 Skills 与 MCP 的配置一致性、会话可用性和空闲资源占用：设置页、订阅模型、自定义模型、新会话与历史恢复现在使用同一份 Xora 集成配置，扩展变更可以在当前 Runtime 中安全生效。
+
+> [!NOTE]
+> 本节描述仓库中 `0.2.2` 的已实现范围，不代表已发布正式稳定版。具体 Preview 安装包应以对应 GitHub Prerelease 中记录的源码提交、构建链接和 SHA-256 校验信息为准。
+
+### Skills 与 MCP
+
+- **唯一配置源**：统一解析共享 Grok Home 与项目 `.grok/config.toml`，模型 Provider 只负责模型和凭据，不再各自持有一套 Skills/MCP 视图。
+- **真实会话注入**：`session/new`、`session/load`、历史恢复与 Provider 重绑均传入同一份实际 `mcpServers`；切换 Grok 订阅或自定义模型不会清空 MCP。
+- **运行期同步**：MCP 变化优先通过 Grok ACP 扩展热更新所有已加载会话；旧 Runtime 不支持时会安全重启、恢复会话且绝不重放 Prompt。Skills 变化使用运行期 reload，并同步自定义 Provider 的只读视图。
+- **可验证状态**：设置页区分“已发现、诊断正常、当前会话已加载”，只有当前会话真实加载的 MCP 才会进入 Agent 快捷选择列表。
+- **安全凭据绑定**：MCP 密钥只以 `secretRef` 管理，在 Electron 主进程内按工作区、Server 和配置身份解析；修改 Server 端点或命令后，旧凭据不会被错误复用。
+
+### 体验与资源占用
+
+- **静默同步共享状态**：共享 Grok 配置或登录文件变化后由 backend 自动刷新，不再显示要求用户“刷新管理页面”的无操作价值提示；真实失败仍会明确报告。
+- **MCP 刷新防风暴**：生命周期通知使用语义去重、前沿合并、750 ms 冷却与 single-flight 查询；会话级通知只回查对应会话，避免多标签页被重复全量 `mcp/list` 扫描。
+- **版本边界**：仓库、桌面应用、工作区包和 ACP 客户端标识统一更新为 `0.2.2`；Grok Build sidecar 继续锁定 `0.2.102`，不迁移既有登录与会话数据。
+- **跨平台预览**：提供 macOS Apple Silicon / Intel、Windows x64 与 Linux x64 安装包；四个平台架构使用同一份前端应用内容并内嵌固定的 Grok Build `0.2.102` 原生 sidecar。
+- **验证基线**：全仓 9 个工作区测试通过，Agent 测试 359/359；`yarn build`、Electron / Browser 构建与 1600×900、1280×720 真实界面交互验证通过；发布页同时提供 SHA-256 校验文件。
 
 ## v0.2.1 Release Notes
 
@@ -265,7 +327,7 @@ Xora Code 将试用构建与正式分发严格分开，避免未签名产物被�
 
 | 通道 | 平台与产物 | 发布策略 |
 | --- | --- | --- |
-| **Preview / Alpha** | macOS arm64/x64：DMG + ZIP；Windows x64：NSIS；Linux x64：AppImage + deb | 在对应平台的原生 Runner 或专用原生构建机上构建，附带目标平台 CycloneDX SBOM、构建来源与 SHA-256，发布为 **Prerelease**，不标记为 **Latest**。当前产物未经完整平台签名，仅供开发与测试。 |
+| **Preview / Alpha** | macOS arm64/x64：DMG + ZIP；Windows x64：NSIS；Linux x64：AppImage + deb | 在对应平台的原生 Runner 或专用原生构建机上构建，发布为 **Prerelease**，不标记为 **Latest**。所有预览版至少提供 SHA-256；原生 CI 构建还会附带目标平台 CycloneDX SBOM 与构建来源。当前产物未经完整平台签名，仅供开发与测试。 |
 | **正式 Release** | 同一桌面平台矩阵，并携带经过校验的 Grok Build sidecar、许可证、notices 与 SBOM | 工作流保持 fail-closed；只有 Apple、Windows、Linux GPG、应用更新与 sidecar 更新签名凭据全部就绪，并通过平台签名、公证及发布验收后才会开放。 |
 
 Preview 页面会明确标注版本和提交，不会覆盖正式版更新通道。请在安装前核对 Release 说明与校验信息，并自行评估 Alpha 软件风险。
@@ -274,7 +336,16 @@ Preview 页面会明确标注版本和提交，不会覆盖正式版更新通道
 
 ### 下载 Preview
 
-可从 [GitHub Releases](https://github.com/WhiteNightShadow/xora-code/releases) 获取 macOS、Windows 与 Linux 的 Preview 构建。请优先选择与系统和架构匹配的 Prerelease 资产，并在安装前核对 Release 页面中的源码提交、SHA-256 与未签名风险说明。
+可从 [GitHub Releases](https://github.com/WhiteNightShadow/xora-code/releases) 获取 macOS、Windows 与 Linux 的 Preview 构建。`v0.2.2` 下载入口如下：
+
+| 系统 | 架构 | 安装包 |
+| --- | --- | --- |
+| macOS | Apple Silicon（arm64） | [DMG](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-arm64.dmg) · [ZIP](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-arm64.zip) |
+| macOS | Intel（x64） | [DMG](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-x64.dmg) · [ZIP](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-x64.zip) |
+| Windows | x64 | [NSIS 安装包](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-win-x64.exe) |
+| Linux | x64 | [AppImage](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-linux-x86_64.AppImage) · [deb](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-linux-amd64.deb) |
+
+请在安装前下载并核对 [SHA256SUMS.txt](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/SHA256SUMS.txt)。本版为未签名 Prerelease：macOS 没有 Developer ID / notarization，Windows 没有 Authenticode 产品签名，Linux 没有 GPG detached signature。
 
 ### 环境要求
 

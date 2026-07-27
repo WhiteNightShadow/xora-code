@@ -18,6 +18,9 @@ Xora Code 是一款由社区独立维护的开源 Grok 桌面应用，基于 Gro
 - **更快的首次交互**：项目打开后预热 Runtime，发送时立即显示本地状态，后台完成会话建立和 Save All，降低首轮无反馈等待。
 - **可审查变更**：文件、搜索、终端、网络、Skill、MCP 和 Plugin 活动分类呈现，支持原生 Diff 与哈希保护的安全撤销。
 - **会话、图片与上下文**：本地保存脱敏会话历史，支持能力受控的 PNG/JPEG/WebP 输入，并展示 Grok Build 提供的 Token 和原生压缩状态。
+- **统一 Skills / MCP**：订阅与自定义模型共用一份用户级/项目级配置；新会话、历史恢复和 Provider 切换均注入真实 MCP，变更后可热更新并展示“发现 / 诊断 / 当前会话已加载”三态。
+- **更安静、更稳定的扩展同步**：共享 Grok 状态自动静默刷新；MCP 生命周期回查具备语义去重、合并、冷却、single-flight 和会话定向刷新，避免重复提示与空闲刷新风暴。
+- **权限语义**：请求审批模式继续限制在受信任工作区；完全访问模式会自动批准兼容工具请求并解除 Xora Code 的路径边界，允许访问当前系统账户可访问的整块磁盘。操作系统权限及 Grok Build 的 deny、Hooks、沙箱和系统管理策略仍然有效。
 - **安全边界**：密钥由 Electron `safeStorage` 保存，进程、网络和最终权限裁决留在主进程；日志、会话和活动事件在持久化前脱敏。
 
 ## 平台产物
@@ -26,7 +29,7 @@ Xora Code 是一款由社区独立维护的开源 Grok 桌面应用，基于 Gro
 - Windows x64：NSIS 安装包；**没有 Authenticode 产品签名**，Windows 可能显示 SmartScreen 警告。
 - Linux x64：AppImage + deb；仅提供 SHA-256 校验和，**没有 GPG detached signature**。
 
-每个平台同时提供独立的 CycloneDX JSON SBOM、构建来源信息与覆盖安装包及 SBOM 的 `SHA256SUMS-<target>.txt`。SBOM 由仓库锁定并校验官方资产 SHA-256 的 Anchore Syft `1.48.0` 生成：它扫描实际打包 payload，并合并该源码提交的锁定依赖树作为保守清单，以覆盖 ASAR 和 stripped Rust 二进制中无法直接识别的依赖。
+由原生 Preview 工作流发布时，每个平台还会提供独立的 CycloneDX JSON SBOM、构建来源信息与覆盖安装包及 SBOM 的 `SHA256SUMS-<target>.txt`；手动预览资产以对应 Release 的实际文件列表为准。SBOM 由仓库锁定并校验官方资产 SHA-256 的 Anchore Syft `1.48.0` 生成：它扫描实际打包 payload，并合并该源码提交的锁定依赖树作为保守清单，以覆盖 ASAR 和 stripped Rust 二进制中无法直接识别的依赖。
 
 ## 构建门禁
 
@@ -37,5 +40,5 @@ Xora Code 是一款由社区独立维护的开源 Grok 桌面应用，基于 Gro
 ## 已知限制
 
 - 当前仍是 Alpha，未经平台商业签名和 macOS 公证，安装时可能触发 Gatekeeper 或 SmartScreen 警告。
-- Skills、MCP 和 Plugins 的管理界面已可体验，兼容来源汇总与运行期无中断刷新仍在完善。
+- Skills、MCP 和 Plugins 的管理界面已可体验；更多 MCP OAuth/远程传输兼容与 Plugin Marketplace 体验仍在完善。
 - 正式组件更新与稳定 Release 会继续保持关闭，直到 Apple、Windows、Linux GPG 与独立 Ed25519 信任锚全部完成配置并通过验收。
