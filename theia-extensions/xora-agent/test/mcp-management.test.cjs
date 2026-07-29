@@ -143,6 +143,48 @@ test('canonical configured MCP remains selectable before the first ACP session e
     assert.equal(disabled.selectable, false);
 });
 
+test('a broken canonical MCP is isolated and hidden while healthy and explicitly accepted servers remain selectable', () => {
+    const result = mergeMcpManagementResults(
+        { ok: true, data: { mcpServers: [] } },
+        { ok: true, data: [] },
+        undefined,
+        {
+            configuredNames: ['healthy', 'ssh-mcp-server', 'literal-auth'],
+            configuredServers: [
+                { name: 'healthy', scope: 'user', enabled: true },
+                { name: 'ssh-mcp-server', scope: 'user', enabled: true },
+                { name: 'literal-auth', scope: 'project', enabled: true }
+            ],
+            enabledNames: ['healthy', 'literal-auth'],
+            issues: [{
+                name: 'ssh-mcp-server',
+                severity: 'error',
+                code: 'missing-environment',
+                message: '缺少环境变量 SSH_MCP_PASSWORD；当前会话已跳过该 MCP，Agent 与其他服务可继续使用。'
+            }, {
+                name: 'literal-auth',
+                severity: 'warning',
+                code: 'literal-credential',
+                message: '参数中包含用户明确配置的明文凭据；已按配置加载并启用日志脱敏。'
+            }],
+            servers: []
+        }
+    );
+
+    const healthy = result.data.mcpServers.find(server => server.name === 'healthy');
+    const broken = result.data.mcpServers.find(server => server.name === 'ssh-mcp-server');
+    const literal = result.data.mcpServers.find(server => server.name === 'literal-auth');
+    assert.equal(healthy.selectable, true);
+    assert.equal(broken.configurationState, 'unavailable');
+    assert.equal(broken.enabled, true, 'a configuration error must not masquerade as a user-disabled switch');
+    assert.equal(broken.scope, 'user');
+    assert.equal(broken.runtimeState, 'setup-required');
+    assert.equal(broken.selectable, false);
+    assert.match(broken.configurationMessage, /SSH_MCP_PASSWORD/);
+    assert.equal(literal.configurationState, 'warning');
+    assert.equal(literal.selectable, true);
+});
+
 test('partial command failures keep discovered servers and expose safe warnings', () => {
     const result = mergeMcpManagementResults({
         ok: true,

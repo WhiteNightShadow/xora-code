@@ -9,20 +9,20 @@
   </p>
 
   <p>
-    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.2%20Stable-2ea44f?style=flat-square" alt="v0.2.2 Stable" /></a>
+    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.3%20Stable-2ea44f?style=flat-square" alt="v0.2.3 Stable" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/build%20targets-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="Build targets: macOS Windows Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
   </p>
 
   <p>
-    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v0.2.2"><strong>下载 v0.2.2</strong></a> ·
+    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v0.2.3"><strong>下载 v0.2.3</strong></a> ·
     <a href="#主要功能">主要功能</a> ·
     <a href="#产品界面">产品界面</a> ·
     <a href="#快速开始">快速开始</a> ·
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
-    <a href="#v022-release-notes">v0.2.2 Release Notes</a> ·
+    <a href="#v023-release-notes">v0.2.3 Release Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
     <a href="#参与项目">参与项目</a> ·
     <a href="#问题反馈与交流">问题反馈与交流</a>
@@ -40,7 +40,7 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 > Xora Code 是由社区独立维护的开源项目，不是 xAI 官方客户端，与 xAI 不存在隶属、赞助或背书关系。“Grok”与“Grok Build”仅用于准确描述本项目集成的上游软件及互操作能力。
 
 > [!IMPORTANT]
-> Xora Code `v0.2.2` 是当前稳定生产版本。核心桌面工作区、并发会话、模型接入、Skills/MCP 统一配置与可审查 Agent 流程已经可用。安装包尚未取得 Apple Developer ID、Windows Authenticode 或 Linux GPG 商业签名，请从本仓库 Release 下载并在安装前核对 SHA-256。
+> Xora Code `v0.2.3` 是当前稳定生产版本。核心桌面工作区、并发会话、模型接入、Skills/MCP 统一配置与可审查 Agent 流程已经可用。安装包尚未取得 Apple Developer ID、Windows Authenticode 或 Linux GPG 商业签名，请从本仓库 Release 下载并在安装前核对 SHA-256。
 
 <p align="center">
   <img src="docs/images/xora-code-workspace.png" width="1200" alt="Xora Code 深色桌面工作区：项目树、代码编辑器与固定 Agent 面板" />
@@ -94,6 +94,7 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 | 能力 | 说明 |
 | --- | --- |
 | **完整编码工作区** | 打开文件夹或多根工作区，使用项目树、Monaco 编辑器、文件搜索、原生 Diff、终端、任务、SCM 和设置；精简桌面外壳保留核心区域，右侧 Xora Code 面板始终可用，切换目录后 Explorer 自动恢复。 |
+| **当前文件运行与测试** | 打开 Python、JavaScript/MJS/CJS、TypeScript、C/C++、Java、Go、Rust 或 Shell 文件后，可从编辑器标签栏直接“运行”或“测试”。执行前自动保存，底部按需展开真实集成终端，持续显示完整命令、输出、报错与退出状态；空闲终端会自动复用。 |
 | **流式 Agent 对话** | 实时显示回复、Plan、工具活动、终端输出、错误与任务状态；首个回复片段立即呈现，后续片段按帧合并刷新。发送后回到底部，位于底部时实时跟随；上滑阅读时不抢位置，并以「有新消息 · 回到底部」提示恢复跟随。 |
 | **理解并修改项目** | Agent 可以读取和搜索项目、修改文件、执行命令、运行测试，并将变更集中到可审查的 Diff 视图。 |
 | **轮次化活动与变更审阅** | 同一条用户任务产生的 Plan、工具和多个文件变更共享稳定轮次 ID，并合并成一个「Agent 活动」；可按文件、搜索、终端、网络、Skill、MCP、Plugin、子 Agent 筛选。文件修改保存不可变前后快照，使用 Theia 原生双栏 Diff，恢复与安全撤销均做哈希校验。 |
@@ -159,7 +160,7 @@ flowchart LR
 | [Grok Build](https://github.com/xai-org/grok-build) | 提供编码 Agent Runtime、工具、Skills、MCP 和 Plugins 能力。 |
 | [ACP](https://github.com/agentclientprotocol/agent-client-protocol) | 连接桌面客户端与 Agent，传输会话、流式内容、工具和权限事件。 |
 
-Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.2 的实际 Runtime 由 Grok Build 提供。
+Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.3 的实际 Runtime 由 Grok Build 提供。
 
 对话流沿端到端链路做了轻量调度：项目打开即预热 Runtime；首个 Assistant 文本片段收到后立即跨进程呈现，后续高频片段再按浏览器帧批量刷新，减少首字等待和连续 Markdown 重排。不同会话使用独立的发送队列并可并行工作，同一会话则保持 ACP Prompt 串行顺序。
 
@@ -202,7 +203,28 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - 子 Agent 独立控制台与逐个取消能力（当前仅活动可见；整轮取消仍是主要控制方式）
 - 两套 Ed25519 更新信任锚、平台代码签名、macOS 公证与自动更新通道
 
-> `v0.2.2` 已作为稳定生产版本发布。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
+> `v0.2.3` 是当前稳定生产版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
+
+## v0.2.3 Release Notes
+
+`v0.2.3` 聚焦扩展管理容错、文件导航和日常编码操作：单个 MCP 配置异常不再拖垮 Agent，Skills/MCP 可以独立启停并在对话中以清晰标签引用，同时补齐当前文件运行、测试和终端关闭入口。
+
+> [!NOTE]
+> `v0.2.3` 是当前正式稳定版本，GitHub Release 标记为 Latest。安装包、源码提交和 SHA-256 校验信息以 [`v0.2.3` Release](https://github.com/WhiteNightShadow/xora-code/releases/tag/v0.2.3) 为准。
+
+### Agent、Skills 与 MCP
+
+- **故障隔离**：缺少环境变量、配置格式错误或单个 MCP 启动失败时，仅隔离对应服务并显示可操作诊断，Agent 和其他健康 MCP 继续工作。
+- **持久启停**：Skills 与 MCP 使用统一配置源保存启用状态，设置页保持稳定排序和紧凑卡片，不因升级、Provider 切换或页面刷新丢失选择。
+- **清晰引用**：对话框只插入 Skill/MCP 名称，并以不同颜色的结构化标签展示；自动保留输入分隔空格，引用状态随各自会话草稿隔离。
+
+### 文件与编码工作流
+
+- **可靠文件定位**：支持多根工作区、工具子目录返回的相对路径、中文路径及完全访问模式下的外部绝对路径；同名歧义会安全拒绝，不会打开错误文件。
+- **计划收尾**：取消任务后，未完成计划明确标记为已中止，不再长期停留在输入框上方。
+- **运行与测试**：Python、JavaScript、TypeScript、C/C++、Java、Go、Rust 与 Shell 文件可以直接运行或测试，输出进入底部集成终端。
+- **终端控制**：终端标签工具栏新增“关闭终端”入口，与新建、分屏操作并列，只关闭当前终端。
+- **版本边界**：仓库与全部工作区包统一为 `0.2.3`，内嵌 Grok Build sidecar 继续锁定 `0.2.102`。
 
 ## v0.2.2 Release Notes
 
@@ -327,7 +349,7 @@ Xora Code 区分稳定版本与开发预览版本；无论通道如何，均应�
 
 | 通道 | 平台与产物 | 发布策略 |
 | --- | --- | --- |
-| **Stable / Production** | macOS arm64/x64：DMG + ZIP；Windows x64：NSIS；Linux x64：AppImage + deb | 标记为 **Latest**，提供固定 Grok Build sidecar、许可证、notices 和 SHA-256。`v0.2.2` 是首个按此通道发布的稳定生产版本。 |
+| **Stable / Production** | macOS arm64/x64：DMG；Windows x64：NSIS；Linux x64：AppImage + deb | 标记为 **Latest**，提供固定 Grok Build sidecar、许可证、notices 和 SHA-256。`v0.2.3` 是当前稳定生产版本。 |
 | **Preview / Alpha** | 同一桌面平台矩阵 | 用于提前验证下一版本，发布为 **Prerelease**，不覆盖 Latest。原生 CI 构建可附带目标平台 CycloneDX SBOM 与构建来源。 |
 
 当前稳定安装包尚未完成平台商业签名；macOS Gatekeeper 和 Windows SmartScreen 仍可能提示未知开发者。未来签名版会继续通过平台签名、公证、SBOM 与 Ed25519 更新门禁增强供应链保障。
@@ -336,16 +358,16 @@ Xora Code 区分稳定版本与开发预览版本；无论通道如何，均应�
 
 ### 下载稳定版
 
-可从 [GitHub Releases](https://github.com/WhiteNightShadow/xora-code/releases) 获取 macOS、Windows 与 Linux 的稳定构建。`v0.2.2` 下载入口如下：
+可从 [GitHub Releases](https://github.com/WhiteNightShadow/xora-code/releases) 获取 macOS、Windows 与 Linux 的稳定构建。`v0.2.3` 下载入口如下：
 
 | 系统 | 架构 | 安装包 |
 | --- | --- | --- |
-| macOS | Apple Silicon（arm64） | [DMG](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-arm64.dmg) · [ZIP](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-arm64.zip) |
-| macOS | Intel（x64） | [DMG](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-x64.dmg) · [ZIP](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-mac-x64.zip) |
-| Windows | x64 | [NSIS 安装包](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-win-x64.exe) |
-| Linux | x64 | [AppImage](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-linux-x86_64.AppImage) · [deb](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/Xora.Code-0.2.2-linux-amd64.deb) |
+| macOS | Apple Silicon（arm64） | [DMG](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.3/Xora.Code-0.2.3-mac-arm64.dmg) |
+| macOS | Intel（x64） | [DMG](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.3/Xora.Code-0.2.3-mac-x64.dmg) |
+| Windows | x64 | [NSIS 安装包](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.3/Xora.Code-0.2.3-win-x64.exe) |
+| Linux | x64 | [AppImage](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.3/Xora.Code-0.2.3-linux-x86_64.AppImage) · [deb](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.3/Xora.Code-0.2.3-linux-amd64.deb) |
 
-请在安装前下载并核对 [SHA256SUMS.txt](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.2/SHA256SUMS.txt)。本版为稳定生产版本，但尚未完成平台商业签名：macOS 没有 Developer ID / notarization，Windows 没有 Authenticode 产品签名，Linux 没有 GPG detached signature。
+请在安装前下载并核对 [SHA256SUMS.txt](https://github.com/WhiteNightShadow/xora-code/releases/download/v0.2.3/SHA256SUMS.txt)。本版为稳定生产版本，但尚未完成平台商业签名：macOS 没有 Developer ID / notarization，Windows 没有 Authenticode 产品签名，Linux 没有 GPG detached signature。
 
 ### 环境要求
 

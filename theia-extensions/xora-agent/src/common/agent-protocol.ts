@@ -238,7 +238,9 @@ export interface AgentPlanEvent {
     sessionId: string;
     turnId?: string;
     title?: string;
-    entries: Array<{ id: string; text: string; status: 'pending' | 'in-progress' | 'completed' | 'failed' }>;
+    /** Renderer-owned terminal state derived from the authoritative turn result. */
+    outcome?: 'completed' | 'cancelled' | 'failed';
+    entries: Array<{ id: string; text: string; status: 'pending' | 'in-progress' | 'completed' | 'failed' | 'cancelled' }>;
 }
 
 /** Stable, renderer-safe semantics derived from ACP tool metadata. */

@@ -25,6 +25,10 @@ export interface McpOverviewServer extends JsonObject {
     callable?: boolean;
     /** True when Xora can attach this configured server to the next/current session. */
     selectable?: boolean;
+    /** Canonical Xora resolution result for this one server. */
+    configurationState?: 'ready' | 'warning' | 'unavailable';
+    /** Secret-free remediation text; a failed server is isolated from Agent startup. */
+    configurationMessage?: string;
     runtime?: {
         status: string;
         enabled: boolean;
@@ -53,9 +57,21 @@ export interface McpManagementOverview extends JsonObject {
 export interface McpRuntimeProjection {
     sessionId?: string;
     configuredNames: string[];
+    configuredServers?: Array<{
+        name: string;
+        scope: 'user' | 'project';
+        /** User-selected state, independent from successful runtime resolution. */
+        enabled: boolean;
+    }>;
     /** Canonical configured servers that are enabled after user/project merge. */
     enabledNames?: string[];
     refreshPending?: boolean;
+    issues?: Array<{
+        name: string;
+        severity: 'warning' | 'error';
+        code: 'literal-credential' | 'missing-environment' | 'invalid-configuration';
+        message: string;
+    }>;
     servers: Array<{
         name: string;
         status: 'ready' | 'initializing' | 'setuprequired' | 'needsauth' | 'unavailable';
@@ -301,6 +317,18 @@ export function mergeMcpManagementResults(
     const enabledNames = new Set((runtime?.enabledNames ?? runtime?.configuredNames ?? [])
         .map(name => name.trim().toLocaleLowerCase())
         .filter(Boolean));
+    const configuredStates = new Map((runtime?.configuredServers ?? []).map(server => [
+        server.name.trim().toLocaleLowerCase(), server
+    ]));
+    const configurationIssues = new Map((runtime?.issues ?? []).flatMap(issue => {
+        const name = safeString(issue.name);
+        const message = safeString(issue.message);
+        if (!name || !message) return [];
+        return [[name.trim().toLocaleLowerCase(), {
+            severity: issue.severity === 'warning' ? 'warning' as const : 'error' as const,
+            message
+        }] as const];
+    }));
     // Keep older callers/tests useful: Grok's native list is itself a canonical
     // user/project configuration source, whereas inspect-only Cursor/Claude
     // compatibility entries are discoveries that still require import.
@@ -320,6 +348,20 @@ export function mergeMcpManagementResults(
         if (!safeName) continue;
         const server = add({ name: safeName, discoveredBy: ['xora-config'], status: 'unknown' });
         if (!server.discoveredBy.includes('xora-config')) server.discoveredBy.push('xora-config');
+        const configuredState = configuredStates.get(safeName.trim().toLocaleLowerCase());
+        if (configuredState) server.scope = configuredState.scope;
+    }
+    for (const issue of runtime?.issues ?? []) {
+        const safeName = safeString(issue.name);
+        const safeMessage = safeString(issue.message);
+        if (!safeName || !safeMessage) continue;
+        const key = safeName.trim().toLocaleLowerCase();
+        if (!configuredNames.has(key)) {
+            warnings.push(safeMessage);
+            continue;
+        }
+        const server = add({ name: safeName, discoveredBy: ['xora-config'], status: 'unknown' });
+        if (!server.discoveredBy.includes('xora-config')) server.discoveredBy.push('xora-config');
     }
     const runtimeByName = new Map((runtime?.servers ?? []).map(server => [
         server.name.trim().toLocaleLowerCase(), server
@@ -333,10 +375,18 @@ export function mergeMcpManagementResults(
     for (const server of ordered) {
         const key = server.name.trim().toLocaleLowerCase();
         const runtimeServer = runtimeByName.get(key);
+        const configurationIssue = configurationIssues.get(key);
         const configured = configuredNames.has(key);
-        const canonicallyEnabled = enabledNames.has(key);
+        const configuredState = configuredStates.get(key);
+        const userEnabled = configuredState?.enabled
+            ?? (runtime ? enabledNames.has(key) : server.enabled !== false);
+        const runtimeResolvable = runtime ? enabledNames.has(key) : userEnabled;
         const healthy = booleanValue(server.health?.healthy);
-        const runtimeState: McpOverviewServer['runtimeState'] = runtimeServer && !runtimeServer.enabled
+        const runtimeState: McpOverviewServer['runtimeState'] = configurationIssue?.severity === 'error'
+            ? 'setup-required'
+            : !userEnabled
+            ? 'disabled'
+            : runtimeServer && !runtimeServer.enabled
             ? 'disabled'
             : runtimeServer?.status === 'ready'
             ? 'loaded'
@@ -352,15 +402,20 @@ export function mergeMcpManagementResults(
         if (configured && runtime) {
             // The effective Xora user/project merge, including
             // disabled_mcp_servers, wins over compatibility discovery flags.
-            server.enabled = canonicallyEnabled;
-            server.status = canonicallyEnabled ? 'enabled' : 'disabled';
+            server.enabled = userEnabled;
+            server.status = userEnabled ? 'enabled' : 'disabled';
+            if (configuredState) server.scope = configuredState.scope;
         }
         server.diagnosticState = healthy === true
             ? 'healthy'
             : healthy === false ? 'unhealthy' : doctor ? 'unknown' : 'not-run';
         server.runtimeState = runtimeState;
+        server.configurationState = configurationIssue?.severity === 'error'
+            ? 'unavailable'
+            : configurationIssue?.severity === 'warning' ? 'warning' : configured ? 'ready' : undefined;
+        server.configurationMessage = configurationIssue?.message;
         server.callable = runtimeState === 'loaded' && runtimeServer?.enabled === true && server.enabled !== false;
-        server.selectable = configured && server.enabled !== false;
+        server.selectable = configured && userEnabled && runtimeResolvable && configurationIssue?.severity !== 'error';
         if (runtimeServer) {
             server.runtime = { status: runtimeServer.status, enabled: runtimeServer.enabled, toolCount: runtimeServer.toolCount };
             if (!server.discoveredBy.includes('runtime')) server.discoveredBy.push('runtime');

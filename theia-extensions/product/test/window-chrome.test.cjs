@@ -41,6 +41,7 @@ test('产品扩展注册主进程窗口策略并把现有标题表面作为安�
     const shellContribution = fs.readFileSync(path.join(__dirname, '../src/browser/xora-shell-contribution.ts'), 'utf8');
 
     assert.equal(productPackage.theiaExtensions[0].electronMain, 'lib/electron-main/xora-electron-main-module');
+    assert.equal(productPackage.theiaExtensions[0].backend, 'lib/node/xora-product-backend-module');
     assert.match(css, /body\.xora-electron-frameless #main-toolbar/);
     assert.match(css, /-webkit-app-region:\s*drag/);
     assert.match(css, /-webkit-app-region:\s*no-drag/);
@@ -50,6 +51,16 @@ test('产品扩展注册主进程窗口策略并把现有标题表面作为安�
     assert.match(css, /#theia-main-content-panel:not\(:has\(\.lm-TabBar\)\)::before/);
     assert.doesNotMatch(css, /#xora-window-drag-handle/);
     assert.doesNotMatch(shellContribution, /createElement\(['"]div['"]\)/);
+});
+
+test('普通启动脚本不会作为工作区触发右下角错误弹窗', () => {
+    const moduleSource = fs.readFileSync(path.join(__dirname, '../src/browser/xora-product-frontend-module.ts'), 'utf8');
+    const serviceSource = fs.readFileSync(path.join(__dirname, '../src/browser/xora-workspace-service.ts'), 'utf8');
+
+    assert.match(moduleSource, /rebind\(WorkspaceService\)\.to\(XoraWorkspaceService\)/);
+    assert.match(serviceSource, /stat\?\.isFile && !this\.isWorkspaceFile\(stat\)/);
+    assert.match(serviceSource, /window\.history\.replaceState/);
+    assert.doesNotMatch(serviceSource, /messageService\.error/);
 });
 
 test('macOS Explorer 为交通灯保留安全边距', () => {

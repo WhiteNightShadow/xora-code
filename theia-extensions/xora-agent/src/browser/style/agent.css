@@ -616,6 +616,88 @@ form.xora-provider-form,
     font-size: 14px;
 }
 
+.xora-integration-header-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+.xora-integration-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 2px 0;
+    border: 0;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    line-height: 18px;
+    cursor: pointer;
+}
+
+.xora-integration-toggle:hover:not(:disabled),
+.xora-integration-toggle:focus-visible {
+    color: var(--theia-foreground);
+}
+
+.xora-integration-toggle:focus-visible {
+    outline: 1px solid var(--theia-focusBorder);
+    outline-offset: 3px;
+    border-radius: 4px;
+}
+
+.xora-integration-toggle:disabled {
+    cursor: wait;
+    opacity: .55;
+}
+
+.xora-integration-toggle-track {
+    position: relative;
+    width: 30px;
+    height: 16px;
+    border: 1px solid var(--theia-widget-border);
+    border-radius: 999px;
+    background: var(--theia-editorWidget-background);
+    transition: background-color 200ms cubic-bezier(.2, .8, .2, 1), border-color 200ms cubic-bezier(.2, .8, .2, 1);
+}
+
+.xora-integration-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--theia-descriptionForeground);
+    transition: transform 200ms cubic-bezier(.2, .8, .2, 1), background-color 200ms cubic-bezier(.2, .8, .2, 1);
+}
+
+.xora-integration-toggle.enabled {
+    color: var(--theia-testing-iconPassed, var(--theia-charts-green, #3fbf8f));
+}
+
+.xora-integration-toggle.enabled .xora-integration-toggle-track {
+    border-color: color-mix(in srgb, var(--theia-testing-iconPassed, var(--theia-charts-green, #3fbf8f)) 72%, var(--theia-widget-border));
+    background: color-mix(in srgb, var(--theia-testing-iconPassed, var(--theia-charts-green, #3fbf8f)) 22%, var(--theia-editorWidget-background));
+}
+
+.xora-integration-toggle.enabled .xora-integration-toggle-thumb {
+    transform: translateX(14px);
+    background: var(--theia-testing-iconPassed, var(--theia-charts-green, #3fbf8f));
+}
+
+@keyframes xora-integration-toggle-pending {
+    0%, 100% { opacity: .58; }
+    50% { opacity: 1; }
+}
+
+.xora-integration-toggle.pending .xora-integration-toggle-track {
+    animation: xora-integration-toggle-pending 720ms ease-in-out infinite;
+}
+
 .xora-status-badge {
     flex: 0 0 auto;
     padding: 2px 7px;
@@ -2253,6 +2335,14 @@ form.xora-provider-form,
     color: var(--theia-testing-iconFailed);
 }
 
+.xora-plan-cancelled {
+    opacity: .64;
+}
+
+.xora-plan-cancelled .codicon {
+    color: var(--theia-descriptionForeground);
+}
+
 .xora-permission-dock {
     position: relative;
     z-index: 2;
@@ -2707,6 +2797,59 @@ form.xora-provider-form,
 
 .xora-image-file-input {
     display: none;
+}
+
+.xora-composer-references {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 9px 10px 1px;
+}
+
+.xora-composer-reference {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 7px;
+    border: 1px solid color-mix(in srgb, var(--xora-reference-color) 38%, var(--theia-widget-border));
+    border-radius: 7px;
+    color: color-mix(in srgb, var(--xora-reference-color) 78%, var(--theia-foreground));
+    background: color-mix(in srgb, var(--xora-reference-color) 11%, var(--theia-input-background));
+    font-size: 11px;
+    font-weight: 620;
+    line-height: 1.25;
+}
+
+.xora-composer-reference > .codicon {
+    flex: 0 0 auto;
+    color: var(--xora-reference-color);
+    font-size: 12px;
+}
+
+.xora-composer-reference > span:nth-child(2) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-composer-reference small {
+    flex: 0 0 auto;
+    padding-left: 5px;
+    border-left: 1px solid color-mix(in srgb, var(--xora-reference-color) 30%, transparent);
+    color: color-mix(in srgb, var(--xora-reference-color) 66%, var(--theia-descriptionForeground));
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .04em;
+}
+
+.xora-composer-reference-mcp {
+    --xora-reference-color: var(--xora-cyan, #34b7eb);
+}
+
+.xora-composer-reference-skill {
+    --xora-reference-color: var(--xora-violet, #9b87f5);
 }
 
 .xora-composer-attachments {
@@ -3303,6 +3446,11 @@ form.xora-provider-form,
     margin: 0;
 }
 
+.xora-integration-list {
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+    align-items: start;
+}
+
 .xora-management-root .xora-card {
     margin: 0;
     padding: 13px 14px;
@@ -3449,6 +3597,18 @@ form.xora-provider-form,
 
 .xora-integration-card {
     padding: 12px 14px;
+    min-width: 0;
+    transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.xora-integration-card:hover,
+.xora-integration-card:focus-within {
+    border-color: color-mix(in srgb, var(--theia-focusBorder) 52%, var(--theia-widget-border));
+}
+
+.xora-integration-card.pending {
+    border-color: color-mix(in srgb, var(--theia-testing-iconPassed) 54%, var(--theia-widget-border));
+    background: color-mix(in srgb, var(--theia-testing-iconPassed) 4%, var(--theia-editorWidget-background));
 }
 
 .xora-integration-header {
@@ -3457,6 +3617,59 @@ form.xora-provider-form,
 
 .xora-integration-header strong {
     font-size: 13px;
+}
+
+.xora-integration-summary {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px 7px;
+    margin: -1px 0 0;
+}
+
+.xora-integration-summary p {
+    display: -webkit-box;
+    min-width: min(180px, 100%);
+    flex: 1 1 220px;
+    margin: 0;
+    overflow: hidden;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.xora-integration-meta {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border-radius: 999px;
+    color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 72%, var(--theia-editor-background));
+    font-size: 10px;
+    line-height: 17px;
+}
+
+.xora-integration-details {
+    margin-top: 8px;
+    color: var(--theia-descriptionForeground);
+    font-size: 11px;
+}
+
+.xora-integration-details > summary {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    cursor: pointer;
+    list-style-position: inside;
+    user-select: none;
+}
+
+.xora-integration-details[open] > summary {
+    margin-bottom: 8px;
+    color: var(--theia-foreground);
 }
 
 .xora-integration-fields {
@@ -3626,8 +3839,15 @@ form.xora-provider-form,
 
     .xora-prompt-suggestions button,
     .xora-details-chevron,
-    .xora-composer-surface {
+    .xora-composer-surface,
+    .xora-integration-card,
+    .xora-integration-toggle-track,
+    .xora-integration-toggle-thumb {
         transition: none;
+    }
+
+    .xora-integration-toggle.pending .xora-integration-toggle-track {
+        animation: none;
     }
 }
 

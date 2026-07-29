@@ -121,6 +121,56 @@ test('isolated Provider skill configuration refreshes after the shared allowlist
     assert.equal(refreshed.compat.cursor.skills, true);
 });
 
+test('MCP enable switches persist without deleting the server configuration', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-mcp-toggle-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const { registry, sharedHome } = isolatedRegistry(directory);
+    const workspace = path.join(directory, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    registry.atomicWrite = ProviderRegistry.prototype.atomicWrite;
+    fs.writeFileSync(registry.grokConfigPath, [
+        '# keep this comment',
+        '[mcp_servers.alpha]',
+        'command = "node"',
+        'args = ["alpha.js"]',
+        ''
+    ].join('\n'));
+
+    registry.updateMcpEnabled(workspace, 'alpha', false, 'user');
+    let parsed = parseToml(fs.readFileSync(path.join(sharedHome, 'config.toml'), 'utf8'));
+    assert.deepEqual(parsed.disabled_mcp_servers, ['alpha']);
+    assert.equal(parsed.mcp_servers.alpha.command, 'node');
+    assert.match(fs.readFileSync(path.join(sharedHome, 'config.toml'), 'utf8'), /keep this comment/);
+
+    registry.updateMcpEnabled(workspace, 'alpha', true, 'user');
+    parsed = parseToml(fs.readFileSync(path.join(sharedHome, 'config.toml'), 'utf8'));
+    assert.deepEqual(parsed.disabled_mcp_servers, []);
+    assert.equal(parsed.mcp_servers.alpha.command, 'node');
+});
+
+test('Skill switches preserve adjacent TOML tables and can complete a full cycle', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-skill-toggle-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const { registry } = isolatedRegistry(directory);
+    registry.lockPath = path.join(directory, '.skills.lock');
+    registry.refreshCustomProviderSkillViews = () => undefined;
+    fs.writeFileSync(registry.grokConfigPath, [
+        '[skills]',
+        'paths = []',
+        'disabled = []',
+        '[mcp_servers.fixture]',
+        'command = "node"',
+        ''
+    ].join('\n'));
+
+    registry.updateSkills('disable', 'check-work');
+    assert.deepEqual(parseToml(fs.readFileSync(registry.grokConfigPath, 'utf8')).skills.disabled, ['check-work']);
+    registry.updateSkills('enable', 'check-work');
+    const restored = parseToml(fs.readFileSync(registry.grokConfigPath, 'utf8'));
+    assert.deepEqual(restored.skills.disabled, []);
+    assert.equal(restored.mcp_servers.fixture.command, 'node');
+});
+
 test('isolated Provider homes reject existing external links and real extension directories without replacing them', t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-skill-links-'));
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

@@ -76,6 +76,12 @@ test('project MCP entries replace user entries and disabled servers are omitted'
     }]);
     assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
     assert.deepEqual(result.configuredNames, ['disable-me', 'locally-off', 'shared', 'user-only']);
+    assert.deepEqual(result.configuredServers, [
+        { name: 'disable-me', scope: 'project', enabled: false },
+        { name: 'locally-off', scope: 'project', enabled: false },
+        { name: 'shared', scope: 'project', enabled: true },
+        { name: 'user-only', scope: 'user', enabled: true }
+    ]);
     assert.deepEqual(result.enabledNames, ['shared', 'user-only']);
     assert.deepEqual(new Set(result.redactionValues), new Set([
         '/opt/node',
@@ -115,6 +121,11 @@ test('top-level disabled_mcp_servers is honored across user and project sources'
 
     const result = files.registry.resolve(files.workspace, {});
     assert.deepEqual(result.configuredNames, ['enabled', 'global-off', 'project-off']);
+    assert.deepEqual(result.configuredServers, [
+        { name: 'enabled', scope: 'user', enabled: true },
+        { name: 'global-off', scope: 'project', enabled: false },
+        { name: 'project-off', scope: 'user', enabled: false }
+    ]);
     assert.deepEqual(result.enabledNames, ['enabled']);
     assert.deepEqual(result.mcpServers, [{ name: 'enabled', command: 'node', args: [], env: [] }]);
 });
@@ -246,36 +257,34 @@ test('a project override is a complete replacement rather than a field merge', t
         'enabled = true'
     ].join('\n'));
 
-    assert.throws(
-        () => files.registry.resolve(files.workspace, {}),
-        /must define exactly one of command or url/
-    );
+    const result = files.registry.resolve(files.workspace, {});
+    assert.deepEqual(result.mcpServers, []);
+    assert.equal(result.issues[0].code, 'invalid-configuration');
+    assert.match(result.issues[0].message, /must define exactly one of command or url/);
 });
 
-test('missing environment values and malformed templates fail closed without leaking values', t => {
+test('missing environment values and malformed templates isolate the server without leaking values', t => {
     const files = fixture(t);
     files.user([
         '[mcp_servers.secure]',
         'url = "https://mcp.example.test/mcp"',
         'headers = { Authorization = "Bearer ${MISSING_TOKEN}" }'
     ].join('\n'));
-    assert.throws(
-        () => files.registry.resolve(files.workspace, {}),
-        /requires environment variable MISSING_TOKEN/
-    );
+    const missing = files.registry.resolve(files.workspace, {});
+    assert.deepEqual(missing.mcpServers, []);
+    assert.deepEqual(missing.configuredServers, [{ name: 'secure', scope: 'user', enabled: true }]);
+    assert.equal(missing.issues[0].code, 'missing-environment');
+    assert.match(missing.issues[0].message, /MISSING_TOKEN/);
 
     files.user([
         '[mcp_servers.secure]',
         'command = "${lowercase_is_rejected}"'
     ].join('\n'));
-    assert.throws(
-        () => files.registry.resolve(files.workspace, { lowercase_is_rejected: 'do-not-leak' }),
-        error => {
-            assert.doesNotMatch(error.message, /do-not-leak/);
-            assert.match(error.message, /invalid environment template/);
-            return true;
-        }
-    );
+    const malformed = files.registry.resolve(files.workspace, { lowercase_is_rejected: 'do-not-leak' });
+    assert.deepEqual(malformed.mcpServers, []);
+    assert.equal(malformed.issues[0].code, 'invalid-configuration');
+    assert.doesNotMatch(malformed.issues[0].message, /do-not-leak/);
+    assert.match(malformed.issues[0].message, /invalid environment template/);
 });
 
 test('invalid names, endpoints, headers, commands, and bearer conflicts are rejected safely', async t => {
@@ -327,14 +336,15 @@ test('invalid names, endpoints, headers, commands, and bearer conflicts are reje
     for (const entry of cases) {
         await t.test(entry.name, () => {
             files.user(entry.source);
-            assert.throws(
-                () => files.registry.resolve(files.workspace, entry.environment),
-                error => {
-                    assert.match(error.message, entry.pattern);
-                    if (entry.absent) assert.doesNotMatch(error.message, entry.absent);
-                    return true;
-                }
-            );
+            if (entry.name === 'unsafe server name') {
+                assert.throws(() => files.registry.resolve(files.workspace, entry.environment), entry.pattern);
+                return;
+            }
+            const result = files.registry.resolve(files.workspace, entry.environment);
+            assert.deepEqual(result.mcpServers, []);
+            assert.equal(result.issues[0].code, 'invalid-configuration');
+            assert.match(result.issues[0].message, entry.pattern);
+            if (entry.absent) assert.doesNotMatch(result.issues[0].message, entry.absent);
         });
     }
 });
@@ -348,7 +358,7 @@ test('registry validates roots and bounds config input before parsing', t => {
     assert.throws(() => bounded.resolve(files.workspace, {}), /too large/);
 });
 
-test('resolved redaction values are bounded and overflow errors do not reveal a value', t => {
+test('resolved redaction values are bounded and overflow isolates only the overflowing server', t => {
     const files = fixture(t);
     const lines = [];
     const environment = {};
@@ -364,14 +374,11 @@ test('resolved redaction values are bounded and overflow errors do not reveal a 
     }
     files.user(lines.join('\n'));
 
-    assert.throws(
-        () => files.registry.resolve(files.workspace, environment),
-        error => {
-            assert.match(error.message, /redaction set is too large/);
-            assert.doesNotMatch(error.message, /ssssssssssssssss/);
-            return true;
-        }
-    );
+    const result = files.registry.resolve(files.workspace, environment);
+    assert.equal(result.mcpServers.length, 32);
+    assert.equal(result.issues.length, 1);
+    assert.equal(result.issues[0].code, 'invalid-configuration');
+    assert.doesNotMatch(result.issues[0].message, /ssssssssssssssss/);
 });
 
 function createSymlinkOrSkip(t, target, link, type) {
@@ -460,11 +467,11 @@ test('remote MCP transport permits plaintext only for strict loopback without cr
     for (const entry of invalid) {
         await t.test(entry.name, () => {
             files.user(entry.source);
-            assert.throws(() => files.registry.resolve(files.workspace, entry.environment), error => {
-                assert.match(error.message, entry.pattern);
-                if (entry.absent) assert.doesNotMatch(error.message, entry.absent);
-                return true;
-            });
+            const result = files.registry.resolve(files.workspace, entry.environment);
+            assert.deepEqual(result.mcpServers, []);
+            assert.equal(result.issues[0].code, 'invalid-configuration');
+            assert.match(result.issues[0].message, entry.pattern);
+            if (entry.absent) assert.doesNotMatch(result.issues[0].message, entry.absent);
         });
     }
 
@@ -481,7 +488,7 @@ test('remote MCP transport permits plaintext only for strict loopback without cr
     assert.deepEqual(allowed.enabledNames, ['ipv4', 'ipv6']);
 });
 
-test('stdio command and arguments reject literal credentials but allow environment templates', async t => {
+test('stdio literal credentials follow explicit user configuration, are redacted, and emit a warning', async t => {
     const files = fixture(t);
     const secret = 'literal-secret-that-must-not-leak';
     const invalid = [{
@@ -510,11 +517,12 @@ test('stdio command and arguments reject literal credentials but allow environme
     for (const entry of invalid) {
         await t.test(entry.name, () => {
             files.user(entry.source);
-            assert.throws(() => files.registry.resolve(files.workspace, {}), error => {
-                assert.match(error.message, /must reference credentials through an environment template/);
-                assert.doesNotMatch(error.message, new RegExp(secret));
-                return true;
-            });
+            const result = files.registry.resolve(files.workspace, {});
+            assert.equal(result.mcpServers.length, 1);
+            assert.equal(result.issues[0].code, 'literal-credential');
+            assert.equal(result.issues[0].severity, 'warning');
+            assert.doesNotMatch(result.issues[0].message, new RegExp(secret));
+            assert.ok(result.redactionValues.length > 0);
         });
     }
 
@@ -534,4 +542,25 @@ test('stdio command and arguments reject literal credentials but allow environme
         args: ['--api-key', 'template-only-secret', '--endpoint', 'https://example.test/mcp?version=1'],
         env: [{ name: 'MCP_TOKEN', value: 'template-only-secret' }]
     }]);
+    assert.deepEqual(allowed.issues, []);
+});
+
+test('one invalid MCP never blocks healthy servers or Agent session descriptors', t => {
+    const files = fixture(t);
+    files.user([
+        '[mcp_servers.healthy]',
+        'command = "node"',
+        'args = ["healthy.js"]',
+        '',
+        '[mcp_servers.ssh-mcp-server]',
+        'command = "ssh-mcp-server"',
+        'args = ["--password", "${SSH_MCP_PASSWORD}"]'
+    ].join('\n'));
+
+    const result = files.registry.resolve(files.workspace, {});
+    assert.deepEqual(result.mcpServers, [{ name: 'healthy', command: 'node', args: ['healthy.js'], env: [] }]);
+    assert.deepEqual(result.enabledNames, ['healthy']);
+    assert.deepEqual(result.configuredNames, ['healthy', 'ssh-mcp-server']);
+    assert.equal(result.issues[0].name, 'ssh-mcp-server');
+    assert.equal(result.issues[0].code, 'missing-environment');
 });

@@ -100,10 +100,10 @@ test('legacy, changed-config, and cross-server MCP credential bindings fail clos
         ''
     ].join('\n'));
     assert.deepEqual(files.runtime.credentialEnvironment(files.workspace, bindings), {});
-    assert.throws(
-        () => files.runtime.resolve(files.workspace, {}, bindings),
-        /requires environment variable ALPHA_TOKEN/
-    );
+    const changed = files.runtime.resolve(files.workspace, {}, bindings);
+    assert.deepEqual(changed.mcpServers, []);
+    assert.equal(changed.issues[0].code, 'missing-environment');
+    assert.match(changed.issues[0].message, /ALPHA_TOKEN/);
 
     fs.writeFileSync(files.providers.grokConfigPath, [
         '[mcp_servers.beta]',
@@ -114,11 +114,9 @@ test('legacy, changed-config, and cross-server MCP credential bindings fail clos
         'ALPHA_TOKEN = "${ALPHA_TOKEN}"',
         ''
     ].join('\n'));
-    assert.throws(
-        () => files.runtime.resolve(files.workspace, {}, bindings),
-        /requires environment variable ALPHA_TOKEN/,
-        'a credential bound to alpha must never satisfy beta'
-    );
+    const crossServer = files.runtime.resolve(files.workspace, {}, bindings);
+    assert.deepEqual(crossServer.mcpServers, [], 'a credential bound to alpha must never satisfy beta');
+    assert.equal(crossServer.issues[0].code, 'missing-environment');
 
     fs.writeFileSync(files.providers.mcpCredentialPath, JSON.stringify({
         schemaVersion: 1,

@@ -86,6 +86,33 @@ test('management data loads on first reveal and coalesces duplicate refreshes', 
     assert.match(source, /onActivateRequest[\s\S]*void this\.refresh\(\)/);
 });
 
+test('Skills and MCP cards expose persistent per-item enable switches', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
+    const toggleStart = source.indexOf('protected async toggleIntegration');
+    const toggleEnd = source.indexOf('\n    protected async', toggleStart + 1);
+    const toggleSource = source.slice(toggleStart, toggleEnd);
+
+    assert.match(source, /role='switch'/);
+    assert.match(source, /toggleIntegration\('skills', name, enabled\)/);
+    assert.match(source, /toggleIntegration\('mcp', name, enabled, managementScope\(scope\)\)/);
+    assert.match(source, /this\.service\.manage\(\{ area, action, name/);
+    assert.match(source, /pendingIntegrations/);
+    assert.match(source, /sortedIntegrationEntries/);
+    assert.match(source, /installedIntegrationEntries/);
+    assert.match(source, /foundPrimaryContainer/);
+    assert.match(source, /entries\.length === 0 && foundPrimaryContainer/);
+    assert.match(source, /\['configured'\]\)\) === true/);
+    assert.match(source, /renderCompactSummary/);
+    const skillEntry = source.slice(source.indexOf('protected renderSkillEntry'), source.indexOf('protected renderMcpEntry'));
+    const mcpEntry = source.slice(source.indexOf('protected renderMcpEntry'), source.indexOf('protected renderPluginEntry'));
+    assert.doesNotMatch(skillEntry, /<details|renderFields|renderRawDetails/);
+    assert.doesNotMatch(mcpEntry, /<details|renderFields|renderRawDetails/);
+    assert.doesNotMatch(toggleSource, /this\.loading\s*=\s*true/);
+    assert.doesNotMatch(toggleSource, /await this\.refresh\(\)/);
+    assert.match(source, /添加或移除技能扫描路径/);
+    assert.doesNotMatch(source, /<option value='disable'>禁用 Skill<\/option>/);
+});
+
 test('built-in xAI settings are absent while custom API configuration remains complete', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
     assert.match(source, /visibleProviders = this\.providers\.filter\(provider => provider\.kind !== 'xai-api-key'\)/);

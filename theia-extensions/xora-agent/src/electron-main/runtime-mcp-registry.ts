@@ -62,6 +62,16 @@ export interface AcpV1SseMcpServer {
 
 export type AcpV1McpServer = AcpV1StdioMcpServer | AcpV1HttpMcpServer | AcpV1SseMcpServer;
 
+/** Renderer-safe explanation for one canonical MCP entry that was degraded. */
+export interface RuntimeMcpIssue {
+    name: string;
+    scope: McpConfigurationScope;
+    severity: 'warning' | 'error';
+    code: 'literal-credential' | 'missing-environment' | 'invalid-configuration';
+    /** This text never contains the configured argument or resolved secret. */
+    message: string;
+}
+
 /** Electron-main-only credential material. It must never cross renderer IPC. */
 export interface RuntimeMcpCredentialBinding {
     /** realpath-normalized workspace root captured when the credential was saved */
@@ -84,12 +94,25 @@ export interface RuntimeMcpSnapshot {
     fingerprint: string;
     /** Renderer-safe names after user/project merge, including disabled entries. */
     configuredNames: string[];
+    /**
+     * Renderer-safe user intent, kept separate from runtime resolution.
+     * A configured server can remain enabled here while a missing environment
+     * variable prevents it from contributing an ACP descriptor.
+     */
+    configuredServers: Array<{
+        name: string;
+        scope: McpConfigurationScope;
+        enabled: boolean;
+    }>;
     /** Renderer-safe names that contributed an ACP runtime descriptor. */
     enabledNames: string[];
+    /** Per-server failures never abort Agent startup or another healthy MCP. */
+    issues: RuntimeMcpIssue[];
     /**
      * Privileged exact values that must be registered with every Electron-main
      * log/event redactor before `mcpServers` are sent to ACP. This includes
-     * resolved environment templates plus all stdio env/header/bearer values.
+     * resolved environment templates, explicitly configured literal
+     * credentials, and all stdio env/header/bearer values.
      * It must never cross the AgentHost RPC boundary.
      */
     redactionValues: string[];
@@ -146,23 +169,40 @@ export class RuntimeMcpRegistry {
         const root = this.workspaceRoot(workspaceRoot);
         const { configured, disabledNames } = this.effectiveConfiguration(root);
         const configuredNames = configured.map(server => server.name);
+        const configuredServers = configured.map(server => ({
+            name: server.name,
+            scope: server.scope,
+            enabled: !disabledNames.has(server.name) && configuredServerEnabled(server)
+        }));
+        const selectedNames = new Set(configuredServers.filter(server => server.enabled).map(server => server.name));
         const redactions = new RedactionValueCollector();
+        const issues: RuntimeMcpIssue[] = [];
         const mcpServers = configured
-            .filter(server => !disabledNames.has(server.name))
-            .flatMap(server => this.resolveServer(
-                server,
-                this.serverEnvironment(root, server, environment, credentials),
-                redactions
-            ));
+            .filter(server => selectedNames.has(server.name))
+            .flatMap(server => {
+                try {
+                    return this.resolveServer(
+                        server,
+                        this.serverEnvironment(root, server, environment, credentials),
+                        redactions,
+                        issues
+                    );
+                } catch (error) {
+                    issues.push(runtimeMcpIssue(server, error));
+                    return [];
+                }
+            });
         const enabledNames = mcpServers.map(server => server.name);
         const fingerprint = crypto.createHash('sha256')
-            .update(JSON.stringify(mcpServers))
+            .update(JSON.stringify({ mcpServers, issues }))
             .digest('hex');
         return {
             mcpServers,
             fingerprint,
             configuredNames,
+            configuredServers,
             enabledNames,
+            issues,
             redactionValues: redactions.values()
         };
     }
@@ -368,7 +408,8 @@ export class RuntimeMcpRegistry {
     protected resolveServer(
         server: RawMcpServer,
         environment: NodeJS.ProcessEnv,
-        redactions: RedactionValueCollector
+        redactions: RedactionValueCollector,
+        issues: RuntimeMcpIssue[]
     ): AcpV1McpServer[] {
         const enabled = optionalBoolean(server, 'enabled');
         const disabled = optionalBoolean(server, 'disabled');
@@ -381,7 +422,7 @@ export class RuntimeMcpRegistry {
         }
         const transport = this.transport(server, command !== undefined, url !== undefined);
         if (transport === 'stdio') {
-            return [this.resolveStdio(server, command!, environment, redactions)];
+            return [this.resolveStdio(server, command!, environment, redactions, issues)];
         }
         return [this.resolveRemote(server, transport, url!, environment, redactions)];
     }
@@ -413,14 +454,16 @@ export class RuntimeMcpRegistry {
         server: RawMcpServer,
         rawCommand: string,
         environment: NodeJS.ProcessEnv,
-        redactions: RedactionValueCollector
+        redactions: RedactionValueCollector,
+        issues: RuntimeMcpIssue[]
     ): AcpV1StdioMcpServer {
-        rejectLiteralCredential(rawCommand, undefined, server, 'command');
+        let containsLiteralCredential = collectLiteralCredentials(rawCommand, undefined, redactions);
         const command = expandTemplate(rawCommand, environment, server, 'command', redactions);
         validateRuntimeString(command, MAX_COMMAND_BYTES, server, 'command', false, true);
         const rawArgs = optionalStringArray(server, 'args');
         const args = rawArgs.map((value, index) => {
-            rejectLiteralCredential(value, rawArgs[index + 1], server, 'argument');
+            containsLiteralCredential = collectLiteralCredentials(value, rawArgs[index + 1], redactions)
+                || containsLiteralCredential;
             const expanded = expandTemplate(value, environment, server, 'argument', redactions);
             validateRuntimeString(expanded, MAX_VALUE_BYTES, server, 'argument', true);
             return expanded;
@@ -436,6 +479,15 @@ export class RuntimeMcpRegistry {
         });
         if (server.value.bearer_token_env_var !== undefined) {
             throw serverError(server.scope, server.name, 'cannot use bearer_token_env_var with stdio');
+        }
+        if (containsLiteralCredential) {
+            issues.push({
+                name: server.name,
+                scope: server.scope,
+                severity: 'warning',
+                code: 'literal-credential',
+                message: '参数中包含用户明确配置的明文凭据；已按配置加载并启用日志脱敏，建议改用环境变量或凭据保管库。'
+            });
         }
         return { name: server.name, command, args, env };
     }
@@ -529,6 +581,18 @@ function optionalBoolean(server: RawMcpServer, key: string): boolean | undefined
     return value;
 }
 
+function configuredServerEnabled(server: RawMcpServer): boolean {
+    try {
+        return optionalBoolean(server, 'enabled') !== false
+            && optionalBoolean(server, 'disabled') !== true;
+    } catch {
+        // Invalid values are still user-enabled configuration. Resolution will
+        // isolate the server and expose its remediation issue without making
+        // the settings switch incorrectly look disabled.
+        return true;
+    }
+}
+
 function optionalString(server: RawMcpServer, key: string): string | undefined {
     const value = server.value[key];
     if (value === undefined) return undefined;
@@ -602,29 +666,66 @@ function expandTemplate(
     return expanded;
 }
 
-function rejectLiteralCredential(
+function collectLiteralCredentials(
     value: string,
     nextValue: string | undefined,
-    server: RawMcpServer,
-    field: string
-): void {
+    redactions: RedactionValueCollector
+): boolean {
     ENVIRONMENT_TEMPLATE.lastIndex = 0;
     const literal = value.replace(ENVIRONMENT_TEMPLATE, '');
     ENVIRONMENT_TEMPLATE.lastIndex = 0;
     const assignment = CREDENTIAL_OPTION_ASSIGNMENT.exec(literal)?.[1]
         ?? CREDENTIAL_OPTION_PAIR.exec(literal)?.[1]
         ?? CREDENTIAL_ENV_ASSIGNMENT.exec(literal)?.[1];
-    if ((assignment && assignment.length > 0) || CREDENTIAL_TOKEN_LITERAL.test(literal)
-        || containsCredentialQuery(literal)) {
-        throw serverError(server.scope, server.name, `${field} must reference credentials through an environment template`);
+    let found = false;
+    if (assignment) {
+        redactions.add(assignment);
+        found = true;
+    }
+    const tokenMatch = CREDENTIAL_TOKEN_LITERAL.exec(literal);
+    if (tokenMatch) {
+        const token = /^bearer\s+/i.test(tokenMatch[0]) ? tokenMatch[0].replace(/^bearer\s+/i, '') : tokenMatch[0];
+        redactions.add(token);
+        redactions.add(tokenMatch[0]);
+        found = true;
+    }
+    for (const secret of credentialQueryValues(literal)) {
+        redactions.add(secret);
+        found = true;
     }
     if (CREDENTIAL_OPTION_NAME.test(value.trim()) && nextValue !== undefined) {
         ENVIRONMENT_TEMPLATE.lastIndex = 0;
         const nextContainsTemplate = ENVIRONMENT_TEMPLATE.test(nextValue);
         ENVIRONMENT_TEMPLATE.lastIndex = 0;
         if (!nextContainsTemplate) {
-            throw serverError(server.scope, server.name, `${field} must reference credentials through an environment template`);
+            redactions.add(nextValue);
+            found = true;
         }
+    }
+    return found;
+}
+
+function credentialQueryValues(value: string): string[] {
+    const queryStart = value.indexOf('?');
+    if (queryStart < 0) return [];
+    try {
+        const parsed = new URL(value);
+        return [...parsed.searchParams.entries()]
+            .filter(([name]) => isCredentialName(name))
+            .map(([, secret]) => secret)
+            .filter(Boolean);
+    } catch {
+        return value.slice(queryStart + 1).split('&').flatMap(part => {
+            const separator = part.indexOf('=');
+            if (separator < 0) return [];
+            try {
+                const name = decodeURIComponent(part.slice(0, separator).replace(/\+/g, ' '));
+                const secret = decodeURIComponent(part.slice(separator + 1).replace(/\+/g, ' '));
+                return isCredentialName(name) && secret ? [secret] : [];
+            } catch {
+                return [];
+            }
+        });
     }
 }
 
@@ -764,7 +865,41 @@ function validateRuntimeString(
 }
 
 function serverError(scope: McpConfigurationScope, name: string, detail: string): Error {
-    return new Error(`Invalid ${scope} MCP server "${name}": ${detail}.`);
+    return new RuntimeMcpServerError(scope, name, detail);
+}
+
+class RuntimeMcpServerError extends Error {
+    constructor(
+        readonly scope: McpConfigurationScope,
+        readonly serverName: string,
+        readonly detail: string
+    ) {
+        super(`Invalid ${scope} MCP server "${serverName}": ${detail}.`);
+        this.name = 'RuntimeMcpServerError';
+    }
+}
+
+function runtimeMcpIssue(server: RawMcpServer, error: unknown): RuntimeMcpIssue {
+    const detail = error instanceof RuntimeMcpServerError ? error.detail : undefined;
+    const missingEnvironment = detail?.match(/requires environment variable ([A-Z][A-Z0-9_]*)$/)?.[1];
+    if (missingEnvironment) {
+        return {
+            name: server.name,
+            scope: server.scope,
+            severity: 'error',
+            code: 'missing-environment',
+            message: `缺少环境变量 ${missingEnvironment}；当前会话已跳过该 MCP，Agent 与其他服务可继续使用。`
+        };
+    }
+    return {
+        name: server.name,
+        scope: server.scope,
+        severity: 'error',
+        code: 'invalid-configuration',
+        message: detail
+            ? `配置无法加载（${detail}）；当前会话已跳过该 MCP，Agent 与其他服务可继续使用。`
+            : '配置无法安全加载；当前会话已跳过该 MCP，Agent 与其他服务可继续使用。'
+    };
 }
 
 function compareText(left: string, right: string): number {

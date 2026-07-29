@@ -1,10 +1,8 @@
 import * as React from '@theia/core/shared/react';
-import { open, OpenerService, ReactWidget } from '@theia/core/lib/browser';
+import { ReactWidget } from '@theia/core/lib/browser';
 import { MessageService } from '@theia/core/lib/common';
 import { Message } from '@theia/core/shared/@lumino/messaging';
-import URI from '@theia/core/lib/common/uri';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { URI as VSCodeURI } from '@theia/core/shared/vscode-uri';
 import { AgentHostService, ComponentUpdateStatus, ManagementRequest, ManagementResult, ProviderProfile, ProviderProtocol, RuntimeSnapshot } from '../common/agent-protocol';
 import {
     AGENT_CODE_HIGHLIGHT_STYLES,
@@ -47,6 +45,7 @@ const CONTAINER_KEYS: Record<Exclude<ManagementTab, 'providers'>, ReadonlySet<st
 const GENERIC_CONTAINER_KEYS = new Set(['data', 'entries', 'items', 'list', 'result', 'results', 'values']);
 const NESTED_METADATA_KEYS = new Set(['config', 'configuration', 'details', 'health', 'metadata', 'origin', 'spec']);
 const CONTAINER_METADATA_KEYS = new Set(['count', 'cursor', 'errors', 'message', 'next', 'page', 'schema', 'schemaversion', 'success', 'total', 'warnings']);
+const MANAGEMENT_ENTRY_COLLATOR = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
 
 function isJsonObject(value: unknown): value is JsonObject {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -132,6 +131,11 @@ function enabledValue(value: unknown): boolean | undefined {
     return booleanValue(fieldValue(value, ['status', 'state']));
 }
 
+function managementScope(value: string | undefined): ManagementRequest['scope'] {
+    const normalized = value?.trim().toLowerCase();
+    return normalized === 'project' || normalized === '项目' ? 'project' : 'user';
+}
+
 function looksLikeEntry(tab: Exclude<ManagementTab, 'providers'>, value: unknown): boolean {
     if (!isJsonObject(value)) return false;
     const specificName = tab === 'mcp' ? 'serverName' : `${tab.slice(0, -1)}Name`;
@@ -151,6 +155,7 @@ function extractEntries(data: unknown, tab: Exclude<ManagementTab, 'providers'>)
     const entries: ManagementEntry[] = [];
     const seenObjects = new Set<object>();
     const visited = new Set<object>();
+    let foundPrimaryContainer = false;
 
     const add = (value: unknown, nameHint?: string): void => {
         if (value === undefined || value === null) return;
@@ -194,7 +199,9 @@ function extractEntries(data: unknown, tab: Exclude<ManagementTab, 'providers'>)
         }
         for (const [key, child] of Object.entries(value)) {
             const normalized = normalizedKey(key);
-            const isContainer = CONTAINER_KEYS[tab].has(normalized) || (includeGeneric && depth <= 1 && GENERIC_CONTAINER_KEYS.has(normalized));
+            const isPrimaryContainer = CONTAINER_KEYS[tab].has(normalized);
+            if (isPrimaryContainer) foundPrimaryContainer = true;
+            const isContainer = isPrimaryContainer || (includeGeneric && depth <= 1 && GENERIC_CONTAINER_KEYS.has(normalized));
             if (isContainer && child !== null && typeof child === 'object') {
                 addContainer(child);
             }
@@ -206,6 +213,9 @@ function extractEntries(data: unknown, tab: Exclude<ManagementTab, 'providers'>)
         addContainer(data);
     } else {
         visit(data, 0, false);
+        // An empty, explicit `skills`/`mcpServers` container is a valid empty
+        // inventory. Do not reinterpret top-level inspect metadata as cards.
+        if (entries.length === 0 && foundPrimaryContainer) return entries;
         if (entries.length === 0 && looksLikeEntry(tab, data)) add(data);
         if (entries.length === 0) {
             visited.clear();
@@ -238,41 +248,6 @@ function isMcpOverview(data: unknown): boolean {
         && Array.isArray(data.mcpServers) && isJsonObject(data.sources);
 }
 
-function mcpStatusLabel(value: unknown, enabled: boolean | undefined): string | undefined {
-    const normalized = stringValue(value)?.toLowerCase();
-    switch (normalized) {
-        case 'healthy': case 'connected': case 'ready': return '连接正常';
-        case 'unhealthy': case 'disconnected': case 'failed': case 'error': return '连接异常';
-        case 'enabled': case 'active': return '已启用';
-        case 'disabled': case 'inactive': return '已禁用';
-        case 'unknown': return enabled === undefined ? '尚未诊断' : enabled ? '已启用，尚未诊断' : '已禁用';
-        default: return displayValue(value) ?? (enabled === undefined ? undefined : enabled ? '已启用' : '已禁用');
-    }
-}
-
-function mcpDiagnosticLabel(value: unknown): string | undefined {
-    switch (stringValue(value)?.toLowerCase()) {
-        case 'healthy': return '诊断正常';
-        case 'unhealthy': return '诊断异常';
-        case 'unknown': return '诊断结果未知';
-        case 'not-run': return '尚未诊断';
-        default: return displayValue(value);
-    }
-}
-
-function mcpRuntimeLabel(value: unknown): string | undefined {
-    switch (stringValue(value)?.toLowerCase()) {
-        case 'loaded': return '当前会话已加载';
-        case 'disabled': return '当前会话已停用';
-        case 'initializing': return '正在连接';
-        case 'setup-required': return '需要完成设置或认证';
-        case 'unavailable': return '当前会话不可用';
-        case 'reload-required': return '配置已变化，等待安全刷新';
-        case 'not-loaded': return '当前会话未加载';
-        default: return displayValue(value);
-    }
-}
-
 @injectable()
 export class AgentManagementWidget extends ReactWidget {
     static readonly ID = 'xora-code-agent-management';
@@ -283,9 +258,6 @@ export class AgentManagementWidget extends ReactWidget {
 
     @inject(MessageService)
     protected readonly messages!: MessageService;
-
-    @inject(OpenerService)
-    protected readonly openerService!: OpenerService;
 
     protected tab: ManagementTab = 'providers';
     protected providers: ProviderProfile[] = [];
@@ -301,6 +273,8 @@ export class AgentManagementWidget extends ReactWidget {
     protected lastKnownGrokSubscriptionAuth: Exclude<GrokSubscriptionAuthStatus, 'unknown'> | undefined;
     protected refreshGeneration = 0;
     protected refreshInFlight: { tab: ManagementTab; promise: Promise<void> } | undefined;
+    /** Per-row state keeps one integration update from blanking or locking the whole page. */
+    protected readonly pendingIntegrations = new Set<string>();
 
     @postConstruct()
     protected init(): void {
@@ -400,8 +374,8 @@ export class AgentManagementWidget extends ReactWidget {
     protected description(): string {
         switch (this.tab) {
             case 'providers': return '选择 Agent 当前使用的服务，登录 Grok 订阅，或配置 API 地址、密钥和模型。密钥不会写入 Theia 设置。';
-            case 'skills': return '查看并管理 Grok 配置和当前项目最终生效的技能。';
-            case 'mcp': return '统一管理 Xora MCP 配置，并分别查看发现来源、连接诊断和当前会话加载状态。已配置且启用的服务可在 Agent 菜单中选择，首次发送时会自动加载。';
+            case 'skills': return '查看当前可用技能，并用每项右侧的开关直接启用或禁用；选择会自动保存并同步到当前 Agent。';
+            case 'mcp': return '统一管理 Xora MCP 配置。每项可独立启用或禁用；只有配置可用、已启用且成功加载的服务才会出现在 Agent 菜单。';
             case 'plugins': return '管理已安装的插件和插件市场；可执行来源需要明确授权。';
         }
     }
@@ -582,14 +556,16 @@ export class AgentManagementWidget extends ReactWidget {
             return <div className='xora-card xora-message-error'>{this.result.error}</div>;
         }
         if (this.tab === 'providers') return undefined;
-        const entries = extractEntries(this.result.data, this.tab);
-        const warnings = managementWarnings(this.result.data);
+        const entries = this.sortedIntegrationEntries(this.installedIntegrationEntries(
+            extractEntries(this.result.data, this.tab), this.tab
+        ), this.tab);
+        const warnings = this.tab === 'plugins' ? managementWarnings(this.result.data) : [];
         if (entries.length === 0) {
             return <>
                 {warnings.map((warning, index) => <div key={`warning-${index}`} className='xora-card xora-message-warning'>{warning}</div>)}
                 <div className='xora-card xora-management-empty'>
-                    <p>当前没有发现 {managementTabLabel(this.tab)} 项目。</p>
-                    {this.result.data !== undefined && !isMcpOverview(this.result.data)
+                    <p>当前没有已安装的 {managementTabLabel(this.tab)} 项目。</p>
+                    {this.tab === 'plugins' && this.result.data !== undefined && !isMcpOverview(this.result.data)
                         ? this.renderRawDetails(this.result.data, '原始响应')
                         : undefined}
                 </div>
@@ -599,7 +575,7 @@ export class AgentManagementWidget extends ReactWidget {
             {warnings.map((warning, index) => <div key={`warning-${index}`} className='xora-card xora-message-warning'>{warning}</div>)}
             <div className='xora-integration-list'>
                 {entries.map((entry, index) => this.renderIntegrationEntry(entry, index))}
-                {this.shouldShowResponseFallback(this.result.data, entries) && !isMcpOverview(this.result.data)
+                {this.tab === 'plugins' && this.shouldShowResponseFallback(this.result.data, entries) && !isMcpOverview(this.result.data)
                     ? this.renderRawDetails(this.result.data, '完整响应', 'xora-response-fallback')
                     : undefined}
             </div>
@@ -618,34 +594,27 @@ export class AgentManagementWidget extends ReactWidget {
     protected renderSkillEntry(entry: ManagementEntry, index: number): React.ReactNode {
         const name = this.entryName(entry, 'Skill', index);
         const rawSource = fieldValue(entry.value, ['source', 'origin', 'provider', 'repository', 'from']);
-        const source = displayValue(rawSource);
-        const path = stringValue(fieldValue(entry.value, ['path', 'skillPath', 'directory', 'dir', 'location', 'manifestPath', 'skillMd', 'skillFile', 'file']))
-            ?? stringValue(fieldValue(rawSource, ['path', 'skillPath', 'file']))
-            ?? (entry.nameHint ? stringValue(entry.value) : undefined);
-        const scope = displayValue(fieldValue(entry.value, ['scope', 'level', 'visibility']))
-            ?? displayValue(fieldValue(rawSource, ['scope', 'type']));
         const explicitEnabled = enabledValue(entry.value);
         const enabled = explicitEnabled ?? (isJsonObject(entry.value) && rawSource !== undefined ? true : undefined);
-        const document = this.skillDocumentUri(path);
-        return <article key={`skill-${index}-${name}`} className='xora-card xora-integration-card'>
-            {this.renderEntryHeader(name, enabled)}
-            {this.renderFields([
-                ['来源', source],
-                ['路径', path],
-                ['作用域', scope]
-            ])}
-            {document ? <div className='xora-integration-actions'>
-                <button className='theia-button secondary' onClick={() => this.openSkillDocument(document, name)}>
-                    打开 SKILL.md
-                </button>
-            </div> : undefined}
-            {this.renderRawDetails(entry.value)}
+        const version = displayValue(fieldValue(entry.value, ['version', 'skillVersion', 'revision']));
+        const description = displayValue(fieldValue(entry.value, ['description', 'summary', 'title']));
+        const pendingKey = this.pendingIntegrationKey('skills', name);
+        const pending = this.pendingIntegrations.has(pendingKey);
+        return <article
+            key={this.integrationIdentity('skills', entry, index)}
+            className={`xora-card xora-integration-card ${pending ? 'pending' : ''}`}
+            aria-busy={pending}>
+            {this.renderEntryHeader(name, enabled, undefined, enabled === undefined ? undefined : {
+                disabled: pending,
+                pending,
+                onToggle: () => this.toggleIntegration('skills', name, enabled)
+            })}
+            {this.renderCompactSummary(version ? `v${version.replace(/^v/iu, '')}` : undefined, description)}
         </article>;
     }
 
     protected renderMcpEntry(entry: ManagementEntry, index: number): React.ReactNode {
         const name = this.entryName(entry, 'MCP 服务', index);
-        const transport = displayValue(fieldValue(entry.value, ['transport', 'transportType', 'protocol', 'type']));
         const rawSource = fieldValue(entry.value, ['configSource', 'source', 'origin']);
         const scope = displayValue(fieldValue(entry.value, ['scope', 'level']))
             ?? displayValue(fieldValue(rawSource, ['scope', 'type']))
@@ -655,36 +624,27 @@ export class AgentManagementWidget extends ReactWidget {
         const enabled = normalizedStatus === 'healthy' || normalizedStatus === 'unhealthy'
             ? booleanValue(fieldValue(entry.value, ['enabled', 'active', 'isEnabled']))
             : enabledValue(entry.value);
-        const status = mcpStatusLabel(statusValue, enabled);
-        const vendor = displayValue(fieldValue(entry.value, ['vendor', 'provider', 'originVendor']));
-        const source = displayValue(fieldValue(entry.value, ['url', 'command', 'target', 'endpoint']))
-            ?? (entry.nameHint ? stringValue(entry.value) : undefined);
         const configured = booleanValue(fieldValue(entry.value, ['configured']));
-        const importRequired = booleanValue(fieldValue(entry.value, ['importRequired']));
-        const callable = booleanValue(fieldValue(entry.value, ['callable']));
-        const selectable = booleanValue(fieldValue(entry.value, ['selectable']));
-        const diagnostic = mcpDiagnosticLabel(fieldValue(entry.value, ['diagnosticState']));
-        const runtime = mcpRuntimeLabel(fieldValue(entry.value, ['runtimeState']));
+        const configurationState = stringValue(fieldValue(entry.value, ['configurationState']));
+        const configurationMessage = displayValue(fieldValue(entry.value, ['configurationMessage']));
         const runtimeDetails = fieldValue(entry.value, ['runtime']);
         const toolCountValue = fieldValue(runtimeDetails, ['toolCount']);
-        const toolCount = typeof toolCountValue === 'number' ? `${toolCountValue} 个` : undefined;
-        return <article key={`mcp-${index}-${name}`} className='xora-card xora-integration-card'>
-            {this.renderEntryHeader(name, enabled)}
-            {this.renderFields([
-                ['发现状态', '已发现'],
-                ['Xora 配置', configured === true ? '已配置' : importRequired === true ? '待导入' : configured === false ? '未配置' : undefined],
-                ['连接诊断', diagnostic],
-                ['当前会话', runtime],
-                ['Agent 菜单', selectable === undefined ? undefined : selectable ? '可选择' : '不显示'],
-                ['Agent 可调用', callable === undefined ? undefined : callable ? '可以' : '不可以'],
-                ['已加载工具', toolCount],
-                ['传输方式', transport],
-                ['配置来源', vendor],
-                ['作用域', scope],
-                ['配置状态', status],
-                ['命令 / URL', source]
-            ])}
-            {this.renderRawDetails(entry.value)}
+        const toolCount = typeof toolCountValue === 'number' ? `${toolCountValue} 个工具` : undefined;
+        const version = displayValue(fieldValue(entry.value, ['version', 'serverVersion', 'revision']));
+        const description = displayValue(fieldValue(entry.value, ['description', 'summary', 'title']))
+            ?? (configurationState === 'unavailable' ? configurationMessage : undefined);
+        const pendingKey = this.pendingIntegrationKey('mcp', name);
+        const pending = this.pendingIntegrations.has(pendingKey);
+        return <article
+            key={this.integrationIdentity('mcp', entry, index)}
+            className={`xora-card xora-integration-card ${pending ? 'pending' : ''}`}
+            aria-busy={pending}>
+            {this.renderEntryHeader(name, enabled, undefined, configured === true && enabled !== undefined ? {
+                    disabled: pending,
+                    pending,
+                    onToggle: () => this.toggleIntegration('mcp', name, enabled, managementScope(scope))
+                } : undefined)}
+            {this.renderCompactSummary(version ? `v${version.replace(/^v/iu, '')}` : undefined, description, toolCount)}
         </article>;
     }
 
@@ -694,7 +654,7 @@ export class AgentManagementWidget extends ReactWidget {
             ?? (entry.nameHint ? stringValue(entry.value) : undefined);
         const source = displayValue(fieldValue(entry.value, ['marketplaceSource', 'source', 'origin', 'repository', 'repo', 'url', 'root', 'path']));
         const enabled = enabledValue(entry.value);
-        return <article key={`plugin-${index}-${name}`} className='xora-card xora-integration-card'>
+        return <article key={this.integrationIdentity('plugins', entry, index)} className='xora-card xora-integration-card'>
             {this.renderEntryHeader(name, enabled)}
             {this.renderFields([
                 ['版本', version],
@@ -711,12 +671,86 @@ export class AgentManagementWidget extends ReactWidget {
             ?? `${fallback} ${index + 1}`;
     }
 
-    protected renderEntryHeader(name: string, enabled?: boolean): React.ReactNode {
+    protected sortedIntegrationEntries(
+        entries: readonly ManagementEntry[],
+        tab: Exclude<ManagementTab, 'providers'>
+    ): ManagementEntry[] {
+        return entries.map((entry, index) => ({
+            entry,
+            index,
+            name: this.entryName(entry, managementTabLabel(tab), index),
+            identity: this.integrationIdentity(tab, entry, index)
+        })).sort((left, right) => MANAGEMENT_ENTRY_COLLATOR.compare(left.name, right.name)
+            || MANAGEMENT_ENTRY_COLLATOR.compare(left.identity, right.identity)
+            || left.index - right.index).map(value => value.entry);
+    }
+
+    protected installedIntegrationEntries(
+        entries: readonly ManagementEntry[],
+        tab: Exclude<ManagementTab, 'providers'>
+    ): ManagementEntry[] {
+        if (tab !== 'mcp') return [...entries];
+        // Schema-v2 separates compatibility discovery from Xora's canonical
+        // configuration. Only canonical entries belong in this install list;
+        // disabled installed entries remain visible so they can be re-enabled.
+        return entries.filter(entry => booleanValue(fieldValue(entry.value, ['configured'])) === true);
+    }
+
+    protected integrationIdentity(
+        tab: Exclude<ManagementTab, 'providers'>,
+        entry: ManagementEntry,
+        index: number
+    ): string {
+        const name = this.entryName(entry, managementTabLabel(tab), index);
+        const detail = tab === 'skills'
+            ? displayValue(fieldValue(entry.value, ['path', 'skillPath', 'directory', 'location']))
+            : tab === 'mcp'
+                ? displayValue(fieldValue(entry.value, ['configSource', 'source', 'command', 'url', 'scope']))
+                : displayValue(fieldValue(entry.value, ['version', 'source', 'repository']));
+        return `${tab}:${name}:${detail ?? entry.nameHint ?? ''}`;
+    }
+
+    protected pendingIntegrationKey(area: 'skills' | 'mcp', name: string): string {
+        return `${area}:${name}`;
+    }
+
+    protected renderCompactSummary(version?: string, description?: string, toolCount?: string): React.ReactNode {
+        if (!version && !description && !toolCount) return undefined;
+        return <div className='xora-integration-summary'>
+            {version ? <span className='xora-integration-meta'>{version}</span> : undefined}
+            {toolCount ? <span className='xora-integration-meta'>{toolCount}</span> : undefined}
+            {description ? <p title={description}>{description}</p> : undefined}
+        </div>;
+    }
+
+    protected renderEntryHeader(
+        name: string,
+        enabled?: boolean,
+        statusLabel?: string,
+        toggle?: { disabled: boolean; pending?: boolean; onToggle: () => void }
+    ): React.ReactNode {
         return <header className='xora-integration-header'>
             <strong>{name}</strong>
-            {enabled !== undefined
-                ? <span className={`xora-status-badge ${enabled ? 'enabled' : 'disabled'}`}>{enabled ? '已启用' : '已禁用'}</span>
-                : undefined}
+            <span className='xora-integration-header-state'>
+                {statusLabel ? <span className='xora-status-badge disabled'>{statusLabel}</span> : undefined}
+                {toggle && enabled !== undefined
+                    ? <button
+                        type='button'
+                        role='switch'
+                        aria-checked={enabled}
+                        aria-label={`${enabled ? '禁用' : '启用'} ${name}`}
+                        className={`xora-integration-toggle ${enabled ? 'enabled' : 'disabled'} ${toggle.pending ? 'pending' : ''}`}
+                        disabled={toggle.disabled}
+                        onClick={toggle.onToggle}>
+                        <span className='xora-integration-toggle-track' aria-hidden='true'>
+                            <span className='xora-integration-toggle-thumb' />
+                        </span>
+                        <span>{toggle.pending ? '保存中' : enabled ? '已启用' : '已禁用'}</span>
+                    </button>
+                    : !statusLabel && enabled !== undefined
+                        ? <span className={`xora-status-badge ${enabled ? 'enabled' : 'disabled'}`}>{enabled ? '已启用' : '已禁用'}</span>
+                        : undefined}
+            </span>
         </header>;
     }
 
@@ -743,48 +777,16 @@ export class AgentManagementWidget extends ReactWidget {
         return Object.keys(data).some(key => !CONTAINER_KEYS[this.tab as Exclude<ManagementTab, 'providers'>].has(normalizedKey(key)));
     }
 
-    protected skillDocumentUri(path: string | undefined): URI | undefined {
-        if (!path || /[\0\r\n]/.test(path)) return undefined;
-        let localPath: string;
-        try {
-            if (/^file:/i.test(path)) {
-                const parsed = VSCodeURI.parse(path);
-                if (parsed.scheme !== 'file') return undefined;
-                localPath = parsed.fsPath;
-            } else {
-                if (!/^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(path)) return undefined;
-                localPath = path;
-            }
-        } catch {
-            return undefined;
-        }
-        let normalized = localPath.replace(/\\/g, '/').replace(/\/+$/, '');
-        const filename = normalized.slice(normalized.lastIndexOf('/') + 1);
-        if (/\.md$/i.test(filename) && !/^skill\.md$/i.test(filename)) return undefined;
-        if (!/^skill\.md$/i.test(filename)) normalized = `${normalized}/SKILL.md`;
-        return new URI(VSCodeURI.file(normalized));
-    }
-
-    protected async openSkillDocument(uri: URI, name: string): Promise<void> {
-        try {
-            await open(this.openerService, uri);
-        } catch (error) {
-            this.messages.error(`无法打开 ${name} 的 SKILL.md：${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
     protected renderManagementForm(): React.ReactNode {
         if (this.tab === 'skills') {
             return <details className='xora-card xora-provider-form'>
-                <summary>添加或管理技能</summary>
+                <summary>添加或移除技能扫描路径</summary>
                 <form onSubmit={event => this.submitManagement(event)}>
                     <label>操作<select name='action' defaultValue='add'>
                         <option value='add'>添加扫描路径</option>
-                        <option value='disable'>禁用 Skill</option>
-                        <option value='enable'>启用 Skill</option>
-                        <option value='remove'>移除路径或禁用项</option>
+                        <option value='remove'>移除扫描路径</option>
                     </select></label>
-                    <label>Skill 名称或绝对路径<input required name='value' /></label>
+                    <label>Skill 绝对路径<input required name='value' /></label>
                     <button className='theia-button main' type='submit'>应用</button>
                 </form>
             </details>;
@@ -1202,6 +1204,41 @@ export class AgentManagementWidget extends ReactWidget {
         } finally {
             this.loading = false;
             await this.refresh();
+        }
+    }
+
+    protected async toggleIntegration(
+        area: 'skills' | 'mcp',
+        name: string,
+        currentlyEnabled: boolean,
+        scope?: ManagementRequest['scope']
+    ): Promise<void> {
+        const pendingKey = this.pendingIntegrationKey(area, name);
+        if (this.pendingIntegrations.has(pendingKey)) return;
+        const action: ManagementRequest['action'] = currentlyEnabled ? 'disable' : 'enable';
+        const scrollContainer = this.node.querySelector<HTMLElement>('.xora-management-root');
+        const scrollTop = scrollContainer?.scrollTop ?? 0;
+        this.pendingIntegrations.add(pendingKey);
+        this.update();
+        try {
+            const result = await this.service.manage({ area, action, name, ...(scope ? { scope } : {}) });
+            if (!result.ok) {
+                this.messages.error(`无法${currentlyEnabled ? '禁用' : '启用'}${area === 'skills' ? '技能' : ' MCP'}“${name}”：${result.error ?? '未知错误'}`);
+                return;
+            }
+            const refreshed = area === 'skills'
+                ? await this.service.inspect()
+                : await this.service.runManagementCommand('mcp-list');
+            if (this.tab === area) this.result = refreshed;
+        } catch (error) {
+            this.messages.error(`无法更新 Agent 集成：${friendlyAgentErrorMessage(error)}`);
+        } finally {
+            this.pendingIntegrations.delete(pendingKey);
+            this.update();
+            requestAnimationFrame(() => {
+                const current = this.node.querySelector<HTMLElement>('.xora-management-root');
+                if (current) current.scrollTop = scrollTop;
+            });
         }
     }
 

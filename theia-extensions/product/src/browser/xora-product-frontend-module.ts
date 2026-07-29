@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { FrontendApplicationContribution, WidgetFactory, bindViewContribution } from '@theia/core/lib/browser';
+import { CommandContribution } from '@theia/core/lib/common';
+import { TabBarToolbarContribution } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { AboutDialog } from '@theia/core/lib/browser/about-dialog';
 import { NavigatorWidgetFactory } from '@theia/navigator/lib/browser/navigator-widget-factory';
 import { ContainerModule } from '@theia/core/shared/inversify';
@@ -12,10 +14,14 @@ import { XoraShellContribution } from './xora-shell-contribution';
 import { XoraNavigatorWidgetFactory } from './xora-navigator-widget-factory';
 import { XoraExplorerContribution } from './xora-explorer-contribution';
 import { XoraMenuI18nContribution } from './xora-menu-i18n-contribution';
+import { XoraFileRunnerContribution } from './xora-file-runner-contribution';
+import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
+import { XoraWorkspaceService } from './xora-workspace-service';
 import '../../src/browser/style/xora-code.css';
 
 export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     rebind(AboutDialog).to(XoraAboutDialog).inSingletonScope();
+    rebind(WorkspaceService).to(XoraWorkspaceService).inSingletonScope();
     rebind(NavigatorWidgetFactory).to(XoraNavigatorWidgetFactory).inSingletonScope();
     bind(XoraWelcomeWidget).toSelf();
     bind(WidgetFactory).toDynamicValue(context => ({
@@ -33,4 +39,7 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     // call registerSubmenu again — that duplicates Selection/Run on the bar.
     bind(XoraMenuI18nContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(XoraMenuI18nContribution);
+    bind(XoraFileRunnerContribution).toSelf().inSingletonScope();
+    bind(CommandContribution).toService(XoraFileRunnerContribution);
+    bind(TabBarToolbarContribution).toService(XoraFileRunnerContribution);
 });

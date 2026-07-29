@@ -5,6 +5,7 @@ const {
     detectSlashQuery,
     extractNamedResources,
     filterSlashCommands,
+    hasDelimitedResourceReference,
     replaceSlashToken,
     resourceMenuItems,
     slashCommandsToMenuItems
@@ -36,8 +37,12 @@ test('slashCommandsToMenuItems preserves command ids', () => {
 
 test('replaceSlashToken inserts replacement with spacing', () => {
     const result = replaceSlashToken('先看 /file', { start: 3, end: 8, query: 'file' }, '@src/a.ts');
-    assert.equal(result.text.includes('@src/a.ts'), true);
+    assert.equal(result.text, '先看 @src/a.ts ');
     assert.equal(result.text.includes('/file'), false);
+    const middle = replaceSlashToken('使用 /mcp继续', { start: 3, end: 7, query: 'mcp' }, 'docs');
+    assert.equal(middle.text, '使用 docs 继续');
+    assert.equal(hasDelimitedResourceReference(middle.text, 'docs'), true);
+    assert.equal(hasDelimitedResourceReference('使用 docs继续', 'docs'), false);
 });
 
 test('extractNamedResources reads mcp and skill payloads', () => {
@@ -54,17 +59,21 @@ test('extractNamedResources reads mcp and skill payloads', () => {
         skills: {
             effectiveSkills: [
                 { name: 'review', path: '/tmp/review/SKILL.md' },
-                { skillName: 'deploy', directory: '/tmp/deploy' }
+                { skillName: 'deploy', directory: '/tmp/deploy' },
+                { name: 'disabled-review', path: '/tmp/disabled/SKILL.md', enabled: false }
             ]
         }
     }, 'skill');
     assert.ok(skills.some(item => item.name === 'review'));
     assert.ok(skills.some(item => item.name === 'deploy'));
+    assert.equal(skills.some(item => item.name === 'disabled-review'), false);
 });
 
 test('resourceMenuItems appends manage action', () => {
     const items = resourceMenuItems('mcp', [{ name: 'docs', detail: 'stdio' }]);
-    assert.equal(items[0].insertText.includes('docs'), true);
+    assert.equal(items[0].insertText, 'docs');
+    assert.equal(items[0].resourceKind, 'mcp');
+    assert.doesNotMatch(items[0].insertText, /优先使用|请使用/);
     assert.equal(items.at(-1).commandId, 'settings');
 });
 

@@ -166,6 +166,21 @@ test('Agent composer accepts pasted images without replacing the native IME text
     assert.doesNotMatch(source, /contentEditable/);
 });
 
+test('Skill and MCP selections render as conversation-local composer tokens', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
+    const styles = fs.readFileSync(path.join(__dirname, '../src/browser/style/agent.css'), 'utf8');
+    assert.match(source, /protected composerReferences: ComposerResourceReference\[\] = \[\]/);
+    assert.match(source, /this\.rememberComposerReference\(item\.resourceKind, item\.insertText\)/);
+    assert.match(source, /className='xora-composer-references'/);
+    assert.match(source, /xora-composer-reference-\$\{reference\.kind\}/);
+    assert.match(source, /references: \[\.\.\.\(this\.composerReferences \?\? \[\]\)\]/);
+    assert.match(source, /this\.composerReferences = \[\.\.\.\(draft\?\.references \?\? \[\]\)\]/);
+    assert.match(source, /hasDelimitedResourceReference\(text, reference\.name\)/);
+    assert.match(styles, /\.xora-composer-reference-mcp/);
+    assert.match(styles, /\.xora-composer-reference-skill/);
+    assert.match(styles, /--xora-reference-color/);
+});
+
 test('image submissions and session restores stay bound to their original Agent context', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
     const sendSource = source.slice(source.indexOf('protected async send('), source.indexOf('protected retry('));
@@ -213,6 +228,8 @@ test('image submissions and session restores stay bound to their original Agent 
 test('Agent activity uses progressive disclosure and keeps permission decisions explicit', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
     assert.match(source, /className='xora-activity xora-plan-card'/);
+    assert.match(source, /plan\.outcome === 'cancelled'/);
+    assert.match(source, /已中止/);
     assert.match(source, /className={`xora-activity xora-tool-card/);
     assert.match(source, /className='xora-inline-diff'/);
     assert.match(source, /className='xora-permission-dock'/);

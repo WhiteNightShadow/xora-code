@@ -1,6 +1,6 @@
 {
   "name": "@xora-code/product-extension",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Xora Code product branding and welcome experience",
   "license": "Apache-2.0",
@@ -15,15 +15,18 @@
     {
       "frontendPreload": "lib/browser/xora-product-preload-module",
       "frontend": "lib/browser/xora-product-frontend-module",
+      "backend": "lib/node/xora-product-backend-module",
       "electronMain": "lib/electron-main/xora-electron-main-module"
     }
   ],
   "dependencies": {
     "@theia/application-package": "1.73.1",
     "@theia/core": "1.73.1",
+    "@theia/editor": "1.73.1",
     "@theia/navigator": "1.73.1",
+    "@theia/terminal": "1.73.1",
     "@theia/workspace": "1.73.1",
-    "@xora-code/agent": "0.2.2"
+    "@xora-code/agent": "0.2.3"
   },
   "devDependencies": {
     "@types/node": "18.19.39",

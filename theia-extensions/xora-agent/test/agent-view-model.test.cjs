@@ -435,6 +435,50 @@ test('terminal session states and runtime crashes clear only the relevant pendin
     assert.equal(model.pendingPermissions.size, 0);
 });
 
+test('cancelled turns finalize every unfinished plan step and suppress a stale repeated snapshot', () => {
+    const model = new AgentViewModel();
+    model.snapshot.sessions = [session('session-a', 'running')];
+    model.setSession(session('session-a', 'running'));
+    const plan = {
+        kind: 'plan',
+        sessionId: 'session-a',
+        turnId: 'turn-cancelled',
+        title: '执行计划',
+        entries: [
+            { id: 'one', text: '完成第一步', status: 'completed' },
+            { id: 'two', text: '执行第二步', status: 'pending' },
+            { id: 'three', text: '执行第三步', status: 'pending' }
+        ]
+    };
+    model.accept(plan);
+    model.accept({
+        kind: 'turn-completed',
+        sessionId: 'session-a',
+        turnId: 'turn-cancelled',
+        stopReason: 'cancelled'
+    });
+
+    const cancelled = model.transcript.find(entry => entry.kind === 'plan').payload;
+    assert.equal(cancelled.outcome, 'cancelled');
+    assert.deepEqual(cancelled.entries.map(entry => entry.status), ['completed', 'cancelled', 'cancelled']);
+
+    model.accept({ ...plan, turnId: 'turn-next' });
+    assert.equal(model.transcript.filter(entry => entry.kind === 'plan').length, 1,
+        'Grok repeating the unchanged session plan must not append it to the next turn');
+
+    model.accept({
+        ...plan,
+        turnId: 'turn-next',
+        entries: [
+            { id: 'one', text: '完成第一步', status: 'completed' },
+            { id: 'two', text: '执行第二步', status: 'in-progress' },
+            { id: 'three', text: '执行第三步', status: 'pending' }
+        ]
+    });
+    assert.equal(model.transcript.filter(entry => entry.kind === 'plan').length, 2,
+        'real resumed progress must make the plan visible again');
+});
+
 test('tool completion updates retain readable metadata from the initial call', () => {
     const model = new AgentViewModel();
     model.accept({

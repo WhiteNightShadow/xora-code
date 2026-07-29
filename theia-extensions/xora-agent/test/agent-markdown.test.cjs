@@ -126,6 +126,17 @@ test('renders the supported subset with React nodes and escapes hostile HTML', (
         'every syntax-highlight token must be escaped before entering the React HTML boundary');
 });
 
+test('API routes remain code while explicit source-file paths are clickable', () => {
+    const html = renderToStaticMarkup(React.createElement(AgentMarkdown, {
+        text: '接口 `/dashboard/exec-trend`，文件 `src/dashboard/exec-trend.ts`。',
+        onOpenPath: () => undefined
+    }));
+
+    assert.match(html, /<code class="xora-agent-markdown-inline-code">\/dashboard\/exec-trend<\/code>/);
+    assert.doesNotMatch(html, /title="打开 \/dashboard\/exec-trend"/);
+    assert.match(html, /title="打开 src\/dashboard\/exec-trend\.ts"/);
+});
+
 test('marks an unfinished fenced block for streaming presentation', () => {
     const html = renderToStaticMarkup(React.createElement(AgentMarkdown, { text: '```\npartial' }));
     assert.match(html, /class="[^"]*\bxora-agent-markdown-code\b[^"]*\bis-streaming\b[^"]*"/);

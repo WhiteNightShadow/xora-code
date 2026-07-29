@@ -46,7 +46,7 @@ import { ProviderRegistry } from './provider-registry';
 import { validatePromptImageAttachments } from './prompt-image-attachments';
 import { normalizeProviderBaseUrl, providerModelsEndpoint, requestProviderJson } from './provider-network';
 import { McpRuntimeProjection, mergeMcpManagementResults } from './mcp-management';
-import { RuntimeMcpRegistry, RuntimeMcpSnapshot } from './runtime-mcp-registry';
+import { RuntimeMcpIssue, RuntimeMcpRegistry, RuntimeMcpSnapshot } from './runtime-mcp-registry';
 import { AgentSessionRepository, deepRedact } from './session-repository';
 import { GrokSidecarSupervisor } from './sidecar-supervisor';
 import { SidecarUpdateCoordinator } from './sidecar-update-coordinator';
@@ -212,8 +212,11 @@ export class GrokAgentHostService implements AgentHostService {
     /** Secret-free identity of the MCP list currently applied to this sidecar. */
     protected runtimeMcpFingerprint: string | undefined;
     protected runtimeMcpConfiguredNames: string[] = [];
+    protected runtimeMcpConfiguredServers: RuntimeMcpSnapshot['configuredServers'] = [];
     /** Canonical configured servers that survive disabled_mcp_servers merging. */
     protected runtimeMcpEnabledNames: string[] = [];
+    /** Secret-free per-server degradation state; never blocks the Agent runtime. */
+    protected runtimeMcpIssues: RuntimeMcpIssue[] = [];
     /** Safe projection of Grok's per-session MCP readiness; raw env/header/detail never leaves main. */
     protected sessionMcpStates: Map<string, RuntimeMcpServerState[]> | undefined = new Map();
     protected mcpConfigurationRefreshPending = false;
@@ -332,7 +335,9 @@ export class GrokAgentHostService implements AgentHostService {
             this.mcpDoctorSnapshot = undefined;
             this.runtimeMcpFingerprint = undefined;
             this.runtimeMcpConfiguredNames = [];
+            this.runtimeMcpConfiguredServers = [];
             this.runtimeMcpEnabledNames = [];
+            this.runtimeMcpIssues = [];
             this.sessionMcpStateMap().clear();
             this.mcpConfigurationRefreshPending = false;
             // Selecting a root is deliberately not a trust assertion. The
@@ -513,7 +518,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.2' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.3' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -521,7 +526,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.2.2'
+                    clientVersion: '0.2.3'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
@@ -628,7 +633,9 @@ export class GrokAgentHostService implements AgentHostService {
         this.sessionMcpStateMap().clear();
         this.runtimeMcpFingerprint = undefined;
         this.runtimeMcpConfiguredNames = [];
+        this.runtimeMcpConfiguredServers = [];
         this.runtimeMcpEnabledNames = [];
+        this.runtimeMcpIssues = [];
         this.mcpConfigurationRefreshPending = false;
         this.skillsRefreshPending = false;
         if (this.mcpStatusRefreshTimer) {
@@ -1878,7 +1885,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.workspaceRoot || !this.isWorkspaceTrusted(this.workspaceRoot)) {
             return { ok: false, error: '请先打开并信任当前项目，再读取 Agent 集成配置。' };
         }
-        return this.runCli(['inspect', '--json'], true, {
+        const result = await this.runCli(['inspect', '--json'], true, {
             allowWhileRuntime: true,
             // Skills must be inspected through the same Provider view that the
             // ACP runtime uses. This environment contains only GROK_HOME.
@@ -1886,6 +1893,42 @@ export class GrokAgentHostService implements AgentHostService {
             // without rewriting the watched isolated config.
             injectedEnvironment: this.providers.managementEnvironment(this.providerId, this.activePrompts.size === 0)
         });
+        if (!result.ok) return result;
+        const data = asRecord(result.data);
+        if (!data || !Array.isArray(data.skills)) return result;
+        const disabled = this.providers.disabledSkills();
+        const disabledNames = new Set(disabled);
+        // The settings surface is an inventory of Skills explicitly installed
+        // through the canonical Grok/Xora configuration. Grok bundled skills
+        // and Cursor/Claude compatibility discoveries remain usable by Grok,
+        // but do not appear as misleading "disabled" Xora installations.
+        const installedSkills = data.skills.filter(value => {
+            const record = asRecord(value);
+            const source = asRecord(record?.source);
+            return asString(source?.type) === 'configToml';
+        });
+        const activeNames = new Set(installedSkills.flatMap(value => {
+            const name = asString(asRecord(value)?.name);
+            return name ? [name] : [];
+        }));
+        return {
+            ...result,
+            data: {
+                ...data,
+                skills: [
+                    ...installedSkills.map(value => {
+                        const record = asRecord(value);
+                        const name = asString(record?.name);
+                        return record ? { ...record, enabled: !name || !disabledNames.has(name) } : value;
+                    }),
+                    ...disabled.filter(name => !activeNames.has(name)).map(name => ({
+                        name,
+                        enabled: false,
+                        source: { type: 'xora-config', scope: 'user' }
+                    }))
+                ]
+            }
+        };
     }
 
     async runManagementCommand(command: 'mcp-list' | 'mcp-doctor' | 'plugin-list' | 'plugin-marketplaces'): Promise<ManagementResult> {
@@ -1930,11 +1973,27 @@ export class GrokAgentHostService implements AgentHostService {
                     if (this.activePrompts.size > 0) {
                         return { ok: false, error: '请先等待当前 Agent 任务结束或取消任务，再修改 MCP 配置。' };
                     }
-                    const result = await this.runCli(this.managementArgs(request), false, {
-                        // The mutation gate prevents a prompt from being
-                        // admitted while Grok atomically edits canonical TOML.
-                        allowWhileRuntime: true
-                    });
+                    const result = request.action === 'enable' || request.action === 'disable'
+                        ? (() => {
+                            if (!request.name || !this.workspaceRoot) {
+                                return { ok: false, error: '请选择要启用或禁用的 MCP 服务。' } satisfies ManagementResult;
+                            }
+                            this.providers.updateMcpEnabled(
+                                this.workspaceRoot,
+                                request.name,
+                                request.action === 'enable',
+                                request.scope === 'project' ? 'project' : 'user'
+                            );
+                            return {
+                                ok: true,
+                                data: { changed: true, area: 'mcp', action: request.action, name: request.name }
+                            } satisfies ManagementResult;
+                        })()
+                        : await this.runCli(this.managementArgs(request), false, {
+                            // The mutation gate prevents a prompt from being
+                            // admitted while Grok atomically edits canonical TOML.
+                            allowWhileRuntime: true
+                        });
                     if (!result.ok || !request.name || !this.workspaceRoot) return result;
                     this.mcpDoctorSnapshot = undefined;
                     if (request.action === 'remove') {
@@ -2258,7 +2317,9 @@ export class GrokAgentHostService implements AgentHostService {
                 mcpServers: [],
                 fingerprint: crypto.createHash('sha256').update('[]').digest('hex'),
                 configuredNames: [],
+                configuredServers: [],
                 enabledNames: [],
+                issues: [],
                 redactionValues: []
             };
         }
@@ -2267,13 +2328,43 @@ export class GrokAgentHostService implements AgentHostService {
                 mcpServers: [],
                 fingerprint: crypto.createHash('sha256').update('[]').digest('hex'),
                 configuredNames: [],
+                configuredServers: [],
                 enabledNames: [],
+                issues: [],
                 redactionValues: []
             };
         }
-        const environment = this.supervisor.commandEnvironment();
+        // The sidecar itself keeps a minimal allowlisted environment, but an
+        // MCP descriptor may explicitly opt into any user-defined variable.
+        // Resolve only names referenced by that server and pass only the
+        // expanded descriptor to ACP; never inject the full login environment
+        // into Grok or another MCP.
+        const environment = { ...process.env, ...this.supervisor.commandEnvironment() };
         const credentials = this.providers.mcpCredentialBindings(workspaceRoot);
-        const snapshot = this.runtimeMcpRegistryState().resolve(workspaceRoot, environment, credentials);
+        let snapshot: RuntimeMcpSnapshot;
+        try {
+            snapshot = this.runtimeMcpRegistryState().resolve(workspaceRoot, environment, credentials);
+        } catch (error) {
+            // A malformed shared/project MCP document is configuration state,
+            // not an Agent runtime failure. Start without MCP and surface the
+            // remediation only in the management projection.
+            const issue: RuntimeMcpIssue = {
+                name: 'Xora MCP 配置',
+                scope: 'user',
+                severity: 'error',
+                code: 'invalid-configuration',
+                message: `MCP 配置暂时无法加载；本次会话已在不加载 MCP 的情况下继续。${errorMessage(error)}`
+            };
+            snapshot = {
+                mcpServers: [],
+                fingerprint: crypto.createHash('sha256').update(JSON.stringify({ issues: [issue] })).digest('hex'),
+                configuredNames: [],
+                configuredServers: [],
+                enabledNames: [],
+                issues: [issue],
+                redactionValues: []
+            };
+        }
         // Register before any ACP write: both protocol errors/events and the
         // sidecar stderr stream may echo a resolved env/header value.
         this.supervisor.registerRedactionSecrets(snapshot.redactionValues);
@@ -2285,7 +2376,13 @@ export class GrokAgentHostService implements AgentHostService {
     protected acceptRuntimeMcpSnapshot(snapshot: RuntimeMcpSnapshot): void {
         this.runtimeMcpFingerprint = snapshot.fingerprint;
         this.runtimeMcpConfiguredNames = [...snapshot.configuredNames];
+        this.runtimeMcpConfiguredServers = [...(snapshot.configuredServers ?? snapshot.configuredNames.map(name => ({
+            name,
+            scope: 'user' as const,
+            enabled: snapshot.enabledNames.includes(name)
+        })))];
         this.runtimeMcpEnabledNames = [...snapshot.enabledNames];
+        this.runtimeMcpIssues = [...(snapshot.issues ?? [])];
         this.mcpConfigurationRefreshPending = false;
     }
 
@@ -2461,14 +2558,23 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected currentMcpRuntimeProjection(
         configuredNames?: string[],
-        enabledNames?: string[]
+        enabledNames?: string[],
+        issues?: RuntimeMcpIssue[],
+        configuredServers?: RuntimeMcpSnapshot['configuredServers']
     ): McpRuntimeProjection {
         const appSessionId = this.activeSessionId;
         const loaded = !!appSessionId && this.loadedSessionIds?.has(appSessionId);
         return {
             ...(loaded ? { sessionId: appSessionId } : {}),
             configuredNames: [...(configuredNames ?? this.runtimeMcpConfiguredNames ?? [])],
+            configuredServers: [...(configuredServers ?? this.runtimeMcpConfiguredServers ?? [])],
             enabledNames: [...(enabledNames ?? this.runtimeMcpEnabledNames ?? [])],
+            issues: [...(issues ?? this.runtimeMcpIssues ?? [])].map(issue => ({
+                name: issue.name,
+                severity: issue.severity,
+                code: issue.code,
+                message: issue.message
+            })),
             refreshPending: this.mcpConfigurationRefreshPending === true,
             servers: loaded ? [...(this.sessionMcpStateMap().get(appSessionId!) ?? [])] : []
         };
@@ -2519,7 +2625,13 @@ export class GrokAgentHostService implements AgentHostService {
         const changed = snapshot.fingerprint !== this.runtimeMcpFingerprint;
         if (!changed) {
             this.runtimeMcpConfiguredNames = [...snapshot.configuredNames];
+            this.runtimeMcpConfiguredServers = [...(snapshot.configuredServers ?? snapshot.configuredNames.map(name => ({
+                name,
+                scope: 'user' as const,
+                enabled: snapshot.enabledNames.includes(name)
+            })))];
             this.runtimeMcpEnabledNames = [...snapshot.enabledNames];
+            this.runtimeMcpIssues = [...(snapshot.issues ?? [])];
             this.mcpConfigurationRefreshPending = false;
             return;
         }
@@ -2839,7 +2951,15 @@ export class GrokAgentHostService implements AgentHostService {
                     return [{
                         id: asString(item?.id) ?? `plan-${index}`,
                         text,
-                        status: status === 'in_progress' ? 'in-progress' : status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'pending'
+                        status: status === 'in_progress'
+                            ? 'in-progress'
+                            : status === 'completed'
+                                ? 'completed'
+                                : status === 'failed'
+                                    ? 'failed'
+                                    : status === 'cancelled'
+                                        ? 'cancelled'
+                                        : 'pending'
                     }];
                 })
             });
@@ -3608,7 +3728,9 @@ export class GrokAgentHostService implements AgentHostService {
         this.sessionMcpStateMap().clear();
         this.runtimeMcpFingerprint = undefined;
         this.runtimeMcpConfiguredNames = [];
+        this.runtimeMcpConfiguredServers = [];
         this.runtimeMcpEnabledNames = [];
+        this.runtimeMcpIssues = [];
         this.acp?.close(error);
         this.acp = undefined;
         this.runtimeProviderEpoch = undefined;
@@ -3826,7 +3948,9 @@ export class GrokAgentHostService implements AgentHostService {
         this.sessionMcpStateMap().clear();
         this.runtimeMcpFingerprint = undefined;
         this.runtimeMcpConfiguredNames = [];
+        this.runtimeMcpConfiguredServers = [];
         this.runtimeMcpEnabledNames = [];
+        this.runtimeMcpIssues = [];
         this.intentionalStop = true;
         this.phase = 'draining';
         for (const permission of this.pendingPermissions.values()) {
@@ -4102,7 +4226,9 @@ export class GrokAgentHostService implements AgentHostService {
             doctor,
             this.currentMcpRuntimeProjection(
                 resolved?.configuredNames ?? this.runtimeMcpConfiguredNames,
-                resolved?.enabledNames ?? this.runtimeMcpEnabledNames
+                resolved?.enabledNames ?? this.runtimeMcpEnabledNames,
+                resolved?.issues ?? this.runtimeMcpIssues,
+                resolved?.configuredServers ?? this.runtimeMcpConfiguredServers
             )
         );
         if (configurationWarning && merged.ok) {

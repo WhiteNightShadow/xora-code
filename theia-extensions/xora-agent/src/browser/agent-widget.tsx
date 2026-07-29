@@ -16,6 +16,7 @@ import { inject, injectable, postConstruct } from '@theia/core/shared/inversify'
 import * as React from '@theia/core/shared/react';
 import { FileDialogService } from '@theia/filesystem/lib/browser/file-dialog';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
+import { FileSearchService } from '@theia/file-search/lib/common/file-search-service';
 import { FileNavigatorCommands } from '@theia/navigator/lib/browser/file-navigator-commands';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import { DiffService } from '@theia/workspace/lib/browser/diff-service';
@@ -56,6 +57,7 @@ import {
     detectSlashQuery,
     extractNamedResources,
     filterSlashCommands,
+    hasDelimitedResourceReference,
     replaceSlashToken,
     resourceMenuItems,
     SlashCommandId,
@@ -142,10 +144,16 @@ interface AgentInlineNotice {
 
 interface ComposerDraftState {
     text: string;
+    references: ComposerResourceReference[];
     images: DraftImageAttachment[];
     imageError?: string;
     imageAnnouncement: string;
     previewImageId?: string;
+}
+
+interface ComposerResourceReference {
+    kind: 'mcp' | 'skill';
+    name: string;
 }
 
 /**
@@ -224,6 +232,9 @@ export class XoraAgentWidget extends ReactWidget {
     @inject(FileService)
     protected readonly fileService!: FileService;
 
+    @inject(FileSearchService)
+    protected readonly fileSearchService!: FileSearchService;
+
     @inject(DiffService)
     protected readonly diffService!: DiffService;
 
@@ -253,6 +264,8 @@ export class XoraAgentWidget extends ReactWidget {
     protected newSessionLaneSequence = 0;
     protected activeComposerLaneKey: string | undefined;
     protected composerDrafts = new Map<string, ComposerDraftState>();
+    /** Visual tokens remain conversation-local just like text and images. */
+    protected composerReferences: ComposerResourceReference[] = [];
     protected promptLanes = new Map<string, SessionPromptLane>();
     protected readonly permissionDecisions = new Set<string>();
     protected textarea: HTMLTextAreaElement | null = null;
@@ -604,6 +617,7 @@ export class XoraAgentWidget extends ReactWidget {
                         }}
                     />
                     {this.renderDraftImages()}
+                    {this.renderComposerReferences()}
                     <textarea
                         ref={node => { this.textarea = node; }}
                         aria-label='Agent 任务输入框'
@@ -620,7 +634,7 @@ export class XoraAgentWidget extends ReactWidget {
                                 && this.imeCompositionLaneKey
                                 && this.imeCompositionLaneKey !== this.activeComposerLaneKey) {
                                 const draft = this.composerDraftState().get(this.imeCompositionLaneKey) ?? {
-                                    text: '', images: [], imageAnnouncement: ''
+                                    text: '', references: [], images: [], imageAnnouncement: ''
                                 };
                                 this.composerDraftState().set(this.imeCompositionLaneKey, {
                                     ...draft,
@@ -629,6 +643,7 @@ export class XoraAgentWidget extends ReactWidget {
                                 return;
                             }
                             this.prompt = event.currentTarget.value;
+                            this.refreshComposerReferences(this.prompt);
                             this.scheduleComposerResize(event.currentTarget);
                             this.syncComposerSubmitButton();
                             this.syncSlashMenuFromComposer(event.currentTarget);
@@ -1317,6 +1332,7 @@ export class XoraAgentWidget extends ReactWidget {
         this.activeComposerLaneKey = key;
         this.composerDraftState().set(key, {
             text: this.prompt ?? '',
+            references: [...(this.composerReferences ?? [])],
             images: [...(this.draftImages ?? [])],
             imageError: this.imageError,
             imageAnnouncement: this.imageAnnouncement ?? '',
@@ -1353,6 +1369,8 @@ export class XoraAgentWidget extends ReactWidget {
         }
         const draft = this.composerDraftState().get(key);
         this.prompt = draft?.text ?? '';
+        this.composerReferences = [...(draft?.references ?? [])].filter(reference =>
+            hasDelimitedResourceReference(this.prompt, reference.name));
         this.draftImages = [...(draft?.images ?? [])];
         this.imageError = draft?.imageError;
         this.imageAnnouncement = draft?.imageAnnouncement ?? '';
@@ -1425,6 +1443,7 @@ export class XoraAgentWidget extends ReactWidget {
         }
         if (this.activeComposerLaneKey === key) {
             this.prompt = '';
+            this.composerReferences = [];
             this.draftImages = [];
             this.imageError = undefined;
             this.previewImageId = undefined;
@@ -2176,6 +2195,7 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected useSuggestion(prompt: string): void {
         this.prompt = prompt;
+        this.syncComposerReferences(prompt);
         this.requestRuntimePrewarm();
         if (this.textarea) {
             this.textarea.value = prompt;
@@ -2350,6 +2370,7 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected async activateSlashItem(item: SlashMenuItem): Promise<void> {
         if (item.insertText) {
+            if (item.resourceKind) this.rememberComposerReference(item.resourceKind, item.insertText);
             this.commitSlashReplacement(item.insertText);
             return;
         }
@@ -2438,6 +2459,7 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected applyComposerText(text: string, cursor: number): void {
         this.prompt = text;
+        this.syncComposerReferences(text);
         if (this.textarea) {
             this.textarea.value = text;
             this.resizeComposer(this.textarea);
@@ -2448,6 +2470,41 @@ export class XoraAgentWidget extends ReactWidget {
         this.requestRuntimePrewarm();
         this.update();
         requestAnimationFrame(() => this.textarea?.focus());
+    }
+
+    protected rememberComposerReference(kind: ComposerResourceReference['kind'], name: string): void {
+        const normalized = name.trim();
+        const current = this.composerReferences ?? [];
+        if (!normalized || current.some(reference => reference.kind === kind && reference.name === normalized)) return;
+        this.composerReferences = [...current, { kind, name: normalized }];
+    }
+
+    /** Returns true only when a visual update is needed. */
+    protected syncComposerReferences(text: string): boolean {
+        const current = this.composerReferences ?? [];
+        const next = current.filter(reference => hasDelimitedResourceReference(text, reference.name));
+        if (next.length === current.length) return false;
+        this.composerReferences = next;
+        return true;
+    }
+
+    protected refreshComposerReferences(text: string): void {
+        if (this.syncComposerReferences(text)) this.update();
+    }
+
+    protected renderComposerReferences(): React.ReactNode {
+        const references = this.composerReferences ?? [];
+        if (!references.length) return undefined;
+        return <div className='xora-composer-references' aria-label='已选择的技能和 MCP'>
+            {references.map(reference => <span
+                key={`${reference.kind}:${reference.name}`}
+                className={`xora-composer-reference xora-composer-reference-${reference.kind}`}
+                title={`${reference.kind === 'mcp' ? 'MCP' : '技能'} · ${reference.name}`}>
+                <span className={`codicon ${reference.kind === 'mcp' ? 'codicon-server-process' : 'codicon-lightbulb'}`} aria-hidden='true' />
+                <span>{reference.name}</span>
+                <small>{reference.kind === 'mcp' ? 'MCP' : 'Skill'}</small>
+            </span>)}
+        </div>;
     }
 
     protected insertComposerText(fragment: string): void {
@@ -2984,16 +3041,143 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected workspaceFileUri(filePath: string): URI | undefined {
-        const root = this.model.snapshot.workspaceRoot;
-        if (!root) return undefined;
-        const rootUri = new URI(VSCodeURI.file(root)).normalizePath();
-        const normalizedPath = filePath.replace(/\\/g, '/');
-        const absolute = normalizedPath.startsWith('/') || /^[a-zA-Z]:\//.test(normalizedPath);
-        const candidate = (absolute
-            ? new URI(VSCodeURI.file(filePath))
-            : rootUri.resolve(normalizedPath)).normalizePath();
-        const caseSensitive = !/^[a-zA-Z]:[\\/]/.test(root);
-        return rootUri.isEqualOrParent(candidate, caseSensitive) ? candidate : undefined;
+        return this.workspaceFileCandidates(filePath)[0];
+    }
+
+    protected workspaceCandidateRoots(): string[] {
+        const roots = [this.model.snapshot.workspaceRoot, ...(this.roots ?? [])]
+            .filter((root): root is string => !!root);
+        const unique = new Map<string, string>();
+        for (const root of roots) {
+            const key = filesystemPathKey(root, this.pathPlatform());
+            if (key && !unique.has(key)) unique.set(key, root);
+        }
+        return [...unique.values()];
+    }
+
+    protected absoluteFileUri(filePath: string): URI | undefined {
+        const trimmed = filePath.trim();
+        if (!trimmed || /[\0\r\n]/.test(trimmed)) return undefined;
+        const normalized = trimmed.replace(/\\/g, '/');
+        const windowsDrivePath = /^[A-Za-z]:\//.test(normalized);
+        // A Windows drive prefix looks like a URI scheme (`C:`) to the
+        // generic parser. Recognise it first so packaged Windows builds can
+        // still open absolute paths in full-access mode.
+        if (!windowsDrivePath && /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed)) {
+            if (!/^file:/i.test(trimmed)) return undefined;
+            try {
+                const uri = new URI(trimmed).normalizePath();
+                return uri.scheme === 'file' ? uri : undefined;
+            } catch {
+                return undefined;
+            }
+        }
+        if (!normalized.startsWith('/') && !windowsDrivePath) return undefined;
+        try {
+            return FileUri.create(trimmed).normalizePath();
+        } catch {
+            return undefined;
+        }
+    }
+
+    protected relativeFilePath(filePath: string): string | undefined {
+        const trimmed = filePath.trim().replace(/\\/g, '/');
+        if (!trimmed || /[\0\r\n]/.test(trimmed) || this.absoluteFileUri(trimmed)) return undefined;
+        const segments: string[] = [];
+        for (const segment of trimmed.split('/')) {
+            if (!segment || segment === '.') continue;
+            if (segment === '..') return undefined;
+            segments.push(segment);
+        }
+        return segments.length ? segments.join('/') : undefined;
+    }
+
+    protected uriIsInWorkspace(uri: URI): boolean {
+        const caseSensitive = this.pathPlatform() !== 'win32';
+        return this.workspaceCandidateRoots().some(root =>
+            FileUri.create(root).normalizePath().isEqualOrParent(uri.normalizePath(), caseSensitive));
+    }
+
+    protected workspaceFileCandidates(filePath: string): URI[] {
+        const absolute = this.absoluteFileUri(filePath);
+        if (absolute) {
+            return this.uriIsInWorkspace(absolute) || this.model.snapshot.permissionMode === 'full-access'
+                ? [absolute]
+                : [];
+        }
+        const relative = this.relativeFilePath(filePath);
+        if (!relative) return [];
+        const caseSensitive = this.pathPlatform() !== 'win32';
+        const candidates: URI[] = [];
+        const seen = new Set<string>();
+        for (const root of this.workspaceCandidateRoots()) {
+            const rootUri = FileUri.create(root).normalizePath();
+            const candidate = rootUri.resolve(relative).normalizePath();
+            if (!rootUri.isEqualOrParent(candidate, caseSensitive)) continue;
+            const key = candidate.toString();
+            if (!seen.has(key)) {
+                seen.add(key);
+                candidates.push(candidate);
+            }
+        }
+        return candidates;
+    }
+
+    protected async resolveWorkspaceFileUri(filePath: string): Promise<URI | undefined> {
+        const candidates = this.workspaceFileCandidates(filePath);
+        for (const candidate of candidates) {
+            try {
+                if (await this.fileService.exists(candidate)) return candidate;
+            } catch {
+                // Continue to the suffix resolver. A provider may reject one
+                // workspace root while another root is still available.
+            }
+        }
+        const relative = this.relativeFilePath(filePath);
+        const roots = this.workspaceCandidateRoots();
+        if (!relative || roots.length === 0 || !this.fileSearchService?.find) return undefined;
+        let results: string[];
+        try {
+            results = await this.fileSearchService.find(relative, {
+                rootUris: roots.map(root => FileUri.create(root).toString()),
+                fuzzyMatch: false,
+                useGitIgnore: false,
+                limit: 64
+            });
+        } catch {
+            return undefined;
+        }
+        const relativeKey = filesystemPathKey(relative, this.pathPlatform()).replace(/^\/+/, '');
+        const suffix = `/${relativeKey}`;
+        const ranked = results.flatMap(value => {
+            let uri: URI;
+            try {
+                uri = new URI(value).normalizePath();
+            } catch {
+                return [];
+            }
+            if (uri.scheme !== 'file' || !this.uriIsInWorkspace(uri)) return [];
+            const candidateKey = filesystemPathKey(FileUri.fsPath(uri), this.pathPlatform());
+            if (candidateKey !== relativeKey && !candidateKey.endsWith(suffix)) return [];
+            const rootIndex = roots.findIndex(root => {
+                const rootKey = filesystemPathKey(root, this.pathPlatform());
+                return candidateKey === rootKey || candidateKey.startsWith(`${rootKey}/`);
+            });
+            const rootKey = rootIndex < 0 ? '' : filesystemPathKey(roots[rootIndex], this.pathPlatform());
+            const candidateRelative = rootKey && candidateKey.startsWith(`${rootKey}/`)
+                ? candidateKey.slice(rootKey.length + 1)
+                : candidateKey;
+            const extraSegments = Math.max(0,
+                candidateRelative.split('/').length - relativeKey.split('/').length);
+            return [{ uri, rootIndex: rootIndex < 0 ? roots.length : rootIndex, extraSegments }];
+        }).sort((left, right) => left.extraSegments - right.extraSegments
+            || left.rootIndex - right.rootIndex
+            || left.uri.toString().localeCompare(right.uri.toString()));
+        if (ranked.length === 0) return undefined;
+        const best = ranked[0];
+        const equallyRanked = ranked.filter(candidate =>
+            candidate.extraSegments === best.extraSegments && candidate.rootIndex === best.rootIndex);
+        return equallyRanked.length === 1 ? best.uri : undefined;
     }
 
     protected diffCounts(diff: string): { added: number; removed: number } {
@@ -3011,6 +3195,7 @@ export class XoraAgentWidget extends ReactWidget {
             case 'completed': return 'codicon-check';
             case 'in-progress': return 'codicon-loading codicon-modifier-spin';
             case 'failed': return 'codicon-error';
+            case 'cancelled': return 'codicon-circle-slash';
             default: return 'codicon-circle-outline';
         }
     }
@@ -3283,11 +3468,18 @@ export class XoraAgentWidget extends ReactWidget {
             const plan = entry.payload as AgentPlanEvent;
             const completed = plan.entries.filter(item => item.status === 'completed').length;
             const active = plan.entries.some(item => item.status === 'in-progress');
+            const outcome = plan.outcome === 'cancelled'
+                ? ' · 已中止'
+                : plan.outcome === 'failed'
+                    ? ' · 已失败'
+                    : plan.outcome === 'completed'
+                        ? ' · 已结束'
+                        : '';
             return <details key={entry.id} className='xora-activity xora-plan-card' open={active}>
                 <summary className='xora-activity-summary'>
                     <span className='codicon codicon-checklist' />
                     <span className='xora-activity-title'>{plan.title ?? '执行计划'}</span>
-                    <span className='xora-activity-meta'>{completed}/{plan.entries.length}</span>
+                    <span className='xora-activity-meta'>{completed}/{plan.entries.length}{outcome}</span>
                     <span className='codicon codicon-chevron-right xora-details-chevron' />
                 </summary>
                 <ol className='xora-plan-list'>{plan.entries.map(item => <li key={item.id} className={`xora-plan-${item.status}`}>
@@ -3550,7 +3742,10 @@ export class XoraAgentWidget extends ReactWidget {
         // Accept locally first. The user can immediately write the next queued
         // message while this lane prepares Save All/runtime work in order.
         if (!retry) {
-            if (this.prompt === draftTextAtStart) this.prompt = '';
+            if (this.prompt === draftTextAtStart) {
+                this.prompt = '';
+                this.composerReferences = [];
+            }
             if (this.textarea && this.activeComposerLaneKey === lane.key) {
                 this.textarea.value = this.prompt;
                 this.resizeComposer(this.textarea);
@@ -3702,6 +3897,7 @@ export class XoraAgentWidget extends ReactWidget {
         const drafts = this.composerDraftState();
         const oldDraft = drafts.get(lane.key) ?? {
             text: '',
+            references: [],
             images: [],
             imageAnnouncement: ''
         };
@@ -4024,9 +4220,9 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async openWorkspacePath(filePath: string, options?: { reveal?: boolean; line?: number }): Promise<void> {
-        const uri = this.workspaceFileUri(filePath);
+        const uri = await this.resolveWorkspaceFileUri(filePath);
         if (!uri) {
-            this.showInlineNotice('无法定位该文件：文件不在当前项目中。', 'error');
+            this.showInlineNotice(`无法定位 ${this.fileLabel(filePath)}：文件不存在、存在多个同名匹配，或不在当前访问范围内。`, 'error');
             return;
         }
         try {
@@ -4034,7 +4230,7 @@ export class XoraAgentWidget extends ReactWidget {
                 ? uri.withFragment(`L${options.line}`)
                 : uri;
             await open(this.openerService, target);
-            if (options?.reveal !== false) {
+            if (options?.reveal !== false && this.uriIsInWorkspace(uri)) {
                 await this.commandService.executeCommand(FileNavigatorCommands.REVEAL_IN_NAVIGATOR.id, uri);
             }
         } catch (error) {
@@ -4261,7 +4457,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected async openDiff(diff: DiffEvent): Promise<void> {
         const after = diff.newPath
             ? new URI(VSCodeURI.file(diff.newPath))
-            : this.workspaceFileUri(diff.path);
+            : await this.resolveWorkspaceFileUri(diff.path);
         if (!diff.oldPath || !after) {
             this.showInlineNotice('无法查看差异：原始文件快照已不可用。', 'error');
             return;

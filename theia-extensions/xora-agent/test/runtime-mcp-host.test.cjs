@@ -111,6 +111,8 @@ function createHost(initial = []) {
     host.sessionMcpStates = new Map();
     host.runtimeMcpFingerprint = undefined;
     host.runtimeMcpConfiguredNames = [];
+    host.runtimeMcpEnabledNames = [];
+    host.runtimeMcpIssues = [];
     host.mcpConfigurationRefreshPending = false;
     host.skillsRefreshPending = false;
     host.disposed = false;
@@ -594,4 +596,74 @@ test('host resolves one config-bound stdio credential into ACP without adding it
         'stored MCP credentials must not enter the sidecar process environment');
     assert.deepEqual(snapshot.mcpServers[0].env, [{ name: 'ALPHA_TOKEN', value: 'host-only-secret' }]);
     assert.deepEqual(registered, ['host-only-secret']);
+});
+
+test('an explicitly referenced user environment variable is available to MCP without broad sidecar injection', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-host-mcp-user-env-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const workspace = path.join(directory, 'workspace');
+    const grokHome = path.join(directory, 'grok-home');
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(grokHome, { recursive: true });
+    fs.writeFileSync(path.join(grokHome, 'config.toml'), [
+        '[mcp_servers.ssh-mcp-server]',
+        'command = "ssh-mcp-server"',
+        'args = ["--password", "${XORA_TEST_SSH_MCP_PASSWORD}"]'
+    ].join('\n'));
+    const previous = process.env.XORA_TEST_SSH_MCP_PASSWORD;
+    process.env.XORA_TEST_SSH_MCP_PASSWORD = 'user-login-secret';
+    t.after(() => {
+        if (previous === undefined) delete process.env.XORA_TEST_SSH_MCP_PASSWORD;
+        else process.env.XORA_TEST_SSH_MCP_PASSWORD = previous;
+    });
+
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.runtimeMcpRegistry = new RuntimeMcpRegistry({ grokHome });
+    host.currentSecrets = [];
+    host.theiaTrustedRoots = new Set([workspace]);
+    host.isWorkspaceTrusted = root => root === workspace;
+    host.security = {};
+    let registered;
+    host.supervisor = {
+        commandEnvironment: () => ({ PATH: '/safe/bin' }),
+        registerRedactionSecrets: values => { registered = [...values]; }
+    };
+    host.providers = { mcpCredentialBindings: () => [] };
+
+    const snapshot = host.resolveRuntimeMcpSnapshot(workspace);
+    assert.deepEqual(snapshot.mcpServers, [{
+        name: 'ssh-mcp-server',
+        command: 'ssh-mcp-server',
+        args: ['--password', 'user-login-secret'],
+        env: []
+    }]);
+    assert.deepEqual(registered, ['user-login-secret']);
+    assert.equal(host.supervisor.commandEnvironment().XORA_TEST_SSH_MCP_PASSWORD, undefined);
+});
+
+test('a malformed MCP document degrades to an empty snapshot instead of taking down Agent startup', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-host-invalid-mcp-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const workspace = path.join(directory, 'workspace');
+    const grokHome = path.join(directory, 'grok-home');
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(grokHome, { recursive: true });
+    fs.writeFileSync(path.join(grokHome, 'config.toml'), '[mcp_servers.invalid\ncommand = "node"');
+
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.runtimeMcpRegistry = new RuntimeMcpRegistry({ grokHome });
+    host.currentSecrets = [];
+    host.theiaTrustedRoots = new Set([workspace]);
+    host.isWorkspaceTrusted = root => root === workspace;
+    host.security = {};
+    host.supervisor = {
+        commandEnvironment: () => ({}),
+        registerRedactionSecrets: () => undefined
+    };
+    host.providers = { mcpCredentialBindings: () => [] };
+
+    const snapshot = host.resolveRuntimeMcpSnapshot(workspace);
+    assert.deepEqual(snapshot.mcpServers, []);
+    assert.equal(snapshot.issues[0].code, 'invalid-configuration');
+    assert.match(snapshot.issues[0].message, /不加载 MCP 的情况下继续/);
 });

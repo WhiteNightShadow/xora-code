@@ -34,6 +34,8 @@ export interface SlashMenuItem {
     readonly commandId?: SlashCommandId;
     /** When set, selection inserts this text in place of the `/…` token. */
     readonly insertText?: string;
+    /** Structured resource metadata used only for composer presentation. */
+    readonly resourceKind?: 'mcp' | 'skill';
     /** Secondary action labels (e.g. open management). */
     readonly detail?: string;
 }
@@ -150,9 +152,8 @@ export function resourceMenuItems(
         description: entry.detail ?? prefix,
         icon,
         kind: 'resource',
-        insertText: kind === 'mcp'
-            ? `（请优先使用 MCP 服务「${entry.name}」）`
-            : `（请使用技能「${entry.name}」）`,
+        insertText: entry.name,
+        resourceKind: kind,
         detail: '插入到输入框'
     }));
     items.push({
@@ -175,18 +176,27 @@ export function replaceSlashToken(
 ): { text: string; cursor: number } {
     const before = text.slice(0, query.start);
     const after = text.slice(query.end);
-    const needsLeadingSpace = replacement.length > 0
+    const normalizedReplacement = replacement.trim();
+    const needsLeadingSpace = normalizedReplacement.length > 0
         && before.length > 0
         && !/\s$/.test(before)
-        && !replacement.startsWith('\n');
-    const needsTrailingSpace = replacement.length > 0
-        && after.length > 0
+        && !normalizedReplacement.startsWith('\n');
+    // Keep a separator after inserted references even at the end of the
+    // draft, so the next character the user types never sticks to the name.
+    const needsTrailingSpace = normalizedReplacement.length > 0
         && !/^\s/.test(after)
-        && !replacement.endsWith('\n')
-        && !replacement.endsWith(' ');
-    const body = `${needsLeadingSpace ? ' ' : ''}${replacement}${needsTrailingSpace ? ' ' : ''}`;
+        && !normalizedReplacement.endsWith('\n');
+    const body = `${needsLeadingSpace ? ' ' : ''}${normalizedReplacement}${needsTrailingSpace ? ' ' : ''}`;
     const next = `${before}${body}${after}`;
     return { text: next, cursor: before.length + body.length };
+}
+
+/** Whether an inserted resource name still exists as its own draft token. */
+export function hasDelimitedResourceReference(text: string, name: string): boolean {
+    const normalized = name.trim();
+    if (!normalized) return false;
+    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|\\s)${escaped}(?=\\s|$)`, 'u').test(text);
 }
 
 type JsonObject = Record<string, unknown>;
@@ -205,6 +215,20 @@ function stringField(value: unknown, aliases: readonly string[]): string | undef
         const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
         if (aliasSet.has(normalized) && typeof field === 'string' && field.trim()) {
             return field.trim();
+        }
+    }
+    return undefined;
+}
+
+function booleanField(value: unknown, aliases: readonly string[]): boolean | undefined {
+    if (!isJsonObject(value)) return undefined;
+    const aliasSet = new Set(aliases.map(a => a.replace(/[^a-z0-9]/gi, '').toLowerCase()));
+    for (const [key, field] of Object.entries(value)) {
+        if (!aliasSet.has(key.replace(/[^a-z0-9]/gi, '').toLowerCase())) continue;
+        if (typeof field === 'boolean') return field;
+        if (typeof field === 'string') {
+            if (['true', 'yes', 'enabled', 'active'].includes(field.trim().toLowerCase())) return true;
+            if (['false', 'no', 'disabled', 'inactive'].includes(field.trim().toLowerCase())) return false;
         }
     }
     return undefined;
@@ -262,7 +286,10 @@ export function extractNamedResources(
         }
         if (!isJsonObject(value)) return;
         const name = stringField(value, nameAliases);
-        if (name && (looksLikeResource(value, kind) || depth >= 1)) {
+        const explicitlyDisabled = kind === 'skill'
+            && (booleanField(value, ['enabled', 'active']) === false
+                || booleanField(value, ['disabled']) === true);
+        if (name && !explicitlyDisabled && (looksLikeResource(value, kind) || depth >= 1)) {
             if (!names.has(name)) {
                 names.set(name, stringField(value, detailAliases));
             }

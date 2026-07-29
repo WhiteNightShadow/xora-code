@@ -50,6 +50,9 @@ const FENCE_PATTERN = /^ {0,3}(`{3,})([^`]*)$/;
 const UNORDERED_ITEM_PATTERN = /^ {0,3}[-+*][\t ]+(.*)$/;
 const ORDERED_ITEM_PATTERN = /^ {0,3}(\d+)[.)][\t ]+(.*)$/;
 const TABLE_SEPARATOR_CELL_PATTERN = /^:?-{3,}:?$/;
+const WELL_KNOWN_EXTENSIONLESS_FILES = new Set([
+    'Dockerfile', 'Gemfile', 'LICENSE', 'Makefile', 'Procfile', 'Rakefile', 'Vagrantfile'
+]);
 
 /**
  * Parses the small, presentation-oriented Markdown subset used by streamed
@@ -346,7 +349,16 @@ function looksLikeFilePath(value: string): boolean {
     if (candidate.startsWith('http://') || candidate.startsWith('https://') || candidate.startsWith('mailto:')) {
         return false;
     }
-    return /(?:\/|\\|\.\w{1,12}$)/.test(candidate) && /[\\/]/.test(candidate);
+    if (!/[\\/]/.test(candidate) || /[?#]/.test(candidate)) return false;
+    const basename = candidate.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() ?? '';
+    // A slash alone is not enough: API routes such as
+    // `/dashboard/exec-trend` used to look like clickable files and then
+    // failed in the workspace resolver. Automatic Markdown links stay
+    // conservative; authoritative tool locations and Diff cards continue to
+    // support extensionless files through their structured metadata.
+    return /^\.[\w.-]+$/.test(basename)
+        || /\.[\p{L}\p{N}_-]{1,16}$/u.test(basename)
+        || WELL_KNOWN_EXTENSIONLESS_FILES.has(basename);
 }
 
 function stripLineSuffix(value: string): string {

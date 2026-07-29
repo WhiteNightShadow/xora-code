@@ -61,6 +61,11 @@ export class AgentViewModel {
     transcript: TranscriptEntry[] = [];
     protected readonly toolEntries = new Map<string, TranscriptEntry>();
     protected readonly diffEntries = new Map<string, TranscriptEntry>();
+    /** Suppresses a stale, unchanged plan snapshot after its turn was
+     * cancelled. Grok may repeat the last session plan at the start of the
+     * next prompt; it becomes visible again only when its structure or
+     * completed progress changes, or an item actually resumes. */
+    protected readonly cancelledPlanSignatures = new Map<string, Map<string, number>>();
     /**
      * Histories created before turn IDs were persisted are reconstructed from
      * their user/turn-completed boundaries. Ordinals are reset for each replay,
@@ -359,11 +364,24 @@ export class AgentViewModel {
             if (!plan
                 || plan.sessionId !== sessionId
                 || (activityTurnId !== undefined && entry.activityTurnId !== activityTurnId)
-                || !plan.entries.some(item => item.status === 'in-progress')) continue;
+                || !plan.entries.some(item => item.status === 'pending' || item.status === 'in-progress')) continue;
+            const planOutcome = outcome === 'completed'
+                ? 'completed' as const
+                : outcome === 'cancelled' || outcome === 'read-only'
+                    ? 'cancelled' as const
+                    : 'failed' as const;
+            if (planOutcome === 'cancelled') this.rememberCancelledPlan(plan);
             entry.payload = {
                 ...plan,
+                outcome: planOutcome,
                 entries: plan.entries.map(item => item.status === 'in-progress'
-                    ? { ...item, status: outcome === 'completed' ? 'completed' as const : 'failed' as const }
+                    || item.status === 'pending'
+                    ? {
+                        ...item,
+                        status: planOutcome === 'completed' && item.status === 'pending'
+                            ? 'pending' as const
+                            : planOutcome
+                    }
                     : item)
             };
         }
@@ -371,13 +389,20 @@ export class AgentViewModel {
 
     protected upsertPlan(event: Extract<AgentHostEvent, { kind: 'plan' }>): boolean {
         const activityTurnId = this.activityTurnId(event);
+        const nextActive = event.entries.some(item => item.status === 'in-progress');
+        const signature = this.planSignature(event);
+        const cancelledProgress = this.cancelledPlanSignatures.get(event.sessionId)?.get(signature);
+        const completed = event.entries.filter(item => item.status === 'completed').length;
+        if (cancelledProgress !== undefined) {
+            if (!nextActive && completed <= cancelledProgress) return false;
+            this.cancelledPlanSignatures.get(event.sessionId)?.delete(signature);
+        }
         const existing = this.transcript.find(entry =>
             entry.kind === 'plan'
             && entry.payload?.kind === 'plan'
             && entry.payload.sessionId === event.sessionId
             && entry.activityTurnId === activityTurnId
         );
-        const nextActive = event.entries.some(item => item.status === 'in-progress');
         if (existing) {
             const previous = existing.payload as Extract<AgentHostEvent, { kind: 'plan' }>;
             const previousActive = previous.entries.some(item => item.status === 'in-progress');
@@ -389,6 +414,29 @@ export class AgentViewModel {
         } else {
             this.transcript.push({ id: this.id('plan'), kind: 'plan', payload: event, activityTurnId });
             return nextActive;
+        }
+    }
+
+    protected planSignature(plan: Extract<AgentHostEvent, { kind: 'plan' }>): string {
+        return JSON.stringify([
+            plan.title ?? '',
+            plan.entries.map(item => [item.id, item.text])
+        ]);
+    }
+
+    protected rememberCancelledPlan(plan: Extract<AgentHostEvent, { kind: 'plan' }>): void {
+        let plans = this.cancelledPlanSignatures.get(plan.sessionId);
+        if (!plans) {
+            plans = new Map();
+            this.cancelledPlanSignatures.set(plan.sessionId, plans);
+        }
+        const signature = this.planSignature(plan);
+        plans.delete(signature);
+        plans.set(signature, plan.entries.filter(item => item.status === 'completed').length);
+        while (plans.size > 32) {
+            const oldest = plans.keys().next().value as string | undefined;
+            if (!oldest) break;
+            plans.delete(oldest);
         }
     }
 
@@ -652,6 +700,7 @@ export class AgentViewModel {
         this.transcript = [];
         this.toolEntries.clear();
         this.diffEntries.clear();
+        this.cancelledPlanSignatures.clear();
         this.legacyActivityTurnIds.clear();
         this.legacyActivityTurnOrdinals.clear();
     }

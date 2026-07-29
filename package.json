@@ -1,6 +1,6 @@
 {
   "name": "xora-code",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "An open-source Grok desktop app and Grok Build GUI client built with Eclipse Theia, Electron, and ACP.",
   "author": {

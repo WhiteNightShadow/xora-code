@@ -26,6 +26,7 @@ const XAI_OFFICIAL_BASE_URL = 'https://api.x.ai/v1';
 export { XAI_MANAGED_MODEL_ID } from '../common/agent-protocol';
 const XAI_MANAGED_ENVIRONMENT = 'XORA_CODE_XAI_API_KEY';
 const AUTHENTICATION_CONSENT_POLICY_VERSION = 1;
+const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 // This value can never be persisted as a valid runtime epoch. Its only purpose
 // is to force ready-runtime and session comparisons to fail while a durable
 // Provider transaction marker exists.
@@ -636,6 +637,90 @@ export class ProviderRegistry {
         // their allowlisted skill view coherent with the shared subscription
         // home immediately after an app-owned Skills change.
         this.refreshCustomProviderSkillViews();
+    }
+
+    disabledSkills(): string[] {
+        try {
+            const root = tomlObject(parseToml(this.readGrokConfig()));
+            const skills = tomlObject(root?.skills);
+            return [...(tomlStringArray(skills?.disabled) ?? [])].sort();
+        } catch {
+            // The management inspect result remains usable even if an external
+            // edit temporarily leaves config.toml malformed.
+            return [];
+        }
+    }
+
+    updateMcpEnabled(
+        workspaceRoot: string,
+        server: string,
+        enabled: boolean,
+        preferredScope: 'user' | 'project' = 'user'
+    ): void {
+        const normalized = server.trim();
+        if (!MCP_SERVER_NAME.test(normalized)) {
+            throw new Error('MCP 服务名称无效。');
+        }
+        const root = this.canonicalMcpWorkspaceRoot(workspaceRoot);
+        const candidates = [
+            { scope: 'user' as const, configPath: this.grokConfigPath },
+            { scope: 'project' as const, configPath: path.join(root, '.grok', 'config.toml') }
+        ].filter(candidate => fs.existsSync(candidate.configPath));
+        if (!candidates.length) throw new Error('找不到可修改的 Xora MCP 配置。');
+
+        const lockPaths = candidates.map(candidate => `${candidate.configPath}.whitenight-code.lock`).sort();
+        this.withOrderedFileLocks(lockPaths, () => {
+            const documents = candidates.map(candidate => {
+                const source = readTextOrEmpty(candidate.configPath);
+                this.assertToml(source);
+                return {
+                    ...candidate,
+                    source,
+                    hash: crypto.createHash('sha256').update(source).digest('hex'),
+                    containsServer: this.mcpServerFlags(source, normalized) !== undefined
+                };
+            });
+            const containing = documents.filter(document => document.containsServer);
+            if (!containing.length) throw new Error(`Xora MCP 配置中不存在服务“${normalized}”。`);
+            const effective = containing.find(document => document.scope === preferredScope)
+                ?? containing.find(document => document.scope === 'project')
+                ?? containing[0];
+
+            const updates = documents.map(document => {
+                let after = document.source;
+                const disabled = new Set(this.readTopLevelTomlStringArray(after, 'disabled_mcp_servers'));
+                if (enabled && disabled.delete(normalized)) {
+                    after = this.writeTopLevelTomlStringArray(after, 'disabled_mcp_servers', [...disabled].sort());
+                } else if (!enabled && document.configPath === effective.configPath && !disabled.has(normalized)) {
+                    disabled.add(normalized);
+                    after = this.writeTopLevelTomlStringArray(after, 'disabled_mcp_servers', [...disabled].sort());
+                }
+
+                if (enabled && document.configPath === effective.configPath) {
+                    const flags = this.mcpServerFlags(after, normalized);
+                    if (flags?.enabled === false) {
+                        after = this.writeTomlBoolean(after, `mcp_servers.${normalized}`, 'enabled', true);
+                    }
+                    if (flags?.disabled === true) {
+                        after = this.writeTomlBoolean(after, `mcp_servers.${normalized}`, 'disabled', false);
+                    }
+                }
+                this.assertToml(after);
+                return { document, after };
+            });
+            for (const { document } of updates) {
+                const current = readTextOrEmpty(document.configPath);
+                if (crypto.createHash('sha256').update(current).digest('hex') !== document.hash) {
+                    throw new Error('MCP 配置在更新期间发生变化，请重试。');
+                }
+            }
+            for (const { document, after } of updates) {
+                if (after !== document.source) {
+                    if (document.source) this.backupConfig(document.configPath);
+                    this.atomicWrite(document.configPath, after, 0o600);
+                }
+            }
+        });
     }
 
     /**
@@ -1359,6 +1444,18 @@ export class ProviderRegistry {
         }
     }
 
+    protected withOrderedFileLocks<T>(lockPaths: readonly string[], operation: () => T): T {
+        const ordered = [...new Set(lockPaths)].sort();
+        const acquire = (index: number): T => index >= ordered.length
+            ? operation()
+            : this.withFileLock(
+                ordered[index],
+                '另一个 Xora Code 窗口正在修改 MCP 配置，请重试。',
+                () => acquire(index + 1)
+            );
+        return acquire(0);
+    }
+
     protected async withFileLockAsync<T>(
         lockPath: string,
         busyMessage: string,
@@ -1424,10 +1521,10 @@ export class ProviderRegistry {
         const section = this.tomlSection(source, table);
         if (!section) return [];
         const body = source.slice(section.bodyStart, section.end);
-        const expression = new RegExp(`^\\s*${key}\\s*=\\s*(\\[[^\\n]*\\])\\s*(?:#.*)?$`, 'm');
+        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*(\\[[^\\n]*\\])[ \\t]*(?:#.*)?$`, 'm');
         const match = expression.exec(body);
         if (!match) {
-            const keyStart = new RegExp(`^\\s*${key}\\s*=`, 'm').exec(body);
+            const keyStart = new RegExp(`^[ \\t]*${key}[ \\t]*=`, 'm').exec(body);
             if (keyStart) {
                 throw new Error(`Xora Code cannot safely edit a multi-line [${table}].${key} array. Keep it on one line or edit it manually.`);
             }
@@ -1450,7 +1547,7 @@ export class ProviderRegistry {
             return `${source}${separator}[${table}]\n${assignment}\n`;
         }
         const body = source.slice(section.bodyStart, section.end);
-        const expression = new RegExp(`^\\s*${key}\\s*=\\s*\\[[^\\n]*\\]\\s*(?:#.*)?$`, 'm');
+        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[[^\\n]*\\][ \\t]*(?:#.*)?$`, 'm');
         if (expression.test(body)) {
             const replaced = body.replace(expression, assignment);
             return `${source.slice(0, section.bodyStart)}${replaced}${source.slice(section.end)}`;
@@ -1459,12 +1556,64 @@ export class ProviderRegistry {
         return `${source.slice(0, section.end)}${insertion}${source.slice(section.end)}`;
     }
 
+    protected readTopLevelTomlStringArray(source: string, key: string): string[] {
+        if (!source.trim()) return [];
+        const root = tomlObject(parseToml(source));
+        const values = tomlStringArray(root?.[key]);
+        if (root?.[key] !== undefined && !values) {
+            throw new Error(`Xora Code 无法安全修改 ${key}；它必须是字符串数组。`);
+        }
+        return values ?? [];
+    }
+
+    protected writeTopLevelTomlStringArray(source: string, key: string, values: string[]): string {
+        const assignment = `${key} = ${JSON.stringify(values)}`;
+        const firstTable = /^[ \t]*\[[^\]]+\][ \t]*(?:#.*)?$/m.exec(source);
+        const headEnd = firstTable?.index ?? source.length;
+        const head = source.slice(0, headEnd);
+        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[[^\\n]*\\][ \\t]*(?:#.*)?$`, 'm');
+        if (expression.test(head)) {
+            return `${head.replace(expression, assignment)}${source.slice(headEnd)}`;
+        }
+        if (new RegExp(`^[ \\t]*${key}[ \\t]*=`, 'm').test(head)) {
+            throw new Error(`Xora Code 无法安全修改多行 ${key}，请改为单行数组后重试。`);
+        }
+        if (!source) return `${assignment}\n`;
+        const separator = source.startsWith('\n') ? '' : '\n';
+        return `${assignment}${separator}${source}`;
+    }
+
+    protected mcpServerFlags(source: string, server: string): { enabled?: boolean; disabled?: boolean } | undefined {
+        const root = tomlObject(parseToml(source));
+        const servers = tomlObject(root?.mcp_servers);
+        const value = tomlObject(servers?.[server]);
+        if (!value) return undefined;
+        return {
+            ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}),
+            ...(typeof value.disabled === 'boolean' ? { disabled: value.disabled } : {})
+        };
+    }
+
+    protected writeTomlBoolean(source: string, table: string, key: string, value: boolean): string {
+        const assignment = `${key} = ${value ? 'true' : 'false'}`;
+        const section = this.tomlSection(source, table);
+        if (!section) {
+            throw new Error(`Xora Code 无法安全修改 [${table}]；请将该服务改为独立 TOML 表后重试。`);
+        }
+        const body = source.slice(section.bodyStart, section.end);
+        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=.*$`, 'm');
+        const replaced = expression.test(body)
+            ? body.replace(expression, assignment)
+            : `${body}${body.endsWith('\n') || !body ? '' : '\n'}${assignment}\n`;
+        return `${source.slice(0, section.bodyStart)}${replaced}${source.slice(section.end)}`;
+    }
+
     protected writeTomlString(source: string, table: string, key: string, value: string): string {
         const assignment = `${key} = ${JSON.stringify(value)}`;
         const section = this.tomlSection(source, table);
         if (!section) throw new Error(`Grok did not create the expected [${table}] MCP table.`);
         const body = source.slice(section.bodyStart, section.end);
-        const expression = new RegExp(`^\\s*${key}\\s*=.*$`, 'm');
+        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=.*$`, 'm');
         const replaced = expression.test(body)
             ? body.replace(expression, assignment)
             : `${body}${body.endsWith('\n') || !body ? '' : '\n'}${assignment}\n`;
@@ -1493,11 +1642,15 @@ export class ProviderRegistry {
 
     protected tomlSection(source: string, table: string): { bodyStart: number; end: number } | undefined {
         const escapedTable = table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const header = new RegExp(`^\\s*\\[${escapedTable}\\]\\s*(?:#.*)?$`, 'm').exec(source);
+        // Keep section boundaries on the table header's own line. `\\s` also
+        // matches newlines, which could make the next-table match consume the
+        // separator newline and concatenate a rewritten assignment with the
+        // following table header (invalid TOML).
+        const header = new RegExp(`^[ \\t]*\\[${escapedTable}\\][ \\t]*(?:#.*)?$`, 'm').exec(source);
         if (!header || header.index === undefined) return undefined;
         const bodyStart = header.index + header[0].length + (source[header.index + header[0].length] === '\n' ? 1 : 0);
         const rest = source.slice(bodyStart);
-        const next = /^\s*\[[^\]]+\]\s*(?:#.*)?$/m.exec(rest);
+        const next = /^[ \t]*\[[^\]]+\][ \t]*(?:#.*)?$/m.exec(rest);
         return { bodyStart, end: next?.index === undefined ? source.length : bodyStart + next.index };
     }
 

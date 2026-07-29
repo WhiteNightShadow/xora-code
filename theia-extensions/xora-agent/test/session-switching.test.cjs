@@ -206,6 +206,62 @@ test('file review opens immutable before and after snapshots in the native Theia
     assert.deepEqual(notices, []);
 });
 
+test('file navigation resolves exact multi-root paths, nested suffix paths and full-access external files', async () => {
+    const { FileUri } = require('@theia/core/lib/common/file-uri');
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const mainRoot = '/workspace/hello-doc';
+    const additionalRoot = '/workspace/shared-docs';
+    const nestedChinese = `${mainRoot}/技术分享/示例项目/材料/案例-滴滴估价-抓包样例.md`;
+    const exactAdditional = `${additionalRoot}/规范/接口说明.md`;
+    const external = '/external/交付文档/检查清单.md';
+    const existing = new Set([nestedChinese, exactAdditional, external]);
+    widget.model = {
+        snapshot: {
+            workspaceRoot: mainRoot,
+            permissionMode: 'request-approval'
+        }
+    };
+    widget.roots = [mainRoot, additionalRoot];
+    widget.pathPlatform = () => 'linux';
+    widget.fileService = {
+        exists: async uri => existing.has(FileUri.fsPath(uri))
+    };
+    widget.fileSearchService = {
+        find: async (pattern, options) => {
+            assert.equal(pattern, '材料/案例-滴滴估价-抓包样例.md');
+            assert.deepEqual(options.rootUris, [FileUri.create(mainRoot).toString(), FileUri.create(additionalRoot).toString()]);
+            return [FileUri.create(nestedChinese).toString()];
+        }
+    };
+
+    assert.equal(FileUri.fsPath(await widget.resolveWorkspaceFileUri('规范/接口说明.md')), exactAdditional);
+    assert.equal(
+        FileUri.fsPath(await widget.resolveWorkspaceFileUri('材料/案例-滴滴估价-抓包样例.md')),
+        nestedChinese,
+        'a unique nested suffix must repair an Agent path relative to a deeper tool cwd'
+    );
+    assert.equal(await widget.resolveWorkspaceFileUri(external), undefined,
+        'request-approval must not open an absolute file outside every workspace root');
+    widget.model.snapshot.permissionMode = 'full-access';
+    assert.equal(FileUri.fsPath(await widget.resolveWorkspaceFileUri(external)), external,
+        'full access must allow an existing absolute file elsewhere on disk');
+    assert.equal(
+        FileUri.fsPath(await widget.resolveWorkspaceFileUri(FileUri.create(external).toString())),
+        external,
+        'already encoded file URIs must be decoded exactly once'
+    );
+
+    widget.fileSearchService.find = async () => [
+        FileUri.create(`${mainRoot}/项目甲/材料/同名说明.md`).toString(),
+        FileUri.create(`${mainRoot}/项目乙/材料/同名说明.md`).toString()
+    ];
+    assert.equal(await widget.resolveWorkspaceFileUri('材料/同名说明.md'), undefined,
+        'equally ranked suffix matches must fail closed instead of opening the wrong file');
+    assert.equal(await widget.resolveWorkspaceFileUri('../工作区外.md'), undefined,
+        'relative traversal must never escape a workspace root');
+});
+
 test('a stale runtime snapshot cannot clear a locally created session before its first prompt', () => {
     const model = new AgentViewModel();
     const created = session('created', 'idle', {
