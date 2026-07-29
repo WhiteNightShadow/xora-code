@@ -39,9 +39,9 @@
   "scripts": {
     "build": "yarn build:packages && yarn build:extensions && yarn build:applications",
     "build:dev": "yarn build",
-    "build:packages": "lerna run build --scope '@xora-code/acp-client' --scope '@xora-code/fake-acp-agent' --scope '@xora-code/runtime-core' --scope '@xora-code/update-build-tools' --stream",
-    "build:extensions": "lerna run build --scope '@xora-code/product-extension' --scope '@xora-code/agent' --stream",
-    "build:applications": "lerna run build --scope '@xora-code/browser-app' --scope '@xora-code/electron-app' --concurrency 1 --stream",
+    "build:packages": "lerna run build --scope \"@xora-code/acp-client\" --scope \"@xora-code/fake-acp-agent\" --scope \"@xora-code/runtime-core\" --scope \"@xora-code/update-build-tools\" --stream",
+    "build:extensions": "lerna run build --scope \"@xora-code/product-extension\" --scope \"@xora-code/agent\" --stream",
+    "build:applications": "lerna run build --scope \"@xora-code/browser-app\" --scope \"@xora-code/electron-app\" --concurrency 1 --stream",
     "clean": "lerna run clean --stream",
     "lint": "lerna run lint --stream",
     "test": "lerna run test --stream",
