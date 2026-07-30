@@ -9,7 +9,7 @@
   </p>
 
   <p>
-    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.3%20Stable-2ea44f?style=flat-square" alt="v0.2.3 Stable" /></a>
+    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.4%20Preview-d29922?style=flat-square" alt="v0.2.4 Preview" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/build%20targets-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="Build targets: macOS Windows Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
@@ -22,7 +22,7 @@
     <a href="#快速开始">快速开始</a> ·
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
-    <a href="#v023-release-notes">v0.2.3 Release Notes</a> ·
+    <a href="#v024-release-notes">v0.2.4 Preview Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
     <a href="#参与项目">参与项目</a> ·
     <a href="#问题反馈与交流">问题反馈与交流</a>
@@ -40,7 +40,7 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 > Xora Code 是由社区独立维护的开源项目，不是 xAI 官方客户端，与 xAI 不存在隶属、赞助或背书关系。“Grok”与“Grok Build”仅用于准确描述本项目集成的上游软件及互操作能力。
 
 > [!IMPORTANT]
-> Xora Code `v0.2.3` 是当前稳定生产版本。核心桌面工作区、并发会话、模型接入、Skills/MCP 统一配置与可审查 Agent 流程已经可用。安装包尚未取得 Apple Developer ID、Windows Authenticode 或 Linux GPG 商业签名，请从本仓库 Release 下载并在安装前核对 SHA-256。
+> 仓库当前迭代版本为 Xora Code `v0.2.4 Preview`；GitHub 最新稳定生产版本仍为 `v0.2.3`。核心桌面工作区、并发会话、模型接入、Skills/MCP 统一配置与可审查 Agent 流程已经可用。安装包尚未取得 Apple Developer ID、Windows Authenticode 或 Linux GPG 商业签名，请从本仓库 Release 下载并在安装前核对 SHA-256。
 
 <p align="center">
   <img src="docs/images/xora-code-workspace.png" width="1200" alt="Xora Code 深色桌面工作区：项目树、代码编辑器与固定 Agent 面板" />
@@ -57,8 +57,8 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
       <p align="center"><strong>可审查的 Agent 工作流</strong><br /><sub>Plan、工具活动、文件变更、耗时与命令审批集中展示。</sub></p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/images/xora-code-mcp-settings.png" alt="Xora Code Skills 与 MCP 统一管理界面" />
-      <p align="center"><strong>统一的 Skills / MCP 管理</strong><br /><sub>查看发现来源、诊断结果、配置状态与当前会话加载状态。</sub></p>
+      <img src="docs/images/xora-code-mcp-settings.png" alt="Xora Code 当前 MCP 管理界面：服务版本、工具数量与启用状态" />
+      <p align="center"><strong>统一的 Skills / MCP 管理</strong><br /><sub>集中查看已安装服务、版本与工具数量，并通过开关控制是否向 Agent 提供。</sub></p>
     </td>
   </tr>
 </table>
@@ -160,7 +160,7 @@ flowchart LR
 | [Grok Build](https://github.com/xai-org/grok-build) | 提供编码 Agent Runtime、工具、Skills、MCP 和 Plugins 能力。 |
 | [ACP](https://github.com/agentclientprotocol/agent-client-protocol) | 连接桌面客户端与 Agent，传输会话、流式内容、工具和权限事件。 |
 
-Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.3 的实际 Runtime 由 Grok Build 提供。
+Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。UI 和会话协议保持 Agent 中立，当前 v0.2.4 迭代的实际 Runtime 由 Grok Build 提供。
 
 对话流沿端到端链路做了轻量调度：项目打开即预热 Runtime；首个 Assistant 文本片段收到后立即跨进程呈现，后续高频片段再按浏览器帧批量刷新，减少首字等待和连续 Markdown 重排。不同会话使用独立的发送队列并可并行工作，同一会话则保持 ACP Prompt 串行顺序。
 
@@ -201,9 +201,27 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - 更多 MCP OAuth/远程传输兼容、Plugin Marketplace 与扩展签名体验
 - 超大历史与超长单轮工具列表的进一步虚拟化，以及更多真实项目性能基准
 - 子 Agent 独立控制台与逐个取消能力（当前仅活动可见；整轮取消仍是主要控制方式）
-- 两套 Ed25519 更新信任锚、平台代码签名、macOS 公证与自动更新通道
+- 两套 Ed25519 更新信任锚、平台代码签名、macOS 公证与自动更新通道；
+  完整的故障隔离、一次性版本提醒、域名主源与 GitHub 回退方案见
+  [在线更新与版本服务设计](docs/architecture/online-update-strategy.md)
 
-> `v0.2.3` 是当前稳定生产版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
+> `v0.2.4` 是当前本地预览迭代，`v0.2.3` 仍是 GitHub 最新稳定生产版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
+
+## v0.2.4 Preview Notes
+
+`v0.2.4` 聚焦应用恢复可靠性与后续在线更新基础：修复 Agent 设置页作为上次关闭页面时，下次启动主编辑区空白的问题，并完成 `xora-code.com`、静态更新源与 GitHub 回退的非阻塞更新方案。
+
+> [!NOTE]
+> `v0.2.4` 当前仅提供本地预览安装包，尚未发布为 GitHub Stable。在线自动安装仍受 Apple Developer ID、Windows Authenticode、Linux GPG 与应用 Ed25519 发布密钥门禁约束。
+
+### 启动恢复与更新基础
+
+- **设置页恢复**：从 Theia 保存布局恢复 Agent 设置页时，先立即绘制本地页面骨架，再异步加载 Provider、Runtime 与组件状态，不再依赖用户重新点击设置标签。
+- **启动路径隔离**：设置数据刷新不进入应用启动关键路径；重复的挂载/激活刷新由现有 single-flight 合并。
+- **更新策略**：定义 `xora-code.com` 说明站、`updates.xora-code.com` 静态签名源、GitHub Release 回退、每版本只提醒一次、失败静默退避和后台下载后由用户确认安装的完整边界。
+- **版本边界**：仓库、全部工作区包和 ACP 客户端标识统一为 `0.2.4`；内嵌 Grok Build sidecar 继续锁定 `0.2.102`。
+
+完整方案见 [在线更新与版本服务设计](docs/architecture/online-update-strategy.md)。
 
 ## v0.2.3 Release Notes
 

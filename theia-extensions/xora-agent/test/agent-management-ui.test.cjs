@@ -76,11 +76,13 @@ test('management UI wires subscription login/logout and credential clearing thro
     assert.doesNotMatch(source, /value=\{provider\.(?:apiKey|secret)/);
 });
 
-test('management data loads on first reveal and coalesces duplicate refreshes', () => {
+test('management view paints and loads when restored without an activation request', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
-    const init = source.slice(source.indexOf('@postConstruct()'), source.indexOf('protected override onActivateRequest'));
+    const init = source.slice(source.indexOf('@postConstruct()'), source.indexOf('protected override onAfterAttach'));
 
     assert.doesNotMatch(init, /refresh\(/);
+    assert.match(source, /onAfterAttach[\s\S]*this\.update\(\)[\s\S]*queueMicrotask/);
+    assert.match(source, /onAfterAttach[\s\S]*void this\.refresh\(\)/);
     assert.match(source, /refreshInFlight/);
     assert.match(source, /this\.refreshInFlight\?\.tab === requestedTab/);
     assert.match(source, /onActivateRequest[\s\S]*void this\.refresh\(\)/);

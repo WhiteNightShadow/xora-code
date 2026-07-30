@@ -288,6 +288,21 @@ export class AgentManagementWidget extends ReactWidget {
         this.node.tabIndex = 0;
     }
 
+    protected override onAfterAttach(message: Message): void {
+        super.onAfterAttach(message);
+        // A widget restored from Theia's saved layout is attached without an
+        // activation request. Render the local shell immediately so the main
+        // area can never reopen as a blank page, then refresh remote/runtime
+        // data outside the startup critical path. A simultaneous command-open
+        // activation is coalesced by refreshInFlight below.
+        this.update();
+        queueMicrotask(() => {
+            if (!this.isDisposed && this.isAttached) {
+                void this.refresh();
+            }
+        });
+    }
+
     protected override onActivateRequest(message: Message): void {
         super.onActivateRequest(message);
         this.node.focus();

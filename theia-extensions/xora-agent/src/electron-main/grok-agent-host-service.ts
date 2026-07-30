@@ -518,7 +518,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.3' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.4' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -526,7 +526,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.2.3'
+                    clientVersion: '0.2.4'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
