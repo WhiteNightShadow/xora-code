@@ -159,7 +159,12 @@ async function main() {
     if (message && Object.hasOwn(message, "id") && pending.has(message.id)) {
       const request = pending.get(message.id);
       pending.delete(message.id);
-      if (message.error) request.reject(new Error(`ACP ${request.method} error: ${JSON.stringify(message.error)}`));
+      if (message.error) {
+        const error = new Error(`ACP ${request.method} error: ${JSON.stringify(message.error)}`);
+        error.rpcCode = message.error.code;
+        error.rpcData = message.error.data;
+        request.reject(error);
+      }
       else request.resolve(message.result);
     }
   });
@@ -201,6 +206,24 @@ async function main() {
       methodId: "xai.api_key",
       _meta: { headless: true },
     }), 30_000, "authenticate");
+
+    // This extension is the non-interrupting transport used by Xora's
+    // "guide current task" action. A deliberately missing session must reach
+    // the registered handler and fail with invalid params; method-not-found
+    // would mean the packaged binary advertises code that ACP cannot route.
+    try {
+      await withTimeout(request("_x.ai/interject", {
+        sessionId: "xora-sidecar-smoke-missing-session",
+        text: "contract probe",
+        interjectionId: "xora-sidecar-smoke-interjection",
+        content: [{ type: "text", text: "contract probe" }],
+      }), 15_000, "_x.ai/interject contract probe");
+      fail("_x.ai/interject unexpectedly accepted a missing session");
+    } catch (error) {
+      if (error?.rpcCode !== -32602 || !String(error?.rpcData ?? "").includes("session not found")) {
+        throw error;
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     let debug = "";
@@ -230,7 +253,7 @@ async function main() {
   }
 
   if (child.exitCode === null && child.signalCode === null) fail("sidecar process survived cleanup");
-  process.stdout.write(`Verified Grok ${lock.upstream.version}: version, ACP initialize, API-key auth, process cleanup.\n`);
+  process.stdout.write(`Verified Grok ${lock.upstream.version}: version, ACP initialize, API-key auth, _x.ai/interject, process cleanup.\n`);
 }
 
 main().catch((error) => {

@@ -23,6 +23,11 @@ import { DiffService } from '@theia/workspace/lib/browser/diff-service';
 import {
     AgentHostEvent,
     AgentHostService,
+    AgentExecutionMode,
+    AgentGoalStateEvent,
+    AgentPlanApprovalRequestEvent,
+    AgentTaskContractEvent,
+    AgentThoughtEvent,
     AgentPermissionMode,
     AgentAttachmentSummary,
     AgentPlanEvent,
@@ -41,6 +46,7 @@ import {
     activityFiltersForTool,
     AgentActivityFilter,
     AgentContextSummary,
+    isGoalCompletionRequest,
     presentAgentTool,
     sessionRelativeTime,
     sessionStatusLabel,
@@ -85,6 +91,9 @@ interface PromptSubmission {
     readonly generation: number;
     readonly workspaceRoot: string;
     readonly providerId: string;
+    /** Explicit, conversation-local choice captured when the user sends. */
+    readonly taskMode: ComposerTaskMode;
+    readonly executionMode: AgentExecutionMode;
     /** Renderer-local click-to-completion anchor used only for live UX. */
     readonly acceptedAt: number;
     readonly sourceSessionId?: string;
@@ -96,7 +105,10 @@ interface PromptSubmission {
      * cold session creation never looks like a missed click. */
     userEventReceived?: boolean;
     cancelled?: boolean;
-    state?: 'queued' | 'preparing' | 'running';
+    state?: 'queued' | 'guiding' | 'preparing' | 'running';
+    /** Blocks FIFO promotion while the same row is crossing x.ai/interject. */
+    guidanceCompletion?: Promise<void>;
+    resolveGuidance?: () => void;
     resolveCompletion?: () => void;
     completion?: Promise<void>;
 }
@@ -105,8 +117,15 @@ interface RetryablePrompt extends PromptSubmission {
     message: string;
 }
 
+interface SessionContextMenuState {
+    sessionId: string;
+    x: number;
+    y: number;
+}
+
 type AgentPopover = 'history' | 'context';
 type AgentPaneView = 'conversation' | 'activity' | 'changes';
+type ComposerTaskMode = 'standard' | 'continuous';
 
 const MAX_RENDERED_TRANSCRIPT_ENTRIES = 180;
 const MAX_PROMPT_IMAGE_COUNT = 4;
@@ -132,7 +151,7 @@ interface DraftImageAttachment extends PromptImageAttachment {
 }
 
 interface ComposerGate {
-    kind: 'project' | 'restore';
+    kind: 'project' | 'restore' | 'plan-approval';
     message: string;
 }
 
@@ -264,10 +283,16 @@ export class XoraAgentWidget extends ReactWidget {
     protected newSessionLaneSequence = 0;
     protected activeComposerLaneKey: string | undefined;
     protected composerDrafts = new Map<string, ComposerDraftState>();
+    /** Execution intent is isolated with the composer lane. It never becomes
+     * a global default and therefore cannot silently affect another session. */
+    protected composerTaskModes = new Map<string, ComposerTaskMode>();
     /** Visual tokens remain conversation-local just like text and images. */
     protected composerReferences: ComposerResourceReference[] = [];
     protected promptLanes = new Map<string, SessionPromptLane>();
     protected readonly permissionDecisions = new Set<string>();
+    protected readonly planApprovalDecisions = new Set<string>();
+    protected readonly planApprovalCriteria = new Map<string, string>();
+    protected readonly planApprovalFeedback = new Map<string, string>();
     protected textarea: HTMLTextAreaElement | null = null;
     protected composerSubmitButton: HTMLButtonElement | null = null;
     protected composerResizeTarget: HTMLTextAreaElement | null = null;
@@ -296,6 +321,9 @@ export class XoraAgentWidget extends ReactWidget {
     protected activityFilter: AgentActivityFilter = 'all';
     protected readonly toolDisclosure = new Map<string, boolean>();
     protected readonly diffDisclosure = new Map<string, boolean>();
+    protected readonly thoughtDisclosure = new Map<string, boolean>();
+    protected sessionContextMenu: SessionContextMenuState | undefined;
+    protected exportingSessionId: string | undefined;
     protected newSessionModel: string | undefined;
     protected modelOptionsLoading = false;
     protected providerRefreshInFlight: Promise<void> | undefined;
@@ -417,6 +445,7 @@ export class XoraAgentWidget extends ReactWidget {
             for (const previewUrl of previewUrls) URL.revokeObjectURL(previewUrl);
             this.draftImages = [];
             this.composerDraftState().clear();
+            this.composerTaskModeState().clear();
             for (const lane of this.promptLaneState().values()) {
                 for (const item of lane.queue) item.cancelled = true;
                 if (lane.active) lane.active.cancelled = true;
@@ -452,14 +481,27 @@ export class XoraAgentWidget extends ReactWidget {
         const modelChoiceCount = modelChoiceGroups.reduce((count, group) => count + group.choices.length, 0);
         const selectedModel = selectedAgentModelChoice(modelChoiceGroups, snapshot, active, this.newSessionModel);
         const permissionMode = snapshot.permissionMode;
+        const taskMode = this.currentComposerTaskMode();
+        // Some lightweight embedders and legacy test fixtures provide only
+        // the original view-model surface. Missing Goal state means standard
+        // mode; it must never make ordinary prompt admission fail.
+        const goalState = this.model.goalState?.(active?.appSessionId);
+        const taskContract = this.model.taskContract?.(active?.appSessionId);
         const contextSummary = summarizeAgentContext(snapshot, this.model.transcript);
         const pendingPermissions = [...this.model.pendingPermissions.values()].map(permission => ({
             id: permission.requestId,
             kind: 'permission' as const,
             payload: permission
         }));
+        const pendingPlanApprovals: TranscriptEntry[] = [...this.model.pendingPlanApprovals.values()].map(request => ({
+            id: request.requestId,
+            kind: 'plan-approval',
+            payload: request,
+            activityTurnId: request.turnId ? `activity:${request.sessionId}:${request.turnId}` : undefined
+        }));
         const visibleTranscript = this.model.transcript.filter(entry => {
             if (entry.kind === 'permission') return !this.model.pendingPermissions.has(entry.id);
+            if (entry.kind === 'plan-approval') return !this.model.pendingPlanApprovals.has(entry.id);
             // A background cold-start failure is an implementation detail while
             // its one bounded recovery attempt is still in progress. If that
             // recovery also fails, the final actionable error remains visible.
@@ -544,9 +586,13 @@ export class XoraAgentWidget extends ReactWidget {
             </header>
             {this.renderSessionTabs()}
             {this.renderPopover()}
+            {this.renderSessionContextMenu()}
             {this.renderImagePreview()}
             {this.renderConversationBar()}
             {this.renderPaneTabs(toolEntries.length, diffEntries.length)}
+            {goalState && goalState.status !== 'cleared'
+                ? this.renderGoalStatus(goalState)
+                : taskContract ? this.renderTaskContractStatus(taskContract, active) : undefined}
             {this.agentPaneView === 'activity' ? this.renderActivityFilters(toolEntries) : undefined}
             <section
                 className='xora-transcript'
@@ -584,8 +630,8 @@ export class XoraAgentWidget extends ReactWidget {
                 onClick={() => this.scrollToBottom()}>
                 <span className='codicon codicon-arrow-down' /> {this.agentPaneView === 'activity' ? '有新活动 · 回到底部' : '有新消息 · 回到底部'}
             </button> : undefined}
-            {pendingPermissions.length ? <aside className='xora-permission-dock' aria-label='等待处理的权限请求'>
-                {pendingPermissions.map(entry => this.renderEntry(entry))}
+            {pendingPermissions.length || pendingPlanApprovals.length ? <aside className='xora-permission-dock' aria-label='等待处理的请求'>
+                {[...pendingPlanApprovals, ...pendingPermissions].map(entry => this.renderEntry(entry))}
             </aside> : undefined}
             {this.inlineNotice ? <div
                 className={`xora-agent-inline-notice tone-${this.inlineNotice.tone}`}
@@ -726,7 +772,9 @@ export class XoraAgentWidget extends ReactWidget {
                         }}
                     />
                     {composerGate ? <div className={`xora-composer-gate xora-composer-gate-${composerGate.kind}`} role='status'>
-                        <span className={`codicon ${composerGate.kind === 'project' ? 'codicon-folder-opened' : 'codicon-loading'}`} />
+                        <span className={`codicon ${composerGate.kind === 'project'
+                            ? 'codicon-folder-opened'
+                            : composerGate.kind === 'plan-approval' ? 'codicon-checklist' : 'codicon-loading'}`} />
                         <span>{composerGate.message}，草稿会保留。</span>
                     </div> : undefined}
                     <div className='xora-composer-actions'>
@@ -777,6 +825,23 @@ export class XoraAgentWidget extends ReactWidget {
                                     <option value='full-access'>完全访问权限</option>
                                 </select>
                             </label>
+                            <label
+                                className={`xora-task-mode-control is-${taskMode}`}
+                                title={taskMode === 'continuous'
+                                    ? '持续执行当前目标，模型结束后由 Xora 核验完成条件'
+                                    : '按当前方式执行一次，不增加额外轮次'}>
+                                <span className={`codicon ${taskMode === 'continuous'
+                                    ? 'codicon-sync'
+                                    : 'codicon-run'}`} />
+                                <select
+                                    aria-label='任务执行方式'
+                                    disabled={this.currentComposerHasPromptLaneWork() || this.sessionLoading}
+                                    value={taskMode}
+                                    onChange={event => this.selectComposerTaskMode(event.currentTarget.value as ComposerTaskMode)}>
+                                    <option value='standard'>常规</option>
+                                    <option value='continuous' disabled={!!active && active.goalCapability?.available !== true}>持续完成</option>
+                                </select>
+                            </label>
                             <button
                                 className={`xora-composer-tool${this.slashMenuOpen ? ' is-active' : ''}`}
                                 type='button'
@@ -799,14 +864,6 @@ export class XoraAgentWidget extends ReactWidget {
                                 disabled={this.draftImages.length + this.imageReadsInFlight >= MAX_PROMPT_IMAGE_COUNT}
                                 onClick={() => this.imageInput?.click()}>
                                 <span className='codicon codicon-attach' />
-                            </button>
-                            <button
-                                className='xora-composer-tool'
-                                type='button'
-                                aria-label='选择工作区文件'
-                                title='选择工作区文件并插入 @路径'
-                                onClick={() => void this.pickWorkspaceFilesForPrompt()}>
-                                <span className='codicon codicon-file' />
                             </button>
                             <button
                                 className={`xora-context-trigger xora-context-${contextSummary.compactionStatus}${contextSummary.usagePercent !== undefined ? ' has-usage' : ''}`}
@@ -895,6 +952,84 @@ export class XoraAgentWidget extends ReactWidget {
         </div>;
     }
 
+    protected renderGoalStatus(goal: AgentGoalStateEvent): React.ReactNode {
+        const modelLabel = goal.agentTurnStatus === 'running'
+            ? '模型执行中'
+            : goal.agentTurnStatus === 'end-turn'
+                ? '模型已结束'
+                : goal.agentTurnStatus === 'cancelled' ? '模型已中止' : '模型出错';
+        const verificationLabel = goal.verificationStatus === 'verified'
+            ? 'Xora · 目标已核验'
+            : goal.verificationStatus === 'verifying'
+                ? 'Xora · 正在核验'
+                : goal.verificationStatus === 'incomplete'
+                    ? '仍有未完成项'
+                    : goal.verificationStatus === 'blocked'
+                        ? '验收受阻'
+                        : goal.verificationStatus === 'paused'
+                            ? '监督已暂停'
+                            : goal.verificationStatus === 'working'
+                                ? '持续完成中'
+                                : '等待验收';
+        const verified = goal.verificationStatus === 'verified';
+        const paused = goal.verificationStatus === 'paused'
+            || ['user-paused', 'back-off-paused', 'no-progress-paused', 'infra-paused', 'blocked', 'budget-limited']
+                .includes(goal.status);
+        const tone = verified ? 'verified' : paused ? 'paused' : goal.verificationStatus === 'verifying' ? 'verifying' : 'active';
+        return <aside className={`xora-goal-status is-${tone}`} role='status' aria-live='polite'>
+            <span className={`codicon ${verified
+                ? 'codicon-verified-filled'
+                : paused ? 'codicon-debug-pause' : 'codicon-sync codicon-modifier-spin'}`} aria-hidden='true' />
+            <span className='xora-goal-status-title'>持续完成</span>
+            <span className='xora-goal-state-chip'>{modelLabel}</span>
+            <span className='xora-goal-state-separator' aria-hidden='true'>·</span>
+            <span className='xora-goal-state-chip' title='核验结果来自 Grok Build Goal，由 Xora 持久化并独立于模型回合状态展示'>{verificationLabel}</span>
+            {goal.workerRounds > 0 ? <span className='xora-goal-rounds'>{goal.workerRounds} 轮</span> : undefined}
+        </aside>;
+    }
+
+    /** Truthful bridge between native Plan approval and the first
+     * goal_updated. It also makes an interrupted restart explicit instead of
+     * resurrecting a synthetic "active" Goal that Xora cannot replay. */
+    protected renderTaskContractStatus(
+        contract: AgentTaskContractEvent,
+        session: SessionRecord | undefined
+    ): React.ReactNode {
+        const live = session?.status === 'running';
+        const verified = contract.lifecycle === 'verified';
+        const interrupted = contract.lifecycle === 'interrupted' || !live;
+        const modelLabel = contract.lifecycle === 'approved' && live
+            ? '模型按计划执行中'
+            : contract.lifecycle === 'goal-starting' && live
+                ? '模型已结束'
+                : contract.lifecycle === 'goal-active' && live
+                    ? '模型执行中'
+                    : verified ? '模型已结束' : '模型已中断';
+        const xoraLabel = verified
+            ? 'Xora · 目标已核验'
+            : interrupted
+                ? 'Xora · 持续完成未启动'
+                : contract.lifecycle === 'goal-starting'
+                    ? 'Xora · 正在启动验收'
+                    : 'Xora · 等待 Goal 状态';
+        const tone = verified ? 'verified' : interrupted ? 'paused' : 'verifying';
+        return <aside className={`xora-goal-status is-${tone}`} role='status' aria-live='polite'>
+            <span className={`codicon ${verified
+                ? 'codicon-verified-filled'
+                : interrupted ? 'codicon-debug-pause' : 'codicon-sync codicon-modifier-spin'}`} aria-hidden='true' />
+            <span className='xora-goal-status-title'>持续完成</span>
+            <span className='xora-goal-state-chip'>{modelLabel}</span>
+            <span className='xora-goal-state-separator' aria-hidden='true'>·</span>
+            <span
+                className='xora-goal-state-chip'
+                title={interrupted
+                    ? '已批准的目标与验收条件保存在本地；Xora 不会在重启后自动重放任务'
+                    : '已锁定目标、计划与验收条件，等待 Grok Build 发布原生 Goal 状态'}>
+                {xoraLabel}
+            </span>
+        </aside>;
+    }
+
     protected transcriptForPane(entries: TranscriptEntry[]): TranscriptEntry[] {
         if (this.agentPaneView === 'conversation') return entries;
         if (this.agentPaneView === 'changes') return entries.filter(entry => entry.kind === 'diff');
@@ -903,7 +1038,7 @@ export class XoraAgentWidget extends ReactWidget {
                 return toolMatchesActivityFilter(entry.payload as ToolCallEvent, this.activityFilter);
             }
             if (this.activityFilter !== 'all') return false;
-            return entry.kind === 'plan' || entry.kind === 'permission' || entry.kind === 'error';
+            return entry.kind === 'plan' || entry.kind === 'plan-approval' || entry.kind === 'permission' || entry.kind === 'error';
         });
     }
 
@@ -1305,6 +1440,41 @@ export class XoraAgentWidget extends ReactWidget {
         return this.composerDrafts ?? (this.composerDrafts = new Map());
     }
 
+    protected composerTaskModeState(): Map<string, ComposerTaskMode> {
+        return this.composerTaskModes ?? (this.composerTaskModes = new Map());
+    }
+
+    protected currentComposerTaskMode(): ComposerTaskMode {
+        const key = this.activeComposerLaneKey ?? this.imageDraftContextKey();
+        const selected = this.composerTaskModeState().get(key);
+        return selected === 'continuous' ? 'continuous' : 'standard';
+    }
+
+    protected selectComposerTaskMode(mode: ComposerTaskMode): void {
+        if (this.currentComposerHasPromptLaneWork() || this.sessionLoading) return;
+        const key = this.activeComposerLaneKey ?? this.imageDraftContextKey();
+        this.composerTaskModeState().set(key, mode);
+        this.requestRuntimePrewarm(true);
+        this.update();
+        requestAnimationFrame(() => this.textarea?.focus());
+    }
+
+    protected sessionModeIsPlan(session: SessionRecord | undefined): boolean {
+        if (!session?.currentModeId) return false;
+        if (session.currentModeId.toLowerCase() === 'plan') return true;
+        const mode = session.availableModes?.find(candidate => candidate.id === session.currentModeId);
+        return /(?:^|\s)plan(?:ning)?(?:\s|$)/i.test(mode?.name ?? '');
+    }
+
+    protected sessionModeId(session: SessionRecord | undefined, kind: 'plan' | 'code'): string | undefined {
+        const exact = session?.availableModes?.find(mode => mode.id.toLowerCase() === kind);
+        if (exact) return exact.id;
+        const semantic = session?.availableModes?.find(mode => kind === 'plan'
+            ? /(?:^|\s)plan(?:ning)?(?:\s|$)/i.test(`${mode.id} ${mode.name}`)
+            : /(?:^|\s)(?:code|agent|build|execute)(?:\s|$)/i.test(`${mode.id} ${mode.name}`));
+        return semantic?.id ?? (session?.availableModes === undefined ? kind : undefined);
+    }
+
     protected promptLaneState(): Map<string, SessionPromptLane> {
         return this.promptLanes ?? (this.promptLanes = new Map());
     }
@@ -1424,6 +1594,20 @@ export class XoraAgentWidget extends ReactWidget {
         return !!lane && (!!lane.active || lane.queue.some(item => !item.cancelled));
     }
 
+    /** Task mode belongs to one composer lane. A task running in another
+     * conversation must not prevent this lane from choosing Plan/Goal before
+     * it sends, while work already accepted by this lane keeps its captured
+     * mode immutable. */
+    protected currentComposerHasPromptLaneWork(): boolean {
+        const lane = this.currentPromptLane(false);
+        if (lane && (lane.active || lane.queue.some(item => !item.cancelled))) return true;
+        const activeSessionId = this.model?.snapshot?.activeSessionId;
+        if (!activeSessionId) return false;
+        if (this.sessionHasPromptLaneWork(activeSessionId)) return true;
+        return this.model.snapshot.sessions?.some(session =>
+            session.appSessionId === activeSessionId && session.status === 'running') === true;
+    }
+
     /** Releases every renderer-owned resource for an unreachable composer.
      * Running lanes are never disposed through this path. */
     protected disposePromptLane(key: string): void {
@@ -1441,6 +1625,7 @@ export class XoraAgentWidget extends ReactWidget {
             }
             this.promptLaneState().delete(key);
         }
+        this.composerTaskModeState().delete(key);
         if (this.activeComposerLaneKey === key) {
             this.prompt = '';
             this.composerReferences = [];
@@ -1507,6 +1692,8 @@ export class XoraAgentWidget extends ReactWidget {
         this.retryablePrompt = undefined;
         this.toolDisclosure?.clear();
         this.diffDisclosure?.clear();
+        this.thoughtDisclosure?.clear();
+        this.sessionContextMenu = undefined;
     }
 
     protected reconcileAgentContext(): void {
@@ -1622,6 +1809,7 @@ export class XoraAgentWidget extends ReactWidget {
                     className={`xora-session-tab${active ? ' active' : ''}${session.status === 'running' ? ' running' : ''}`}
                     role='tab'
                     aria-selected={active}
+                    onContextMenu={event => this.openSessionContextMenu(event, session)}
                     title={session.title || '未命名会话'}>
                     {renaming ? <input
                         className='xora-session-rename-input'
@@ -1703,6 +1891,7 @@ export class XoraAgentWidget extends ReactWidget {
                         key={session.appSessionId}
                         className={`xora-session-item${active ? ' active' : ''}`}
                         role='listitem'
+                        onContextMenu={event => this.openSessionContextMenu(event, session)}
                         aria-current={active ? 'true' : undefined}>
                         <span className={`xora-session-status-dot xora-session-status-${session.status}`} />
                         {renaming ? <input
@@ -1769,6 +1958,105 @@ export class XoraAgentWidget extends ReactWidget {
                 </button>
             </footer>
         </section>;
+    }
+
+    protected openSessionContextMenu(event: React.MouseEvent<HTMLElement>, session: SessionRecord): void {
+        event.preventDefault();
+        event.stopPropagation();
+        const menuWidth = 196;
+        const menuHeight = 132;
+        const margin = 8;
+        this.openPopover = undefined;
+        this.sessionContextMenu = {
+            sessionId: session.appSessionId,
+            x: Math.max(margin, Math.min(event.clientX, window.innerWidth - menuWidth - margin)),
+            y: Math.max(margin, Math.min(event.clientY, window.innerHeight - menuHeight - margin))
+        };
+        this.update();
+    }
+
+    protected closeSessionContextMenu(): void {
+        if (!this.sessionContextMenu) return;
+        this.sessionContextMenu = undefined;
+        this.update();
+    }
+
+    protected renderSessionContextMenu(): React.ReactNode {
+        const state = this.sessionContextMenu;
+        if (!state) return undefined;
+        const session = this.model.snapshot.sessions.find(candidate => candidate.appSessionId === state.sessionId);
+        if (!session) return undefined;
+        const busy = session.status === 'running'
+            || this.sessionHasPromptLaneWork(session.appSessionId)
+            || this.sessionLoading;
+        return <>
+            <div
+                className='xora-session-context-scrim'
+                aria-hidden='true'
+                onMouseDown={() => this.closeSessionContextMenu()}
+                onContextMenu={event => {
+                    event.preventDefault();
+                    this.closeSessionContextMenu();
+                }} />
+            <section
+                className='xora-session-context-menu'
+                role='menu'
+                aria-label={`会话操作：${session.title || '未命名会话'}`}
+                style={{ left: state.x, top: state.y }}
+                onMouseDown={event => event.stopPropagation()}>
+                <button
+                    type='button'
+                    role='menuitem'
+                    disabled={busy || this.exportingSessionId === session.appSessionId}
+                    title={busy ? '任务结束后可导出完整会话' : '导出为 Markdown'}
+                    onClick={() => void this.exportSession(session)}>
+                    <span className={`codicon ${this.exportingSessionId === session.appSessionId ? 'codicon-loading codicon-modifier-spin' : 'codicon-export'}`} />
+                    <span>{this.exportingSessionId === session.appSessionId ? '正在导出…' : '导出会话…'}</span>
+                </button>
+                <button
+                    type='button'
+                    role='menuitem'
+                    disabled={busy}
+                    onClick={() => {
+                        this.sessionContextMenu = undefined;
+                        this.beginSessionRename(session);
+                    }}>
+                    <span className='codicon codicon-edit' />
+                    <span>重命名</span>
+                </button>
+                <div className='xora-session-context-separator' role='separator' />
+                <button
+                    type='button'
+                    role='menuitem'
+                    className='danger'
+                    disabled={busy}
+                    onClick={() => {
+                        this.sessionContextMenu = undefined;
+                        void this.deleteSession(session);
+                    }}>
+                    <span className='codicon codicon-trash' />
+                    <span>删除会话</span>
+                </button>
+            </section>
+        </>;
+    }
+
+    protected async exportSession(session: SessionRecord): Promise<void> {
+        if (this.exportingSessionId) return;
+        this.exportingSessionId = session.appSessionId;
+        this.sessionContextMenu = undefined;
+        this.update();
+        try {
+            const result = await this.service.exportSession(session.appSessionId);
+            if (result.status === 'exported') {
+                this.showInlineNotice(`会话已导出为 ${result.fileName ?? 'Markdown 文档'}。`);
+            }
+        } catch (error) {
+            this.showInlineNotice(`无法导出会话：${friendlyAgentErrorMessage(error)}`, 'error');
+        } finally {
+            this.exportingSessionId = undefined;
+            this.update();
+        }
     }
 
     protected renderContextPopover(): React.ReactNode {
@@ -1865,10 +2153,11 @@ export class XoraAgentWidget extends ReactWidget {
     protected handleRootKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
         const nativeEvent = event.nativeEvent as KeyboardEvent;
         if (this.imeComposing || this.imeCompositionJustEnded || nativeEvent.isComposing || nativeEvent.keyCode === 229) return;
-        if (event.key !== 'Escape' || (!this.openPopover && !this.previewImageId)) return;
+        if (event.key !== 'Escape' || (!this.openPopover && !this.previewImageId && !this.sessionContextMenu)) return;
         event.preventDefault();
         event.stopPropagation();
         if (this.previewImageId) this.closeImagePreview();
+        else if (this.sessionContextMenu) this.closeSessionContextMenu();
         else this.closePopover();
     }
 
@@ -1972,6 +2261,11 @@ export class XoraAgentWidget extends ReactWidget {
         }
         if (this.sessionLoading) {
             return { kind: 'restore', message: '正在恢复会话' };
+        }
+        const planApprovals = this.model.pendingPlanApprovals?.values?.() ?? [];
+        if (snapshot.activeSessionId && [...planApprovals]
+            .some(request => request.sessionId === snapshot.activeSessionId)) {
+            return { kind: 'plan-approval', message: '请先处理当前计划审批' };
         }
         return undefined;
     }
@@ -3262,6 +3556,7 @@ export class XoraAgentWidget extends ReactWidget {
         let activeToolEntry: TranscriptEntry | undefined;
         let latestToolEntry: TranscriptEntry | undefined;
         let activePlanEntry: TranscriptEntry | undefined;
+        let latestGoalCompletionEntry: TranscriptEntry | undefined;
         let lastEntry: TranscriptEntry | undefined;
         // A restored transcript can contain thousands of entries. Resolve all
         // progress hints in one backwards pass instead of allocating several
@@ -3272,6 +3567,9 @@ export class XoraAgentWidget extends ReactWidget {
             lastEntry ??= entry;
             if (entry.kind === 'tool' && entry.payload.kind === 'tool-call') {
                 latestToolEntry ??= entry;
+                if (!latestGoalCompletionEntry && isGoalCompletionRequest(entry.payload)) {
+                    latestGoalCompletionEntry = entry;
+                }
                 if (!activeToolEntry && (entry.payload.status === 'pending' || entry.payload.status === 'running')) {
                     activeToolEntry = entry;
                 }
@@ -3284,6 +3582,12 @@ export class XoraAgentWidget extends ReactWidget {
         const activeTool = activeToolEntry?.payload?.kind === 'tool-call' ? activeToolEntry.payload : undefined;
         const latestTool = latestToolEntry?.payload?.kind === 'tool-call' ? latestToolEntry.payload : undefined;
         const activePlan = activePlanEntry?.payload?.kind === 'plan' ? activePlanEntry.payload : undefined;
+        const goal = this.model.goalState(sessionId);
+        const authoritativeGoalVerifying = goal?.agentTurnStatus === 'running'
+            && goal.verificationStatus === 'verifying';
+        const completionRequestBelongsToCurrentTurn = !!latestGoalCompletionEntry
+            && !!lastEntry
+            && latestGoalCompletionEntry.activityTurnId === lastEntry.activityTurnId;
         const activeToolDisplay = activeTool ? presentAgentTool(activeTool) : undefined;
         const latestToolDisplay = latestTool ? presentAgentTool(latestTool) : undefined;
         const permissionDisplay = permission ? presentAgentTool({
@@ -3314,6 +3618,11 @@ export class XoraAgentWidget extends ReactWidget {
             title = '正在推进执行计划';
             detail = activeStep?.text ?? activePlan.title ?? '正在处理下一步';
             icon = 'codicon-checklist';
+            tone = 'plan';
+        } else if (authoritativeGoalVerifying || completionRequestBelongsToCurrentTurn) {
+            title = '正在核验完成条件';
+            detail = '模型已提交结果，Grok Build 正在进行最终验收';
+            icon = 'codicon-verified';
             tone = 'plan';
         } else if (lastEntry?.kind === 'assistant') {
             title = '正在生成回复';
@@ -3463,7 +3772,105 @@ export class XoraAgentWidget extends ReactWidget {
         this.update();
     }
 
+    protected planApprovalCriteriaText(request: AgentPlanApprovalRequestEvent): string {
+        const existing = this.planApprovalCriteria.get(request.requestId);
+        if (existing !== undefined) return existing;
+        const suggested = request.suggestedContract.acceptanceCriteria.length
+            ? request.suggestedContract.acceptanceCriteria
+            : request.suggestedContract.planEntries.map(entry => `完成：${entry.text}`);
+        return suggested.join('\n');
+    }
+
+    protected async decidePlanApproval(
+        request: AgentPlanApprovalRequestEvent,
+        outcome: 'approved' | 'cancelled' | 'abandoned'
+    ): Promise<void> {
+        if (this.planApprovalDecisions.has(request.requestId)) return;
+        const feedback = (this.planApprovalFeedback.get(request.requestId) ?? '').trim();
+        if (outcome === 'cancelled' && !feedback) {
+            this.showInlineNotice('请先填写希望 Agent 如何修改计划。', 'warning');
+            return;
+        }
+        const criteria = this.planApprovalCriteriaText(request)
+            .split(/\r?\n/)
+            .map(item => item.trim().replace(/^[-*]\s+/, ''))
+            .filter(Boolean);
+        if (outcome === 'approved' && !criteria.length) {
+            this.showInlineNotice('批准前请至少保留一条验收条件。', 'warning');
+            return;
+        }
+        this.planApprovalDecisions.add(request.requestId);
+        this.update();
+        try {
+            await this.model.decidePlan({
+                requestId: request.requestId,
+                outcome,
+                ...(feedback ? { feedback } : {}),
+                ...(outcome === 'approved' ? {
+                    contract: {
+                        objective: request.suggestedContract.objective,
+                        planEntries: request.suggestedContract.planEntries,
+                        acceptanceCriteria: criteria
+                    }
+                } : {})
+            });
+            const session = this.model.snapshot.sessions.find(candidate => candidate.appSessionId === request.sessionId);
+            if (session) {
+                const laneKey = this.promptLaneKey(session.workspaceRoot, session.providerId, session.appSessionId);
+                if (outcome === 'approved') {
+                    // Electron continues the approved Plan as the same native
+                    // Goal. Do not turn a later, unrelated manual prompt into
+                    // another Goal merely because this approval succeeded.
+                    this.composerTaskModeState().delete(laneKey);
+                } else if (outcome === 'abandoned') {
+                    this.composerTaskModeState().set(laneKey, 'standard');
+                }
+            }
+            this.planApprovalCriteria.delete(request.requestId);
+            this.planApprovalFeedback.delete(request.requestId);
+            this.followTranscript(true, true);
+        } catch (error) {
+            this.showInlineNotice(`无法处理计划：${friendlyAgentErrorMessage(error)}`, 'error');
+        } finally {
+            this.planApprovalDecisions.delete(request.requestId);
+            this.update();
+        }
+    }
+
     protected renderEntry(entry: TranscriptEntry): React.ReactNode {
+        if (entry.kind === 'thought') {
+            const thought = entry.payload as AgentThoughtEvent;
+            if (!entry.text?.trim()) return undefined;
+            const streaming = entry.thoughtStreaming === true;
+            const expanded = streaming || (this.thoughtDisclosure.get(entry.id) ?? false);
+            const startedAtMs = thought.startedAt ? Date.parse(thought.startedAt) : undefined;
+            return <details
+                key={entry.id}
+                className={`xora-thought${streaming ? ' is-streaming' : ''}`}
+                open={expanded}
+                onToggle={event => {
+                    if (streaming) return;
+                    const open = event.currentTarget.open;
+                    if ((this.thoughtDisclosure.get(entry.id) ?? false) === open) return;
+                    this.thoughtDisclosure.set(entry.id, open);
+                    this.update();
+                }}>
+                <summary>
+                    <span className={`codicon ${streaming ? 'codicon-loading codicon-modifier-spin' : 'codicon-sparkle'}`} aria-hidden='true' />
+                    <span>{streaming ? '正在思考' : '思考过程'}</span>
+                    <small
+                        ref={node => this.bindLiveElapsed(
+                            node,
+                            streaming && Number.isFinite(startedAtMs) ? startedAtMs : undefined,
+                            streaming ? undefined : entry.thoughtElapsedMs
+                        )} />
+                    <span className='codicon codicon-chevron-right xora-details-chevron' aria-hidden='true' />
+                </summary>
+                {expanded ? <div className='xora-thought-content'>
+                    <AgentMarkdown text={entry.text} onOpenPath={this.openMarkdownPath} />
+                </div> : undefined}
+            </details>;
+        }
         if (entry.kind === 'plan') {
             const plan = entry.payload as AgentPlanEvent;
             const completed = plan.entries.filter(item => item.status === 'completed').length;
@@ -3487,6 +3894,53 @@ export class XoraAgentWidget extends ReactWidget {
                     <span>{item.text}</span>
                 </li>)}</ol>
             </details>;
+        }
+        if (entry.kind === 'plan-approval') {
+            const request = entry.payload as AgentPlanApprovalRequestEvent;
+            const pending = this.model.pendingPlanApprovals.has(request.requestId);
+            const deciding = this.planApprovalDecisions.has(request.requestId);
+            if (!pending) {
+                return <article key={entry.id} className='xora-permission-history'>
+                    <span className='codicon codicon-checklist' />
+                    <span>执行计划 · 已处理</span>
+                    <span>已响应</span>
+                </article>;
+            }
+            return <article key={entry.id} className='xora-plan-approval-card' role='dialog' aria-label='确认执行计划'>
+                <header>
+                    <span className='xora-tool-icon tone-plan'><span className='codicon codicon-checklist' /></span>
+                    <div>
+                        <span>只读规划已完成</span>
+                        <strong>确认后开始执行，并持续完成当前目标</strong>
+                    </div>
+                </header>
+                {request.planContent ? <div className='xora-plan-approval-content'>
+                    <AgentMarkdown text={request.planContent} onOpenPath={this.openMarkdownPath} />
+                </div> : undefined}
+                <label className='xora-plan-contract-field'>
+                    <span>验收条件 <small>每行一条，可在批准前调整</small></span>
+                    <textarea
+                        rows={Math.min(5, Math.max(2, this.planApprovalCriteriaText(request).split(/\r?\n/).length))}
+                        defaultValue={this.planApprovalCriteriaText(request)}
+                        disabled={deciding}
+                        onChange={event => this.planApprovalCriteria.set(request.requestId, event.currentTarget.value)} />
+                </label>
+                <label className='xora-plan-contract-field xora-plan-feedback-field'>
+                    <span>修改意见 <small>仅“请求修改”时需要</small></span>
+                    <textarea
+                        rows={2}
+                        placeholder='例如：先补充回归测试，再修改实现…'
+                        disabled={deciding}
+                        onChange={event => this.planApprovalFeedback.set(request.requestId, event.currentTarget.value)} />
+                </label>
+                <div className='xora-card-actions'>
+                    <button className='theia-button main' disabled={deciding} onClick={() => void this.decidePlanApproval(request, 'approved')}>
+                        {deciding ? '正在处理…' : '批准并持续完成'}
+                    </button>
+                    <button className='theia-button secondary' disabled={deciding} onClick={() => void this.decidePlanApproval(request, 'cancelled')}>请求修改</button>
+                    <button className='theia-button secondary' disabled={deciding} onClick={() => void this.decidePlanApproval(request, 'abandoned')}>放弃计划</button>
+                </div>
+            </article>;
         }
         if (entry.kind === 'tool') {
             return this.renderToolEntry(entry);
@@ -3583,7 +4037,8 @@ export class XoraAgentWidget extends ReactWidget {
             </article>;
         }
         const attachments = entry.payload?.kind === 'text-delta' ? entry.payload.attachments ?? [] : [];
-        return <article key={entry.id} className={`xora-message xora-message-${entry.kind}`}>
+        const guidance = entry.payload?.kind === 'text-delta' && entry.payload.guidance === true;
+        return <article key={entry.id} className={`xora-message xora-message-${entry.kind}${guidance ? ' xora-message-guidance' : ''}`}>
             <div className='xora-message-header'>
                 <span>{entry.kind === 'assistant' ? 'Agent' : transcriptRoleLabel(entry.kind)}</span>
                 <span className='xora-message-meta'>
@@ -3598,6 +4053,10 @@ export class XoraAgentWidget extends ReactWidget {
                     </button> : undefined}
                 </span>
             </div>
+            {guidance ? <div className='xora-guidance-label'>
+                <span className='codicon codicon-compass' aria-hidden='true' />
+                已引导当前任务
+            </div> : undefined}
             {attachments.length ? this.renderMessageAttachments(attachments) : undefined}
             {entry.text ? <div className='xora-message-text'>{entry.kind === 'user'
                 ? entry.text
@@ -3664,7 +4123,17 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected renderPendingSubmission(submission: PromptSubmission, active: boolean, queueIndex: number): React.ReactNode {
-        const stateLabel = active
+        const guiding = submission.state === 'guiding';
+        const lane = this.currentPromptLane(false);
+        const canGuide = !active
+            && !guiding
+            && submission.state === 'queued'
+            && lane?.active?.state === 'running'
+            && !!lane.active.sessionId
+            && this.model.snapshot.capabilities?.guidePrompt === true;
+        const stateLabel = guiding
+            ? '正在加入当前任务'
+            : active
             ? submission.state === 'running' ? '正在执行' : '正在发送'
             : `排队中${queueIndex > 0 ? ` · 前面 ${queueIndex} 条` : ''}`;
         return <article
@@ -3677,17 +4146,27 @@ export class XoraAgentWidget extends ReactWidget {
                 {submission.attachments.length} 张图片
             </div> : undefined}
             <div className='xora-pending-send-state' role='status'>
-                <span className={`codicon ${active ? 'codicon-loading codicon-modifier-spin' : 'codicon-clock'}`} />
+                <span className={`codicon ${active || guiding ? 'codicon-loading codicon-modifier-spin' : 'codicon-clock'}`} />
                 <span>{stateLabel}{active ? <>
                     {' · '}<span ref={node => this.bindLiveElapsed(node, submission.acceptedAt)} />
                 </> : undefined}</span>
-                <button
-                    type='button'
-                    className='xora-pending-cancel'
-                    aria-label='取消这条消息'
-                    onClick={() => void this.cancelPromptItem(submission.id)}>
-                    取消
-                </button>
+                <span className='xora-pending-actions'>
+                    {canGuide ? <button
+                        type='button'
+                        className='xora-pending-guide'
+                        title='不打断当前任务，在下一个安全节点让 Agent 读取这条消息'
+                        onClick={() => void this.guidePromptItem(submission.id)}>
+                        引导当前任务
+                    </button> : undefined}
+                    <button
+                        type='button'
+                        className='xora-pending-cancel'
+                        aria-label='取消这条消息'
+                        disabled={guiding}
+                        onClick={() => void this.cancelPromptItem(submission.id)}>
+                        取消
+                    </button>
+                </span>
             </div>
         </article>;
     }
@@ -3718,6 +4197,7 @@ export class XoraAgentWidget extends ReactWidget {
             ...(image.name ? { name: image.name } : {})
         }));
         if (!text && !attachments.length) return;
+        const taskMode = retry?.taskMode ?? this.currentComposerTaskMode();
         let resolveCompletion: (() => void) | undefined;
         const completion = new Promise<void>(resolve => { resolveCompletion = resolve; });
         this.promptSequence = Number.isSafeInteger(this.promptSequence) ? this.promptSequence + 1 : 1;
@@ -3728,6 +4208,8 @@ export class XoraAgentWidget extends ReactWidget {
             generation: this.agentContextGeneration,
             workspaceRoot: lane.workspaceRoot,
             providerId: lane.providerId,
+            taskMode,
+            executionMode: taskMode === 'continuous' ? 'continuous' : 'standard',
             acceptedAt: Date.now(),
             sourceSessionId: lane.sourceSessionId,
             sessionId: retry?.sessionId ?? lane.sessionId,
@@ -3779,6 +4261,14 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected async processPromptLane(lane: SessionPromptLane): Promise<void> {
         while (lane.queue.length) {
+            const next = lane.queue[0];
+            // A guidance request races the active turn by design. Never let
+            // the FIFO worker also promote that row to session/prompt while
+            // Electron is waiting for x.ai/interject to acknowledge it.
+            if (next.state === 'guiding' && next.guidanceCompletion) {
+                await next.guidanceCompletion;
+                continue;
+            }
             const submission = lane.queue.shift()!;
             if (submission.cancelled) {
                 submission.resolveCompletion?.();
@@ -3852,7 +4342,7 @@ export class XoraAgentWidget extends ReactWidget {
                     model: this.newSessionModel ?? this.model.snapshot.selectedModel,
                     title: submission.text.slice(0, 64)
                         || (submission.attachments.length === 1 ? '图片任务' : `${submission.attachments.length} 张图片`),
-                    additionalDirectories: this.roots.filter(candidate => !this.sameWorkspaceRoot(candidate, hostRoot))
+                    additionalDirectories: this.roots.filter(candidate => !this.sameWorkspaceRoot(candidate, hostRoot)),
                 });
                 if (!this.submissionCanContinue(lane, submission)) return;
                 sessionId = session.appSessionId;
@@ -3867,10 +4357,17 @@ export class XoraAgentWidget extends ReactWidget {
                 await this.ensureSessionHydrated(sessionId, hydrationKey);
                 if (!this.submissionCanContinue(lane, submission)) return;
             }
+            await this.ensureSubmissionSessionMode(sessionId);
+            if (!this.submissionCanContinue(lane, submission)) return;
             submission.sessionId = sessionId;
             submission.state = 'running';
             this.syncPromptLaneIfVisible(lane);
-            await this.service.sendPrompt({ sessionId, text: submission.text, attachments: submission.attachments });
+            await this.service.sendPrompt({
+                sessionId,
+                text: submission.text,
+                executionMode: submission.executionMode,
+                attachments: submission.attachments
+            });
         } catch (error) {
             const cancelled = submission.cancelled
                 || (submission.sessionId ? this.cancelRequested.has(submission.sessionId) : false)
@@ -3920,6 +4417,19 @@ export class XoraAgentWidget extends ReactWidget {
         return false;
     }
 
+    protected async ensureSubmissionSessionMode(sessionId: string): Promise<void> {
+        const session = this.model.snapshot.sessions.find(candidate => candidate.appSessionId === sessionId);
+        if (!session) return;
+        // Releases before 0.2.4 could persist a session in Grok's optional
+        // Plan mode. The composer no longer exposes that fragile mode, so the
+        // next ordinary/continuous prompt returns the session to its normal
+        // executable mode when Grok advertises one.
+        const targetModeId = this.sessionModeIsPlan(session) ? this.sessionModeId(session, 'code') : undefined;
+        if (!targetModeId || targetModeId === session.currentModeId) return;
+        const updated = await this.service.setSessionMode(sessionId, targetModeId);
+        this.model.updateSession(updated);
+    }
+
     protected bindPromptLaneToSession(lane: SessionPromptLane, session: SessionRecord): void {
         const oldKey = lane.key;
         const nextKey = this.promptLaneKey(session.workspaceRoot, this.model.snapshot.providerId, session.appSessionId);
@@ -3933,6 +4443,11 @@ export class XoraAgentWidget extends ReactWidget {
         if (draft) {
             this.composerDraftState().delete(oldKey);
             this.composerDraftState().set(nextKey, draft);
+        }
+        const taskMode = this.composerTaskModeState().get(oldKey);
+        if (taskMode) {
+            this.composerTaskModeState().delete(oldKey);
+            this.composerTaskModeState().set(nextKey, taskMode);
         }
         if (this.activeComposerLaneKey === oldKey) {
             this.activeComposerLaneKey = nextKey;
@@ -3959,6 +4474,63 @@ export class XoraAgentWidget extends ReactWidget {
         lane.retryable = undefined;
         this.syncVisiblePromptLane();
         this.update();
+    }
+
+    protected async guidePromptItem(promptId: string): Promise<void> {
+        const lane = [...this.promptLaneState().values()]
+            .find(candidate => candidate.queue.some(item => item.id === promptId));
+        const submission = lane?.queue.find(item => item.id === promptId);
+        if (!lane || !submission || submission.cancelled || submission.state !== 'queued') return;
+        const runningSessionId = lane.active?.state === 'running' ? lane.active.sessionId : undefined;
+        if (!runningSessionId) {
+            if (this.activeComposerLaneKey === lane.key) {
+                this.showInlineNotice('当前任务刚刚结束，这条消息会继续按队列发送。');
+            }
+            return;
+        }
+
+        let resolveGuidance: (() => void) | undefined;
+        submission.guidanceCompletion = new Promise<void>(resolve => { resolveGuidance = resolve; });
+        submission.resolveGuidance = resolveGuidance;
+        submission.state = 'guiding';
+        this.syncPromptLaneIfVisible(lane);
+        let accepted = false;
+        try {
+            const result = await this.service.guidePrompt({
+                sessionId: runningSessionId,
+                text: submission.text,
+                attachments: submission.attachments
+            });
+            if (result.status !== 'accepted') {
+                if (this.activeComposerLaneKey === lane.key) {
+                    this.showInlineNotice('当前任务刚刚结束，这条消息会继续按队列发送。');
+                }
+                return;
+            }
+            accepted = true;
+            const currentIndex = lane.queue.indexOf(submission);
+            if (currentIndex >= 0) lane.queue.splice(currentIndex, 1);
+            submission.resolveCompletion?.();
+            // The acknowledged guidance event is published by Electron main;
+            // keep following the current turn without resetting its progress.
+            if (this.activeComposerLaneKey === lane.key) this.followTranscript(true, true);
+        } catch (error) {
+            if (this.activeComposerLaneKey === lane.key) {
+                const unsupported = /method not found|not supported|unknown method/i.test(
+                    error instanceof Error ? error.message : String(error));
+                this.showInlineNotice(unsupported
+                    ? '当前 Grok Build 不支持任务引导；消息已保留在队列。'
+                    : '暂时无法引导当前任务；消息已保留在队列。', 'warning');
+            }
+        } finally {
+            // On success the row has left the FIFO; on failure it resumes its
+            // original queued state and is sent normally when the turn ends.
+            submission.state = 'queued';
+            submission.resolveGuidance?.();
+            submission.guidanceCompletion = undefined;
+            submission.resolveGuidance = undefined;
+            this.syncPromptLaneIfVisible(lane);
+        }
     }
 
     protected async cancelPromptItem(promptId: string): Promise<void> {

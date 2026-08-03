@@ -291,6 +291,8 @@ lines.on("line", (line) => {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { authMethods: [{ id: "xai.api_key" }] } }) + "\\n");
   } else if (request.method === "authenticate") {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }) + "\\n");
+  } else if (request.method === "_x.ai/interject") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "Invalid params", data: "session not found: xora-sidecar-smoke-missing-session" } }) + "\\n");
   }
 });`);
 
@@ -299,7 +301,7 @@ lines.on("line", (line) => {
     timeout: 10_000,
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /ACP initialize, API-key auth, process cleanup/u);
+  assert.match(result.stdout, /ACP initialize, API-key auth, _x\.ai\/interject, process cleanup/u);
 });
 
 test("ACP smoke reports an early sidecar exit without waiting for request timeout", async (context) => {

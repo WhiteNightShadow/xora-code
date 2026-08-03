@@ -7,6 +7,21 @@ const { FileUri } = require('@theia/core/lib/node');
 
 const { XoraWorkspaceServer } = require('../lib/node/xora-workspace-server');
 
+test('the product Explorer omits Theia Timeline without removing provider support', () => {
+    const sourceRoot = path.join(__dirname, '..', 'src', 'browser');
+    const moduleSource = fs.readFileSync(path.join(sourceRoot, 'xora-product-frontend-module.ts'), 'utf8');
+    const contributionSource = fs.readFileSync(path.join(sourceRoot, 'xora-timeline-contribution.ts'), 'utf8');
+    const explorerSource = fs.readFileSync(path.join(sourceRoot, 'xora-explorer-contribution.ts'), 'utf8');
+    const manifest = require('../package.json');
+
+    assert.equal(manifest.dependencies['@theia/timeline'], '1.73.1');
+    assert.match(moduleSource, /rebind\(TimelineContribution\)\.to\(XoraTimelineContribution\)/);
+    assert.match(contributionSource, /Deliberately omit Theia's Explorer attachment listener/);
+    assert.doesNotMatch(contributionSource, /explorer\.addWidget|TimelineWidget\.ID/);
+    assert.match(explorerSource, /tryGetWidget<TimelineWidget>\(TimelineWidget\.ID\)\?\.close\(\)/,
+        'saved layouts from older releases must also shed an already-restored Timeline pane');
+});
+
 test('empty-window restore ignores scripts and keeps real workspaces', async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-workspace-startup-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));

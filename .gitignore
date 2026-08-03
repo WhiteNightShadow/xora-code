@@ -5,8 +5,9 @@ dist/
 coverage/
 .nyc_output/
 .playwright-cli/
-output/playwright/
-output/releases/
+/output/
+/sample-notes.txt
+/website/
 *.tsbuildinfo
 *.log
 .DS_Store

@@ -15,3 +15,17 @@ text, tool-call, permission-request, diff and completion fixtures. Reply to the
 
 Sending a `session/cancel` notification while permission is pending makes the
 original prompt finish with `{ "stopReason": "cancelled" }`.
+
+The session also advertises the native `/goal` command and `update_goal` tool.
+A prompt beginning with `/goal` emits deterministic
+`x.ai/session_notification` / `goal_updated` transitions, including an active
+verification state after a cosmetic all-completed Plan snapshot. Ordinary
+prompts emit no Goal lifecycle events.
+
+`session/set_mode` accepts `default` and `plan`. A prompt in Plan mode performs
+no edits before sending an `x.ai/exit_plan_mode` reverse request. Reply with
+`{ "outcome": "approved" }` to switch back to `default`; the same native loop
+then emits a deterministic edit and diff before finishing with `end_turn`.
+This intentionally matches Grok Build: approval can resume coding, but does not
+start Goal by itself. The client must send one subsequent `/goal …` prompt to
+continue the approved objective under Goal supervision and verification.

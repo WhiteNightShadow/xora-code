@@ -171,7 +171,7 @@ test('Skill switches preserve adjacent TOML tables and can complete a full cycle
     assert.equal(restored.mcp_servers.fixture.command, 'node');
 });
 
-test('isolated Provider homes reject existing external links and real extension directories without replacing them', t => {
+test('isolated Provider homes reject external links but preserve real extension directories without blocking Agent startup', t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-skill-links-'));
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
     const { registry, sharedHome, providerHomes } = isolatedRegistry(directory);
@@ -190,12 +190,36 @@ test('isolated Provider homes reject existing external links and real extension 
     assert.equal(fs.readFileSync(path.join(external, 'sentinel'), 'utf8'), 'keep');
 
     fs.unlinkSync(path.join(home, 'skills'));
-    fs.symlinkSync(path.join(sharedHome, 'skills'), path.join(home, 'skills'), process.platform === 'win32' ? 'junction' : 'dir');
+    fs.mkdirSync(path.join(home, 'skills'));
+    fs.writeFileSync(path.join(home, 'skills', 'legacy-skill.md'), 'keep legacy skill');
     fs.mkdirSync(path.join(home, 'commands'));
     fs.writeFileSync(path.join(home, 'commands', 'sentinel'), 'keep');
 
-    assert.throws(() => registry.ensureApiProviderGrokHome(profile), /refused to replace the existing commands directory/);
+    const restoredHome = registry.ensureApiProviderGrokHome(profile);
+    assert.equal(restoredHome, home);
+    assert.equal(fs.readFileSync(path.join(home, 'skills', 'legacy-skill.md'), 'utf8'), 'keep legacy skill');
     assert.equal(fs.readFileSync(path.join(home, 'commands', 'sentinel'), 'utf8'), 'keep');
+    const generated = parseToml(fs.readFileSync(path.join(home, 'config.toml'), 'utf8'));
+    assert.deepEqual(generated.skills.paths, [path.join(sharedHome, 'skills')]);
+});
+
+test('a Grok-created empty skills directory keeps configured paths and adds the canonical shared Skills source once', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-real-skills-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const { registry, sharedHome, providerHomes } = isolatedRegistry(directory);
+    const profile = customProvider('xora-real-skills-fixture');
+    const home = path.join(providerHomes, profile.id);
+    fs.mkdirSync(path.join(sharedHome, 'skills'), { recursive: true });
+    fs.mkdirSync(path.join(home, 'skills'), { recursive: true });
+    fs.writeFileSync(registry.grokConfigPath, '[skills]\npaths = ["/opt/team-skills"]\n');
+
+    assert.doesNotThrow(() => registry.ensureApiProviderGrokHome(profile));
+    assert.doesNotThrow(() => registry.ensureApiProviderGrokHome(profile));
+
+    const generated = parseToml(fs.readFileSync(path.join(home, 'config.toml'), 'utf8'));
+    assert.deepEqual(generated.skills.paths, ['/opt/team-skills', path.join(sharedHome, 'skills')]);
+    assert.equal(fs.lstatSync(path.join(home, 'skills')).isDirectory(), true);
+    assert.equal(fs.lstatSync(path.join(home, 'skills')).isSymbolicLink(), false);
 });
 
 test('public refresh and management environment APIs target custom and selected Providers', () => {

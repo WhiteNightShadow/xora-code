@@ -30,6 +30,10 @@ test('known Provider lifecycle errors become actionable Chinese guidance', () =>
         friendlyAgentErrorMessage('The application-wide model is not advertised by this ACP runtime.'),
         /Grok Build.*模型 ID/
     );
+    assert.equal(
+        friendlyAgentErrorMessage('The requested Agent mode is not advertised by this session.'),
+        '当前会话不支持该执行方式，请使用“常规”或“持续完成”。'
+    );
 });
 
 test('unknown errors keep their useful diagnostic text', () => {

@@ -120,6 +120,34 @@ test('stream noise stays frame-batched while new running activity publishes imme
     assert.equal(changes, 4);
 });
 
+test('one thought stream stays separate from the answer and settles when the reply starts', () => {
+    const model = new AgentViewModel();
+    model.accept({
+        kind: 'thought-delta', sessionId: 'session-a', turnId: 'turn-a', thoughtId: 'thought-a',
+        text: '先检查项目，', startedAt: '2026-08-03T00:00:00.000Z'
+    }, false);
+    model.accept({
+        kind: 'thought-delta', sessionId: 'session-a', turnId: 'turn-a', thoughtId: 'thought-a',
+        text: '再运行测试。', startedAt: '2026-08-03T00:00:00.000Z'
+    }, false);
+
+    const thought = model.transcript.find(entry => entry.kind === 'thought');
+    assert.ok(thought);
+    assert.equal(thought.text, '先检查项目，再运行测试。');
+    assert.equal(thought.thoughtStreaming, true);
+
+    model.accept({ kind: 'text-delta', sessionId: 'session-a', turnId: 'turn-a', role: 'assistant', text: '已完成。' }, false);
+    assert.equal(thought.thoughtStreaming, false, 'assistant output auto-collapses a legacy thought without a terminal marker');
+    assert.equal(model.transcript.filter(entry => entry.kind === 'assistant').length, 1);
+
+    model.accept({
+        kind: 'thought-delta', sessionId: 'session-a', turnId: 'turn-a', thoughtId: 'thought-a',
+        text: '', completed: true, elapsedMs: 1820
+    }, false);
+    assert.equal(thought.thoughtElapsedMs, 1820);
+    assert.equal(thought.payload.completed, true);
+});
+
 test('running tool lifecycle paints before its terminal update and keeps one card', () => {
     const model = new AgentViewModel();
     const frames = animationFrameHarness(model);
@@ -342,6 +370,31 @@ test('attachment text events stay isolated from adjacent messages with the same 
     assert.equal(model.transcript.length, 3);
     assert.deepEqual(model.transcript.map(entry => entry.text), ['before', 'inspect this', 'after']);
     assert.deepEqual(model.transcript[1].payload.attachments, [attachment]);
+});
+
+test('mid-turn guidance remains a distinct user message inside the active turn', () => {
+    const model = new AgentViewModel();
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: 'session-a', turnId: 'turn-1', role: 'user', text: '实现这个功能' },
+        {
+            kind: 'text-delta',
+            sessionId: 'session-a',
+            turnId: 'turn-1',
+            role: 'user',
+            text: '不要重构现有模块',
+            guidance: true,
+            messageId: 'guide-1'
+        },
+        { kind: 'text-delta', sessionId: 'session-a', turnId: 'turn-1', role: 'assistant', text: '收到' }
+    ]);
+
+    assert.deepEqual(model.transcript.map(entry => entry.text), [
+        '实现这个功能',
+        '不要重构现有模块',
+        '收到'
+    ]);
+    assert.equal(model.transcript[1].payload.guidance, true);
+    assert.equal(model.transcript[1].activityTurnId, 'activity:session-a:turn-1');
 });
 
 test('image-only user messages and optimistic attachment summaries are retained', () => {

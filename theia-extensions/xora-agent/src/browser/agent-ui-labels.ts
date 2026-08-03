@@ -23,8 +23,10 @@ const TOOL_STATUS_LABELS: Record<ToolCallEvent['status'], string> = {
 const TRANSCRIPT_ROLE_LABELS: Record<TranscriptEntry['kind'], string> = {
     user: '你',
     assistant: 'Agent',
+    thought: '思考过程',
     system: '系统',
     plan: '计划',
+    'plan-approval': '计划确认',
     tool: '工具',
     permission: '权限请求',
     diff: '文件修改',

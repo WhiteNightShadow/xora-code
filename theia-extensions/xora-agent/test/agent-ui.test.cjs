@@ -145,6 +145,10 @@ test('Agent composer accepts pasted images without replacing the native IME text
     assert.match(source, /onPaste=\{event => \{[\s\S]*?this\.handleImagePaste\(event\);[\s\S]*?\}\}/);
     assert.match(source, /Do not preventDefault/);
     assert.match(source, /aria-label='添加图片'/);
+    assert.doesNotMatch(source, /aria-label='选择工作区文件'/,
+        'workspace files stay available through the slash menu without a duplicate file-shaped toolbar button');
+    assert.match(source, /case 'file':[\s\S]*?await this\.pickWorkspaceFilesForPrompt\(\)/,
+        'removing the duplicate icon must not remove workspace-file insertion');
     assert.match(source, /accept='image\/png,image\/jpeg,image\/webp'/);
     assert.match(source, /className='xora-composer-attachments'/);
     assert.match(source, /className='xora-composer-image-error'/);
@@ -465,7 +469,7 @@ test('Agent history, context and model controls keep the sidebar concise and tru
     assert.doesNotMatch(source, /<option value=''>\{active\?\.model \?\? '默认模型'\}<\/option>/);
 });
 
-test('Agent composer shows only model and permission selection on one row', () => {
+test('Agent composer keeps model, permission and the two supported task modes on one row', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
     const styles = fs.readFileSync(path.join(__dirname, '../src/browser/style/agent.css'), 'utf8');
     const selectorStart = source.indexOf("<div className='xora-composer-selectors'>");
@@ -474,6 +478,10 @@ test('Agent composer shows only model and permission selection on one row', () =
     assert.ok(selectorStart >= 0 && selectorEnd > selectorStart);
     assert.match(selectors, /aria-label='Agent 模型'/);
     assert.match(selectors, /aria-label='Agent 全局权限'/);
+    assert.match(selectors, /aria-label='任务执行方式'/);
+    assert.match(selectors, /<option value='standard'>常规<\/option>/);
+    assert.match(selectors, /<option value='continuous'[^>]*>持续完成<\/option>/);
+    assert.doesNotMatch(selectors, /<option value='plan'|先规划/);
     assert.doesNotMatch(selectors, /aria-label='Agent 服务'/);
     assert.ok(selectors.indexOf("aria-label='Agent 模型'") < selectors.indexOf("aria-label='Agent 全局权限'"));
     assert.match(styles, /\.xora-composer-selectors\s*\{[\s\S]*?flex-wrap: nowrap;/);
@@ -514,6 +522,9 @@ test('Agent output renders safe Markdown and groups categorized tool activity', 
     assert.match(source, /renderTurnProgress\(visibleTranscript, active, currentLane\)/);
     assert.match(source, /正在分析任务/);
     assert.match(source, /正在执行：\$\{activeToolDisplay\.title\}/);
+    assert.match(source, /isGoalCompletionRequest\(entry\.payload\)/);
+    assert.match(source, /正在核验完成条件/);
+    assert.match(source, /Grok Build 正在进行最终验收/);
     assert.match(source, /正在等待工具返回结果/);
     assert.match(source, /bindLiveElapsed/);
     assert.match(source, /liveElapsedNodes/);
@@ -525,4 +536,21 @@ test('Agent output renders safe Markdown and groups categorized tool activity', 
     assert.match(styles, /\.xora-live-turn\s*\{[\s\S]*?grid-template-columns:/);
     assert.match(styles, /\.xora-live-turn-time,[\s\S]*?font-variant-numeric: tabular-nums;/);
     assert.match(styles, /\.xora-tool-group-operation\s*\{[\s\S]*?text-overflow: ellipsis;/);
+});
+
+test('thought details are compact and session export stays in the context menu', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
+    const styles = fs.readFileSync(path.join(__dirname, '../src/browser/style/agent.css'), 'utf8');
+    assert.match(source, /entry\.kind === 'thought'/);
+    assert.match(source, /streaming \? '正在思考' : '思考过程'/);
+    assert.match(source, /const expanded = streaming \|\| \(this\.thoughtDisclosure\.get\(entry\.id\) \?\? false\)/);
+    assert.match(source, /thoughtElapsedMs/);
+    assert.match(styles, /\.xora-thought\s*\{[\s\S]*?font-size: 10\.5px;/);
+    assert.match(styles, /\.xora-thought-content\s*\{[\s\S]*?border-left:/);
+
+    assert.match(source, /onContextMenu=\{event => this\.openSessionContextMenu\(event, session\)\}/);
+    assert.match(source, /className='xora-session-context-menu'/);
+    assert.match(source, /this\.service\.exportSession\(session\.appSessionId\)/);
+    assert.doesNotMatch(source, /aria-label='导出会话'/,
+        'export must not become another permanent toolbar or session-list icon');
 });

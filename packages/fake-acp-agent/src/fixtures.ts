@@ -25,6 +25,78 @@ export const PLAN_FIXTURE = Object.freeze({
   ]),
 });
 
+/**
+ * Grok Build advertises slash commands through ACP session updates rather
+ * than through a pager-only command registry.  Keep this fixture deliberately
+ * small: contract tests only need to prove that clients discover `/goal` from
+ * the live session instead of inferring support from a version string.
+ */
+export const AVAILABLE_COMMANDS_FIXTURE = Object.freeze({
+  sessionUpdate: "available_commands_update",
+  availableCommands: Object.freeze([
+    Object.freeze({
+      name: "goal",
+      description: "Start or manage a persistent goal",
+      input: Object.freeze({ hint: "<objective> | status | pause | resume | clear" }),
+    }),
+  ]),
+  _meta: Object.freeze({ tools: Object.freeze(["update_goal"]) }),
+});
+
+export const PLAN_MODE_FIXTURE = Object.freeze({
+  sessionUpdate: "plan",
+  entries: Object.freeze([
+    Object.freeze({
+      id: "fixture-plan-1",
+      content: "Inspect the project without modifying files",
+      priority: "high",
+      status: "completed",
+    }),
+    Object.freeze({
+      id: "fixture-plan-2",
+      content: "Implement the approved change and run the fixture test",
+      priority: "high",
+      status: "pending",
+    }),
+  ]),
+});
+
+export const PLAN_APPROVAL_FIXTURE = Object.freeze({
+  toolCallId: "fake-exit-plan-0001",
+  planContent: [
+    "# Fixture plan",
+    "",
+    "## Goal",
+    "Implement the requested deterministic fixture change.",
+    "",
+    "## Acceptance criteria",
+    "- Apply the fixture edit.",
+    "- Run the fixture validation.",
+  ].join("\n"),
+});
+
+export const GOAL_OBJECTIVE_FIXTURE = "Implement the requested deterministic fixture change";
+
+export function goalUpdateFixture(overrides: Record<string, unknown> = {}): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    sessionUpdate: "goal_updated",
+    goal_id: "fake-goal-0001",
+    objective: GOAL_OBJECTIVE_FIXTURE,
+    status: "active",
+    phase: "executing",
+    token_budget: 100_000,
+    tokens_used: 1_000,
+    elapsed_ms: 250,
+    total_deliverables: 0,
+    completed_deliverables: 0,
+    total_worker_rounds: 1,
+    total_verify_rounds: 0,
+    token_baseline: 0,
+    finished_subagent_tokens: 0,
+    ...overrides,
+  });
+}
+
 export const TOOL_CALL_FIXTURE = Object.freeze({
   sessionUpdate: "tool_call",
   toolCallId: "fake-tool-0001",

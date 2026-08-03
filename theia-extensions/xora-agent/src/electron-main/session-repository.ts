@@ -210,7 +210,8 @@ export class AgentSessionRepository {
         pending.events.push(redacted);
         pending.bytes += Buffer.byteLength(line);
         this.pendingEvents.set(appSessionId, pending);
-        if (pending.lines.length >= 64 || pending.bytes >= 64 * 1024 || !['text-delta', 'plan', 'tool-call'].includes(event.kind)) {
+        if (pending.lines.length >= 64 || pending.bytes >= 64 * 1024
+            || !['text-delta', 'thought-delta', 'plan', 'tool-call', 'goal-state', 'supervision-shadow'].includes(event.kind)) {
             this.flushEvents(appSessionId);
         } else {
             this.scheduleFlush();
@@ -792,7 +793,20 @@ function parseStoredEventChunk(
 function isStoredEvent(value: unknown, appSessionId: string): value is AgentHostEvent {
     if (!value || typeof value !== 'object') return false;
     const event = value as { kind?: unknown; sessionId?: unknown };
-    const kinds = ['text-delta', 'plan', 'tool-call', 'permission-request', 'diff', 'context-usage', 'turn-completed', 'error'];
+    const kinds = [
+        'text-delta',
+        'thought-delta',
+        'plan',
+        'goal-state',
+        'task-contract',
+        'supervision-shadow',
+        'tool-call',
+        'permission-request',
+        'diff',
+        'context-usage',
+        'turn-completed',
+        'error'
+    ];
     return typeof event.kind === 'string' && kinds.includes(event.kind) &&
         (event.sessionId === appSessionId || (event.kind === 'error' && event.sessionId === undefined));
 }

@@ -22,7 +22,7 @@
     <a href="#快速开始">快速开始</a> ·
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
-    <a href="#v024-release-notes">v0.2.4 Preview Notes</a> ·
+    <a href="#v024-release-notes">v0.2.4 Release Notes</a> ·
     <a href="#发行通道">发行通道</a> ·
     <a href="#参与项目">参与项目</a> ·
     <a href="#问题反馈与交流">问题反馈与交流</a>
@@ -95,12 +95,14 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 | --- | --- |
 | **完整编码工作区** | 打开文件夹或多根工作区，使用项目树、Monaco 编辑器、文件搜索、原生 Diff、终端、任务、SCM 和设置；精简桌面外壳保留核心区域，右侧 Xora Code 面板始终可用，切换目录后 Explorer 自动恢复。 |
 | **当前文件运行与测试** | 打开 Python、JavaScript/MJS/CJS、TypeScript、C/C++、Java、Go、Rust 或 Shell 文件后，可从编辑器标签栏直接“运行”或“测试”。执行前自动保存，底部按需展开真实集成终端，持续显示完整命令、输出、报错与退出状态；空闲终端会自动复用。 |
-| **流式 Agent 对话** | 实时显示回复、Plan、工具活动、终端输出、错误与任务状态；首个回复片段立即呈现，后续片段按帧合并刷新。发送后回到底部，位于底部时实时跟随；上滑阅读时不抢位置，并以「有新消息 · 回到底部」提示恢复跟随。 |
+| **流式 Agent 对话** | 实时显示回复、Plan、工具活动、终端输出、错误与任务状态；ACP 提供的单次思考过程使用小字低调展示，生成结束后自动收起，仍可按回复展开查看。首个回复片段立即呈现，后续片段按帧合并刷新；上滑阅读时不抢位置。 |
 | **理解并修改项目** | Agent 可以读取和搜索项目、修改文件、执行命令、运行测试，并将变更集中到可审查的 Diff 视图。 |
 | **轮次化活动与变更审阅** | 同一条用户任务产生的 Plan、工具和多个文件变更共享稳定轮次 ID，并合并成一个「Agent 活动」；可按文件、搜索、终端、网络、Skill、MCP、Plugin、子 Agent 筛选。文件修改保存不可变前后快照，使用 Theia 原生双栏 Diff，恢复与安全撤销均做哈希校验。 |
 | **多会话与消息队列** | 不同会话可并行执行；同一会话可连续提交多条等待消息，并可单独取消队列中的消息。编辑框文字、图片和重试状态均按会话隔离。 |
+| **常规 / 持续完成** | 常规任务保持原有低等待流程；“持续完成”仅在用户显式选择时通过 ACP 发送原生 `/goal`，并以目标、计划和验收双状态监督长任务，聊天中仍只展示用户原文。 |
+| **Goal 双状态验收** | 接收并持久化 Grok Build 的 `goal_updated`，分别展示“模型本轮是否结束”和“Xora 是否验收通过”；`end_turn` 不再等同于整个任务已经完成，Plan 在 Goal 验收前保持真实进度。 |
 | **权限模式** | 默认逐项请求审批，也可开启全磁盘完全访问；模式由应用级设置统一管理并持久化到本机，所有项目、会话和窗口保持一致。 |
-| **会话与本地历史** | 打开项目时优先恢复该工作区最近一次会话；也可随时新建、重命名或切换历史。事件以脱敏 JSONL 保存在本地，常用历史会缓存在 renderer 中以加快切换，崩溃后绝不自动重放任务。 |
+| **会话与本地历史** | 打开项目时优先恢复该工作区最近一次会话；也可随时新建、重命名或切换历史。事件以脱敏 JSONL 保存在本地，常用历史会缓存在 renderer 中以加快切换，崩溃后绝不自动重放任务。右击会话可将完整脱敏记录导出为 Markdown，不占用日常界面入口。 |
 | **原生上下文压缩** | 复用 Grok Build 0.2.102 的自动上下文压缩；展示 Token、压缩状态、耗时与累计次数，并持久化到会话历史。压缩是否触发由 Grok Build 根据上下文窗口决定，桌面端不按字符数推算。 |
 | **Grok 订阅与自定义模型** | 设置页只保留 Grok 订阅和自定义模型服务；支持编辑 Base URL、API Key、模型 ID、上下文窗口与后端搜索，并可从兼容端点获取模型列表。 |
 | **兼容模型服务** | 自定义 Provider 支持 OpenAI Responses、OpenAI Chat Completions 与 Anthropic Messages 协议，所有模型仍通过 Grok Build 运行。 |
@@ -166,6 +168,10 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 
 每次 Prompt 都由 Electron 生成并持久化稳定 `turnId`。user、Plan、工具、Diff、Assistant 与完成事件因此可以在实时流、历史恢复和会话切换后保持同一活动边界；旧版 JSONL 没有 `turnId` 时，renderer 会根据 user / turn-completed 边界兼容推断。上下文整理完全复用 Grok Build 0.2.102 的原生机制，Xora Code 只适配并展示真实 Token 与压缩事件，不在桌面端另造摘要或按字符数估算。
 
+持续完成模式由 ACP 原生能力驱动。Xora 接收并持久化 Goal 与 Plan 状态，Goal 的 `goal_updated` 是验收状态的唯一权威来源，普通 `end_turn` 只代表模型结束当前轮次。Runtime 崩溃或恢复边界不会自动重放 Prompt。
+
+当前仅运行“长任务监督”影子统计：在不改变模型行为的前提下，本机脱敏 JSONL 记录开放计划、工具失败和缺少测试证据等信号，用于后续评估误触发率。它不会上传遥测、不会向用户弹出建议，也不会自动把普通任务切换为“持续完成”。
+
 ## 安全与权限
 
 - Electron 主进程独占 Grok Build 进程管理、密钥读取和最终权限裁决，renderer 不能直接启动程序或批准敏感操作。
@@ -187,6 +193,7 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - 项目打开即预热 Grok Build、45 秒 ACP 初始化上限、有界冷启动恢复和低延迟首片段输出
 - **对话智能滚动**（`v0.2.1`）：发送后回到底部；位于底部时实时跟随；上滑后不抢位置，并显示「有新消息 · 回到底部」
 - Plan、按轮次合并的工具活动、操作耗时、权限审批、文件定位与安全撤销
+- **原生 Goal 工作流**：常规与持续完成两种显式任务模式；持久化 Goal、Plan 与验收契约，并分别展示“模型结束 / Xora 验收”状态
 - **不可变 Diff 快照 + Theia 原生双栏 Diff**（`v0.2.1`）：修改前后快照、恢复与安全撤销哈希校验，历史记录兼容 `v0.2.0`
 - Grok Build 原生自动上下文压缩，以及 Token、压缩状态、耗时与累计次数展示（事件持久化到会话历史）
 - **子 Agent 活动可见性**（`v0.2.1`）：识别启动 / 等待 / 停止等后台任务，可在「活动 → 子 Agent」筛选并随历史恢复
@@ -205,14 +212,14 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
   完整的故障隔离、一次性版本提醒、域名主源与 GitHub 回退方案见
   [在线更新与版本服务设计](docs/architecture/online-update-strategy.md)
 
-> `v0.2.4` 是当前本地预览迭代，`v0.2.3` 仍是 GitHub 最新稳定生产版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
+> `v0.2.4` 是当前稳定生产版本。订阅登录状态由 Grok Build 与共享的 Grok Home 管理；Xora Code 会在启动时同步实际认证状态。恢复最近会话只恢复本地历史和 ACP 会话身份，绝不会自动重新发送旧任务。
 
-## v0.2.4 Preview Notes
+## v0.2.4 Release Notes
 
 `v0.2.4` 聚焦应用恢复可靠性与后续在线更新基础：修复 Agent 设置页作为上次关闭页面时，下次启动主编辑区空白的问题，并完成 `xora-code.com`、静态更新源与 GitHub 回退的非阻塞更新方案。
 
 > [!NOTE]
-> `v0.2.4` 当前仅提供本地预览安装包，尚未发布为 GitHub Stable。在线自动安装仍受 Apple Developer ID、Windows Authenticode、Linux GPG 与应用 Ed25519 发布密钥门禁约束。
+> `v0.2.4` 是当前正式稳定版本，安装包、源码提交和 SHA-256 校验信息以 [`v0.2.4` Release](https://github.com/WhiteNightShadow/xora-code/releases/tag/v0.2.4) 为准。当前社区安装包尚未完成 Apple Developer ID、Windows Authenticode、Linux GPG 与应用 Ed25519 正式签名，请只从 GitHub Release 或 [Xora Code 官网](https://xora-code.com/download) 下载并核对校验值。
 
 ### 启动恢复与更新基础
 
@@ -220,6 +227,15 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 - **启动路径隔离**：设置数据刷新不进入应用启动关键路径；重复的挂载/激活刷新由现有 single-flight 合并。
 - **更新策略**：定义 `xora-code.com` 说明站、`updates.xora-code.com` 静态签名源、GitHub Release 回退、每版本只提醒一次、失败静默退避和后台下载后由用户确认安装的完整边界。
 - **版本边界**：仓库、全部工作区包和 ACP 客户端标识统一为 `0.2.4`；内嵌 Grok Build sidecar 继续锁定 `0.2.102`。
+
+### Plan、Goal 与长任务监督
+
+- **显式持续完成**：只有用户选择“持续完成”时才向 Grok Build 发送原生 `/goal`；对话记录、会话标题与 Agent 面板始终保留用户输入的原始文本。
+- **思考过程折叠**：适配 ACP `agent_thought_chunk`，按单次思考流独立记录并显示耗时；生成时小字展开，正式回复开始或该思考完成后自动收起，点击仍可查看并随历史恢复。
+- **完整会话导出**：会话标签与历史列表的右键菜单新增 Markdown 导出；导出在 Electron 主进程读取脱敏历史并调用系统另存为，renderer 不接触导出正文或目标目录。
+- **稳定的长任务状态**：持续完成模式持久化 Goal、Plan 与验收状态；短任务完成信号可快速收口，避免模型已经完成后长时间停留在“正在生成回复”。
+- **双状态收口**：持久化 `goal_updated`，将模型 `end_turn` 与 Xora 验收结果分开；Goal 活跃时不提前结算 Plan，恢复、取消、崩溃和 Provider 切换均采用失败关闭策略。
+- **影子统计先行**：仅在本机记录脱敏的候选信号，用于衡量未来“建议使用持续完成”的误触发率；本版本不展示智能建议，也不会自动启用长任务监督。
 
 完整方案见 [在线更新与版本服务设计](docs/architecture/online-update-strategy.md)。
 

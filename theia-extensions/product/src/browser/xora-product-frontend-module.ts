@@ -6,6 +6,7 @@ import { CommandContribution } from '@theia/core/lib/common';
 import { TabBarToolbarContribution } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { AboutDialog } from '@theia/core/lib/browser/about-dialog';
 import { NavigatorWidgetFactory } from '@theia/navigator/lib/browser/navigator-widget-factory';
+import { TimelineContribution } from '@theia/timeline/lib/browser/timeline-contribution';
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { XoraWelcomeContribution } from './xora-welcome-contribution';
 import { XoraWelcomeWidget } from './xora-welcome-widget';
@@ -13,6 +14,7 @@ import { XoraAboutDialog } from './xora-about-dialog';
 import { XoraShellContribution } from './xora-shell-contribution';
 import { XoraNavigatorWidgetFactory } from './xora-navigator-widget-factory';
 import { XoraExplorerContribution } from './xora-explorer-contribution';
+import { XoraTimelineContribution } from './xora-timeline-contribution';
 import { XoraMenuI18nContribution } from './xora-menu-i18n-contribution';
 import { XoraFileRunnerContribution } from './xora-file-runner-contribution';
 import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
@@ -23,6 +25,7 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     rebind(AboutDialog).to(XoraAboutDialog).inSingletonScope();
     rebind(WorkspaceService).to(XoraWorkspaceService).inSingletonScope();
     rebind(NavigatorWidgetFactory).to(XoraNavigatorWidgetFactory).inSingletonScope();
+    rebind(TimelineContribution).to(XoraTimelineContribution).inSingletonScope();
     bind(XoraWelcomeWidget).toSelf();
     bind(WidgetFactory).toDynamicValue(context => ({
         id: XoraWelcomeWidget.ID,

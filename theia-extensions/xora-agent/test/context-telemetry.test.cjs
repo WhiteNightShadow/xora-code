@@ -26,10 +26,15 @@ function session() {
 
 function hostHarness() {
     const host = Object.create(GrokAgentHostService.prototype);
-    const record = session();
+    let record = session();
     host.sessions = {
         get: id => id === record.appSessionId ? record : undefined,
         list: () => [record],
+        update: (id, patch) => {
+            assert.equal(id, record.appSessionId);
+            record = { ...record, ...patch };
+            return record;
+        },
         appendEvent: () => undefined
     };
     host.acpSessionLookup = new Map([['acp-a', 'app-a']]);
@@ -41,6 +46,24 @@ function hostHarness() {
     const emitted = [];
     host.emit = event => emitted.push(event);
     return { host, emitted };
+}
+
+function notificationTransport() {
+    const handlers = new Map();
+    const add = (key, handler) => {
+        const list = handlers.get(key) ?? [];
+        list.push(handler);
+        handlers.set(key, list);
+    };
+    return {
+        onNotification: add,
+        onRequest: () => undefined,
+        onError: () => undefined,
+        emit(method, params) {
+            for (const handler of handlers.get(method) ?? []) handler(params, method);
+            for (const handler of handlers.get('*') ?? []) handler(params, method);
+        }
+    };
 }
 
 test('fixed Grok extension envelopes are parsed narrowly and replay is explicit', () => {
@@ -174,4 +197,79 @@ test('standard ACP metadata and prompt fallback retain strict session mapping', 
     });
     assert.equal(emitted.at(-1).context.totalTokens, 80000);
     assert.equal(emitted.at(-1).context.usagePercent, 40);
+});
+
+test('a new ACP generation accepts low event sequences and delayed old callbacks cannot cross the identity guard', () => {
+    const { host, emitted } = hostHarness();
+    host.loadedSessionIds = new Set(['app-a']);
+    host.activePrompts = new Map();
+    host.currentSecrets = [];
+    host.runtimeProviderEpoch = 'epoch-a';
+    host.providerId = 'grok-subscription';
+    host.providers = {
+        selectedProviderId: () => 'grok-subscription',
+        runtimeEpoch: () => 'epoch-a'
+    };
+    const oldAcp = notificationTransport();
+    host.acp = oldAcp;
+    host.bindAcp(oldAcp);
+    oldAcp.emit('x.ai/session_notification', {
+        sessionId: 'acp-a',
+        update: {
+            sessionUpdate: 'auto_compact_started',
+            tokens_used: 100,
+            context_window: 1000,
+            percentage: 10
+        },
+        _meta: { eventId: 'acp-a-100' }
+    });
+    assert.equal(host.contextEventHighwaters.get('app-a'), 100);
+
+    host.clearGoalRuntimeState('error');
+    assert.equal(host.contextEventHighwaters.size, 0);
+    const nextAcp = notificationTransport();
+    host.acp = nextAcp;
+    host.bindAcp(nextAcp);
+    nextAcp.emit('x.ai/session_notification', {
+        sessionId: 'acp-a',
+        update: {
+            sessionUpdate: 'goal_updated',
+            goal_id: 'goal-new-runtime',
+            objective: '新进程目标',
+            status: 'active',
+            phase: 'executing'
+        },
+        _meta: { eventId: 'acp-a-1' }
+    });
+    nextAcp.emit('session/update', {
+        sessionId: 'acp-a',
+        update: {
+            sessionUpdate: 'plan',
+            entries: [{ id: 'new-plan', content: '新进程计划', status: 'in_progress' }]
+        },
+        _meta: { eventId: 'acp-a-2' }
+    });
+    nextAcp.emit('x.ai/session_notification', {
+        sessionId: 'acp-a',
+        update: {
+            sessionUpdate: 'auto_compact_completed',
+            tokens_before: 100,
+            tokens_after: 50,
+            elapsed_ms: 1
+        },
+        _meta: { eventId: 'acp-a-3' }
+    });
+    assert.equal(host.contextEventHighwaters.get('app-a'), 3);
+    assert.ok(emitted.some(event => event.kind === 'goal-state' && event.goalId === 'goal-new-runtime'));
+    assert.ok(emitted.some(event => event.kind === 'plan' && event.entries[0]?.id === 'new-plan'));
+    assert.ok(emitted.some(event => event.kind === 'context-usage' && event.context.compactionCount === 1));
+
+    const countBeforeOldCallback = emitted.length;
+    oldAcp.emit('x.ai/session_notification', {
+        sessionId: 'acp-a',
+        update: { sessionUpdate: 'auto_compact_failed', error: 'stale old process' },
+        _meta: { eventId: 'acp-a-101' }
+    });
+    assert.equal(emitted.length, countBeforeOldCallback);
+    assert.equal(host.contextEventHighwaters.get('app-a'), 3);
 });

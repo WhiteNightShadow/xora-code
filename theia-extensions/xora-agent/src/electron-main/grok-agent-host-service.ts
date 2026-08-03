@@ -11,6 +11,8 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+    AgentGoalStateEvent,
+    AgentGoalCapability,
     AgentCapabilities,
     AgentPermissionMode,
     AuthenticationResult,
@@ -19,16 +21,26 @@ import {
     AgentHostService,
     AgentSessionContext,
     AgentTextEvent,
+    AgentThoughtEvent,
     AgentToolAction,
     AgentToolLocation,
     AgentToolPresentation,
     AgentModelOption,
+    AgentPlanApprovalRequestEvent,
+    AgentPlanEvent,
+    AgentSessionMode,
+    AgentTaskContract,
+    AgentTaskContractEvent,
     CreateSessionRequest,
     ComponentUpdateResult,
     ComponentUpdateStatus,
+    GuidePromptRequest,
+    GuidePromptResult,
+    ExportSessionResult,
     ManagementRequest,
     ManagementResult,
     PermissionDecision,
+    PlanApprovalDecision,
     PermissionRequestEvent,
     PROVIDER_DEFAULT_MODEL_CHOICE_ID,
     PromptRequest,
@@ -39,6 +51,8 @@ import {
     StartRuntimeRequest,
     SynchronizeWorkspaceTrustRequest,
     ToolCallEvent,
+    SupervisionShadowEvent,
+    SupervisionShadowReason,
     XAI_MANAGED_MODEL_ID
 } from '../common/agent-protocol';
 import { normalizeWindowsFilesystemPath } from '../common/workspace-path';
@@ -48,6 +62,7 @@ import { normalizeProviderBaseUrl, providerModelsEndpoint, requestProviderJson }
 import { McpRuntimeProjection, mergeMcpManagementResults } from './mcp-management';
 import { RuntimeMcpIssue, RuntimeMcpRegistry, RuntimeMcpSnapshot } from './runtime-mcp-registry';
 import { AgentSessionRepository, deepRedact } from './session-repository';
+import { buildSessionExportMarkdown } from './session-export';
 import { GrokSidecarSupervisor } from './sidecar-supervisor';
 import { SidecarUpdateCoordinator } from './sidecar-update-coordinator';
 import { PermissionSubject, WorkspaceSecurityStore } from './workspace-security';
@@ -84,6 +99,19 @@ interface PendingAssistantTextDelta {
     timer: NodeJS.Timeout;
 }
 
+interface PendingThoughtDelta {
+    event: AgentThoughtEvent;
+    persist: boolean;
+    timer: NodeJS.Timeout;
+}
+
+interface ActiveThoughtStream {
+    thoughtId: string;
+    wireMessageId?: string;
+    startedAt: string;
+    startedNanos: bigint;
+}
+
 interface PendingSessionLoad {
     runtimeGeneration: number;
     providerId: string;
@@ -97,6 +125,42 @@ interface ToolActivityTiming {
     startedNanos: bigint;
     status: ToolCallEvent['status'];
     elapsedMs?: number;
+}
+
+type SessionGoalCapability = AgentGoalCapability;
+
+interface SupervisionTurnSignals {
+    sawPlan: boolean;
+    openPlanCount: number;
+    failedToolIds: Set<string>;
+    testEvidenceIds: Set<string>;
+    /** Explicit read-only Plan turns are not candidates for a future Goal suggestion. */
+    excludeFromSuggestion?: boolean;
+}
+
+interface PendingApprovedPlan {
+    objective: string;
+    planEntries: Array<{ id: string; text: string }>;
+    acceptanceCriteria: string[];
+}
+
+interface PendingPlanApproval {
+    appSessionId: string;
+    acpSessionId: string;
+    runtimeGeneration: number;
+    providerRuntimeEpoch: string;
+    toolCallId: string;
+    /** Exact Plan/user turn that owns this reverse request. */
+    planTurnId?: string;
+    planContent?: string;
+    suggestedContract: AgentTaskContract;
+    resolve: (response: { outcome: 'approved' | 'cancelled' | 'abandoned'; feedback?: string }) => void;
+}
+
+interface GoalCompletionSignal {
+    turnId: string;
+    promise: Promise<AgentGoalStateEvent>;
+    resolve: (goal: AgentGoalStateEvent) => void;
 }
 
 interface RuntimeMcpServerState {
@@ -148,6 +212,11 @@ const MAX_EMITTED_DIFF_KEYS = 2048;
 // Markdown parse per token. Do not debounce this timer: a continuous stream
 // must still reach the renderer at a steady cadence.
 const ASSISTANT_TEXT_BATCH_INTERVAL_MS = 28;
+const THOUGHT_TEXT_BATCH_INTERVAL_MS = 40;
+// A verified Goal is authoritative even when Grok Build leaves the outer
+// session/prompt request open. Keep a brief window for the final text chunk,
+// then release the UI instead of displaying an endless running turn.
+const GOAL_COMPLETION_GRACE_MS = 500;
 // Keep the release-grade upper bound aligned with the packaged sidecar smoke
 // test. App-owned API-provider homes disable Grok's optional startup catalog
 // fetch, while subscription homes remain Grok/CLI-owned and may still need a
@@ -179,10 +248,36 @@ export class GrokAgentHostService implements AgentHostService {
     protected readonly pendingAssistantTextDeltas = new Map<string, PendingAssistantTextDelta>();
     /** Sessions whose current turn already delivered its latency-critical first assistant chunk. */
     protected assistantStreamsStarted = new Set<string>();
+    /** Provider-authored thoughts use their own stream and never merge into final answer text. */
+    protected pendingThoughtDeltas: Map<string, PendingThoughtDelta> | undefined = new Map();
+    protected activeThoughtStreams: Map<string, ActiveThoughtStream> | undefined = new Map();
+    protected thoughtStreamsStarted: Set<string> | undefined = new Set();
     /** Nested/concurrent restores are counted so replay stays suppressed until all finish. */
     protected readonly restoringSessionCounts = new Map<string, number>();
     /** Latest Grok-owned context state, isolated by Xora app session id. */
     protected sessionContexts = new Map<string, AgentSessionContext>();
+    /** Latest safe Goal projection. Grok remains the source of truth. */
+    protected sessionGoalStates = new Map<string, AgentGoalStateEvent>();
+    /** Last authoritative Plan kept separate from cosmetic turn-final snapshots. */
+    protected sessionPlans = new Map<string, AgentPlanEvent>();
+    /** Live slash-command/tool evidence, keyed by ACP session until Xora maps it. */
+    protected acpGoalCapabilities = new Map<string, SessionGoalCapability>();
+    /** Per-turn local-only counters used for the opt-in supervision shadow study. */
+    protected supervisionTurnSignals = new Map<string, SupervisionTurnSignals>();
+    /** One-shot approved Plan contract consumed by the next native `/goal`. */
+    protected pendingApprovedPlans = new Map<string, PendingApprovedPlan>();
+    /** Latest durable handoff lifecycle for an approved task contract. */
+    protected sessionTaskContracts = new Map<string, AgentTaskContractEvent>();
+    /** Latest authoritative goal_updated observed only during session/load replay. */
+    protected replayedGoalStates = new Map<string, AgentGoalStateEvent>();
+    /** Sessions whose replayed active Goal could not yet be cancelled safely. */
+    protected orphanedGoalSessions = new Set<string>();
+    /** Live reverse requests parked inside Grok's in-flight Plan turn. */
+    protected pendingPlanApprovals = new Map<string, PendingPlanApproval>();
+    /** Original user text for the active turn; never forwarded as extension metadata. */
+    protected activePromptObjectives = new Map<string, string>();
+    /** Authoritative `goal_updated=complete` signals for the owned prompt turn. */
+    protected goalCompletionSignals: Map<string, GoalCompletionSignal> | undefined = new Map();
     /** Drops stale extension delivery without trusting opaque event ids. */
     protected contextEventHighwaters = new Map<string, number>();
     protected acp: AcpClient | undefined;
@@ -287,6 +382,7 @@ export class GrokAgentHostService implements AgentHostService {
         // replacing the renderer that owns this per-window service.
         if (this.client && this.client !== client) {
             this.flushAssistantTextDeltas();
+            this.flushThoughtDeltas();
         }
         this.client = client;
         if (client) {
@@ -331,6 +427,7 @@ export class GrokAgentHostService implements AgentHostService {
         }
         if (workspaceChanged) {
             this.flushAssistantTextDeltas();
+            this.completeActiveThought();
             ++this.sessionLoadGeneration;
             this.mcpDoctorSnapshot = undefined;
             this.runtimeMcpFingerprint = undefined;
@@ -458,6 +555,7 @@ export class GrokAgentHostService implements AgentHostService {
 
         const generation = ++this.runtimeGeneration;
         this.loadedSessionIds.clear();
+        this.clearGoalRuntimeState();
         this.sessionMcpStateMap().clear();
         this.runtimeProviderEpoch = undefined;
         this.workspaceRoot = root;
@@ -542,6 +640,9 @@ export class GrokAgentHostService implements AgentHostService {
             // allowed to restore the model that happened to be active when
             // initialize started.
             this.acceptInitialize(initialized, false);
+            if (this.capabilities) {
+                this.capabilities.guidePrompt = await this.detectGuidePromptCapability(acp);
+            }
             if (provider.id !== this.providers.selectedProviderId()
                 || this.runtimeProviderEpoch !== this.providers.runtimeEpoch(provider.id)) {
                 throw new Error('The application-wide Provider changed while the Agent runtime was initializing.');
@@ -627,9 +728,12 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected async stopRuntimeLocked(graceMs = 3000): Promise<void> {
         this.flushAssistantTextDeltas();
+        this.completeActiveThought();
+        this.flushThoughtDeltas();
         this.assistantStreamState().clear();
         ++this.runtimeGeneration;
         this.loadedSessionIds.clear();
+        this.clearGoalRuntimeState();
         this.sessionMcpStateMap().clear();
         this.runtimeMcpFingerprint = undefined;
         this.runtimeMcpConfiguredNames = [];
@@ -758,6 +862,7 @@ export class GrokAgentHostService implements AgentHostService {
         // final text arrived less than one batching window ago.
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
+        this.completeActiveThought();
         const activationGeneration = ++this.sessionLoadGeneration;
         // Peer-window Provider/model notifications can arrive while ACP is
         // creating the session. The generation is sampled again at the last
@@ -826,6 +931,19 @@ export class GrokAgentHostService implements AgentHostService {
         const result = await acp.request<Record<string, unknown>>('session/new', params, { timeoutMs: 30_000 });
         if (typeof result.sessionId !== 'string' || !result.sessionId) {
             throw new Error('Grok returned an invalid ACP session ID.');
+        }
+        let sessionModes = parseSessionModes(result);
+        if (request.modeId) {
+            if (!sessionModes.availableModes.some(mode => mode.id === request.modeId)) {
+                throw new Error('The requested Agent mode is not advertised by this session.');
+            }
+            if (sessionModes.currentModeId !== request.modeId) {
+                await acp.request('session/set_mode', {
+                    sessionId: result.sessionId,
+                    modeId: request.modeId
+                });
+                sessionModes = { ...sessionModes, currentModeId: request.modeId };
+            }
         }
         this.acceptRuntimeMcpSnapshot(mcpSnapshot);
         const createdModelState = modelStateFrom(result);
@@ -907,10 +1025,14 @@ export class GrokAgentHostService implements AgentHostService {
             providerId: request.providerId,
             providerRuntimeEpoch: runtimeProviderEpoch,
             model: resolvedModel,
-            sidecarVersion: this.sidecarVersion
+            sidecarVersion: this.sidecarVersion,
+            ...(sessionModes.availableModes.length ? { availableModes: sessionModes.availableModes } : {}),
+            ...(sessionModes.currentModeId ? { currentModeId: sessionModes.currentModeId } : {})
         });
         this.knownSessionIds.add(record.appSessionId);
         this.acpSessionLookup.set(record.acpSessionId!, record.appSessionId);
+        this.acceptSessionModeCapability(record.acpSessionId!, record.appSessionId, sessionModes);
+        record = this.sessions.get(record.appSessionId) ?? record;
         if (incompatibleWithGlobalDefaults) {
             record = this.sessions.update(record.appSessionId, { status: 'read-only' });
             this.emit({ kind: 'session', session: record });
@@ -954,6 +1076,7 @@ export class GrokAgentHostService implements AgentHostService {
             || entry.providerEpoch !== selectedProviderEpoch) {
             this.flushAssistantTextDeltas();
             this.assistantStreamState().clear();
+            this.completeActiveThought();
             let boundRuntimeGeneration = this.runtimeGeneration;
             let createdEntry: PendingSessionLoad | undefined;
             const task = this.withCurrentIntegrationRead(storedSession.workspaceRoot, snapshot =>
@@ -1042,6 +1165,7 @@ export class GrokAgentHostService implements AgentHostService {
             // session/load. A same-Provider crash/restart must not let Send
             // await an obsolete Promise and then prompt an unhydrated process.
             bindRuntimeGeneration(restoreRuntimeGeneration);
+            this.replayedGoalStateMap().delete(appSessionId);
             this.beginSessionRestore(appSessionId);
             try {
                 const result = await this.requireReady().request<Record<string, unknown>>('session/load', {
@@ -1050,6 +1174,7 @@ export class GrokAgentHostService implements AgentHostService {
                     mcpServers: mcpSnapshot.mcpServers,
                     ...(globallySelectedModel ? { _meta: { modelId: globallySelectedModel } } : {})
                 }, { timeoutMs: 60_000 });
+                const sessionModes = parseSessionModes(result);
                 if (restoreRuntimeGeneration !== this.runtimeGeneration) {
                     throw new Error('The Agent runtime changed while restoring this conversation.');
                 }
@@ -1094,23 +1219,34 @@ export class GrokAgentHostService implements AgentHostService {
                 const currentRecord = this.sessions.get(appSessionId) ?? record;
                 const requiresDurableUpdate = currentRecord.status !== 'idle'
                     || currentRecord.sidecarVersion !== this.sidecarVersion
-                    || (!!restoredModel && currentRecord.model !== restoredModel);
+                    || (!!restoredModel && currentRecord.model !== restoredModel)
+                    || !sameSessionModes(currentRecord, sessionModes);
                 // A repeated history activation is descriptive, not a new
                 // durable state transition. Avoid lock + temp file + two fsyncs
                 // when the already-restored index record is byte-equivalent.
-                const loaded = requiresDurableUpdate
+                let loaded = requiresDurableUpdate
                     ? this.sessions.update(appSessionId, {
                         status: 'idle',
                         sidecarVersion: this.sidecarVersion,
-                        ...(restoredModel ? { model: restoredModel } : {})
+                        ...(restoredModel ? { model: restoredModel } : {}),
+                        ...(sessionModes.availableModes.length ? { availableModes: sessionModes.availableModes } : {}),
+                        ...(sessionModes.currentModeId ? { currentModeId: sessionModes.currentModeId } : {})
                     })
                     : currentRecord;
+                this.acceptSessionModeCapability(record.acpSessionId!, appSessionId, sessionModes);
+                loaded = this.sessions.get(appSessionId) ?? loaded;
+                await this.publishReplayedGoalState(appSessionId);
+                const resumedGoal = this.startRestoredApprovedPlanGoal(appSessionId);
+                if (resumedGoal) return resumedGoal;
+                this.interruptUnownedTaskContract(appSessionId);
+                loaded = this.sessions.get(appSessionId) ?? loaded;
                 this.emit({ kind: 'session', session: loaded });
                 return loaded;
             } finally {
                 this.endSessionRestore(appSessionId);
             }
         } catch (error) {
+            this.replayedGoalStateMap().delete(appSessionId);
             if (restoreRuntimeGeneration !== undefined && restoreRuntimeGeneration !== this.runtimeGeneration) {
                 throw error;
             }
@@ -1148,13 +1284,57 @@ export class GrokAgentHostService implements AgentHostService {
         }
         this.knownSessionIds.add(appSessionId);
         this.flushAssistantTextDeltas(appSessionId);
-        const history = deepRedact(this.sessions.readEvents(appSessionId), this.currentSecrets);
+        this.flushThoughtDeltas(appSessionId);
+        const record = this.sessions.get(appSessionId);
+        const providerRuntimeEpoch = record?.providerRuntimeEpoch;
+        const history = deepRedact(this.sessions.readEvents(appSessionId), this.currentSecrets)
+            .filter(event => {
+                // Goal and frozen task contracts are Provider-owned execution
+                // state. Never project them into a session rebound to another
+                // credential/configuration generation.
+                if (event.kind !== 'goal-state' && event.kind !== 'task-contract') return true;
+                return !!providerRuntimeEpoch && event.providerRuntimeEpoch === providerRuntimeEpoch;
+            });
         for (const event of history) {
             if (event.kind === 'context-usage' && event.sessionId === appSessionId) {
                 this.contextStates().set(appSessionId, event.context);
+            } else if (event.kind === 'goal-state' && event.sessionId === appSessionId) {
+                this.sessionGoalStateMap().set(appSessionId, event);
+            } else if (event.kind === 'plan' && event.sessionId === appSessionId) {
+                if (providerRuntimeEpoch && event.providerRuntimeEpoch === providerRuntimeEpoch) {
+                    this.sessionPlanState().set(appSessionId, event);
+                }
+            } else if (event.kind === 'task-contract' && event.sessionId === appSessionId) {
+                this.sessionTaskContractState().set(appSessionId, event);
             }
         }
         return history;
+    }
+
+    async exportSession(appSessionId: string): Promise<ExportSessionResult> {
+        const record = this.sessions.get(appSessionId);
+        if (!record) throw new Error('Unknown Xora Code session.');
+        if (record.status === 'running' || this.activePrompts.has(appSessionId)) {
+            throw new Error('当前任务仍在运行，请在任务结束后导出完整会话。');
+        }
+        this.flushAssistantTextDeltas(appSessionId);
+        this.flushThoughtDeltas(appSessionId);
+        const history = await this.getSessionHistory(appSessionId);
+        const defaultName = `${safeExportFileName(record.title || 'Xora-Code-会话')}-${record.updatedAt.slice(0, 10)}.md`;
+        const selection = await dialog.showSaveDialog({
+            title: '导出 Xora Code 会话',
+            defaultPath: path.join(app.getPath('downloads'), defaultName),
+            buttonLabel: '导出',
+            filters: [{ name: 'Markdown 文档', extensions: ['md'] }],
+            properties: ['showOverwriteConfirmation', 'createDirectory']
+        });
+        if (selection.canceled || !selection.filePath) return { status: 'cancelled' };
+        const target = selection.filePath.toLowerCase().endsWith('.md')
+            ? selection.filePath
+            : `${selection.filePath}.md`;
+        const markdown = buildSessionExportMarkdown(record, history);
+        await fs.promises.writeFile(target, markdown, { encoding: 'utf8', mode: 0o600 });
+        return { status: 'exported', fileName: path.basename(target) };
     }
 
     async renameSession(appSessionId: string, title: string): Promise<SessionRecord> {
@@ -1190,14 +1370,29 @@ export class GrokAgentHostService implements AgentHostService {
         }
         this.flushAssistantTextDeltas(appSessionId);
         this.assistantStreamState().delete(appSessionId);
+        this.completeActiveThought(appSessionId);
+        this.flushThoughtDeltas(appSessionId);
         this.loadedSessionIds.delete(appSessionId);
         this.sessionMcpStateMap().delete(appSessionId);
         this.knownSessionIds.delete(appSessionId);
-        this.sessionContexts.delete(appSessionId);
+        this.contextStates().delete(appSessionId);
+        this.sessionGoalStateMap().delete(appSessionId);
+        this.sessionPlanState().delete(appSessionId);
+        this.pendingApprovedPlanState().delete(appSessionId);
+        this.sessionTaskContractState().delete(appSessionId);
+        this.replayedGoalStateMap().delete(appSessionId);
+        this.orphanedGoalSessionState().delete(appSessionId);
+        this.activePromptObjectiveState().delete(appSessionId);
+        for (const [requestId, approval] of this.pendingPlanApprovalState()) {
+            if (approval.appSessionId !== appSessionId) continue;
+            this.pendingPlanApprovalState().delete(requestId);
+            approval.resolve({ outcome: 'abandoned' });
+        }
         this.contextEventHighwaters.delete(appSessionId);
         this.restoringSessionCounts.delete(appSessionId);
         if (record.acpSessionId) {
             this.acpSessionLookup.delete(record.acpSessionId);
+            this.acpGoalCapabilityState().delete(record.acpSessionId);
         }
         if (!this.sessions.delete(appSessionId)) {
             throw new Error('Unknown Xora Code session.');
@@ -1206,6 +1401,101 @@ export class GrokAgentHostService implements AgentHostService {
             this.activeSessionId = undefined;
             this.emitSnapshot();
         }
+    }
+
+    async setSessionMode(appSessionId: string, modeId: string): Promise<SessionRecord> {
+        const acp = this.requireReady();
+        const record = this.sessions.get(appSessionId);
+        if (!record?.acpSessionId || record.status === 'read-only') {
+            throw new Error('The selected session cannot change Agent mode.');
+        }
+        if (this.activePrompts.has(appSessionId)) {
+            throw new Error('Wait for the current task to finish before changing Agent mode.');
+        }
+        if (!this.loadedSessionIds.has(appSessionId)
+            || record.workspaceRoot !== this.workspaceRoot
+            || record.providerId !== this.providerId
+            || !this.providerAuthorityIsCurrent(record.providerId, record.providerRuntimeEpoch ?? 'legacy-v1')) {
+            throw new Error('Restore the selected conversation before changing Agent mode.');
+        }
+        const normalizedModeId = requireBoundedText(modeId, 'Agent mode', 128);
+        const modes = record.availableModes ?? [];
+        if (!modes.some(mode => mode.id === normalizedModeId)) {
+            throw new Error('The requested Agent mode is not advertised by this session.');
+        }
+        if (record.currentModeId === normalizedModeId) return record;
+        await acp.request('session/set_mode', {
+            sessionId: record.acpSessionId,
+            modeId: normalizedModeId
+        });
+        if (!this.providerAuthorityIsCurrent(record.providerId, record.providerRuntimeEpoch ?? 'legacy-v1')) {
+            throw new Error('The Provider changed while Agent mode was switching.');
+        }
+        const updated = this.sessions.update(appSessionId, { currentModeId: normalizedModeId });
+        this.emit({ kind: 'session', session: updated });
+        return updated;
+    }
+
+    async respondPlanApproval(decision: PlanApprovalDecision): Promise<void> {
+        const requestId = requireBoundedText(decision.requestId, 'Plan approval request id', 256);
+        const pending = this.pendingPlanApprovalState().get(requestId);
+        if (!pending) throw new Error('This Plan approval is no longer pending.');
+        const session = this.sessions.get(pending.appSessionId);
+        const usableSession = this.loadedSessionIds.has(pending.appSessionId)
+            || this.isSessionRestoring(pending.appSessionId);
+        if (!session
+            || session.acpSessionId !== pending.acpSessionId
+            || !usableSession
+            || pending.runtimeGeneration !== this.runtimeGeneration
+            || pending.providerRuntimeEpoch !== session.providerRuntimeEpoch
+            || !this.providerAuthorityIsCurrent(session.providerId, session.providerRuntimeEpoch ?? 'legacy-v1')) {
+            this.pendingPlanApprovalState().delete(requestId);
+            pending.resolve({ outcome: 'abandoned' });
+            throw new Error('The Agent runtime changed while this Plan was awaiting approval.');
+        }
+        if (decision.outcome === 'approved') {
+            if (!this.sessionAdvertisesGoal(pending.appSessionId)) {
+                throw new Error('The active Grok session does not advertise native Goal support.');
+            }
+            const submittedContract = validateTaskContract(decision.contract ?? pending.suggestedContract);
+            const expectedContract = pending.suggestedContract;
+            if (submittedContract.objective !== expectedContract.objective
+                || JSON.stringify(submittedContract.planEntries) !== JSON.stringify(expectedContract.planEntries)) {
+                throw new Error('The approved Plan objective or steps do not match the Electron-owned proposal.');
+            }
+            const contract: AgentTaskContract = {
+                objective: expectedContract.objective,
+                planEntries: expectedContract.planEntries.map(entry => ({ ...entry })),
+                acceptanceCriteria: [...submittedContract.acceptanceCriteria]
+            };
+            this.pendingApprovedPlanState().set(pending.appSessionId, contract);
+            const planTurnId = pending.planTurnId;
+            const event: AgentTaskContractEvent = {
+                kind: 'task-contract',
+                sessionId: pending.appSessionId,
+                ...(planTurnId ? { turnId: planTurnId } : {}),
+                objective: contract.objective,
+                planEntries: contract.planEntries,
+                acceptanceCriteria: contract.acceptanceCriteria,
+                approvedAt: new Date().toISOString(),
+                lifecycle: 'approved',
+                updatedAt: new Date().toISOString(),
+                ...(session.providerRuntimeEpoch ? { providerRuntimeEpoch: session.providerRuntimeEpoch } : {})
+            };
+            this.sessionTaskContractState().set(pending.appSessionId, event);
+            this.emit(event);
+            this.pendingPlanApprovalState().delete(requestId);
+            pending.resolve({ outcome: 'approved' });
+            return;
+        }
+        const feedback = decision.feedback === undefined
+            ? undefined
+            : requireBoundedText(decision.feedback, 'Plan feedback', 16_000);
+        this.pendingPlanApprovalState().delete(requestId);
+        pending.resolve({
+            outcome: decision.outcome,
+            ...(decision.outcome === 'cancelled' && feedback ? { feedback } : {})
+        });
     }
 
     async sendPrompt(request: PromptRequest): Promise<void> {
@@ -1237,6 +1527,9 @@ export class GrokAgentHostService implements AgentHostService {
         if (!this.loadedSessionIds.has(request.sessionId)) {
             throw new Error('Restore the selected conversation before sending another task.');
         }
+        if ([...this.pendingPlanApprovalState().values()].some(pending => pending.appSessionId === request.sessionId)) {
+            throw new Error('Respond to the pending Plan approval before sending another task.');
+        }
         // Prompt ownership is independent from the conversation currently
         // visible in the renderer. A background tab may keep working while the
         // user reads or sends from another loaded session; accepting its turn
@@ -1244,7 +1537,22 @@ export class GrokAgentHostService implements AgentHostService {
         if (this.activePrompts.has(request.sessionId)) {
             throw new Error('This session already has a running task.');
         }
+        if (record.status === 'running') {
+            throw new Error('This session has an unowned running task. Cancel or restore it before sending.');
+        }
+        if (this.orphanedGoalSessionState().has(request.sessionId)) {
+            throw new Error('Cancel the orphaned restored Goal before sending another task.');
+        }
         if (typeof request.text !== 'string') throw new Error('Prompt text must be a string.');
+        if (request.executionMode !== undefined
+            && request.executionMode !== 'standard'
+            && request.executionMode !== 'continuous') {
+            throw new Error('Unsupported Agent execution mode.');
+        }
+        const continuous = request.executionMode === 'continuous';
+        if (continuous && !this.sessionSupportsGoal(request.sessionId)) {
+            throw new Error('The active Grok session does not advertise native Goal support.');
+        }
         if (request.attachments !== undefined && !Array.isArray(request.attachments)) {
             throw new Error('Image attachments must be an array.');
         }
@@ -1267,6 +1575,12 @@ export class GrokAgentHostService implements AgentHostService {
             if (!refreshedRecord.acpSessionId || !this.loadedSessionIds.has(request.sessionId)) {
                 throw new Error('The selected conversation could not be restored after refreshing MCP.');
             }
+            if (refreshedRecord.status === 'running' && !this.activePrompts.has(request.sessionId)) {
+                throw new Error('This session has an unowned running task. Cancel or restore it before sending.');
+            }
+            if (this.orphanedGoalSessionState().has(request.sessionId)) {
+                throw new Error('Cancel the orphaned restored Goal before sending another task.');
+            }
             if (refreshedRecord.providerId !== this.providers.selectedProviderId()
                 || refreshedRecord.providerId !== this.providerId) {
                 this.notifyProviderDefaultsChanged();
@@ -1282,8 +1596,14 @@ export class GrokAgentHostService implements AgentHostService {
                 this.notifyProviderDefaultsChanged();
                 throw new Error('The application-wide model changed while MCP was refreshing.');
             }
+            // Any contract belongs only to the live Plan turn that obtained
+            // its approval. A stale value may never alter a later user turn.
+            this.pendingApprovedPlanState().delete(request.sessionId);
+            const wireText = continuous
+                ? formatContinuousGoalPrompt(request.text)
+                : formatAgentWirePrompt(request.text);
             const prompt = [
-                ...(request.text.length ? [{ type: 'text' as const, text: request.text }] : []),
+                ...(wireText.length ? [{ type: 'text' as const, text: wireText }] : []),
                 ...images.blocks
             ];
             const turnId = crypto.randomUUID();
@@ -1293,7 +1613,20 @@ export class GrokAgentHostService implements AgentHostService {
             this.clearToolActivityTimings(request.sessionId);
             this.flushAssistantTextDeltas(request.sessionId);
             this.assistantStreamState().delete(request.sessionId);
+            this.completeActiveThought(request.sessionId);
+            this.flushThoughtDeltas(request.sessionId);
             this.activeTurnIdState().set(request.sessionId, turnId);
+            this.activePromptObjectiveState().set(request.sessionId, request.text);
+            const goalCompletion = continuous
+                ? this.beginGoalCompletionSignal(request.sessionId, turnId)
+                : undefined;
+            this.supervisionTurnSignalState().set(request.sessionId, {
+                sawPlan: false,
+                openPlanCount: 0,
+                failedToolIds: new Set(),
+                testEvidenceIds: new Set(),
+                excludeFromSuggestion: sessionUsesPlanMode(refreshedRecord)
+            });
             this.emit({
                 kind: 'text-delta',
                 sessionId: request.sessionId,
@@ -1314,9 +1647,11 @@ export class GrokAgentHostService implements AgentHostService {
                 });
                 this.activePrompts.set(request.sessionId, handle);
             } catch (error) {
+                if (goalCompletion) this.clearGoalCompletionSignal(request.sessionId, turnId);
                 const failed = this.sessions.update(request.sessionId, { status: 'failed' });
                 this.emit({ kind: 'session', session: failed });
                 this.activeTurnIdState().delete(request.sessionId);
+                this.activePromptObjectiveState().delete(request.sessionId);
                 this.emit({
                     kind: 'turn-completed',
                     sessionId: request.sessionId,
@@ -1325,29 +1660,82 @@ export class GrokAgentHostService implements AgentHostService {
                 });
                 throw error;
             }
-            return { acpSessionId: refreshedRecord.acpSessionId, handle, promptStartedAt, turnId };
+            return { acpSessionId: refreshedRecord.acpSessionId, handle, promptStartedAt, turnId, goalCompletion };
         });
-        const { handle, promptStartedAt, turnId } = admitted;
+        const { handle, promptStartedAt, turnId, goalCompletion } = admitted;
         // Measure only the actual ACP turn. Startup, authentication, Save All
         // and session hydration are Xora orchestration latency.
         const elapsedMs = (): number => Number((process.hrtime.bigint() - promptStartedAt) / 1_000_000n);
         try {
-            const result = await handle.promise;
+            let result = await this.awaitPromptOrGoalCompletion(handle, goalCompletion);
             this.acceptPromptContextFallback(request.sessionId, admitted.acpSessionId, result);
-            const stopReason = typeof result.stopReason === 'string' ? result.stopReason : undefined;
+            let stopReason = typeof result.stopReason === 'string' ? result.stopReason : undefined;
+            const approvedPlan = this.pendingApprovedPlanState().get(request.sessionId);
+            // Approval resumes the original read-only Plan prompt first. Only
+            // its normal end_turn may hand off to Goal; cancellation, errors,
+            // crashes and non-terminal stop reasons never auto-run more work.
+            if (!continuous && approvedPlan && stopReason === 'end_turn') {
+                this.pendingApprovedPlanState().delete(request.sessionId);
+                const current = this.sessions.get(request.sessionId);
+                if (!current?.acpSessionId
+                    || current.acpSessionId !== admitted.acpSessionId
+                    || this.phase !== 'ready'
+                    || !this.loadedSessionIds.has(request.sessionId)
+                    || !this.providerAuthorityIsCurrent(current.providerId, current.providerRuntimeEpoch ?? 'legacy-v1')) {
+                    throw new Error('The Agent runtime changed before Xora could start Goal verification.');
+                }
+                this.updateTaskContractLifecycle(request.sessionId, 'goal-starting');
+                const goalHandle = this.requireReady().startRequest<Record<string, unknown>>('session/prompt', {
+                    sessionId: current.acpSessionId,
+                    prompt: [{
+                        type: 'text',
+                        text: formatContinuousGoalPrompt(approvedPlan.objective, approvedPlan)
+                    }]
+                }, {
+                    timeoutMs: 0,
+                    cancellation: { method: 'session/cancel', params: { sessionId: current.acpSessionId } }
+                });
+                // Replacing the completed handle keeps cancel() authoritative
+                // and avoids any transient completed/idle UI state.
+                this.activePrompts.set(request.sessionId, goalHandle);
+                const approvedGoalCompletion = this.beginGoalCompletionSignal(request.sessionId, turnId);
+                try {
+                    result = await this.awaitPromptOrGoalCompletion(goalHandle, approvedGoalCompletion);
+                } finally {
+                    this.clearGoalCompletionSignal(request.sessionId, turnId);
+                }
+                this.acceptPromptContextFallback(request.sessionId, admitted.acpSessionId, result);
+                stopReason = typeof result.stopReason === 'string' ? result.stopReason : undefined;
+            }
             const status = stopReason === 'cancelled' ? 'cancelled' : 'completed';
             const finished = this.sessions.update(request.sessionId, { status });
             this.emit({ kind: 'session', session: finished });
+            this.projectGoalTurnEnd(request.sessionId, stopReason === 'cancelled' ? 'cancelled' : 'end-turn');
+            const goalState = this.sessionGoalStateMap().get(request.sessionId);
+            const taskContract = this.sessionTaskContractState().get(request.sessionId);
+            if (goalState?.status === 'complete'
+                && taskContract?.goalId
+                && taskContract.goalId === goalState.goalId) {
+                this.updateTaskContractLifecycle(request.sessionId, 'verified');
+            } else if (taskContract) {
+                this.updateTaskContractLifecycle(request.sessionId, 'interrupted');
+            }
+            if (!continuous) this.emitSupervisionShadow(request.sessionId, turnId);
             this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason, elapsedMs: elapsedMs() });
         } catch (error) {
+            this.pendingApprovedPlanState().delete(request.sessionId);
             if ((error instanceof AcpCancelledError || asRecord(error)?.kind === 'cancelled') && this.phase !== 'crashed') {
                 const cancelled = this.sessions.update(request.sessionId, { status: 'cancelled' });
                 this.emit({ kind: 'session', session: cancelled });
+                this.projectGoalTurnEnd(request.sessionId, 'cancelled');
+                this.updateTaskContractLifecycle(request.sessionId, 'interrupted');
                 this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'cancelled', elapsedMs: elapsedMs() });
                 return;
             }
             const failed = this.sessions.update(request.sessionId, { status: 'failed' });
             this.emit({ kind: 'session', session: failed });
+            this.projectGoalTurnEnd(request.sessionId, 'error');
+            this.updateTaskContractLifecycle(request.sessionId, 'interrupted');
             this.emitError('PROMPT_FAILED', error, true, request.sessionId);
             this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'error', elapsedMs: elapsedMs() });
             throw error;
@@ -1355,9 +1743,13 @@ export class GrokAgentHostService implements AgentHostService {
             this.flushAssistantTextDeltas(request.sessionId);
             this.assistantStreamState().delete(request.sessionId);
             this.activePrompts.delete(request.sessionId);
+            this.supervisionTurnSignalState().delete(request.sessionId);
+            this.activePromptObjectiveState().delete(request.sessionId);
+            this.pendingApprovedPlanState().delete(request.sessionId);
             if (this.activeTurnIdState().get(request.sessionId) === turnId) {
                 this.activeTurnIdState().delete(request.sessionId);
             }
+            this.clearGoalCompletionSignal(request.sessionId, turnId);
             this.sessions.flushEvents(request.sessionId);
             if (this.providerDefaultsRefreshPending) {
                 this.scheduleProviderDefaultsRefresh();
@@ -1366,6 +1758,78 @@ export class GrokAgentHostService implements AgentHostService {
                 this.scheduleIntegrationRefresh();
             }
         }
+    }
+
+    async guidePrompt(request: GuidePromptRequest): Promise<GuidePromptResult> {
+        const acp = this.requireReady();
+        if (this.capabilities?.guidePrompt !== true) {
+            throw new Error('The active Grok runtime does not provide non-interrupting task guidance.');
+        }
+        const record = this.sessions.get(request.sessionId);
+        if (!record?.acpSessionId || record.status === 'read-only') {
+            throw new Error('The selected session cannot accept guidance.');
+        }
+        if (record.workspaceRoot !== this.workspaceRoot || record.providerId !== this.providerId) {
+            throw new Error('The active runtime does not match this session.');
+        }
+        if (record.providerId !== this.providers.selectedProviderId()) {
+            throw new Error('The application-wide model service changed.');
+        }
+        const recordProviderEpoch = record.providerRuntimeEpoch ?? 'legacy-v1';
+        if (this.runtimeProviderEpoch !== recordProviderEpoch
+            || recordProviderEpoch !== this.providers.runtimeEpoch(record.providerId)) {
+            throw new Error('The Provider changed after this session was created.');
+        }
+        if (!this.loadedSessionIds.has(request.sessionId)) {
+            throw new Error('Restore the selected conversation before guiding its task.');
+        }
+        // Keep the renderer-owned FIFO row untouched when the running turn
+        // ended just before this RPC crossed the process boundary.
+        if (!this.activePrompts.has(request.sessionId)) {
+            return { status: 'not-running' };
+        }
+        if (typeof request.text !== 'string') throw new Error('Guidance text must be a string.');
+        if (request.attachments !== undefined && !Array.isArray(request.attachments)) {
+            throw new Error('Image attachments must be an array.');
+        }
+        if (request.attachments?.length && this.capabilities?.prompt.image !== true) {
+            throw new Error('The active Agent does not support image guidance.');
+        }
+        const images = validatePromptImageAttachments(request.attachments);
+        if (!request.text.length && !images.blocks.length) throw new Error('Guidance cannot be empty.');
+
+        const interjectionId = crypto.randomUUID();
+        const content = [
+            ...(request.text.length ? [{ type: 'text' as const, text: request.text }] : []),
+            ...images.blocks
+        ];
+        // ACP extension methods are encoded on the wire with a leading
+        // underscore. The typed Rust client adds it automatically; Xora's
+        // raw JSON-RPC transport must do so explicitly.
+        const result = await acp.request<Record<string, unknown>>('_x.ai/interject', {
+            sessionId: record.acpSessionId,
+            text: request.text,
+            interjectionId,
+            content
+        }, { timeoutMs: 0 });
+        const status = asString(result?.status);
+        if (status && status !== 'queued') {
+            throw new Error(`Grok Build rejected the guidance request (${status}).`);
+        }
+
+        // Grok deliberately skips the live session/update user echo for an
+        // interjection because its originating client owns that message.
+        // Publish one safe Xora event after ACP acknowledges the request.
+        this.emit({
+            kind: 'text-delta',
+            sessionId: request.sessionId,
+            role: 'user',
+            text: request.text,
+            guidance: true,
+            messageId: interjectionId,
+            ...(images.summaries.length ? { attachments: images.summaries } : {})
+        });
+        return { status: 'accepted', interjectionId };
     }
 
     async cancel(appSessionId: string): Promise<void> {
@@ -1378,6 +1842,20 @@ export class GrokAgentHostService implements AgentHostService {
                 permission.resolve({ outcome: { outcome: 'cancelled' } });
                 this.pendingPermissions.delete(requestId);
             }
+        }
+        for (const [requestId, approval] of this.pendingPlanApprovalState()) {
+            if (approval.appSessionId !== appSessionId) continue;
+            this.pendingPlanApprovalState().delete(requestId);
+            approval.resolve({ outcome: 'abandoned' });
+        }
+        this.pendingApprovedPlanState().delete(appSessionId);
+        this.projectGoalTurnEnd(appSessionId, 'cancelled');
+        this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+        if (this.orphanedGoalSessionState().has(appSessionId) && this.acp) {
+            await this.acp.notify('session/cancel', { sessionId: record.acpSessionId });
+            this.orphanedGoalSessionState().delete(appSessionId);
+            const cancelled = this.sessions.update(appSessionId, { status: 'cancelled' });
+            this.emit({ kind: 'session', session: cancelled });
         }
         const handle = this.activePrompts.get(appSessionId);
         if (handle) {
@@ -2058,6 +2536,8 @@ export class GrokAgentHostService implements AgentHostService {
         this.watchProjectGrokConfiguration(undefined);
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
+        this.completeActiveThought();
+        this.flushThoughtDeltas();
         this.client = undefined;
         this.disposed = true;
         if (this.managementChild) {
@@ -2072,6 +2552,8 @@ export class GrokAgentHostService implements AgentHostService {
         this.watchProjectGrokConfiguration(undefined);
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
+        this.completeActiveThought();
+        this.flushThoughtDeltas();
         this.client = undefined;
         this.disposed = true;
         ++this.runtimeGeneration;
@@ -2237,7 +2719,10 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected bindAcp(acp: AcpClient): void {
-        acp.onNotification('session/update', params => this.acceptSessionUpdate(params));
+        const isCurrent = (): boolean => this.acp === acp;
+        acp.onNotification('session/update', params => {
+            if (isCurrent()) this.acceptSessionUpdate(params);
+        });
         for (const method of [
             '_x.ai/mcp/init_progress',
             '_x.ai/mcp_initialized',
@@ -2245,9 +2730,12 @@ export class GrokAgentHostService implements AgentHostService {
             '_x.ai/mcp/server_status',
             '_x.ai/mcp/servers_updated'
         ]) {
-            acp.onNotification(method, params => this.acceptMcpLifecycleNotification(method, params));
+            acp.onNotification(method, params => {
+                if (isCurrent()) this.acceptMcpLifecycleNotification(method, params);
+            });
         }
         acp.onNotification('_x.ai/model_state_updated', params => {
+            if (!isCurrent()) return;
             const record = asRecord(params);
             const state = asRecord(record?.modelState) as ModelState | undefined;
             const preferred = this.defaultModelId(this.providerId);
@@ -2265,6 +2753,7 @@ export class GrokAgentHostService implements AgentHostService {
             }
         });
         acp.onNotification('*', (params, method) => {
+            if (!isCurrent()) return;
             if (method === 'session/update' || method === '_x.ai/model_state_updated') {
                 return;
             }
@@ -2283,7 +2772,18 @@ export class GrokAgentHostService implements AgentHostService {
             // and exposed protocol diagnostics as noisy system chat messages.
             void params;
         });
-        acp.onRequest('session/request_permission', params => this.handlePermissionRequest(params));
+        acp.onRequest('session/request_permission', params => isCurrent()
+            ? this.handlePermissionRequest(params)
+            : { outcome: { outcome: 'cancelled' } });
+        // Grok Build's typed ACP extension currently uses the unprefixed
+        // method. Accept the raw-prefixed spelling too so older sidecars and
+        // transport adapters cannot turn Plan approval into -32601.
+        acp.onRequest('x.ai/exit_plan_mode', params => isCurrent()
+            ? this.handlePlanApprovalRequest(params)
+            : { outcome: 'abandoned' });
+        acp.onRequest('_x.ai/exit_plan_mode', params => isCurrent()
+            ? this.handlePlanApprovalRequest(params)
+            : { outcome: 'abandoned' });
         acp.onError(error => {
             // Numeric unknown-response ids remain a real protocol warning.
             // String lifecycle ids are already demoted in AcpClient.
@@ -2803,6 +3303,9 @@ export class GrokAgentHostService implements AgentHostService {
         this.capabilities = {
             protocolVersion: typeof response.protocolVersion === 'number' ? response.protocolVersion : 1,
             loadSession: agentCapabilities?.loadSession === true,
+            guidePrompt: false,
+            goal: { available: false, command: false, updateTool: false },
+            sessionModes: false,
             prompt: {
                 image: prompt?.image === true,
                 audio: prompt?.audio === true,
@@ -2822,6 +3325,26 @@ export class GrokAgentHostService implements AgentHostService {
         // reports another current model. A missing preference may still be
         // initialized from the sidecar's first authoritative catalogue.
         this.acceptModelState(modelStateFrom(response), emitSnapshot);
+    }
+
+    /**
+     * Grok 0.2.102 does not advertise extension routes in initialize. Probe a
+     * deliberately missing session: a conforming `_x.ai/interject` handler
+     * returns invalid-params, while an incompatible binary returns -32601.
+     * The probe is local, credential-free and never creates or mutates a turn.
+     */
+    protected async detectGuidePromptCapability(acp: AcpClient): Promise<boolean> {
+        try {
+            await acp.request('_x.ai/interject', {
+                sessionId: `xora-capability-probe-${crypto.randomUUID()}`,
+                text: 'capability probe',
+                interjectionId: crypto.randomUUID(),
+                content: [{ type: 'text', text: 'capability probe' }]
+            }, { timeoutMs: 2_000 });
+            return true;
+        } catch (error) {
+            return error instanceof AcpRemoteError && error.rpcCode === -32602;
+        }
     }
 
     protected acceptModelState(
@@ -2917,17 +3440,74 @@ export class GrokAgentHostService implements AgentHostService {
         const update = envelope?.update;
         const type = asString(update?.sessionUpdate);
         const appSessionId = envelope ? this.strictAppSessionForAcp(envelope.sessionId) : undefined;
-        if (!appSessionId || !type || !update) {
+        const replaying = !!envelope && (envelope.replay || this.isSessionRestoring(appSessionId));
+        if (!acpSessionId || !type || !update) {
+            return;
+        }
+        // These updates can arrive before session/new or session/load resolves.
+        // Cache them by ACP id, then project once the app-session mapping
+        // commits. A replay is the authoritative capability snapshot for the
+        // newly hydrated process, so it must refresh backend state too.
+        if (type === 'available_commands_update') {
+            this.acceptAvailableCommands(acpSessionId, replaying ? undefined : appSessionId, update, !replaying);
+            return;
+        }
+        if (!appSessionId) return;
+        if (type === 'current_mode_update') {
+            if (!replaying) this.acceptCurrentModeUpdate(appSessionId, update);
+            return;
+        }
+        if (type === 'goal_updated') {
+            if (!replaying && !this.acceptContextEventSequence(appSessionId, envelope.eventSequence)) return;
+            const session = this.sessions.get(appSessionId);
+            const goal = parseGoalUpdated(update, {
+                sessionId: appSessionId,
+                turnId: this.activeTurnIdState().get(appSessionId),
+                agentTurnStatus: this.activePrompts?.has(appSessionId) ? 'running' : 'end-turn',
+                providerRuntimeEpoch: session?.providerRuntimeEpoch
+            });
+            if (!goal) return;
+            const previousEvidence = this.acpGoalCapabilityState().get(acpSessionId)
+                ?? { available: false, command: false, updateTool: false };
+            const evidence: SessionGoalCapability = {
+                ...previousEvidence,
+                updateTool: true,
+                available: previousEvidence.command
+            };
+            this.acpGoalCapabilityState().set(acpSessionId, evidence);
+            if (!replaying) this.refreshGoalCapability(appSessionId, acpSessionId);
+            this.sessionGoalStateMap().set(appSessionId, goal);
+            if (replaying) {
+                this.replayedGoalStateMap().set(appSessionId, goal);
+            } else {
+                this.acceptContextTotal(appSessionId, envelope.meta);
+                this.emit(goal);
+                this.reconcileTaskContractWithGoal(appSessionId, goal);
+                this.resolveGoalCompletionSignal(appSessionId, goal);
+            }
             return;
         }
         // ACP session/load replays existing updates. The local redacted JSONL
         // already owns visible history, so rebroadcasting or persisting this
         // stream would duplicate the conversation on every switch.
-        if (envelope.replay || this.isSessionRestoring(appSessionId)) {
+        if (replaying) {
             return;
         }
         if (!this.acceptContextEventSequence(appSessionId, envelope.eventSequence)) return;
         this.acceptContextTotal(appSessionId, envelope.meta);
+        if (type === 'agent_thought_chunk') {
+            const content = asRecord(update.content);
+            const text = asString(content?.text);
+            if (text) {
+                const meta = asRecord(update._meta);
+                const wireMessageId = asString(update.messageId)
+                    ?? asString(update.message_id)
+                    ?? asString(meta?.messageId)
+                    ?? asString(meta?.message_id);
+                this.acceptThoughtDelta(appSessionId, text, wireMessageId);
+            }
+            return;
+        }
         if (type === 'agent_message_chunk') {
             const content = asRecord(update.content);
             const text = asString(content?.text);
@@ -2938,9 +3518,16 @@ export class GrokAgentHostService implements AgentHostService {
         }
         if (type === 'plan') {
             const entries = Array.isArray(update.entries) ? update.entries : [];
-            this.emit({
+            const event: AgentPlanEvent = {
                 kind: 'plan',
                 sessionId: appSessionId,
+                ...(this.activeTurnIdState().get(appSessionId)
+                    ? { turnId: this.activeTurnIdState().get(appSessionId) }
+                    : {}),
+                ...(asString(update.title) ? { title: asString(update.title)!.slice(0, 512) } : {}),
+                ...(this.sessions.get(appSessionId)?.providerRuntimeEpoch
+                    ? { providerRuntimeEpoch: this.sessions.get(appSessionId)!.providerRuntimeEpoch }
+                    : {}),
                 entries: entries.flatMap((candidate, index) => {
                     const item = asRecord(candidate);
                     const text = asString(item?.content) ?? asString(item?.text);
@@ -2962,7 +3549,31 @@ export class GrokAgentHostService implements AgentHostService {
                                         : 'pending'
                     }];
                 })
-            });
+            };
+            const priorPlan = this.sessionPlanState().get(appSessionId);
+            const goalActive = this.sessionGoalStateMap().get(appSessionId)?.status === 'active'
+                || this.hasLiveApprovedPlanExecution(appSessionId);
+            const incomingOnlyCompletes = event.entries.length > 0
+                && event.entries.every(entry => entry.status === 'completed');
+            const priorHasOpenWork = !!priorPlan?.entries.some(entry =>
+                entry.status === 'pending' || entry.status === 'in-progress' || entry.status === 'failed'
+            );
+            if (goalActive && incomingOnlyCompletes && priorHasOpenWork
+                && samePlanSignature(priorPlan, event)) {
+                // Grok emits a cosmetic all-completed Plan snapshot while a
+                // native Goal continues/verifies. Publishing it would flash
+                // and prematurely settle the user's approved Plan.
+                return;
+            }
+            const signals = this.supervisionTurnSignalState().get(appSessionId);
+            if (signals) {
+                signals.sawPlan = event.entries.length > 0;
+                signals.openPlanCount = event.entries.filter(entry =>
+                    entry.status === 'pending' || entry.status === 'in-progress' || entry.status === 'failed'
+                ).length;
+            }
+            this.sessionPlanState().set(appSessionId, event);
+            this.emit(event);
             return;
         }
         if (type === 'tool_call' || type === 'tool_call_update') {
@@ -2970,11 +3581,449 @@ export class GrokAgentHostService implements AgentHostService {
         }
     }
 
+    protected acceptAvailableCommands(
+        acpSessionId: string,
+        appSessionId: string | undefined,
+        update: Record<string, unknown>,
+        emitSession = true
+    ): void {
+        const previous = this.acpGoalCapabilityState().get(acpSessionId)
+            ?? { available: false, command: false, updateTool: false };
+        const command = Array.isArray(update.availableCommands)
+            ? update.availableCommands.some(candidate => {
+                const item = asRecord(candidate);
+                const name = (asString(item?.name) ?? asString(item?.id) ?? '').replace(/^\//, '');
+                return name === 'goal';
+            })
+            : previous.command;
+        const meta = asRecord(update._meta) ?? {};
+        // Grok may advertise tools separately from slash commands. An update
+        // without `_meta.tools` must not erase already observed tool evidence.
+        const updateTool = Array.isArray(meta.tools)
+            ? meta.tools.some(tool => asString(tool) === 'update_goal')
+            : previous.updateTool;
+        const evidence: SessionGoalCapability = {
+            command,
+            updateTool,
+            available: command && updateTool
+        };
+        this.acpGoalCapabilityState().set(acpSessionId, evidence);
+        if (appSessionId) this.refreshGoalCapability(appSessionId, acpSessionId, emitSession);
+    }
+
+    protected acceptCurrentModeUpdate(appSessionId: string, update: Record<string, unknown>): void {
+        const currentModeId = asString(update.currentModeId) ?? asString(update.current_mode_id);
+        const record = this.sessions.get(appSessionId);
+        if (!currentModeId || !record || record.currentModeId === currentModeId) return;
+        const updated = this.sessions.update(appSessionId, { currentModeId });
+        this.emit({ kind: 'session', session: updated });
+    }
+
+    protected acceptSessionModeCapability(
+        acpSessionId: string,
+        appSessionId: string,
+        modes: { currentModeId?: string; availableModes: AgentSessionMode[] }
+    ): void {
+        if (this.capabilities && modes.availableModes.length > 0 && !this.capabilities.sessionModes) {
+            this.capabilities = { ...this.capabilities, sessionModes: true };
+            this.emitSnapshot();
+        }
+        this.refreshGoalCapability(appSessionId, acpSessionId);
+    }
+
+    protected refreshGoalCapability(appSessionId: string, acpSessionId: string, emitSession = true): void {
+        const record = this.sessions.get(appSessionId);
+        if (!record || record.acpSessionId !== acpSessionId) return;
+        const rawEvidence = this.acpGoalCapabilityState().get(acpSessionId)
+            ?? { available: false, command: false, updateTool: false };
+        const evidence: AgentGoalCapability = {
+            command: rawEvidence.command,
+            updateTool: rawEvidence.updateTool,
+            available: rawEvidence.command && rawEvidence.updateTool
+        };
+        if (!sameGoalCapability(record.goalCapability, evidence)) {
+            const updated = this.sessions.update(appSessionId, { goalCapability: evidence });
+            if (emitSession) this.emit({ kind: 'session', session: updated });
+        }
+        // Runtime capability is only a fallback for sessions created before a
+        // per-session snapshot exists. It is monotonic within one sidecar and
+        // must never be downgraded by a different session.
+        if (this.capabilities && evidence.available && !this.capabilities.goal.available) {
+            this.capabilities = { ...this.capabilities, goal: evidence };
+            this.emitSnapshot();
+        }
+    }
+
+    protected sessionSupportsGoal(appSessionId: string): boolean {
+        const record = this.sessions.get(appSessionId);
+        if (!record?.acpSessionId || !this.loadedSessionIds.has(appSessionId)) return false;
+        return this.sessionAdvertisesGoal(appSessionId);
+    }
+
+    protected sessionAdvertisesGoal(appSessionId: string): boolean {
+        const record = this.sessions.get(appSessionId);
+        if (!record?.acpSessionId) return false;
+        if (record.goalCapability) return record.goalCapability.available === true;
+        const evidence = this.acpGoalCapabilityState().get(record.acpSessionId);
+        return evidence?.available === true || (evidence?.command === true && evidence.updateTool === true);
+    }
+
+    protected hasLiveApprovedPlanExecution(appSessionId: string): boolean {
+        const session = this.sessions.get(appSessionId);
+        if (!session || !this.activePrompts.has(appSessionId)) return false;
+        if (this.pendingApprovedPlanState().has(appSessionId)) return true;
+        const contract = this.sessionTaskContractState().get(appSessionId);
+        const activeTurnId = this.activeTurnIdState().get(appSessionId);
+        return !!contract
+            && !!contract.turnId
+            && contract.turnId === activeTurnId
+            && contract.providerRuntimeEpoch === session.providerRuntimeEpoch
+            && (contract.lifecycle === 'approved'
+                || contract.lifecycle === 'goal-starting'
+                || contract.lifecycle === 'goal-active');
+    }
+
+    protected projectGoalTurnEnd(
+        appSessionId: string,
+        agentTurnStatus: AgentGoalStateEvent['agentTurnStatus']
+    ): void {
+        const previous = this.sessionGoalStateMap().get(appSessionId);
+        if (!previous) return;
+        const verificationStatus = previous.status === 'complete' || previous.verificationStatus === 'verified'
+            ? 'verified'
+            : agentTurnStatus === 'cancelled' || agentTurnStatus === 'error'
+                ? 'paused'
+                : verificationStatusForGoal(previous.status, previous.verifying);
+        if (previous.agentTurnStatus === agentTurnStatus
+            && previous.verificationStatus === verificationStatus) return;
+        const next: AgentGoalStateEvent = { ...previous, agentTurnStatus, verificationStatus };
+        this.sessionGoalStateMap().set(appSessionId, next);
+        this.emit(next);
+    }
+
+    protected reconcileTaskContractWithGoal(appSessionId: string, goal: AgentGoalStateEvent): void {
+        const contract = this.sessionTaskContractState().get(appSessionId);
+        if (!contract || !goal.goalId) return;
+        if (contract.goalId && contract.goalId !== goal.goalId) return;
+        // Only the Goal immediately launched from an approved Plan may claim
+        // an unbound contract. A later unrelated explicit /goal in the same
+        // session must never verify old acceptance criteria.
+        if (!contract.goalId && contract.lifecycle !== 'goal-starting') return;
+        const lifecycle: AgentTaskContractEvent['lifecycle'] | undefined = goal.status === 'complete'
+            ? 'verified'
+            : goal.status === 'active'
+                ? 'goal-active'
+                : goal.status !== 'unknown'
+                    ? 'interrupted'
+                    : undefined;
+        if (!lifecycle) return;
+        if (!contract.goalId) {
+            const next: AgentTaskContractEvent = {
+                ...contract,
+                goalId: goal.goalId,
+                lifecycle,
+                updatedAt: new Date().toISOString()
+            };
+            this.sessionTaskContractState().set(appSessionId, next);
+            this.emit(next);
+            return;
+        }
+        this.updateTaskContractLifecycle(appSessionId, lifecycle);
+    }
+
+    /** Commit the final replay snapshot once session/load has succeeded. */
+    protected async publishReplayedGoalState(appSessionId: string): Promise<AgentGoalStateEvent | undefined> {
+        const goal = this.replayedGoalStateMap().get(appSessionId);
+        this.replayedGoalStateMap().delete(appSessionId);
+        if (!goal) return undefined;
+        const record = this.sessions.get(appSessionId);
+        if (!record?.providerRuntimeEpoch || goal.providerRuntimeEpoch !== record.providerRuntimeEpoch) return undefined;
+        const history = this.sessions.readEvents(appSessionId);
+        if (!this.sessionTaskContractState().has(appSessionId)) {
+            const contract = [...history].reverse().find(event =>
+                event.kind === 'task-contract'
+                && event.sessionId === appSessionId
+                && event.providerRuntimeEpoch === record.providerRuntimeEpoch);
+            if (contract?.kind === 'task-contract') this.sessionTaskContractState().set(appSessionId, contract);
+        }
+        const persisted = [...history].reverse().find(event =>
+            event.kind === 'goal-state'
+            && event.sessionId === appSessionId
+            && event.providerRuntimeEpoch === record.providerRuntimeEpoch) as AgentGoalStateEvent | undefined;
+        const orphanedActive = goal.status === 'active' && !this.activePrompts.has(appSessionId);
+        const projectedGoal: AgentGoalStateEvent = orphanedActive
+            ? {
+                ...goal,
+                agentTurnStatus: persisted?.agentTurnStatus === 'cancelled' ? 'cancelled' : 'error',
+                verificationStatus: 'paused'
+            }
+            : goal;
+        this.sessionGoalStateMap().set(appSessionId, projectedGoal);
+        if (!sameGoalStateProjection(persisted, projectedGoal)) this.emit(projectedGoal);
+        if (orphanedActive) {
+            this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            this.orphanedGoalSessionState().add(appSessionId);
+            try {
+                await this.requireReady().notify('session/cancel', { sessionId: record.acpSessionId });
+                this.orphanedGoalSessionState().delete(appSessionId);
+            } catch (error) {
+                const failed = this.sessions.update(appSessionId, { status: 'failed' });
+                this.emit({ kind: 'session', session: failed });
+                this.emitError('GOAL_RESTORE_CANCEL_FAILED', error, true, appSessionId);
+            }
+        } else {
+            this.reconcileTaskContractWithGoal(appSessionId, projectedGoal);
+        }
+        return projectedGoal;
+    }
+
+    /** A persisted approval cannot authorize tools after load unless Xora
+     * successfully resumed and owns the matching Goal request. */
+    protected interruptUnownedTaskContract(appSessionId: string): void {
+        const contract = this.sessionTaskContractState().get(appSessionId);
+        if (!contract || this.hasLiveApprovedPlanExecution(appSessionId)) return;
+        if (contract.lifecycle === 'approved'
+            || contract.lifecycle === 'goal-starting'
+            || contract.lifecycle === 'goal-active') {
+            this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+        }
+    }
+
+    /** A Plan approval replayed by session/load has no public sendPrompt owner.
+     * Start its approved Goal exactly once after hydration, without another
+     * user bubble or a transient completed session. */
+    protected startRestoredApprovedPlanGoal(appSessionId: string): SessionRecord | undefined {
+        const contract = this.pendingApprovedPlanState().get(appSessionId);
+        if (!contract) return undefined;
+        const record = this.sessions.get(appSessionId);
+        if (!record?.acpSessionId
+            || !this.loadedSessionIds.has(appSessionId)
+            || !this.providerAuthorityIsCurrent(record.providerId, record.providerRuntimeEpoch ?? 'legacy-v1')
+            || this.activePrompts.has(appSessionId)) {
+            this.pendingApprovedPlanState().delete(appSessionId);
+            this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            return undefined;
+        }
+        // The reverse request can arrive before session/load completes, where
+        // persisted per-session capability avoids deadlocking Grok's waiter.
+        // Re-check the capability snapshot committed from this process's
+        // replay before starting executable work; stale evidence may approve
+        // a contract but can never launch a native Goal.
+        if (!this.sessionSupportsGoal(appSessionId)) {
+            this.pendingApprovedPlanState().delete(appSessionId);
+            this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            this.emitError(
+                'GOAL_CAPABILITY_CHANGED',
+                new Error('当前 Grok 会话不再支持持续完成；计划已保留，可在能力恢复后重新执行。'),
+                true,
+                appSessionId
+            );
+            return undefined;
+        }
+        this.pendingApprovedPlanState().delete(appSessionId);
+        // The restored Goal is the implementation phase of the same approved
+        // user logical turn. Reusing the Plan turn id lets the renderer settle
+        // that Plan when the matching Goal verifies instead of leaving it pending.
+        const turnId = this.sessionTaskContractState().get(appSessionId)?.turnId ?? crypto.randomUUID();
+        const startedAt = process.hrtime.bigint();
+        this.activeTurnIdState().set(appSessionId, turnId);
+        this.activePromptObjectiveState().set(appSessionId, contract.objective);
+        const goalCompletion = this.beginGoalCompletionSignal(appSessionId, turnId);
+        this.updateTaskContractLifecycle(appSessionId, 'goal-starting');
+        let handle: RequestHandle<Record<string, unknown>>;
+        try {
+            handle = this.requireReady().startRequest<Record<string, unknown>>('session/prompt', {
+                sessionId: record.acpSessionId,
+                prompt: [{ type: 'text', text: formatContinuousGoalPrompt(contract.objective, contract) }]
+            }, {
+                timeoutMs: 0,
+                cancellation: { method: 'session/cancel', params: { sessionId: record.acpSessionId } }
+            });
+        } catch (error) {
+            this.clearGoalCompletionSignal(appSessionId, turnId);
+            this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            this.activeTurnIdState().delete(appSessionId);
+            this.activePromptObjectiveState().delete(appSessionId);
+            this.emitError('PROMPT_FAILED', error, true, appSessionId);
+            return undefined;
+        }
+        this.activePrompts.set(appSessionId, handle);
+        const running = this.sessions.update(appSessionId, { status: 'running' });
+        this.emit({ kind: 'session', session: running });
+        void this.observeRestoredGoal(
+            appSessionId,
+            record.acpSessionId,
+            record.providerRuntimeEpoch ?? 'legacy-v1',
+            this.runtimeGeneration,
+            handle,
+            goalCompletion,
+            turnId,
+            startedAt
+        )
+            .catch(() => undefined);
+        return running;
+    }
+
+    protected async observeRestoredGoal(
+        appSessionId: string,
+        acpSessionId: string,
+        providerRuntimeEpoch: string,
+        runtimeGeneration: number,
+        handle: RequestHandle<Record<string, unknown>>,
+        goalCompletion: GoalCompletionSignal,
+        turnId: string,
+        startedAt: bigint
+    ): Promise<void> {
+        const elapsedMs = (): number => Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+        try {
+            const result = await this.awaitPromptOrGoalCompletion(handle, goalCompletion);
+            const current = this.sessions.get(appSessionId);
+            if (runtimeGeneration !== this.runtimeGeneration
+                || current?.acpSessionId !== acpSessionId
+                || current.providerRuntimeEpoch !== providerRuntimeEpoch) return;
+            this.acceptPromptContextFallback(appSessionId, acpSessionId, result);
+            const stopReason = asString(result.stopReason);
+            const status = stopReason === 'cancelled' ? 'cancelled' : 'completed';
+            const finished = this.sessions.update(appSessionId, { status });
+            this.emit({ kind: 'session', session: finished });
+            this.projectGoalTurnEnd(appSessionId, stopReason === 'cancelled' ? 'cancelled' : 'end-turn');
+            const goal = this.sessionGoalStateMap().get(appSessionId);
+            const contract = this.sessionTaskContractState().get(appSessionId);
+            if (goal?.status === 'complete' && contract?.goalId === goal.goalId) {
+                this.updateTaskContractLifecycle(appSessionId, 'verified');
+            } else {
+                this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            }
+            this.emit({ kind: 'turn-completed', sessionId: appSessionId, stopReason, elapsedMs: elapsedMs() });
+        } catch (error) {
+            const current = this.sessions.get(appSessionId);
+            if (runtimeGeneration !== this.runtimeGeneration
+                || current?.acpSessionId !== acpSessionId
+                || current.providerRuntimeEpoch !== providerRuntimeEpoch) return;
+            const cancelled = error instanceof AcpCancelledError || asRecord(error)?.kind === 'cancelled';
+            if (this.phase !== 'crashed' && this.sessions.get(appSessionId)) {
+                const failed = this.sessions.update(appSessionId, { status: cancelled ? 'cancelled' : 'failed' });
+                this.emit({ kind: 'session', session: failed });
+                this.projectGoalTurnEnd(appSessionId, cancelled ? 'cancelled' : 'error');
+                this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+                if (!cancelled) this.emitError('PROMPT_FAILED', error, true, appSessionId);
+                this.emit({
+                    kind: 'turn-completed',
+                    sessionId: appSessionId,
+                    stopReason: cancelled ? 'cancelled' : 'error',
+                    elapsedMs: elapsedMs()
+                });
+            }
+        } finally {
+            if (this.activePrompts.get(appSessionId) === handle) this.activePrompts.delete(appSessionId);
+            if (this.activeTurnIdState().get(appSessionId) === turnId) this.activeTurnIdState().delete(appSessionId);
+            this.clearGoalCompletionSignal(appSessionId, turnId);
+            this.activePromptObjectiveState().delete(appSessionId);
+            this.sessions.flushEvents(appSessionId);
+        }
+    }
+
+    protected updateTaskContractLifecycle(
+        appSessionId: string,
+        lifecycle: AgentTaskContractEvent['lifecycle']
+    ): void {
+        const previous = this.sessionTaskContractState().get(appSessionId);
+        if (!previous || previous.lifecycle === lifecycle
+            || previous.lifecycle === 'verified') return;
+        // A native Goal may pause/stop and later resume in the same Provider
+        // generation. Only a fresh authoritative active update may revive an
+        // interrupted contract; local orchestration cannot do so itself.
+        if (previous.lifecycle === 'interrupted' && lifecycle !== 'goal-active' && lifecycle !== 'verified') return;
+        const next: AgentTaskContractEvent = {
+            ...previous,
+            lifecycle,
+            updatedAt: new Date().toISOString()
+        };
+        this.sessionTaskContractState().set(appSessionId, next);
+        this.emit(next);
+    }
+
+    protected emitSupervisionShadow(appSessionId: string, turnId: string): void {
+        const signals = this.supervisionTurnSignalState().get(appSessionId);
+        if (!signals || signals.excludeFromSuggestion) return;
+        this.emit(buildSupervisionShadowEvent(appSessionId, turnId, signals));
+    }
+
+    protected clearGoalRuntimeState(agentTurnStatus: 'cancelled' | 'error' = 'cancelled'): void {
+        for (const [appSessionId, goal] of this.sessionGoalStateMap()) {
+            if (goal.agentTurnStatus === 'running' || this.activePrompts?.has(appSessionId)) {
+                this.projectGoalTurnEnd(appSessionId, agentTurnStatus);
+            }
+        }
+        for (const [appSessionId, contract] of this.sessionTaskContractState()) {
+            if (contract.lifecycle === 'approved'
+                || contract.lifecycle === 'goal-starting'
+                || contract.lifecycle === 'goal-active') {
+                this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            }
+        }
+        for (const pending of this.pendingPlanApprovalState().values()) {
+            pending.resolve({ outcome: 'abandoned' });
+        }
+        this.pendingPlanApprovalState().clear();
+        this.activePromptObjectiveState().clear();
+        this.goalCompletionSignalState().clear();
+        this.sessionGoalStateMap().clear();
+        this.sessionPlanState().clear();
+        this.acpGoalCapabilityState().clear();
+        this.supervisionTurnSignalState().clear();
+        this.pendingApprovedPlanState().clear();
+        this.sessionTaskContractState().clear();
+        this.replayedGoalStateMap().clear();
+        this.orphanedGoalSessionState().clear();
+        this.contextEventHighwaters?.clear();
+        if (this.capabilities?.goal?.available || this.capabilities?.sessionModes) {
+            this.capabilities = {
+                ...this.capabilities,
+                goal: { available: false, command: false, updateTool: false },
+                sessionModes: false
+            };
+        }
+    }
+
     protected acceptXaiSessionContext(params: unknown, method: string): void {
         const envelope = parseXaiSessionContextEnvelope(method, params);
-        if (!envelope || envelope.replay) return;
+        if (!envelope) return;
         const appSessionId = this.strictAppSessionForAcp(envelope.sessionId);
-        if (!appSessionId || this.isSessionRestoring(appSessionId)) return;
+        if (!appSessionId) return;
+        const replaying = envelope.replay || this.isSessionRestoring(appSessionId);
+
+        const session = this.sessions.get(appSessionId);
+        const goal = parseGoalUpdated(envelope.update, {
+            sessionId: appSessionId,
+            turnId: this.activeTurnIdState().get(appSessionId),
+            agentTurnStatus: this.activePrompts?.has(appSessionId) ? 'running' : 'end-turn',
+            providerRuntimeEpoch: session?.providerRuntimeEpoch
+        });
+        if (goal) {
+            if (!replaying && !this.acceptContextEventSequence(appSessionId, envelope.eventSequence)) return;
+            const previousEvidence = this.acpGoalCapabilityState().get(envelope.sessionId)
+                ?? { available: false, command: false, updateTool: false };
+            const evidence: SessionGoalCapability = {
+                ...previousEvidence,
+                updateTool: true,
+                available: previousEvidence.command
+            };
+            this.acpGoalCapabilityState().set(envelope.sessionId, evidence);
+            if (!replaying) this.refreshGoalCapability(appSessionId, envelope.sessionId);
+            this.sessionGoalStateMap().set(appSessionId, goal);
+            if (replaying) {
+                this.replayedGoalStateMap().set(appSessionId, goal);
+            } else {
+                this.emit(goal);
+                this.reconcileTaskContractWithGoal(appSessionId, goal);
+                this.resolveGoalCompletionSignal(appSessionId, goal);
+                this.acceptContextTotal(appSessionId, envelope.meta);
+            }
+            return;
+        }
+
+        if (replaying) return;
         if (!this.acceptContextEventSequence(appSessionId, envelope.eventSequence)) return;
 
         const compaction = parseAutoCompaction(envelope.update);
@@ -3122,6 +4171,17 @@ export class GrokAgentHostService implements AgentHostService {
             input: boundedToolInput(safeUpdate.rawInput),
             output
         };
+        const supervision = this.supervisionTurnSignalState().get(appSessionId);
+        if (supervision && isTerminalToolStatus(status)) {
+            if (status === 'failed' || status === 'rejected') {
+                supervision.failedToolIds.add(toolCallId);
+            } else {
+                supervision.failedToolIds.delete(toolCallId);
+            }
+            if (event.presentation?.action === 'test' && status === 'completed') {
+                supervision.testEvidenceIds.add(toolCallId);
+            }
+        }
         this.emit(event);
         if (Array.isArray(update.content)) {
             for (const candidate of update.content) {
@@ -3219,6 +4279,106 @@ export class GrokAgentHostService implements AgentHostService {
         return this.toolActivityTimings ?? (this.toolActivityTimings = new Map());
     }
 
+    protected async handlePlanApprovalRequest(params: unknown): Promise<unknown> {
+        const request = asRecord(params);
+        const acpSessionId = asString(request?.sessionId);
+        const toolCallId = asString(request?.toolCallId);
+        const appSessionId = acpSessionId ? this.strictAppSessionForAcp(acpSessionId) : undefined;
+        const session = appSessionId ? this.sessions.get(appSessionId) : undefined;
+        if (!appSessionId || !acpSessionId || !toolCallId || !session
+            || session.workspaceRoot !== this.workspaceRoot
+            || session.providerId !== this.providerId
+            || !this.providerAuthorityIsCurrent(session.providerId, session.providerRuntimeEpoch ?? 'legacy-v1')) {
+            return { outcome: 'abandoned' };
+        }
+        const rawPlanContent = asString(request?.planContent);
+        // Keep the live approval usable even if an overlong model-generated
+        // Plan arrives; renderer/history receive only a bounded safe preview.
+        const planContent = rawPlanContent?.slice(0, 256_000);
+        const planBasis = this.planApprovalBasis(session);
+        const suggestedContract = suggestTaskContract(
+            this.activePromptObjectiveState().get(appSessionId)
+                ?? this.persistedPlanObjective(session, planBasis.turnId)
+                ?? session.title,
+            planContent,
+            planBasis.plan
+        );
+
+        // Only one Plan approval can own a session. A resumed/replayed request
+        // supersedes stale chrome and releases the old Grok waiter closed.
+        for (const [oldRequestId, old] of this.pendingPlanApprovalState()) {
+            if (old.appSessionId !== appSessionId) continue;
+            this.pendingPlanApprovalState().delete(oldRequestId);
+            old.resolve({ outcome: 'abandoned' });
+        }
+        const requestId = crypto.randomUUID();
+        const event: AgentPlanApprovalRequestEvent = {
+            kind: 'plan-approval-request',
+            sessionId: appSessionId,
+            ...(planBasis.turnId ? { turnId: planBasis.turnId } : {}),
+            requestId,
+            toolCallId: requireBoundedText(toolCallId, 'Plan tool call id', 1_024),
+            ...(planContent ? { planContent } : {}),
+            suggestedContract,
+            requestedAt: new Date().toISOString()
+        };
+        const response = new Promise<{ outcome: 'approved' | 'cancelled' | 'abandoned'; feedback?: string }>(resolve => {
+            this.pendingPlanApprovalState().set(requestId, {
+                appSessionId,
+                acpSessionId,
+                runtimeGeneration: this.runtimeGeneration,
+                providerRuntimeEpoch: session.providerRuntimeEpoch ?? 'legacy-v1',
+                toolCallId,
+                ...(planBasis.turnId ? { planTurnId: planBasis.turnId } : {}),
+                ...(planContent ? { planContent } : {}),
+                suggestedContract,
+                resolve
+            });
+        });
+        // A reverse-request card is live chrome backed by this resolver. Only
+        // the resulting frozen task-contract is durable.
+        this.emit(event, false);
+        return response;
+    }
+
+    /** Recover the original user objective for a re-parked Plan approval.
+     * Session titles are mutable and truncated, so they are only a final
+     * fallback. The Provider-epoch Plan event supplies the safe turn binding. */
+    protected planApprovalBasis(session: SessionRecord): { plan?: AgentPlanEvent; turnId?: string } {
+        const providerRuntimeEpoch = session.providerRuntimeEpoch;
+        const activeTurnId = this.activeTurnIdState().get(session.appSessionId);
+        const livePlan = this.sessionPlanState().get(session.appSessionId);
+        if (activeTurnId) {
+            const matchingPlan = livePlan?.turnId === activeTurnId
+                && !!providerRuntimeEpoch
+                && livePlan.providerRuntimeEpoch === providerRuntimeEpoch
+                ? livePlan
+                : undefined;
+            return { ...(matchingPlan ? { plan: matchingPlan } : {}), turnId: activeTurnId };
+        }
+        // Only session/load may recover a Plan without a live prompt owner.
+        // Normal turns must never borrow an older in-memory/durable Plan.
+        if (!this.isSessionRestoring(session.appSessionId) || !providerRuntimeEpoch) return {};
+        const durablePlan = [...this.sessions.readEvents(session.appSessionId)].reverse().find(
+            (event): event is AgentPlanEvent => event.kind === 'plan'
+                && event.sessionId === session.appSessionId
+                && !!event.turnId
+                && event.providerRuntimeEpoch === providerRuntimeEpoch
+        );
+        return durablePlan ? { plan: durablePlan, turnId: durablePlan.turnId } : {};
+    }
+
+    protected persistedPlanObjective(session: SessionRecord, turnId: string | undefined): string | undefined {
+        if (!turnId) return undefined;
+        const events = deepRedact(this.sessions.readEvents(session.appSessionId), this.currentSecrets);
+        const user = [...events].reverse().find(event =>
+            event.kind === 'text-delta'
+            && event.sessionId === session.appSessionId
+            && event.turnId === turnId
+            && event.role === 'user');
+        return user?.kind === 'text-delta' ? user.text.slice(0, 32_000) : undefined;
+    }
+
     protected rememberEmittedDiff(key: string): void {
         this.emittedDiffKeys.add(key);
         while (this.emittedDiffKeys.size > MAX_EMITTED_DIFF_KEYS) {
@@ -3269,6 +4429,15 @@ export class GrokAgentHostService implements AgentHostService {
         const policyPresentation = normalizeToolPresentation(identity, tool, policyLocations);
         const safeIdentity = normalizeToolIdentity(safeTool, 'tool_call');
         const presentation = normalizeToolPresentation(safeIdentity, safeTool, locations);
+        const approvedPlanExecution = this.hasLiveApprovedPlanExecution(appSessionId);
+        // Plan is a real read-only execution boundary, not merely renderer
+        // decoration. Fail closed before full-access and remembered policy,
+        // using Xora's builtin-action allowlist rather than provider-supplied
+        // read_only metadata.
+        if (sessionUsesPlanMode(session) && !approvedPlanExecution
+            && !planModeAllowsTool(policyPresentation, identity, rawInput)) {
+            return { outcome: { outcome: 'cancelled' } };
+        }
         const subject: PermissionSubject = {
             toolName: identity.name,
             path: asString(location?.path) ?? asString(rawInput?.path),
@@ -3474,6 +4643,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (typeof result.sessionId !== 'string' || !result.sessionId) {
             throw new Error('Grok returned an invalid ACP session ID.');
         }
+        const sessionModes = parseSessionModes(result);
         if (runtimeGeneration !== this.runtimeGeneration) {
             throw new Error('The Agent runtime changed while reconnecting this conversation.');
         }
@@ -3510,19 +4680,43 @@ export class GrokAgentHostService implements AgentHostService {
             throw new Error('The application-wide model service changed while the conversation was reconnecting.');
         }
 
+        // The old ACP id, Goal and approved contract belong to the previous
+        // Provider epoch. Close that lifecycle before binding the local
+        // transcript to a fresh credential/configuration authority.
+        const oldGoal = this.sessionGoalStateMap().get(record.appSessionId);
+        if (oldGoal?.agentTurnStatus === 'running') {
+            this.projectGoalTurnEnd(record.appSessionId, 'cancelled');
+        }
+        this.updateTaskContractLifecycle(record.appSessionId, 'interrupted');
+        this.sessionGoalStateMap().delete(record.appSessionId);
+        this.sessionPlanState().delete(record.appSessionId);
+        this.pendingApprovedPlanState().delete(record.appSessionId);
+        this.sessionTaskContractState().delete(record.appSessionId);
+        this.replayedGoalStateMap().delete(record.appSessionId);
+        for (const [requestId, approval] of this.pendingPlanApprovalState()) {
+            if (approval.appSessionId !== record.appSessionId) continue;
+            this.pendingPlanApprovalState().delete(requestId);
+            approval.resolve({ outcome: 'abandoned' });
+        }
         if (record.acpSessionId && this.acpSessionLookup.get(record.acpSessionId) === record.appSessionId) {
             this.acpSessionLookup.delete(record.acpSessionId);
         }
-        const rebound = this.sessions.update(record.appSessionId, {
+        if (record.acpSessionId) this.acpGoalCapabilityState().delete(record.acpSessionId);
+        let rebound = this.sessions.update(record.appSessionId, {
             acpSessionId: result.sessionId,
             providerId,
             providerRuntimeEpoch: runtimeEpoch,
             model: resolvedModel,
             sidecarVersion: this.sidecarVersion,
+            availableModes: sessionModes.availableModes,
+            currentModeId: sessionModes.currentModeId,
+            goalCapability: undefined,
             status: 'idle'
         });
         this.knownSessionIds.add(record.appSessionId);
         this.acpSessionLookup.set(result.sessionId, record.appSessionId);
+        this.acceptSessionModeCapability(result.sessionId, record.appSessionId, sessionModes);
+        rebound = this.sessions.get(record.appSessionId) ?? rebound;
         this.loadedSessionIds.add(record.appSessionId);
         if (options.acceptMcpSnapshot !== false) this.acceptRuntimeMcpSnapshot(mcpSnapshot);
         this.scheduleMcpStatusRefresh();
@@ -3619,6 +4813,15 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected emit(event: AgentHostEvent, persist = true): void {
         event = this.attachActiveTurnId(event);
+        if (event.kind === 'thought-delta' && !event.completed) {
+            this.enqueueThoughtDelta(event, persist);
+            return;
+        }
+        if (this.isThoughtBoundary(event)) {
+            if (event.kind === 'session') this.completeActiveThought(event.session.appSessionId);
+            else if ('sessionId' in event && typeof event.sessionId === 'string') this.completeActiveThought(event.sessionId);
+            else if (event.kind === 'error') this.completeActiveThought();
+        }
         if (event.kind === 'text-delta' && event.role === 'assistant') {
             this.enqueueAssistantTextDelta(event, persist);
             return;
@@ -3639,6 +4842,18 @@ export class GrokAgentHostService implements AgentHostService {
         this.emitImmediately(event, persist);
     }
 
+    protected isThoughtBoundary(event: AgentHostEvent): boolean {
+        if (event.kind === 'text-delta') return event.role === 'assistant';
+        return event.kind === 'plan'
+            || event.kind === 'plan-approval-request'
+            || event.kind === 'tool-call'
+            || event.kind === 'permission-request'
+            || event.kind === 'diff'
+            || event.kind === 'turn-completed'
+            || event.kind === 'error'
+            || (event.kind === 'session' && event.session.status !== 'running');
+    }
+
     protected attachActiveTurnId(event: AgentHostEvent): AgentHostEvent {
         if (!('sessionId' in event) || typeof event.sessionId !== 'string' || event.turnId) return event;
         const turnId = this.activeTurnIdState().get(event.sessionId);
@@ -3648,6 +4863,208 @@ export class GrokAgentHostService implements AgentHostService {
     /** Keeps prototype-only migration and test harnesses backwards compatible. */
     protected activeTurnIdState(): Map<string, string> {
         return this.activeTurnIds ?? (this.activeTurnIds = new Map());
+    }
+
+    /** Lazy accessors keep prototype-only migration/contract harnesses working. */
+    protected sessionGoalStateMap(): Map<string, AgentGoalStateEvent> {
+        return this.sessionGoalStates ?? (this.sessionGoalStates = new Map());
+    }
+
+    protected sessionPlanState(): Map<string, AgentPlanEvent> {
+        return this.sessionPlans ?? (this.sessionPlans = new Map());
+    }
+
+    protected acpGoalCapabilityState(): Map<string, SessionGoalCapability> {
+        return this.acpGoalCapabilities ?? (this.acpGoalCapabilities = new Map());
+    }
+
+    protected supervisionTurnSignalState(): Map<string, SupervisionTurnSignals> {
+        return this.supervisionTurnSignals ?? (this.supervisionTurnSignals = new Map());
+    }
+
+    protected pendingApprovedPlanState(): Map<string, PendingApprovedPlan> {
+        return this.pendingApprovedPlans ?? (this.pendingApprovedPlans = new Map());
+    }
+
+    protected sessionTaskContractState(): Map<string, AgentTaskContractEvent> {
+        return this.sessionTaskContracts ?? (this.sessionTaskContracts = new Map());
+    }
+
+    protected replayedGoalStateMap(): Map<string, AgentGoalStateEvent> {
+        return this.replayedGoalStates ?? (this.replayedGoalStates = new Map());
+    }
+
+    protected orphanedGoalSessionState(): Set<string> {
+        return this.orphanedGoalSessions ?? (this.orphanedGoalSessions = new Set());
+    }
+
+    protected pendingPlanApprovalState(): Map<string, PendingPlanApproval> {
+        return this.pendingPlanApprovals ?? (this.pendingPlanApprovals = new Map());
+    }
+
+    protected activePromptObjectiveState(): Map<string, string> {
+        return this.activePromptObjectives ?? (this.activePromptObjectives = new Map());
+    }
+
+    protected goalCompletionSignalState(): Map<string, GoalCompletionSignal> {
+        return this.goalCompletionSignals ?? (this.goalCompletionSignals = new Map());
+    }
+
+    protected beginGoalCompletionSignal(appSessionId: string, turnId: string): GoalCompletionSignal {
+        let resolve!: (goal: AgentGoalStateEvent) => void;
+        const promise = new Promise<AgentGoalStateEvent>(resolvePromise => {
+            resolve = resolvePromise;
+        });
+        const signal = { turnId, promise, resolve };
+        this.goalCompletionSignalState().set(appSessionId, signal);
+        return signal;
+    }
+
+    protected resolveGoalCompletionSignal(appSessionId: string, goal: AgentGoalStateEvent): void {
+        if (goal.status !== 'complete' || !goal.turnId) return;
+        const signal = this.goalCompletionSignalState().get(appSessionId);
+        if (!signal || signal.turnId !== goal.turnId) return;
+        signal.resolve(goal);
+    }
+
+    protected clearGoalCompletionSignal(appSessionId: string, turnId: string): void {
+        const signal = this.goalCompletionSignalState().get(appSessionId);
+        if (signal?.turnId === turnId) this.goalCompletionSignalState().delete(appSessionId);
+    }
+
+    /**
+     * Grok's native Goal can publish an authoritative completed state while
+     * leaving the surrounding `session/prompt` request open. Preserve a short
+     * grace period for final text, then cancel only that already-completed
+     * wire request so the session becomes immediately usable again.
+     */
+    protected async awaitPromptOrGoalCompletion(
+        handle: RequestHandle<Record<string, unknown>>,
+        goalCompletion?: GoalCompletionSignal
+    ): Promise<Record<string, unknown>> {
+        const promptOutcome = handle.promise.then(
+            result => ({ kind: 'result' as const, result }),
+            error => ({ kind: 'error' as const, error })
+        );
+        if (!goalCompletion) {
+            const outcome = await promptOutcome;
+            if (outcome.kind === 'error') throw outcome.error;
+            return outcome.result;
+        }
+        const winner = await Promise.race([
+            promptOutcome,
+            goalCompletion.promise.then(goal => ({ kind: 'goal' as const, goal }))
+        ]);
+        if (winner.kind === 'result') return winner.result;
+        if (winner.kind === 'error') throw winner.error;
+
+        const grace = new Promise<{ kind: 'timeout' }>(resolve => {
+            const timer = setTimeout(() => resolve({ kind: 'timeout' }), GOAL_COMPLETION_GRACE_MS);
+            timer.unref?.();
+        });
+        const settled = await Promise.race([promptOutcome, grace]);
+        if (settled.kind === 'result') return settled.result;
+        if (settled.kind === 'error') {
+            // The native Goal completion is authoritative. A simultaneous
+            // cancellation response must not turn a verified task into an
+            // error card.
+            return { stopReason: 'end_turn' };
+        }
+        void handle.cancel().catch(() => undefined);
+        return { stopReason: 'end_turn' };
+    }
+
+    protected acceptThoughtDelta(appSessionId: string, text: string, wireMessageId?: string): void {
+        const streams = this.activeThoughtStreamState();
+        let active = streams.get(appSessionId);
+        if (active && wireMessageId && active.wireMessageId && wireMessageId !== active.wireMessageId) {
+            this.completeActiveThought(appSessionId);
+            active = undefined;
+        }
+        if (!active) {
+            active = {
+                thoughtId: wireMessageId
+                    ? `thought:${appSessionId}:${wireMessageId.slice(0, 160)}`
+                    : `thought:${appSessionId}:${crypto.randomUUID()}`,
+                ...(wireMessageId ? { wireMessageId } : {}),
+                startedAt: new Date().toISOString(),
+                startedNanos: process.hrtime.bigint()
+            };
+            streams.set(appSessionId, active);
+        }
+        this.emit({
+            kind: 'thought-delta',
+            sessionId: appSessionId,
+            thoughtId: active.thoughtId,
+            text,
+            startedAt: active.startedAt
+        });
+    }
+
+    protected enqueueThoughtDelta(event: AgentThoughtEvent, persist: boolean): void {
+        const started = this.thoughtStreamStartedState();
+        if (!started.has(event.thoughtId)) {
+            started.add(event.thoughtId);
+            this.emitImmediately(event, persist);
+            return;
+        }
+        const pendingState = this.pendingThoughtDeltaState();
+        const pending = pendingState.get(event.sessionId);
+        if (pending && pending.event.thoughtId === event.thoughtId && pending.persist === persist) {
+            pending.event.text += event.text;
+            return;
+        }
+        if (pending) this.flushThoughtDeltas(event.sessionId);
+        const timer = setTimeout(() => this.flushThoughtDeltas(event.sessionId), THOUGHT_TEXT_BATCH_INTERVAL_MS);
+        timer.unref?.();
+        pendingState.set(event.sessionId, { event: { ...event }, persist, timer });
+    }
+
+    protected flushThoughtDeltas(sessionId?: string): void {
+        const pendingState = this.pendingThoughtDeltas;
+        if (!pendingState) return;
+        const sessionIds = sessionId ? [sessionId] : [...pendingState.keys()];
+        for (const pendingSessionId of sessionIds) {
+            const pending = pendingState.get(pendingSessionId);
+            if (!pending) continue;
+            pendingState.delete(pendingSessionId);
+            clearTimeout(pending.timer);
+            this.emitImmediately(pending.event, pending.persist);
+        }
+    }
+
+    protected completeActiveThought(sessionId?: string): void {
+        const streams = this.activeThoughtStreams;
+        if (!streams) return;
+        const sessionIds = sessionId ? [sessionId] : [...streams.keys()];
+        for (const activeSessionId of sessionIds) {
+            const active = streams.get(activeSessionId);
+            if (!active) continue;
+            this.flushThoughtDeltas(activeSessionId);
+            streams.delete(activeSessionId);
+            this.emitImmediately(this.attachActiveTurnId({
+                kind: 'thought-delta',
+                sessionId: activeSessionId,
+                thoughtId: active.thoughtId,
+                text: '',
+                startedAt: active.startedAt,
+                completed: true,
+                elapsedMs: Number((process.hrtime.bigint() - active.startedNanos) / 1_000_000n)
+            }) as AgentThoughtEvent, true);
+            this.thoughtStreamStartedState().delete(active.thoughtId);
+        }
+    }
+
+    protected pendingThoughtDeltaState(): Map<string, PendingThoughtDelta> {
+        return this.pendingThoughtDeltas ?? (this.pendingThoughtDeltas = new Map());
+    }
+
+    protected activeThoughtStreamState(): Map<string, ActiveThoughtStream> {
+        return this.activeThoughtStreams ?? (this.activeThoughtStreams = new Map());
+    }
+
+    protected thoughtStreamStartedState(): Set<string> {
+        return this.thoughtStreamsStarted ?? (this.thoughtStreamsStarted = new Set());
     }
 
     protected enqueueAssistantTextDelta(event: AgentTextEvent, persist: boolean): void {
@@ -3721,10 +5138,13 @@ export class GrokAgentHostService implements AgentHostService {
             return;
         }
         this.flushAssistantTextDeltas();
+        this.completeActiveThought();
+        this.flushThoughtDeltas();
         this.assistantStreamState().clear();
         ++this.sessionLoadGeneration;
         this.phase = 'crashed';
         this.loadedSessionIds.clear();
+        this.clearGoalRuntimeState('error');
         this.sessionMcpStateMap().clear();
         this.runtimeMcpFingerprint = undefined;
         this.runtimeMcpConfiguredNames = [];
@@ -3942,9 +5362,11 @@ export class GrokAgentHostService implements AgentHostService {
     protected interruptRuntimeForTrustRevocation(): void {
         this.flushAssistantTextDeltas();
         this.assistantStreamState().clear();
+        this.completeActiveThought();
         ++this.runtimeGeneration;
         ++this.sessionLoadGeneration;
         this.loadedSessionIds.clear();
+        this.clearGoalRuntimeState();
         this.sessionMcpStateMap().clear();
         this.runtimeMcpFingerprint = undefined;
         this.runtimeMcpConfiguredNames = [];
@@ -4350,6 +5772,284 @@ function sameContextState(left: AgentSessionContext, right: AgentSessionContext)
         && left.lastCompaction?.elapsedMs === right.lastCompaction?.elapsedMs;
 }
 
+function sameGoalStateProjection(
+    left: AgentGoalStateEvent | undefined,
+    right: AgentGoalStateEvent
+): boolean {
+    if (!left) return false;
+    const { turnId: _leftTurnId, ...leftProjection } = left;
+    const { turnId: _rightTurnId, ...rightProjection } = right;
+    return JSON.stringify(leftProjection) === JSON.stringify(rightProjection);
+}
+
+export function parseGoalUpdated(
+    updateValue: unknown,
+    context: {
+        sessionId: string;
+        turnId?: string;
+        agentTurnStatus: AgentGoalStateEvent['agentTurnStatus'];
+        providerRuntimeEpoch?: string;
+    }
+): AgentGoalStateEvent | undefined {
+    const update = asRecord(updateValue);
+    if (asString(update?.sessionUpdate) !== 'goal_updated') return undefined;
+    const status = normalizeGoalStatus(asString(update?.status));
+    const phase = normalizeGoalPhase(asString(update?.phase));
+    const verdict = normalizeGoalVerdict(asString(update?.last_classifier_verdict));
+    const objective = asString(update?.objective);
+    const goalId = asString(update?.goal_id) ?? '';
+    return {
+        kind: 'goal-state',
+        sessionId: context.sessionId,
+        ...(context.turnId ? { turnId: context.turnId } : {}),
+        goalId: goalId.slice(0, 512),
+        ...(objective ? { objective: objective.slice(0, 32_000) } : {}),
+        status,
+        phase,
+        agentTurnStatus: context.agentTurnStatus,
+        verificationStatus: verificationStatusForGoal(status, update?.verifying_completion === true),
+        ...(safeNonNegativeInteger(update?.token_budget) !== undefined
+            ? { tokenBudget: safeNonNegativeInteger(update?.token_budget) }
+            : {}),
+        tokensUsed: safeNonNegativeInteger(update?.tokens_used) ?? 0,
+        elapsedMs: safeNonNegativeInteger(update?.elapsed_ms) ?? 0,
+        workerRounds: safeNonNegativeInteger(update?.total_worker_rounds) ?? 0,
+        verificationRounds: safeNonNegativeInteger(update?.total_verify_rounds) ?? 0,
+        ...(safeNonNegativeInteger(update?.classifier_runs_attempted) !== undefined
+            ? { classifierRuns: safeNonNegativeInteger(update?.classifier_runs_attempted) }
+            : {}),
+        ...(safeNonNegativeInteger(update?.classifier_max_runs) !== undefined
+            ? { classifierMaxRuns: safeNonNegativeInteger(update?.classifier_max_runs) }
+            : {}),
+        ...(verdict ? { classifierVerdict: verdict } : {}),
+        planning: update?.planning === true || phase === 'planning',
+        verifying: update?.verifying_completion === true,
+        ...(asString(update?.pause_message)
+            ? { pauseMessage: asString(update?.pause_message)!.slice(0, 4_000) }
+            : {}),
+        ...(asString(update?.last_event)
+            ? { lastEvent: asString(update?.last_event)!.slice(0, 256) }
+            : {}),
+        ...(context.providerRuntimeEpoch ? { providerRuntimeEpoch: context.providerRuntimeEpoch } : {})
+    };
+}
+
+export function buildSupervisionShadowEvent(
+    sessionId: string,
+    turnId: string | undefined,
+    signals: {
+        sawPlan: boolean;
+        openPlanCount: number;
+        failedToolIds: ReadonlySet<string>;
+        testEvidenceIds: ReadonlySet<string>;
+    }
+): SupervisionShadowEvent {
+    const reasons: SupervisionShadowReason[] = [];
+    if (signals.openPlanCount > 0) reasons.push('open-plan');
+    if (signals.failedToolIds.size > 0) reasons.push('tool-failure');
+    if (signals.sawPlan && signals.testEvidenceIds.size === 0) reasons.push('missing-test-evidence');
+    return {
+        kind: 'supervision-shadow',
+        sessionId,
+        ...(turnId ? { turnId } : {}),
+        eligible: reasons.length > 0,
+        reasons,
+        openPlanCount: Math.max(0, Math.floor(signals.openPlanCount)),
+        failedToolCount: signals.failedToolIds.size,
+        testEvidenceCount: signals.testEvidenceIds.size
+    };
+}
+
+export function formatContinuousGoalPrompt(
+    objective: string,
+    approvedPlan?: {
+        planEntries: Array<{ id: string; text: string }>;
+        acceptanceCriteria: string[];
+    }
+): string {
+    // Prefix prevents status/pause/resume/clear from becoming Goal control
+    // verbs; the suffix prevents a user objective ending in `--budget N`
+    // from being parsed as Xora's autonomous-run budget.
+    const languageHint = prefersChineseAgentLanguage(objective) ? `\n\n${CHINESE_AGENT_LANGUAGE_HINT}` : '';
+    const boundedObjective = `完成以下目标：\n${objective}\n\n（以上为用户原始目标，请完整保留。）${languageHint}\n\n${CONTINUOUS_GOAL_EFFICIENCY_HINT}`;
+    if (!approvedPlan) return `/goal ${boundedObjective}`;
+    const contract = JSON.stringify({
+        approvedPlan: approvedPlan.planEntries,
+        acceptanceCriteria: approvedPlan.acceptanceCriteria
+    });
+    return `/goal ${boundedObjective}\n\nXora 已批准的任务契约（保持以下范围，并在完成前逐项验收）：\n${contract}`;
+}
+
+const CHINESE_AGENT_LANGUAGE_HINT = 'Xora Code 使用中文界面：请使用中文展示思考过程和最终回复；代码、命令、路径、标识符及专有名词保持原样。';
+const CONTINUOUS_GOAL_EFFICIENCY_HINT = 'Xora 执行策略（不改变目标）：按任务复杂度安排工作。简单、只读、总结或一次即可验证的目标，在直接证据满足完成条件后立即收口；不要为了流程刻意增加轮次、启动子 Agent 或重复验收。只有确有未完成项、错误或高风险改动时才继续执行。';
+
+/**
+ * Grok owns the thought stream language. Keep the visible user bubble exact,
+ * while adding a bounded, non-task-changing locale hint only for Chinese
+ * prompts. An explicit request for another language always wins.
+ */
+export function formatAgentWirePrompt(text: string): string {
+    if (!prefersChineseAgentLanguage(text)) return text;
+    return `${text}\n\n${CHINESE_AGENT_LANGUAGE_HINT}`;
+}
+
+function prefersChineseAgentLanguage(text: string): boolean {
+    return /[\u3400-\u9fff]/u.test(text)
+        && !/(?:请|使用|用|以).{0,12}(?:英文|英语)|respond\s+(?:in|using)\s+english|answer\s+(?:in|using)\s+english/iu.test(text);
+}
+
+function validateTaskContract(value: AgentTaskContract): PendingApprovedPlan {
+    const objective = requireBoundedText(value?.objective, 'Plan objective', 32_000);
+    if (!Array.isArray(value?.planEntries) || value.planEntries.length === 0 || value.planEntries.length > 100) {
+        throw new Error('An approved Plan must contain between 1 and 100 steps.');
+    }
+    const planEntries = value.planEntries.map((entry, index) => ({
+        id: requireBoundedText(entry?.id || `plan-${index}`, 'Plan step id', 256),
+        text: requireBoundedText(entry?.text, 'Plan step', 4_000)
+    }));
+    if (!Array.isArray(value.acceptanceCriteria)
+        || value.acceptanceCriteria.length === 0
+        || value.acceptanceCriteria.length > 100) {
+        throw new Error('An approved Plan must contain between 1 and 100 acceptance criteria.');
+    }
+    const acceptanceCriteria = value.acceptanceCriteria.map(criterion =>
+        requireBoundedText(criterion, 'Acceptance criterion', 4_000)
+    );
+    return { objective, planEntries, acceptanceCriteria };
+}
+
+function suggestTaskContract(
+    objectiveValue: string,
+    planContent: string | undefined,
+    plan: AgentPlanEvent | undefined
+): AgentTaskContract {
+    const objective = safeUiText(objectiveValue, 32_000) ?? '完成已批准的计划';
+    const fromEvent = plan?.entries.map((entry, index) => ({
+        id: safeUiText(entry.id, 256) ?? `plan-${index}`,
+        text: safeUiText(entry.text, 4_000) ?? `步骤 ${index + 1}`
+    })) ?? [];
+    const fromMarkdown = (planContent ?? '').split(/\r?\n/).flatMap((line, index) => {
+        const match = line.match(/^\s*(?:[-*+] |\d+[.)]\s+|#{2,}\s+)(.+?)\s*$/);
+        const text = safeUiText(match?.[1], 4_000);
+        return text ? [{ id: `plan-${index}`, text }] : [];
+    }).slice(0, 100);
+    const planEntries = (fromEvent.length ? fromEvent : fromMarkdown).slice(0, 100);
+    if (!planEntries.length) {
+        planEntries.push({ id: 'plan-0', text: '按已批准的计划完成任务并验证结果' });
+    }
+    const acceptanceCriteria = (planContent ?? '').split(/\r?\n/).flatMap(line => {
+        const match = line.match(/^\s*(?:[-*+] |\d+[.)]\s+)(.+?)\s*$/);
+        if (!match || !/(?:验收|acceptance|完成条件|done when)/i.test(line)) return [];
+        const text = safeUiText(match[1], 4_000);
+        return text ? [text] : [];
+    }).slice(0, 100);
+    return { objective, planEntries, acceptanceCriteria };
+}
+
+function parseSessionModes(value: unknown): { currentModeId?: string; availableModes: AgentSessionMode[] } {
+    const record = asRecord(value);
+    const modes = asRecord(record?.modes) ?? asRecord(record?._meta && asRecord(record._meta)?.modes);
+    const availableModes = (Array.isArray(modes?.availableModes) ? modes.availableModes : []).flatMap(candidate => {
+        const item = asRecord(candidate);
+        const id = asString(item?.id);
+        if (!id) return [];
+        return [{
+            id: id.slice(0, 128),
+            name: (asString(item?.name) ?? id).slice(0, 256),
+            ...(asString(item?.description) ? { description: asString(item?.description)!.slice(0, 1_000) } : {})
+        }];
+    });
+    const currentModeId = asString(modes?.currentModeId) ?? asString(modes?.current_mode_id);
+    return { ...(currentModeId ? { currentModeId: currentModeId.slice(0, 128) } : {}), availableModes };
+}
+
+function sameSessionModes(
+    record: SessionRecord,
+    modes: { currentModeId?: string; availableModes: AgentSessionMode[] }
+): boolean {
+    if (record.currentModeId !== modes.currentModeId) return false;
+    const previous = record.availableModes ?? [];
+    return JSON.stringify(previous) === JSON.stringify(modes.availableModes);
+}
+
+function sameGoalCapability(
+    left: AgentGoalCapability | undefined,
+    right: AgentGoalCapability
+): boolean {
+    return left?.available === right.available
+        && left.command === right.command
+        && left.updateTool === right.updateTool;
+}
+
+function sessionUsesPlanMode(record: SessionRecord): boolean {
+    const modeId = record.currentModeId?.trim().toLowerCase();
+    if (!modeId) return false;
+    if (/(^|[-_.:/])plan(?:ning)?($|[-_.:/])/.test(modeId)) return true;
+    const advertised = record.availableModes?.find(mode => mode.id === record.currentModeId);
+    return !!advertised && /(?:^|\s)(?:plan|planning)(?:\s|$)|规划模式|计划模式/i.test(advertised.name);
+}
+
+function samePlanSignature(left: AgentPlanEvent | undefined, right: AgentPlanEvent): boolean {
+    if (!left || (left.title ?? '') !== (right.title ?? '')) return false;
+    if (left.entries.length !== right.entries.length) return false;
+    return left.entries.every((entry, index) => {
+        const candidate = right.entries[index];
+        return candidate?.id === entry.id && candidate.text === entry.text;
+    });
+}
+
+function normalizeGoalStatus(value: string | undefined): AgentGoalStateEvent['status'] {
+    switch (value) {
+        case 'active': return 'active';
+        case 'user_paused':
+        case 'paused':
+        case 'doom_loop_paused': return 'user-paused';
+        case 'back_off_paused': return 'back-off-paused';
+        case 'no_progress_paused': return 'no-progress-paused';
+        case 'infra_paused': return 'infra-paused';
+        case 'blocked': return 'blocked';
+        case 'budget_limited': return 'budget-limited';
+        case 'complete': return 'complete';
+        case 'cleared': return 'cleared';
+        default: return 'unknown';
+    }
+}
+
+function normalizeGoalPhase(value: string | undefined): AgentGoalStateEvent['phase'] {
+    return value === 'idle' || value === 'planning' || value === 'executing' ? value : 'unknown';
+}
+
+function normalizeGoalVerdict(value: string | undefined): AgentGoalStateEvent['classifierVerdict'] | undefined {
+    if (value === 'achieved') return 'achieved';
+    if (value === 'not_achieved') return 'not-achieved';
+    if (value === 'inconclusive') return 'inconclusive';
+    return value ? 'unknown' : undefined;
+}
+
+function verificationStatusForGoal(
+    status: AgentGoalStateEvent['status'],
+    verifying: boolean
+): AgentGoalStateEvent['verificationStatus'] {
+    if (verifying) return 'verifying';
+    if (status === 'complete') return 'verified';
+    if (status === 'blocked') return 'blocked';
+    if (status === 'active') return 'working';
+    if (status === 'cleared') return 'not-required';
+    if (status === 'unknown') return 'incomplete';
+    return 'paused';
+}
+
+function safeNonNegativeInteger(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function requireBoundedText(value: unknown, label: string, maxLength: number): string {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} is required.`);
+    if (value.length > maxLength) throw new Error(`${label} is too long.`);
+    if (value.includes('\0')) throw new Error(`${label} contains invalid characters.`);
+    return value;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
     return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -4480,6 +6180,27 @@ function normalizeToolPresentation(
         // never downgrade an action whose canonical semantics mutate files.
         readOnly: mutatesFiles ? false : identity.readOnly
     };
+}
+
+function planModeAllowsTool(
+    presentation: AgentToolPresentation,
+    identity: NormalizedToolIdentity,
+    rawInput: Record<string, unknown> | undefined
+): boolean {
+    if (presentation.source !== 'builtin') return false;
+    const allowed: ReadonlySet<AgentToolAction> = new Set([
+        'file-read',
+        'project-search',
+        'web-search',
+        'web-fetch',
+        'plan'
+    ]);
+    if (!allowed.has(presentation.action)) return false;
+    // A provider cannot disguise shell execution as a read-only builtin by
+    // asserting read_only=true or choosing a read-like label.
+    const input = identity.canonicalInput ?? rawInput;
+    if (firstInputString(input, ['command', 'cmd', 'script'])) return false;
+    return true;
 }
 
 /** Recognize only the first executable segment; no command text is retained. */
@@ -4725,4 +6446,14 @@ function safeCliArgument(value: string): string {
         throw new Error('Unsafe MCP process argument.');
     }
     return value;
+}
+
+function safeExportFileName(value: string): string {
+    const normalized = value
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+        .replace(/[. ]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 96);
+    return normalized || 'Xora-Code-会话';
 }

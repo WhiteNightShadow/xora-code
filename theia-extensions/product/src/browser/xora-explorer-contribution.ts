@@ -10,6 +10,7 @@ import {
     EXPLORER_VIEW_CONTAINER_TITLE_OPTIONS
 } from '@theia/navigator/lib/browser/navigator-widget-factory';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
+import { TimelineWidget } from '@theia/timeline/lib/browser/timeline-widget';
 
 /**
  * Keeps the project tree available when a folder/workspace is open.
@@ -78,5 +79,10 @@ export class XoraExplorerContribution implements FrontendApplicationContribution
             ...EXPLORER_VIEW_CONTAINER_TITLE_OPTIONS,
             closeable: false
         });
+
+        // Layout state from an older Xora/Theia version may already contain
+        // Timeline even though the current contribution no longer attaches
+        // it. Remove that restored pane once; the provider API remains intact.
+        this.widgetManager.tryGetWidget<TimelineWidget>(TimelineWidget.ID)?.close();
     }
 }

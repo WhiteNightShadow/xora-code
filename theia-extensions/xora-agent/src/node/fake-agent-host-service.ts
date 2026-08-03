@@ -10,9 +10,13 @@ import {
     CreateSessionRequest,
     ComponentUpdateResult,
     ComponentUpdateStatus,
+    GuidePromptRequest,
+    GuidePromptResult,
+    ExportSessionResult,
     ManagementRequest,
     ManagementResult,
     PermissionDecision,
+    PlanApprovalDecision,
     PromptRequest,
     ProviderProfile,
     RuntimeSnapshot,
@@ -122,6 +126,9 @@ export class FakeAgentHostService implements AgentHostService {
         this.snapshot.capabilities = {
             protocolVersion: 1,
             loadSession: true,
+            guidePrompt: true,
+            goal: { available: true, command: true, updateTool: true },
+            sessionModes: true,
             prompt: { image: true, audio: false, embeddedContext: true },
             mcp: { http: true, sse: true },
             authMethods: [
@@ -167,6 +174,8 @@ export class FakeAgentHostService implements AgentHostService {
             providerId: request.providerId,
             model: request.model ?? this.snapshot.selectedModel,
             sidecarVersion: this.snapshot.sidecarVersion,
+            availableModes: [{ id: 'code', name: 'Code' }, { id: 'plan', name: 'Plan' }],
+            currentModeId: request.modeId ?? 'code',
             createdAt: now,
             updatedAt: now,
             status: 'idle'
@@ -211,6 +220,24 @@ export class FakeAgentHostService implements AgentHostService {
         return [];
     }
 
+    async exportSession(_appSessionId: string): Promise<ExportSessionResult> {
+        return { status: 'cancelled' };
+    }
+
+    async setSessionMode(appSessionId: string, modeId: string): Promise<SessionRecord> {
+        const session = this.requireSession(appSessionId);
+        if (!session.availableModes?.some(mode => mode.id === modeId)) throw new Error('Unsupported Agent mode.');
+        session.currentModeId = modeId;
+        session.updatedAt = new Date().toISOString();
+        this.client?.onAgentEvent({ kind: 'session', session });
+        return session;
+    }
+
+    async respondPlanApproval(_decision: PlanApprovalDecision): Promise<void> {
+        // Browser-only fake sessions do not park live reverse requests. The
+        // full fake ACP process owns Plan approval contract tests.
+    }
+
     async sendPrompt(request: PromptRequest): Promise<void> {
         const promptStartedAt = Date.now();
         const session = this.requireSession(request.sessionId);
@@ -232,6 +259,21 @@ export class FakeAgentHostService implements AgentHostService {
             role: 'user',
             text: request.text,
             ...(images.summaries.length ? { attachments: images.summaries } : {})
+        });
+        const thoughtId = `fixture-thought-${++this.sequence}`;
+        const thoughtStartedAt = new Date().toISOString();
+        this.client?.onAgentEvent({
+            kind: 'thought-delta', sessionId: request.sessionId, thoughtId,
+            text: '先确认项目结构，', startedAt: thoughtStartedAt
+        });
+        await new Promise(resolve => setTimeout(resolve, 80));
+        this.client?.onAgentEvent({
+            kind: 'thought-delta', sessionId: request.sessionId, thoughtId,
+            text: '再选择最小改动并验证结果。', startedAt: thoughtStartedAt
+        });
+        this.client?.onAgentEvent({
+            kind: 'thought-delta', sessionId: request.sessionId, thoughtId,
+            text: '', startedAt: thoughtStartedAt, completed: true, elapsedMs: 80
         });
         this.client?.onAgentEvent({
             kind: 'plan',
@@ -415,6 +457,31 @@ export class FakeAgentHostService implements AgentHostService {
         this.client?.onAgentEvent({
             kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'end_turn', elapsedMs: Date.now() - promptStartedAt
         });
+    }
+
+    async guidePrompt(request: GuidePromptRequest): Promise<GuidePromptResult> {
+        const session = this.requireSession(request.sessionId);
+        if (session.status !== 'running') return { status: 'not-running' };
+        if (typeof request.text !== 'string') throw new Error('Guidance text must be a string.');
+        if (request.attachments !== undefined && !Array.isArray(request.attachments)) {
+            throw new Error('Image attachments must be an array.');
+        }
+        if (request.attachments?.length && this.snapshot.capabilities?.prompt.image !== true) {
+            throw new Error('The active Agent does not support image guidance.');
+        }
+        const images = validatePromptImageAttachments(request.attachments);
+        if (!request.text.length && !images.blocks.length) throw new Error('Guidance cannot be empty.');
+        const interjectionId = `fixture-interjection-${++this.sequence}`;
+        this.client?.onAgentEvent({
+            kind: 'text-delta',
+            sessionId: request.sessionId,
+            role: 'user',
+            text: request.text,
+            guidance: true,
+            messageId: interjectionId,
+            ...(images.summaries.length ? { attachments: images.summaries } : {})
+        });
+        return { status: 'accepted', interjectionId };
     }
 
     async cancel(sessionId: string): Promise<void> {

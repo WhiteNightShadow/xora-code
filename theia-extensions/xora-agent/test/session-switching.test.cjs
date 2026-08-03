@@ -2263,6 +2263,116 @@ test('one conversation sends queued prompts in FIFO order and can cancel one que
     assert.deepEqual(calls, ['第一条', '第三条']);
 });
 
+test('a queued prompt can guide the running turn without becoming a second session prompt', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const active = session('active');
+    const snapshot = runtimeSnapshot('/fixture', [active], active.appSessionId);
+    const firstGate = deferred();
+    const prompts = [];
+    const guidance = [];
+
+    widget.prompt = '先分析当前实现';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.model = { snapshot };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.followTranscript = () => undefined;
+    widget.service = {
+        sendPrompt: async request => {
+            prompts.push(request.text);
+            if (request.text === '先分析当前实现') await firstGate.promise;
+        },
+        guidePrompt: async request => {
+            guidance.push(request);
+            return { status: 'accepted', interjectionId: 'guide-1' };
+        }
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.update = () => undefined;
+    widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', snapshot.providerId, active.appSessionId));
+
+    const first = widget.send();
+    widget.prompt = '不要重构，先补测试';
+    const queued = widget.send();
+    await new Promise(resolve => setImmediate(resolve));
+
+    const lane = widget.currentPromptLane(false);
+    assert.equal(lane.active.text, '先分析当前实现');
+    assert.deepEqual(lane.queue.map(item => item.text), ['不要重构，先补测试']);
+    await widget.guidePromptItem(lane.queue[0].id);
+    await queued;
+
+    assert.deepEqual(prompts, ['先分析当前实现']);
+    assert.deepEqual(guidance, [{
+        sessionId: active.appSessionId,
+        text: '不要重构，先补测试',
+        attachments: []
+    }]);
+    assert.deepEqual(lane.queue, []);
+
+    firstGate.resolve();
+    await first;
+});
+
+test('a guidance admission race leaves the message in FIFO order', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const active = session('active');
+    const snapshot = runtimeSnapshot('/fixture', [active], active.appSessionId);
+    const firstGate = deferred();
+    const prompts = [];
+    const notices = [];
+
+    widget.prompt = '第一条';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.model = { snapshot };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.showInlineNotice = message => notices.push(message);
+    widget.service = {
+        sendPrompt: async request => {
+            prompts.push(request.text);
+            if (request.text === '第一条') await firstGate.promise;
+        },
+        guidePrompt: async () => ({ status: 'not-running' })
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.update = () => undefined;
+    widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', snapshot.providerId, active.appSessionId));
+
+    const first = widget.send();
+    widget.prompt = '仍按队列发送';
+    const second = widget.send();
+    await new Promise(resolve => setImmediate(resolve));
+    const lane = widget.currentPromptLane(false);
+    await widget.guidePromptItem(lane.queue[0].id);
+    assert.deepEqual(lane.queue.map(item => item.text), ['仍按队列发送']);
+    assert.match(notices[0], /继续按队列发送/);
+
+    firstGate.resolve();
+    await Promise.all([first, second]);
+    assert.deepEqual(prompts, ['第一条', '仍按队列发送']);
+});
+
 test('different conversations can send concurrently without sharing a preparation state', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
@@ -2310,6 +2420,91 @@ test('different conversations can send concurrently without sharing a preparatio
     assert.deepEqual(calls, ['a:A', 'b:B']);
     assert.equal(widget.currentPromptLane(false).active.text, 'B');
     assert.equal(widget.submission.text, 'B', 'visible preparation mirrors only the selected conversation');
+
+    gates.A.resolve();
+    gates.B.resolve();
+    await Promise.all([sendingA, sendingB]);
+});
+
+test('a running conversation does not lock another continuous-mode choice or reset its captured mode', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const modes = [
+        { id: 'default', name: 'Agent' },
+        { id: 'plan', name: 'Plan' }
+    ];
+    const a = session('a', 'running', { currentModeId: 'default', availableModes: modes });
+    const b = session('b', 'idle', {
+        currentModeId: 'default',
+        availableModes: modes,
+        goalCapability: { available: true, command: true, updateTool: true }
+    });
+    const snapshot = runtimeSnapshot('/fixture', [a, b], a.appSessionId);
+    const gates = { A: deferred(), B: deferred() };
+    const prompts = [];
+    const modeChanges = [];
+
+    widget.prompt = 'A';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.closeSlashMenu = () => undefined;
+    widget.requestRuntimePrewarm = () => undefined;
+    widget.model = {
+        snapshot,
+        updateSession: updated => {
+            const index = snapshot.sessions.findIndex(candidate => candidate.appSessionId === updated.appSessionId);
+            snapshot.sessions[index] = updated;
+        }
+    };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.service = {
+        setSessionMode: async (sessionId, modeId) => {
+            modeChanges.push(`${sessionId}:${modeId}`);
+            const current = snapshot.sessions.find(candidate => candidate.appSessionId === sessionId);
+            return { ...current, currentModeId: modeId };
+        },
+        sendPrompt: async request => {
+            prompts.push(request);
+            await gates[request.text].promise;
+        }
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.update = () => undefined;
+    for (const current of [a, b]) {
+        widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', snapshot.providerId, current.appSessionId));
+    }
+
+    const sendingA = widget.send();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(widget.hasPromptLaneWork(), true, 'A keeps application-wide settings locked');
+
+    snapshot.activeSessionId = b.appSessionId;
+    widget.activateComposerLane(widget.promptLaneKey('/fixture', snapshot.providerId, b.appSessionId));
+    assert.equal(widget.currentComposerHasPromptLaneWork(), false, 'B owns an independent task-mode lane');
+    widget.selectComposerTaskMode('continuous');
+    assert.equal(widget.currentComposerTaskMode(), 'continuous');
+    widget.prompt = 'B';
+    const sendingB = widget.send();
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(modeChanges, []);
+    assert.deepEqual(prompts.map(request => [request.sessionId, request.text, request.executionMode]), [
+        ['a', 'A', 'standard'],
+        ['b', 'B', 'continuous']
+    ]);
+    assert.equal(widget.currentComposerTaskMode(), 'continuous',
+        'continuous completion remains the conversation preference while its task is running');
+    assert.equal(widget.composerTaskModeState().get(widget.promptLaneKey('/fixture', snapshot.providerId, a.appSessionId)), undefined,
+        'B mode selection must not rewrite A');
 
     gates.A.resolve();
     gates.B.resolve();

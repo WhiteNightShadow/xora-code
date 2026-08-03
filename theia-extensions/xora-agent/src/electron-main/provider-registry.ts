@@ -909,7 +909,7 @@ export class ProviderRegistry {
                 if (fs.existsSync(candidate)) fs.rmSync(candidate, { force: true });
             } catch { /* best effort */ }
         }
-        const sharedSkillConfiguration = this.sharedSkillConfigurationToml();
+        const sharedSkillConfiguration = this.sharedSkillConfigurationToml(root);
         const config = [
             '# Managed by Xora Code for an isolated API-provider sidecar.',
             '# Do not place auth.json here — OIDC would override env_key.',
@@ -940,9 +940,11 @@ export class ProviderRegistry {
         }
 
         // Reuse user-owned extension directories without copying executable
-        // content into app-owned homes. Existing entries are accepted only
-        // when they are links to the exact shared directory; real directories
-        // and links to any other target are never overwritten.
+        // content into app-owned homes. Grok Build and older Xora releases may
+        // already have created a real directory here. Preserve that directory
+        // instead of making Provider startup fail; shared Skills are exposed
+        // through the allowlisted [skills].paths fallback generated above.
+        // Links to an unexpected external target remain a hard failure.
         this.synchronizeSharedProviderDirectory(root, 'skills');
         this.synchronizeSharedProviderDirectory(root, 'commands');
 
@@ -957,14 +959,29 @@ export class ProviderRegistry {
      * Authentication, hooks, permissions, MCP, plugins, model tables and every
      * unknown field are deliberately omitted from isolated Provider homes.
      */
-    protected sharedSkillConfigurationToml(): string {
+    protected sharedSkillConfigurationToml(providerRoot?: string): string {
         const configPath = this.grokConfigPath
             ?? path.join(this.grokHomePath ?? sharedGrokHome(), 'config.toml');
         const source = readTextOrEmpty(configPath);
-        if (!source.trim()) return '';
+        const sharedRoot = this.grokHomePath ?? sharedGrokHome();
+        const sharedSkillsPath = path.join(sharedRoot, 'skills');
+        // A real directory inside an isolated Provider home is valid legacy
+        // state: Grok itself creates it on some installations before Xora has
+        // a shared Skills directory to link. Do not delete or replace it. Add
+        // the canonical shared directory as an explicit scan path so both the
+        // preserved local contents and the user's current Skills remain
+        // available to the Agent.
+        const providerSkillsInfo = providerRoot
+            ? lstatOrUndefined(path.join(providerRoot, 'skills'))
+            : undefined;
+        const needsSharedSkillsPath = !!providerSkillsInfo
+            && providerSkillsInfo.isDirectory()
+            && !providerSkillsInfo.isSymbolicLink()
+            && statOrUndefined(sharedSkillsPath)?.isDirectory() === true;
+        if (!source.trim() && !needsSharedSkillsPath) return '';
         let parsed: unknown;
         try {
-            parsed = parseToml(source);
+            parsed = source.trim() ? parseToml(source) : {};
         } catch {
             // A malformed external configuration must not cause Xora to copy a
             // partially interpreted or over-broad configuration subset.
@@ -974,10 +991,17 @@ export class ProviderRegistry {
         if (!root) return '';
         const sections: string[] = [];
         const skills = tomlObject(root.skills);
-        if (skills) {
+        if (skills || needsSharedSkillsPath) {
             const assignments: string[] = [];
-            for (const key of ['paths', 'ignore', 'disabled'] as const) {
-                const value = tomlStringArray(skills[key]);
+            const configuredPaths = tomlStringArray(skills?.paths) ?? [];
+            const paths = needsSharedSkillsPath && !configuredPaths.some(candidate => sameFilesystemPath(candidate, sharedSkillsPath))
+                ? [...configuredPaths, sharedSkillsPath]
+                : configuredPaths;
+            if (skills?.paths !== undefined || paths.length) {
+                assignments.push(`paths = ${JSON.stringify(paths)}`);
+            }
+            for (const key of ['ignore', 'disabled'] as const) {
+                const value = tomlStringArray(skills?.[key]);
                 if (value) assignments.push(`${key} = ${JSON.stringify(value)}`);
             }
             if (assignments.length) sections.push(['[skills]', ...assignments].join('\n'));
@@ -999,7 +1023,15 @@ export class ProviderRegistry {
         const targetInfo = lstatOrUndefined(target);
         if (targetInfo) {
             if (!targetInfo.isSymbolicLink()) {
-                throw new Error(`Xora Code refused to replace the existing ${name} directory in an isolated Provider home.`);
+                if (targetInfo.isDirectory()) {
+                    // Preserve a directory created by Grok Build, an older
+                    // Xora version, or the user. Replacing it would risk data
+                    // loss; rejecting it would unnecessarily take down the
+                    // entire Agent. Skills receive a shared-path fallback in
+                    // sharedSkillConfigurationToml().
+                    return;
+                }
+                throw new Error(`Xora Code refused to replace the existing ${name} entry in an isolated Provider home.`);
             }
             if (!sameLinkTarget(source, target)) {
                 throw new Error(`Xora Code refused to replace an isolated Provider ${name} link that points outside the shared Grok home.`);

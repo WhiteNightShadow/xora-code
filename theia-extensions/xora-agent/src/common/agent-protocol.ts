@@ -70,9 +70,21 @@ export interface AuthenticationResult {
     status: 'authenticated' | 'confirmation-required';
 }
 
+export interface AgentGoalCapability {
+    available: boolean;
+    command: boolean;
+    updateTool: boolean;
+}
+
 export interface AgentCapabilities {
     protocolVersion: number;
     loadSession: boolean;
+    /** Verified against the live ACP route; false hides non-interrupting guidance actions. */
+    guidePrompt: boolean;
+    /** Session-scoped capability; true only after Grok advertises both `/goal` and `update_goal`. */
+    goal: AgentGoalCapability;
+    /** True after a live session response advertises selectable ACP modes. */
+    sessionModes: boolean;
     prompt: {
         image: boolean;
         audio: boolean;
@@ -125,6 +137,11 @@ export interface SessionRecord {
     providerRuntimeEpoch?: string;
     model?: string;
     sidecarVersion?: string;
+    /** ACP modes are descriptive, session-scoped state and contain no secrets. */
+    availableModes?: AgentSessionMode[];
+    currentModeId?: string;
+    /** Authoritative capability for this exact ACP session. */
+    goalCapability?: AgentGoalCapability;
     createdAt: string;
     updatedAt: string;
     status: 'idle' | 'running' | 'completed' | 'cancelled' | 'failed' | 'read-only';
@@ -186,7 +203,26 @@ export interface CreateSessionRequest {
     model?: string;
     title?: string;
     additionalDirectories?: string[];
+    /** Optional initial ACP mode, applied immediately after `session/new`. */
+    modeId?: string;
 }
+
+export interface AgentSessionMode {
+    id: string;
+    name: string;
+    description?: string;
+}
+
+export type AgentExecutionMode = 'standard' | 'continuous';
+export type AgentTurnStatus = 'running' | 'end-turn' | 'cancelled' | 'error';
+export type AgentTaskVerificationStatus =
+    | 'not-required'
+    | 'working'
+    | 'verifying'
+    | 'verified'
+    | 'incomplete'
+    | 'blocked'
+    | 'paused';
 
 export type PromptImageMimeType = 'image/png' | 'image/jpeg' | 'image/webp';
 
@@ -212,8 +248,40 @@ export interface AgentAttachmentSummary {
 export interface PromptRequest {
     sessionId: string;
     text: string;
+    /** Explicit user choice. Xora never promotes a standard prompt automatically. */
+    executionMode?: AgentExecutionMode;
     /** At most four images and 5 MiB of decoded data in total. */
     attachments?: PromptImageAttachment[];
+}
+
+/** User-authored contract locked when Grok asks to leave read-only Plan mode. */
+export interface AgentTaskContract {
+    objective: string;
+    planEntries: Array<{ id: string; text: string }>;
+    acceptanceCriteria: string[];
+}
+
+/**
+ * Renderer decision for one live `x.ai/exit_plan_mode` reverse request.
+ * `cancelled` means "revise this plan" and may include feedback; `abandoned`
+ * exits Plan mode without implementing it.
+ */
+export interface PlanApprovalDecision {
+    requestId: string;
+    outcome: 'approved' | 'cancelled' | 'abandoned';
+    feedback?: string;
+    /** Required for approval so Xora can persist the frozen acceptance contract. */
+    contract?: AgentTaskContract;
+}
+
+/** Adds a queued message to the running turn at Grok's next safe checkpoint. */
+export interface GuidePromptRequest extends PromptRequest {
+}
+
+export interface GuidePromptResult {
+    /** `not-running` leaves the renderer-owned FIFO item untouched. */
+    status: 'accepted' | 'not-running';
+    interjectionId?: string;
 }
 
 export interface PermissionDecision {
@@ -229,8 +297,38 @@ export interface AgentTextEvent {
     turnId?: string;
     role: 'assistant' | 'user' | 'system';
     text: string;
+    /** This user message guides an already-running turn without cancelling it. */
+    guidance?: boolean;
+    /** Stable non-secret id for one accepted Grok interjection. */
+    messageId?: string;
     /** Safe metadata only. Raw attachment data is never persisted. */
     attachments?: AgentAttachmentSummary[];
+}
+
+/**
+ * One provider-authored ACP thought stream. This is deliberately independent
+ * from assistant text so a renderer can present it as optional, low-emphasis
+ * detail without merging it into the final answer.
+ */
+export interface AgentThoughtEvent {
+    kind: 'thought-delta';
+    sessionId: string;
+    turnId?: string;
+    /** Stable for one ACP thought message (or one contiguous legacy stream). */
+    thoughtId: string;
+    text: string;
+    /** ISO wall-clock anchor used only for the live elapsed label. */
+    startedAt?: string;
+    /** A terminal marker emitted by Xora at the next semantic boundary. */
+    completed?: boolean;
+    /** Monotonic duration frozen by Electron when this thought completes. */
+    elapsedMs?: number;
+}
+
+export interface ExportSessionResult {
+    status: 'exported' | 'cancelled';
+    /** Safe basename only; the renderer never receives the selected directory. */
+    fileName?: string;
 }
 
 export interface AgentPlanEvent {
@@ -241,6 +339,87 @@ export interface AgentPlanEvent {
     /** Renderer-owned terminal state derived from the authoritative turn result. */
     outcome?: 'completed' | 'cancelled' | 'failed';
     entries: Array<{ id: string; text: string; status: 'pending' | 'in-progress' | 'completed' | 'failed' | 'cancelled' }>;
+    /** Binds resumable Plan state to the Provider configuration that produced it. */
+    providerRuntimeEpoch?: string;
+}
+
+export interface AgentGoalStateEvent {
+    kind: 'goal-state';
+    sessionId: string;
+    turnId?: string;
+    goalId: string;
+    /** Present on Grok state transitions; omitted on Xora-only lifecycle projections. */
+    objective?: string;
+    status:
+        | 'active'
+        | 'user-paused'
+        | 'back-off-paused'
+        | 'no-progress-paused'
+        | 'infra-paused'
+        | 'blocked'
+        | 'budget-limited'
+        | 'complete'
+        | 'cleared'
+        | 'unknown';
+    phase: 'idle' | 'planning' | 'executing' | 'unknown';
+    agentTurnStatus: AgentTurnStatus;
+    verificationStatus: AgentTaskVerificationStatus;
+    tokenBudget?: number;
+    tokensUsed: number;
+    elapsedMs: number;
+    workerRounds: number;
+    verificationRounds: number;
+    classifierRuns?: number;
+    classifierMaxRuns?: number;
+    classifierVerdict?: 'achieved' | 'not-achieved' | 'inconclusive' | 'unknown';
+    planning: boolean;
+    verifying: boolean;
+    pauseMessage?: string;
+    lastEvent?: string;
+    /** Binds restored UI state to the credentials/configuration that produced it. */
+    providerRuntimeEpoch?: string;
+}
+
+/** Persisted when the user approves a read-only Plan; it is not a chat bubble. */
+export interface AgentTaskContractEvent {
+    kind: 'task-contract';
+    sessionId: string;
+    turnId?: string;
+    objective: string;
+    planEntries: Array<{ id: string; text: string }>;
+    acceptanceCriteria: string[];
+    /** Bound by the first authoritative goal_updated after Plan handoff. */
+    goalId?: string;
+    approvedAt: string;
+    lifecycle: 'approved' | 'goal-starting' | 'goal-active' | 'verified' | 'interrupted';
+    updatedAt: string;
+    providerRuntimeEpoch?: string;
+}
+
+/** A live Grok reverse request. It remains pending until the renderer responds. */
+export interface AgentPlanApprovalRequestEvent {
+    kind: 'plan-approval-request';
+    sessionId: string;
+    turnId?: string;
+    requestId: string;
+    toolCallId: string;
+    planContent?: string;
+    suggestedContract: AgentTaskContract;
+    requestedAt: string;
+}
+
+export type SupervisionShadowReason = 'open-plan' | 'tool-failure' | 'missing-test-evidence';
+
+/** Local-only, redacted eligibility counters. This event is never product telemetry. */
+export interface SupervisionShadowEvent {
+    kind: 'supervision-shadow';
+    sessionId: string;
+    turnId?: string;
+    eligible: boolean;
+    reasons: SupervisionShadowReason[];
+    openPlanCount: number;
+    failedToolCount: number;
+    testEvidenceCount: number;
 }
 
 /** Stable, renderer-safe semantics derived from ACP tool metadata. */
@@ -335,7 +514,12 @@ export type AgentHostEvent =
     | { kind: 'snapshot'; snapshot: RuntimeSnapshot }
     | { kind: 'session'; session: SessionRecord }
     | AgentTextEvent
+    | AgentThoughtEvent
     | AgentPlanEvent
+    | AgentPlanApprovalRequestEvent
+    | AgentGoalStateEvent
+    | AgentTaskContractEvent
+    | SupervisionShadowEvent
     | ToolCallEvent
     | PermissionRequestEvent
     | DiffEvent
@@ -399,16 +583,24 @@ export interface AgentHostService extends RpcServer<AgentHostClient> {
     createSession(request: CreateSessionRequest): Promise<SessionRecord>;
     loadSession(appSessionId: string): Promise<SessionRecord>;
     getSessionHistory(appSessionId: string): Promise<AgentHostEvent[]>;
+    /** Exports one completed, redacted conversation through Electron's native save dialog. */
+    exportSession(appSessionId: string): Promise<ExportSessionResult>;
     /** Renames a local session title without touching ACP history content. */
     renameSession(appSessionId: string, title: string): Promise<SessionRecord>;
     /** Deletes a local session index entry and its redacted history files. */
     deleteSession(appSessionId: string): Promise<void>;
     sendPrompt(request: PromptRequest): Promise<void>;
+    /** Responds to Grok's in-flight Plan approval reverse request. */
+    respondPlanApproval(decision: PlanApprovalDecision): Promise<void>;
+    /** Guides a running turn without cancelling it. */
+    guidePrompt(request: GuidePromptRequest): Promise<GuidePromptResult>;
     cancel(sessionId: string): Promise<void>;
     /** Persists one permission mode for all projects, sessions and windows. */
     setPermissionMode(mode: AgentPermissionMode): Promise<RuntimeSnapshot>;
     respondPermission(decision: PermissionDecision): Promise<void>;
     selectModel(sessionId: string, modelId: string): Promise<void>;
+    /** Changes the next-turn ACP mode for one hydrated session. */
+    setSessionMode(appSessionId: string, modeId: string): Promise<SessionRecord>;
     /** Sets the user-level default for new sessions across projects and windows. */
     selectDefaultModel(providerId: string, modelId: string): Promise<RuntimeSnapshot>;
     revertDiff(diffId: string): Promise<void>;

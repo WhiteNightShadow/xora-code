@@ -24,6 +24,9 @@ export function friendlyAgentErrorMessage(error: unknown): string {
     if (/model is not advertised by (?:this|the) ACP runtime|selected model is not advertised|newly selected global model is not advertised/i.test(normalized)) {
         return '当前 Grok Build 未识别所选模型，请检查模型 ID 后重新保存。';
     }
+    if (/requested Agent mode is not advertised by this session/i.test(normalized)) {
+        return '当前会话不支持该执行方式，请使用“常规”或“持续完成”。';
+    }
     if (/ACP session could not be restored|History remains read-only|history.*read-only/i.test(normalized)) {
         return '该会话暂时无法恢复，历史内容仍已保留。';
     }

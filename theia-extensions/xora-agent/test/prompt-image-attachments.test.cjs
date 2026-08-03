@@ -1,8 +1,12 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const test = require('node:test');
+const { AcpRemoteError } = require('@xora-code/acp-client');
 
-const { GrokAgentHostService } = require('../lib/electron-main/grok-agent-host-service');
+const {
+    GrokAgentHostService,
+    formatAgentWirePrompt
+} = require('../lib/electron-main/grok-agent-host-service');
 const {
     MAX_PROMPT_IMAGE_BYTES,
     validatePromptImageAttachments
@@ -38,6 +42,10 @@ function hostHarness(imageCapability) {
         startRequest(method, params, options) {
             requests.push({ method, params, options });
             return { promise: Promise.resolve({ stopReason: 'end_turn' }), cancel: async () => undefined };
+        },
+        async request(method, params, options) {
+            requests.push({ method, params, options });
+            return { status: 'queued' };
         }
     };
     host.requireReady = () => acp;
@@ -69,6 +77,7 @@ function hostHarness(imageCapability) {
     host.capabilities = {
         protocolVersion: 1,
         loadSession: true,
+        guidePrompt: true,
         prompt: { image: imageCapability, audio: false, embeddedContext: true },
         mcp: { http: false, sse: false },
         authMethods: []
@@ -101,7 +110,7 @@ test('image capability true emits exact ACP image blocks and persists metadata o
     assert.deepEqual(requests[0].params, {
         sessionId: 'acp-session',
         prompt: [
-            { type: 'text', text: '解释这张图' },
+            { type: 'text', text: formatAgentWirePrompt('解释这张图') },
             { type: 'image', mimeType: 'image/png', data: image.data }
         ]
     });
@@ -124,6 +133,71 @@ test('image capability true emits exact ACP image blocks and persists metadata o
     assert.equal(completion.stopReason, 'end_turn');
     assert.equal(Number.isSafeInteger(completion.elapsedMs), true);
     assert.ok(completion.elapsedMs >= 0);
+});
+
+test('guidance uses the ACP-encoded _x.ai/interject route without cancelling the running turn', async () => {
+    const image = attachment('image/png', PNG_SIGNATURE, '引导.png');
+    const { host, events, requests } = hostHarness(true);
+    host.activePrompts.set('app-session', { cancel: () => assert.fail('guidance must not cancel the turn') });
+
+    const result = await host.guidePrompt({
+        sessionId: 'app-session',
+        text: '先保留现有实现，再检查边界条件',
+        attachments: [image]
+    });
+
+    assert.equal(result.status, 'accepted');
+    assert.equal(typeof result.interjectionId, 'string');
+    assert.deepEqual(requests, [{
+        method: '_x.ai/interject',
+        params: {
+            sessionId: 'acp-session',
+            text: '先保留现有实现，再检查边界条件',
+            interjectionId: result.interjectionId,
+            content: [
+                { type: 'text', text: '先保留现有实现，再检查边界条件' },
+                { type: 'image', mimeType: 'image/png', data: image.data }
+            ]
+        },
+        options: { timeoutMs: 0 }
+    }]);
+    const guidance = events.find(event => event.kind === 'text-delta' && event.guidance);
+    assert.equal(guidance.messageId, result.interjectionId);
+    assert.equal(guidance.attachments[0].name, '引导.png');
+    assert.equal(JSON.stringify(guidance).includes(image.data), false,
+        'raw interjection images must never cross back into the renderer');
+});
+
+test('guidance keeps the renderer queue authoritative when the turn already ended', async () => {
+    const { host, events, requests } = hostHarness(true);
+    const result = await host.guidePrompt({ sessionId: 'app-session', text: '继续检查' });
+    assert.deepEqual(result, { status: 'not-running' });
+    assert.deepEqual(requests, []);
+    assert.deepEqual(events, []);
+});
+
+test('live guidance capability probe distinguishes a routed handler from method-not-found', async () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    const methods = [];
+    const routed = await host.detectGuidePromptCapability({
+        request: async method => {
+            methods.push(method);
+            throw new AcpRemoteError(1, method, {
+                code: -32602,
+                message: 'Invalid params',
+                data: 'session not found: xora-capability-probe'
+            });
+        }
+    });
+    const missing = await host.detectGuidePromptCapability({
+        request: async method => {
+            methods.push(method);
+            throw new AcpRemoteError(2, method, { code: -32601, message: 'Method not found' });
+        }
+    });
+    assert.equal(routed, true);
+    assert.equal(missing, false);
+    assert.deepEqual(methods, ['_x.ai/interject', '_x.ai/interject']);
 });
 
 test('validator rejects non-canonical base64, unsupported MIME and MIME magic mismatch', () => {

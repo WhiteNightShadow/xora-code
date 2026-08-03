@@ -4,10 +4,14 @@ import { inject, injectable, postConstruct } from '@theia/core/shared/inversify'
 import {
     AgentAttachmentSummary,
     DiffEvent,
+    AgentGoalStateEvent,
     AgentHostEvent,
     AgentHostService,
+    AgentPlanApprovalRequestEvent,
+    AgentTaskContractEvent,
     PermissionDecision,
     PermissionRequestEvent,
+    PlanApprovalDecision,
     RuntimeSnapshot,
     SessionRecord,
     ToolCallEvent
@@ -18,7 +22,7 @@ import { friendlyAgentErrorMessage } from './agent-error-labels';
 
 export interface TranscriptEntry {
     id: string;
-    kind: 'user' | 'assistant' | 'system' | 'plan' | 'tool' | 'permission' | 'diff' | 'error';
+    kind: 'user' | 'assistant' | 'system' | 'thought' | 'plan' | 'plan-approval' | 'tool' | 'permission' | 'diff' | 'error';
     text?: string;
     payload?: AgentHostEvent;
     /** Stable grouping key for every visible event produced by one prompt. */
@@ -26,6 +30,9 @@ export interface TranscriptEntry {
     /** Completion metadata attached to the final Agent reply for this turn. */
     turnElapsedMs?: number;
     turnStopReason?: string;
+    /** Thought streams remain expanded only while the provider is producing them. */
+    thoughtStreaming?: boolean;
+    thoughtElapsedMs?: number;
 }
 
 @injectable()
@@ -61,6 +68,13 @@ export class AgentViewModel {
     transcript: TranscriptEntry[] = [];
     protected readonly toolEntries = new Map<string, TranscriptEntry>();
     protected readonly diffEntries = new Map<string, TranscriptEntry>();
+    protected readonly thoughtEntries = new Map<string, TranscriptEntry>();
+    /** Latest persisted native Goal projection for each conversation. Goal
+     * state is task metadata, not another chat message. */
+    protected readonly goalStates = new Map<string, AgentGoalStateEvent>();
+    /** User-approved Plan contracts are kept separately from conversation
+     * text so restoring them never creates a synthetic user bubble. */
+    protected readonly taskContracts = new Map<string, AgentTaskContractEvent>();
     /** Suppresses a stale, unchanged plan snapshot after its turn was
      * cancelled. Grok may repeat the last session plan at the start of the
      * next prompt; it becomes visible again only when its structure or
@@ -74,6 +88,7 @@ export class AgentViewModel {
     protected readonly legacyActivityTurnIds = new Map<string, string>();
     protected readonly legacyActivityTurnOrdinals = new Map<string, number>();
     pendingPermissions = new Map<string, PermissionRequestEvent>();
+    pendingPlanApprovals = new Map<string, AgentPlanApprovalRequestEvent>();
     /**
      * `undefined` follows the backend's initial selection, `null` represents a
      * user-selected new session, and a string pins the visible conversation.
@@ -101,15 +116,40 @@ export class AgentViewModel {
             this.applySnapshot(event.snapshot);
             if (event.snapshot.phase === 'crashed') {
                 this.clearPendingPermissions();
+                this.clearPendingPlanApprovals();
             }
         } else if (event.kind === 'session') {
             this.upsertSession(event.session);
             if (['completed', 'cancelled', 'failed', 'read-only'].includes(event.session.status)) {
                 this.finalizeSessionActivity(event.session.appSessionId, event.session.status);
                 this.clearPendingPermissions(event.session.appSessionId);
+                this.clearPendingPlanApprovals(event.session.appSessionId);
+            }
+        } else if (event.kind === 'thought-delta') {
+            if (!this.isVisibleSession(event.sessionId)) return;
+            const key = `${event.sessionId}:${event.thoughtId}`;
+            const existing = this.thoughtEntries.get(key);
+            if (existing) {
+                existing.text = `${existing.text ?? ''}${event.text}`;
+                existing.payload = event;
+                existing.thoughtStreaming = !event.completed;
+                if (event.elapsedMs !== undefined) existing.thoughtElapsedMs = Math.round(event.elapsedMs);
+            } else {
+                const entry: TranscriptEntry = {
+                    id: key,
+                    kind: 'thought',
+                    text: event.text,
+                    payload: event,
+                    activityTurnId: this.activityTurnId(event),
+                    thoughtStreaming: !event.completed,
+                    ...(event.elapsedMs !== undefined ? { thoughtElapsedMs: Math.round(event.elapsedMs) } : {})
+                };
+                this.transcript.push(entry);
+                this.thoughtEntries.set(key, entry);
             }
         } else if (event.kind === 'text-delta') {
             if (!this.isVisibleSession(event.sessionId)) return;
+            if (event.role === 'assistant') this.finishThoughtsForTurn(event.sessionId, event.turnId);
             // Older builds persisted protocol-extension diagnostics into the
             // user conversation. Keep those legacy records out of the chat;
             // unknown ACP extensions are compatibility details, not messages.
@@ -120,8 +160,11 @@ export class AgentViewModel {
             const last = this.transcript[this.transcript.length - 1];
             const lastHasAttachments = last?.payload?.kind === 'text-delta'
                 && Boolean(last.payload.attachments?.length);
+            const lastIsGuidance = last?.payload?.kind === 'text-delta' && last.payload.guidance === true;
             const eventHasAttachments = Boolean(event.attachments?.length);
-            if (!eventHasAttachments
+            if (!event.guidance
+                && !lastIsGuidance
+                && !eventHasAttachments
                 && !lastHasAttachments
                 && last?.kind === event.role
                 && last.payload
@@ -150,12 +193,42 @@ export class AgentViewModel {
                     activityTurnId: this.activityTurnId(event)
                 });
             }
+        } else if (event.kind === 'plan-approval-request') {
+            // Like tool permissions, Plan approval can block a background
+            // session and therefore remains globally reachable from the dock.
+            this.pendingPlanApprovals.set(event.requestId, event);
+            if (this.isVisibleSession(event.sessionId)) {
+                this.transcript.push({
+                    id: event.requestId,
+                    kind: 'plan-approval',
+                    payload: event,
+                    activityTurnId: this.activityTurnId(event)
+                });
+            }
         } else if (event.kind === 'tool-call') {
             if (!this.isVisibleSession(event.sessionId)) return;
             liveActivityStarted = this.upsertTool(event);
         } else if (event.kind === 'plan') {
             if (!this.isVisibleSession(event.sessionId)) return;
             liveActivityStarted = this.upsertPlan(event);
+        } else if (event.kind === 'goal-state') {
+            const previous = this.goalStates.get(event.sessionId);
+            this.goalStates.set(event.sessionId, event);
+            if (this.goalState(event.sessionId) === event && event.verificationStatus === 'verified') {
+                this.finalizeVerifiedSessionPlan(event.sessionId, event.turnId);
+                const planTurnId = this.taskContract(event.sessionId)?.turnId;
+                if (planTurnId && planTurnId !== event.turnId) {
+                    this.finalizeVerifiedSessionPlan(event.sessionId, planTurnId);
+                }
+            }
+            liveActivityStarted = previous?.verificationStatus !== 'verifying'
+                && event.verificationStatus === 'verifying';
+        } else if (event.kind === 'task-contract') {
+            this.taskContracts.set(event.sessionId, event);
+        } else if (event.kind === 'supervision-shadow') {
+            // Persisted for local evaluation only. Shadow eligibility neither
+            // changes behavior nor appears in the product UI.
+            return;
         } else if (event.kind === 'diff') {
             if (!this.isVisibleSession(event.sessionId)) return;
             this.upsertDiff(event);
@@ -166,12 +239,22 @@ export class AgentViewModel {
                 [event.sessionId]: event.context
             };
         } else if (event.kind === 'turn-completed') {
+            this.finishThoughtsForTurn(event.sessionId, event.turnId);
             const activityTurnId = this.activityTurnId(event);
+            const outcome = event.stopReason === 'cancelled'
+                ? 'cancelled' : event.stopReason === 'error' ? 'failed' : 'completed';
             this.finalizeSessionActivity(
                 event.sessionId,
-                event.stopReason === 'cancelled' ? 'cancelled' : event.stopReason === 'error' ? 'failed' : 'completed',
-                activityTurnId
+                outcome,
+                activityTurnId,
+                this.planFinalizationMode(event.sessionId)
             );
+            const contract = this.taskContract(event.sessionId);
+            if (contract?.turnId
+                && contract.turnId !== event.turnId
+                && (contract.lifecycle === 'verified' || contract.lifecycle === 'interrupted')) {
+                this.finalizeSessionPlans(event.sessionId, outcome, contract.turnId);
+            }
             if (this.isVisibleSession(event.sessionId) && Number.isFinite(event.elapsedMs) && (event.elapsedMs ?? -1) >= 0) {
                 const finalReply = [...this.transcript].reverse().find(entry =>
                     entry.kind === 'assistant'
@@ -187,6 +270,7 @@ export class AgentViewModel {
             }
             this.finishLegacyActivityTurn(event.sessionId);
             this.clearPendingPermissions(event.sessionId);
+            this.clearPendingPlanApprovals(event.sessionId);
         } else if (event.kind === 'error') {
             if (event.sessionId && !this.isVisibleSession(event.sessionId)) return;
             this.transcript.push({
@@ -201,6 +285,7 @@ export class AgentViewModel {
             });
             if (event.code === 'SIDECAR_CRASHED') {
                 this.clearPendingPermissions();
+                this.clearPendingPlanApprovals();
             }
         }
         if (notify) {
@@ -339,7 +424,8 @@ export class AgentViewModel {
     protected finalizeSessionActivity(
         sessionId: string,
         outcome: SessionRecord['status'],
-        activityTurnId?: string
+        activityTurnId?: string,
+        planMode: 'terminal' | 'proposal' | 'preserve' = this.planFinalizationMode(sessionId)
     ): void {
         const terminalToolStatus: ToolCallEvent['status'] = outcome === 'completed'
             ? 'completed'
@@ -359,6 +445,30 @@ export class AgentViewModel {
                 ...(elapsedMs !== undefined ? { elapsedMs } : {})
             };
         }
+        if (planMode === 'preserve') return;
+        if (planMode === 'proposal') {
+            for (const entry of this.transcript) {
+                const plan = entry.payload?.kind === 'plan' ? entry.payload : undefined;
+                if (!plan
+                    || plan.sessionId !== sessionId
+                    || (activityTurnId !== undefined && entry.activityTurnId !== activityTurnId)) continue;
+                entry.payload = {
+                    ...plan,
+                    outcome: undefined,
+                    entries: plan.entries.map(item => item.status === 'in-progress'
+                        ? { ...item, status: 'pending' as const }
+                        : item)
+                };
+            }
+            return;
+        }
+        this.finalizeSessionPlans(sessionId, outcome, activityTurnId);
+    }
+
+    protected finalizeSessionPlans(sessionId: string, outcome: SessionRecord['status'], turnId?: string): void {
+        const activityTurnId = turnId?.startsWith('activity:')
+            ? turnId
+            : turnId ? `activity:${sessionId}:${turnId}` : undefined;
         for (const entry of this.transcript) {
             const plan = entry.payload?.kind === 'plan' ? entry.payload : undefined;
             if (!plan
@@ -387,6 +497,72 @@ export class AgentViewModel {
         }
     }
 
+    /** Native Goal verification is stronger than an ordinary end_turn. Every
+     * frozen step in the approved Plan has passed Xora's acceptance contract,
+     * so the original Plan card may settle completely even when the Goal turn
+     * has a different turn id after session/load. */
+    protected finalizeVerifiedSessionPlan(sessionId: string, turnId?: string): void {
+        const activityTurnId = turnId?.startsWith('activity:')
+            ? turnId
+            : turnId ? `activity:${sessionId}:${turnId}` : undefined;
+        for (const entry of this.transcript) {
+            const plan = entry.payload?.kind === 'plan' ? entry.payload : undefined;
+            if (!plan
+                || plan.sessionId !== sessionId
+                || (activityTurnId !== undefined && entry.activityTurnId !== activityTurnId)) continue;
+            entry.payload = {
+                ...plan,
+                outcome: 'completed',
+                entries: plan.entries.map(item => item.status === 'pending' || item.status === 'in-progress'
+                    ? { ...item, status: 'completed' as const }
+                    : item)
+            };
+        }
+    }
+
+    protected planFinalizationMode(sessionId: string): 'terminal' | 'proposal' | 'preserve' {
+        const contract = this.taskContract(sessionId);
+        // A frozen contract is terminal once Xora has either verified it or
+        // interrupted it. Restoring an idle/failed Plan-mode session must not
+        // reinterpret that durable outcome as a fresh read-only proposal.
+        if (contract?.lifecycle === 'verified' || contract?.lifecycle === 'interrupted') return 'terminal';
+        const goal = this.goalState(sessionId);
+        if (goal && goal.status !== 'cleared'
+            && !(goal.status === 'complete' && goal.verificationStatus === 'verified')) return 'preserve';
+        const session = this.snapshot.sessions.find(candidate => candidate.appSessionId === sessionId);
+        // Between approving x.ai/exit_plan_mode and receiving the first native
+        // goal_updated there is intentionally no synthetic Goal. The durable
+        // contract is the authority for this short handoff window, but a
+        // restored idle/failed session must never look as if it is still live.
+        if (session?.status === 'running' && contract
+            && ['approved', 'goal-starting', 'goal-active'].includes(contract.lifecycle)) {
+            return 'preserve';
+        }
+        const currentMode = session?.availableModes?.find(mode => mode.id === session.currentModeId);
+        return session?.currentModeId?.toLowerCase() === 'plan'
+            || /(?:^|\s)plan(?:ning)?(?:\s|$)/i.test(currentMode?.name ?? '')
+            ? 'proposal'
+            : 'terminal';
+    }
+
+    goalState(sessionId: string | undefined): AgentGoalStateEvent | undefined {
+        if (!sessionId) return undefined;
+        const goal = this.goalStates.get(sessionId);
+        if (!goal?.providerRuntimeEpoch) return goal;
+        const session = this.snapshot.sessions.find(candidate => candidate.appSessionId === sessionId);
+        if (!session?.providerRuntimeEpoch || session.providerRuntimeEpoch !== goal.providerRuntimeEpoch) return undefined;
+        return goal;
+    }
+
+    taskContract(sessionId: string | undefined): AgentTaskContractEvent | undefined {
+        if (!sessionId) return undefined;
+        const contract = this.taskContracts.get(sessionId);
+        if (!contract?.providerRuntimeEpoch) return contract;
+        const session = this.snapshot.sessions.find(candidate => candidate.appSessionId === sessionId);
+        if (!session?.providerRuntimeEpoch || session.providerRuntimeEpoch !== contract.providerRuntimeEpoch) return undefined;
+        return contract;
+    }
+
     protected upsertPlan(event: Extract<AgentHostEvent, { kind: 'plan' }>): boolean {
         const activityTurnId = this.activityTurnId(event);
         const nextActive = event.entries.some(item => item.status === 'in-progress');
@@ -406,6 +582,20 @@ export class AgentViewModel {
         if (existing) {
             const previous = existing.payload as Extract<AgentHostEvent, { kind: 'plan' }>;
             const previousActive = previous.entries.some(item => item.status === 'in-progress');
+            const previousOpen = previous.entries.some(item => item.status === 'pending' || item.status === 'in-progress');
+            const incomingOnlyCompletes = event.entries.length > 0
+                && event.entries.every(item => item.status === 'completed');
+            const goal = this.goalState(event.sessionId);
+            const goalAwaitingVerification = !!goal
+                && goal.status !== 'cleared'
+                && goal.verificationStatus !== 'verified';
+            if (goalAwaitingVerification && previousOpen && incomingOnlyCompletes
+                && this.planSignature(previous) === signature) {
+                // Grok may close a worker round with a cosmetic all-completed
+                // Plan snapshot before its Goal verifier runs. Keep the last
+                // meaningful progress visible until goal-state says verified.
+                return false;
+            }
             existing.payload = {
                 ...event,
                 ...(event.title ? {} : { title: previous.title })
@@ -469,9 +659,25 @@ export class AgentViewModel {
         }
     }
 
+    protected clearPendingPlanApprovals(sessionId?: string): void {
+        if (!sessionId) {
+            this.pendingPlanApprovals.clear();
+            return;
+        }
+        for (const [requestId, request] of this.pendingPlanApprovals) {
+            if (request.sessionId === sessionId) this.pendingPlanApprovals.delete(requestId);
+        }
+    }
+
     async decide(decision: PermissionDecision): Promise<void> {
         await this.service.respondPermission(decision);
         this.pendingPermissions.delete(decision.requestId);
+        this.notifyChangeImmediately();
+    }
+
+    async decidePlan(decision: PlanApprovalDecision): Promise<void> {
+        await this.service.respondPlanApproval(decision);
+        this.pendingPlanApprovals.delete(decision.requestId);
         this.notifyChangeImmediately();
     }
 
@@ -519,12 +725,17 @@ export class AgentViewModel {
     loadHistory(events: AgentHostEvent[]): void {
         this.clearTranscript();
         const livePermissionIds = new Set(this.pendingPermissions.keys());
+        const livePlanApprovalIds = new Set(this.pendingPlanApprovals.keys());
         for (const event of events) {
             this.accept(event, false);
             if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
                 this.pendingPermissions.delete(event.requestId);
             }
+            if (event.kind === 'plan-approval-request' && !livePlanApprovalIds.has(event.requestId)) {
+                this.pendingPlanApprovals.delete(event.requestId);
+            }
         }
+        this.reconcileRestoredTaskContractPlans(events);
         this.notifyChangeImmediately();
     }
 
@@ -534,13 +745,43 @@ export class AgentViewModel {
         this.snapshot.activeSessionId = session.appSessionId;
         this.clearTranscript();
         const livePermissionIds = new Set(this.pendingPermissions.keys());
+        const livePlanApprovalIds = new Set(this.pendingPlanApprovals.keys());
         for (const event of events) {
             this.accept(event, false);
             if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
                 this.pendingPermissions.delete(event.requestId);
             }
+            if (event.kind === 'plan-approval-request' && !livePlanApprovalIds.has(event.requestId)) {
+                this.pendingPlanApprovals.delete(event.requestId);
+            }
         }
+        this.reconcileRestoredTaskContractPlans(events);
         this.notifyChangeImmediately();
+    }
+
+    /**
+     * A crash can leave the durable task-contract as the final history event,
+     * without a later turn-completed marker. Replaying events one-by-one cannot
+     * settle the earlier Plan card in that ordering, so reconcile only after
+     * the complete history has established the final contract lifecycle.
+     */
+    protected reconcileRestoredTaskContractPlans(events: AgentHostEvent[]): void {
+        const finalContracts = new Map<string, AgentTaskContractEvent>();
+        for (const event of events) {
+            if (event.kind === 'task-contract') finalContracts.set(event.sessionId, event);
+        }
+        for (const contract of finalContracts.values()) {
+            if (contract.lifecycle === 'verified') {
+                this.finalizeVerifiedSessionPlan(contract.sessionId, contract.turnId);
+            } else if (contract.lifecycle === 'interrupted') {
+                const session = this.snapshot.sessions.find(candidate => candidate.appSessionId === contract.sessionId);
+                this.finalizeSessionPlans(
+                    contract.sessionId,
+                    session?.status === 'failed' ? 'failed' : 'cancelled',
+                    contract.turnId
+                );
+            }
+        }
     }
 
     protected applySnapshot(snapshot: RuntimeSnapshot): void {
@@ -601,6 +842,7 @@ export class AgentViewModel {
                 this.snapshot.activeSessionId = undefined;
                 this.clearTranscript();
                 this.pendingPermissions.clear();
+                this.pendingPlanApprovals.clear();
             }
         } else {
             const contextChanged = (previousWorkspaceRoot !== undefined && previousWorkspaceRoot !== snapshot.workspaceRoot)
@@ -623,6 +865,7 @@ export class AgentViewModel {
                 }
                 this.clearTranscript();
                 this.pendingPermissions.clear();
+                this.pendingPlanApprovals.clear();
             }
         }
     }
@@ -700,6 +943,7 @@ export class AgentViewModel {
         this.transcript = [];
         this.toolEntries.clear();
         this.diffEntries.clear();
+        this.thoughtEntries.clear();
         this.cancelledPlanSignatures.clear();
         this.legacyActivityTurnIds.clear();
         this.legacyActivityTurnOrdinals.clear();
@@ -708,10 +952,20 @@ export class AgentViewModel {
     protected id(prefix: string): string {
         return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
+
+    protected finishThoughtsForTurn(sessionId: string, turnId?: string): void {
+        for (const entry of this.thoughtEntries.values()) {
+            if (!entry.thoughtStreaming || entry.payload?.kind !== 'thought-delta') continue;
+            if (entry.payload.sessionId !== sessionId) continue;
+            if (turnId && entry.payload.turnId && entry.payload.turnId !== turnId) continue;
+            entry.thoughtStreaming = false;
+        }
+    }
 }
 
 function isFrameBatchedEvent(event: AgentHostEvent): boolean {
     return event.kind === 'text-delta'
+        || event.kind === 'thought-delta'
         || event.kind === 'tool-call'
         || event.kind === 'plan'
         || event.kind === 'diff'

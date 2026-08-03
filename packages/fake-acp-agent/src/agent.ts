@@ -1,12 +1,17 @@
 import {
+  AVAILABLE_COMMANDS_FIXTURE,
   AUTH_METHODS_FIXTURE,
   DIFF_FIXTURE,
   FAKE_AGENT_VERSION,
   FAKE_PROTOCOL_VERSION,
+  GOAL_OBJECTIVE_FIXTURE,
   MODEL_STATE_FIXTURE,
   PERMISSION_OPTIONS_FIXTURE,
+  PLAN_APPROVAL_FIXTURE,
   PLAN_FIXTURE,
+  PLAN_MODE_FIXTURE,
   TOOL_CALL_FIXTURE,
+  goalUpdateFixture,
   sessionIdFixture,
 } from "./fixtures.js";
 import type {
@@ -24,6 +29,7 @@ interface Session {
   readonly id: string;
   readonly cwd: string;
   modelId: string;
+  modeId: "default" | "plan";
   mcpServers: McpServerConfig[];
   mcpState: "initializing" | "ready";
 }
@@ -168,6 +174,9 @@ export class FakeAcpAgent {
         case "session/set_model":
           await this.#setModel(request);
           break;
+        case "session/set_mode":
+          await this.#setMode(request);
+          break;
         case "_x.ai/session/update_mcp_servers":
           await this.#updateMcpServers(request);
           break;
@@ -255,6 +264,7 @@ export class FakeAcpAgent {
       id,
       cwd: params.cwd,
       modelId: typeof requestedModel === "string" ? requestedModel : MODEL_STATE_FIXTURE.currentModelId,
+      modeId: "default",
       mcpServers,
       mcpState: mcpServers.length === 0 ? "ready" : "initializing",
     };
@@ -262,9 +272,9 @@ export class FakeAcpAgent {
     await this.#respondResult(request.id, {
       sessionId: id,
       modes: {
-        currentModeId: "code",
+        currentModeId: session.modeId,
         availableModes: [
-          { id: "code", name: "Code" },
+          { id: "default", name: "Agent" },
           { id: "plan", name: "Plan" },
         ],
       },
@@ -272,6 +282,7 @@ export class FakeAcpAgent {
       _meta: { modelState: modelState(session.modelId) },
     });
     await this.#notifyModelState(id, session.modelId);
+    await this.#sessionUpdate(id, AVAILABLE_COMMANDS_FIXTURE);
     await this.#notifyMcpInitializationStarted(session);
   }
 
@@ -288,6 +299,7 @@ export class FakeAcpAgent {
       id: params.sessionId,
       cwd: params.cwd,
       modelId: typeof requestedModel === "string" ? requestedModel : MODEL_STATE_FIXTURE.currentModelId,
+      modeId: "default",
       mcpServers,
       mcpState: mcpServers.length === 0 ? "ready" : "initializing",
     };
@@ -302,13 +314,14 @@ export class FakeAcpAgent {
     });
     await this.#respondResult(request.id, {
       modes: {
-        currentModeId: "code",
-        availableModes: [{ id: "code", name: "Code" }, { id: "plan", name: "Plan" }],
+        currentModeId: session.modeId,
+        availableModes: [{ id: "default", name: "Agent" }, { id: "plan", name: "Plan" }],
       },
       configOptions: [modelConfigOption()],
       _meta: { modelState: modelState(session.modelId) },
     });
     await this.#notifyModelState(session.id, session.modelId);
+    await this.#sessionUpdate(session.id, AVAILABLE_COMMANDS_FIXTURE);
     await this.#notifyMcpInitializationStarted(session);
   }
 
@@ -320,7 +333,8 @@ export class FakeAcpAgent {
       await this.#respondError(request.id, -32602, "session/prompt requires sessionId and prompt");
       return;
     }
-    if (!this.#sessions.has(sessionId)) {
+    const session = this.#sessions.get(sessionId);
+    if (!session) {
       await this.#respondError(request.id, INVALID_SESSION, "Unknown session");
       return;
     }
@@ -332,7 +346,21 @@ export class FakeAcpAgent {
     const turn = createActiveTurn(sessionId);
     this.#activeTurns.set(sessionId, turn);
     try {
-      await this.#notifyModelState(sessionId, this.#sessions.get(sessionId)?.modelId);
+      await this.#notifyModelState(sessionId, session.modelId);
+      const promptText = textPrompt(params?.prompt);
+      if (session.modeId === "plan") {
+        await this.#planPrompt(request, session);
+        return;
+      }
+      if (isGoalPrompt(promptText)) {
+        await this.#goalPrompt(request, session, goalObjective(promptText));
+        return;
+      }
+      await this.#sessionUpdate(sessionId, {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: `thought-${sessionId}-${String(request.id)}`,
+        content: { type: "text", text: "Inspect the deterministic fixture before applying the edit." },
+      });
       await this.#sessionUpdate(sessionId, PLAN_FIXTURE);
       await this.#sessionUpdate(sessionId, {
         sessionUpdate: "agent_message_chunk",
@@ -410,6 +438,134 @@ export class FakeAcpAgent {
     }
   }
 
+  /**
+   * Deterministic native `/goal` flow.  In particular, the all-completed plan
+   * snapshot is emitted while the goal is still active and verifying.  This
+   * mirrors Grok Build's cosmetic end-of-worker snapshot and guards clients
+   * against marking the whole task complete too early.
+   */
+  async #goalPrompt(request: JsonRpcRequest, session: Session, objective: string): Promise<void> {
+    const sessionId = session.id;
+    await this.#notifyGoalState(sessionId, goalUpdateFixture({
+      objective,
+      phase: "planning",
+      planning: true,
+      tokens_used: 0,
+      total_worker_rounds: 0,
+      last_event: "goal_created",
+    }));
+    await this.#sessionUpdate(sessionId, PLAN_FIXTURE);
+    await this.#notifyGoalState(sessionId, goalUpdateFixture({
+      objective,
+      status: "active",
+      phase: "executing",
+      tokens_used: 1_000,
+      total_worker_rounds: 1,
+      last_event: "worker_started",
+    }));
+
+    // A worker may close its plan rows before the goal verifier runs.  Xora
+    // must keep the task in `verifying`, not turn this snapshot into success.
+    await this.#sessionUpdate(sessionId, {
+      sessionUpdate: "plan",
+      entries: PLAN_FIXTURE.entries.map((entry) => ({ ...entry, status: "completed" })),
+    });
+    await this.#notifyGoalState(sessionId, goalUpdateFixture({
+      objective,
+      status: "active",
+      phase: "executing",
+      tokens_used: 1_500,
+      total_worker_rounds: 1,
+      total_verify_rounds: 1,
+      verifying_completion: true,
+      last_event: "verification_started",
+    }));
+    await this.#sessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "The deterministic goal passed verification." },
+    });
+    await this.#notifyGoalState(sessionId, goalUpdateFixture({
+      objective,
+      status: "complete",
+      phase: "idle",
+      tokens_used: 2_000,
+      elapsed_ms: 500,
+      total_worker_rounds: 1,
+      total_verify_rounds: 1,
+      last_event: "goal_completed",
+      last_classifier_verdict: "achieved",
+      classifier_runs_attempted: 1,
+      classifier_max_runs: 3,
+    }));
+    await this.#respondResult(request.id, {
+      stopReason: "end_turn",
+      _meta: { fixture: "goal-complete" },
+    });
+  }
+
+  /**
+   * Plan mode is read-only until the client approves the frozen plan. Real
+   * Grok Build then resumes the same native tool loop and may start coding
+   * before that original prompt reaches end_turn. Starting `/goal` remains a
+   * separate client request used by Xora for supervised completion; this
+   * fixture deliberately emits no Goal state during the approved Plan turn.
+   */
+  async #planPrompt(request: JsonRpcRequest, session: Session): Promise<void> {
+    await this.#sessionUpdate(session.id, PLAN_MODE_FIXTURE);
+    await this.#sessionUpdate(session.id, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "The read-only fixture plan is ready for approval." },
+    });
+    const approval = this.#requestClient("x.ai/exit_plan_mode", {
+      sessionId: session.id,
+      toolCallId: PLAN_APPROVAL_FIXTURE.toolCallId,
+      planContent: PLAN_APPROVAL_FIXTURE.planContent,
+    });
+    const response = await approval.promise;
+    const result = asRecord(response.result);
+    if (response.error || result?.outcome !== "approved") {
+      await this.#respondResult(request.id, {
+        stopReason: "end_turn",
+        _meta: { fixture: "plan-not-approved" },
+      });
+      return;
+    }
+    session.modeId = "default";
+    await this.#sessionUpdate(session.id, {
+      sessionUpdate: "current_mode_update",
+      currentModeId: session.modeId,
+    });
+    await this.#sessionUpdate(session.id, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Approval received; applying the deterministic fixture edit." },
+    });
+    await this.#sessionUpdate(session.id, TOOL_CALL_FIXTURE);
+    await this.#sessionUpdate(session.id, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: TOOL_CALL_FIXTURE.toolCallId,
+      status: "in_progress",
+    });
+    await this.#sessionUpdate(session.id, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: TOOL_CALL_FIXTURE.toolCallId,
+      status: "completed",
+      rawOutput: { changedFiles: 1 },
+      content: [DIFF_FIXTURE],
+    });
+    await this.#sessionUpdate(session.id, {
+      sessionUpdate: "plan",
+      entries: PLAN_MODE_FIXTURE.entries.map((entry) => ({ ...entry, status: "completed" })),
+    });
+    await this.#sessionUpdate(session.id, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "The approved fixture implementation is complete." },
+    });
+    await this.#respondResult(request.id, {
+      stopReason: "end_turn",
+      _meta: { fixture: "plan-approved" },
+    });
+  }
+
   async #setModel(request: JsonRpcRequest): Promise<void> {
     if (!await this.#requireAuthenticated(request.id)) return;
     const params = asRecord(request.params);
@@ -428,6 +584,28 @@ export class FakeAcpAgent {
     session.modelId = modelId;
     await this.#respondResult(request.id, {});
     await this.#notifyModelState(sessionId, modelId);
+  }
+
+  async #setMode(request: JsonRpcRequest): Promise<void> {
+    if (!await this.#requireAuthenticated(request.id)) return;
+    const params = asRecord(request.params);
+    const sessionId = params?.sessionId;
+    const modeId = params?.modeId;
+    if (typeof sessionId !== "string" || (modeId !== "default" && modeId !== "plan")) {
+      await this.#respondError(request.id, INVALID_PARAMS, "session/set_mode requires a valid sessionId and modeId");
+      return;
+    }
+    const session = this.#sessions.get(sessionId);
+    if (!session) {
+      await this.#respondError(request.id, INVALID_SESSION, "Unknown session");
+      return;
+    }
+    session.modeId = modeId;
+    await this.#respondResult(request.id, {});
+    await this.#sessionUpdate(sessionId, {
+      sessionUpdate: "current_mode_update",
+      currentModeId: modeId,
+    });
   }
 
   async #updateMcpServers(request: JsonRpcRequest): Promise<void> {
@@ -595,6 +773,14 @@ export class FakeAcpAgent {
     });
   }
 
+  async #notifyGoalState(sessionId: string, update: Readonly<Record<string, unknown>>): Promise<void> {
+    await this.#send({
+      jsonrpc: "2.0",
+      method: "x.ai/session_notification",
+      params: { sessionId, update },
+    });
+  }
+
   async #sessionUpdate(sessionId: string, update: unknown): Promise<void> {
     await this.#send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update } });
   }
@@ -632,6 +818,23 @@ function modelConfigOption(): Record<string, unknown> {
 
 function modelState(currentModelId: string): Record<string, unknown> {
   return { ...MODEL_STATE_FIXTURE, currentModelId };
+}
+
+function textPrompt(prompt: unknown): string {
+  if (!Array.isArray(prompt)) return "";
+  return prompt.flatMap((block) => {
+    const record = asRecord(block);
+    return record?.type === "text" && typeof record.text === "string" ? [record.text] : [];
+  }).join("\n");
+}
+
+function isGoalPrompt(text: string): boolean {
+  return /^\s*\/goal(?:\s|$)/u.test(text);
+}
+
+function goalObjective(text: string): string {
+  const objective = text.replace(/^\s*\/goal(?:\s+|$)/u, "").trim();
+  return objective || GOAL_OBJECTIVE_FIXTURE;
 }
 
 function permissionOutcome(response: JsonRpcResponse): "allowed" | "denied" | "cancelled" {

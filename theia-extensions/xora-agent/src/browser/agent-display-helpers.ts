@@ -44,6 +44,21 @@ export interface AgentContextSummary {
     };
 }
 
+/**
+ * Grok's native Goal loop first lets the model request completion through the
+ * `update_goal` tool, then runs a separate verifier before `end_turn`.  Some
+ * sidecar builds do not stream the intermediate `goal_updated` notification
+ * over ACP, so this tool call is the earliest truthful UI signal that the
+ * visible work has moved from execution into verification.  It is deliberately
+ * not treated as proof that the Goal passed.
+ */
+export function isGoalCompletionRequest(tool: ToolCallEvent | undefined): boolean {
+    if (!tool || tool.toolKind !== 'goal_update') return false;
+    const input = tool.input;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+    return (input as Record<string, unknown>).completed === true;
+}
+
 const SESSION_STATUS_LABELS: Record<SessionRecord['status'], string> = {
     idle: '就绪',
     running: '进行中',

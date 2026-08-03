@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const {
     displayToolTitle,
+    isGoalCompletionRequest,
     isMachineToolTitle,
     presentAgentTool,
     sessionRelativeTime,
@@ -11,6 +12,30 @@ const {
     summarizeToolCategories,
     toolMatchesActivityFilter
 } = require('../lib/browser/agent-display-helpers');
+
+test('native Goal completion requests are a verification hint, not a verified result', () => {
+    assert.equal(isGoalCompletionRequest({
+        kind: 'tool-call',
+        sessionId: 'session-a',
+        toolCallId: 'goal-1',
+        title: 'Goal: marking complete',
+        toolName: 'update_goal',
+        toolKind: 'goal_update',
+        status: 'completed',
+        input: { completed: true }
+    }), true);
+    assert.equal(isGoalCompletionRequest({
+        kind: 'tool-call',
+        sessionId: 'session-a',
+        toolCallId: 'goal-2',
+        title: 'Goal: progress',
+        toolName: 'update_goal',
+        toolKind: 'goal_update',
+        status: 'completed',
+        input: { message: 'still working' }
+    }), false);
+    assert.equal(isGoalCompletionRequest(undefined), false);
+});
 
 test('machine tool titles are recognized and replaced with safe Chinese labels', () => {
     assert.equal(isMachineToolTitle('call-20b15043-5d26-433c-8bd5-556a812f7381'), true);
