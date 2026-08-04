@@ -63,6 +63,10 @@ function nativeCompilerFlagsFor(pathRemaps, rustTarget) {
     // paths on newer Visual Studio toolchains.
     return [
       "/experimental:deterministic",
+      // CMake try-compile adds /Zi by default. Keep debug records embedded so
+      // /pathmap cannot turn an external PDB output path into a virtual path
+      // that MSVC then tries (and fails) to create on disk.
+      "/Z7",
       ...pathRemaps.map(({ from, to }) => `/pathmap:${from}=${to}`),
     ];
   }

@@ -21,9 +21,11 @@ well as Rust diagnostics; the release gate rejects any binary that still embeds
 the runner home, work tree, Cargo cache, or Rustup cache path.
 
 On Windows, the native remap includes MSVC deterministic mode because recent
-toolchains otherwise accept but ignore `/pathmap`. The pinned AWS-LC dependency
-is built through CMake so its byte-swap feature probe is link-checked instead of
-being accepted at compile time and failing during the final Grok link.
+toolchains otherwise accept but ignore `/pathmap`. Native debug records use
+`/Z7` so a mapped diagnostic prefix can never become an external PDB output
+path. The pinned AWS-LC dependency is built through CMake so its byte-swap
+feature probe is link-checked instead of being accepted at compile time and
+failing during the final Grok link.
 
 Language plugins are an audited local release input because the plugin staging
 directory is intentionally not part of the source archive. Transfer one verified
