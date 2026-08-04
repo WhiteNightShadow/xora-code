@@ -105,6 +105,11 @@ without contacting the registry; only an incomplete cache falls back to the lock
 official crates.io sparse index. This keeps cloned build images fast while retaining
 the same pinned version and post-install version verification.
 
+The pinned source builds of ripgrep and Grok use the same offline-first policy. A
+fresh image still falls back to the configured locked registry, while a cloned image
+can complete those native stages from its verified Cargo cache even when the Windows
+certificate-revocation service or the public index is temporarily unavailable.
+
 Before starting a remote build, inventory the image rather than reinstalling tools:
 
 ```bash

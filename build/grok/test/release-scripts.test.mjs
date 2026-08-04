@@ -247,6 +247,15 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
   }
 });
 
+test("native Grok and ripgrep builds attempt the verified Cargo cache before registry access", async () => {
+  const source = await readFile(new URL("../build-sidecar.mjs", import.meta.url), "utf8");
+  assert.match(source, /function runCargoOfflineFirst/u);
+  assert.match(source, /\[\.\.\.plan\.args, "--offline"\]/u);
+  assert.match(source, /runCargoOfflineFirst\(ripgrepInstall/u);
+  assert.match(source, /runCargoOfflineFirst\(cargoBuild/u);
+  assert.match(source, /retrying through the configured locked registry/u);
+});
+
 test("source-built ripgrep version and native architecture checks fail closed", async (context) => {
   assert.doesNotThrow(() => assertRipgrepVersion("ripgrep 15.0.0\nfeatures:+pcre2", "15.0.0"));
   assert.throws(() => assertRipgrepVersion("ripgrep 15.0.1", "15.0.0"), /expected 15\.0\.0/u);

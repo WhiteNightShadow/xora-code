@@ -348,6 +348,17 @@ function captured(file, args, options = {}) {
   return run(file, args, { ...options, capture: true }).trim();
 }
 
+function runCargoOfflineFirst(plan, options = {}) {
+  try {
+    return run(plan.file, [...plan.args, "--offline"], { ...options, env: plan.env });
+  } catch {
+    process.stderr.write(
+      "Verified Cargo cache is incomplete; retrying through the configured locked registry.\n",
+    );
+    return run(plan.file, plan.args, { ...options, env: plan.env });
+  }
+}
+
 function assertExactSource(sourceDirectory, lock) {
   const head = captured("git", ["rev-parse", "HEAD"], { cwd: sourceDirectory });
   if (head !== lock.upstream.commit) {
@@ -466,7 +477,7 @@ function main() {
     pathRemaps,
     rustTarget: target.rustTarget,
   });
-  run(ripgrepInstall.file, ripgrepInstall.args, { cwd: workDirectory, env: ripgrepInstall.env });
+  runCargoOfflineFirst(ripgrepInstall, { cwd: workDirectory });
 
   const ripgrep = lock.bundledTools.ripgrep;
   const ripgrepBinary = join(
@@ -506,7 +517,7 @@ function main() {
     cargoBuild.env.PROTOC = protoc;
   }
   // Keep this invocation aligned with the audited command in sidecar.lock.json.
-  run(cargoBuild.file, cargoBuild.args, { cwd: sourceDirectory, env: cargoBuild.env });
+  runCargoOfflineFirst(cargoBuild, { cwd: sourceDirectory });
 
   const sourceBinary = join(
     targetDirectory,
