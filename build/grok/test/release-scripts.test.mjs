@@ -260,8 +260,15 @@ test("pinned Grok checkout preserves legal files byte-for-byte on Windows", asyn
   const source = await readFile(new URL("../build-sidecar.mjs", import.meta.url), "utf8");
   const autocrlf = source.indexOf('["config", "core.autocrlf", "false"]');
   const eol = source.indexOf('["config", "core.eol", "lf"]');
-  const checkout = source.indexOf('["checkout", "--detach", "--force", "--quiet", "FETCH_HEAD"]');
+  const checkout = source.indexOf('["checkout", "--detach", "--force", "--quiet", checkoutReference]');
   assert.ok(autocrlf >= 0 && eol > autocrlf && checkout > eol);
+});
+
+test("pinned Grok checkout reuses an existing exact commit before fetching", async () => {
+  const source = await readFile(new URL("../build-sidecar.mjs", import.meta.url), "utf8");
+  const probe = source.indexOf('["cat-file", "-e", `${lock.upstream.commit}^{commit}`]');
+  const fetch = source.indexOf('["fetch", "--depth=1", "origin", lock.upstream.commit]');
+  assert.ok(probe >= 0 && fetch > probe);
 });
 
 test("source-built ripgrep version and native architecture checks fail closed", async (context) => {

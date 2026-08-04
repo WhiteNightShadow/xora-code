@@ -399,8 +399,14 @@ function checkoutExactSource(sourceDirectory, lock) {
   if (origin !== lock.upstream.repository) {
     fail(`existing build checkout uses an unexpected origin: ${origin}`);
   }
-  run("git", ["fetch", "--depth=1", "origin", lock.upstream.commit], { cwd: sourceDirectory });
-  run("git", ["checkout", "--detach", "--force", "--quiet", "FETCH_HEAD"], { cwd: sourceDirectory });
+  let checkoutReference = lock.upstream.commit;
+  try {
+    captured("git", ["cat-file", "-e", `${lock.upstream.commit}^{commit}`], { cwd: sourceDirectory });
+  } catch {
+    run("git", ["fetch", "--depth=1", "origin", lock.upstream.commit], { cwd: sourceDirectory });
+    checkoutReference = "FETCH_HEAD";
+  }
+  run("git", ["checkout", "--detach", "--force", "--quiet", checkoutReference], { cwd: sourceDirectory });
   assertExactSource(sourceDirectory, lock);
 }
 

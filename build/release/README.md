@@ -115,6 +115,11 @@ The disposable Grok checkout overrides host Git line-ending preferences with
 This keeps upstream LICENSE and notice bytes identical on Windows and prevents a
 previous failed attempt from leaking patched worktree state into a retry.
 
+Before fetching the pinned upstream commit, retries use `git cat-file` to verify
+whether that exact commit object is already present in the isolated checkout. A
+verified object is reused and still passes SOURCE_REV/toolchain checks; only a
+missing object triggers the network fetch.
+
 Before starting a remote build, inventory the image rather than reinstalling tools:
 
 ```bash
