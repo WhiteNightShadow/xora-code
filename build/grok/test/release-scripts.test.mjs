@@ -261,7 +261,9 @@ test("pinned Grok checkout preserves legal files byte-for-byte on Windows", asyn
   const autocrlf = source.indexOf('["config", "core.autocrlf", "false"]');
   const eol = source.indexOf('["config", "core.eol", "lf"]');
   const checkout = source.indexOf('["checkout", "--detach", "--force", "--quiet", checkoutReference]');
-  assert.ok(autocrlf >= 0 && eol > autocrlf && checkout > eol);
+  const rawBlob = source.indexOf('["cat-file", "blob", `${lock.upstream.commit}:${upstreamRelative}`]');
+  assert.ok(autocrlf >= 0 && eol > autocrlf && checkout > eol && rawBlob > checkout);
+  assert.match(source, /writeFileSync\(join\(sourceDirectory, upstreamRelative\), blob\)/u);
 });
 
 test("pinned Grok checkout reuses an existing exact commit before fetching", async () => {

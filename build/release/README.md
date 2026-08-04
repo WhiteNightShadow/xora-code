@@ -120,6 +120,11 @@ whether that exact commit object is already present in the isolated checkout. A
 verified object is reused and still passes SOURCE_REV/toolchain checks; only a
 missing object triggers the network fetch.
 
+The audited upstream license and notice paths are then materialized as raw bytes
+from that verified commit object. This avoids Git for Windows retaining CRLF in
+an already-created worktree after a host line-ending preference changes, while
+the release gate continues comparing those bytes with the committed legal set.
+
 Before starting a remote build, inventory the image rather than reinstalling tools:
 
 ```bash

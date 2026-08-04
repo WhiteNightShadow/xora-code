@@ -15,6 +15,14 @@ const repositoryRoot = resolve(scriptDirectory, "../..");
 const lockPath = join(scriptDirectory, "sidecar.lock.json");
 const encodedRustFlagSeparator = "\u001f";
 const requiredRustCodegenFlags = ["-Cdebuginfo=0", "-Cstrip=symbols"];
+const auditedUpstreamNotices = [
+  ["LICENSE", "LICENSE"],
+  ["THIRD-PARTY-NOTICES", "THIRD-PARTY-NOTICES"],
+  ["crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md", "crates/xai-grok-tools/THIRD_PARTY_NOTICES.md"],
+  ["crates/codegen/xai-ratatui-inline/NOTICE", "crates/xai-ratatui-inline/NOTICE"],
+  ["crates/codegen/xai-ratatui-textarea/NOTICE", "crates/xai-ratatui-textarea/NOTICE"],
+  ["third_party/NOTICE", "third_party/NOTICE"],
+];
 
 function fail(message) {
   throw new Error(`Grok sidecar build refused: ${message}`);
@@ -348,6 +356,14 @@ function captured(file, args, options = {}) {
   return run(file, args, { ...options, capture: true }).trim();
 }
 
+function capturedBytes(file, args, options = {}) {
+  return execFileSync(file, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    cwd: options.cwd,
+    env: options.env,
+  });
+}
+
 function runCargoOfflineFirst(plan, options = {}) {
   try {
     return run(plan.file, [...plan.args, "--offline"], { ...options, env: plan.env });
@@ -407,6 +423,19 @@ function checkoutExactSource(sourceDirectory, lock) {
     checkoutReference = "FETCH_HEAD";
   }
   run("git", ["checkout", "--detach", "--force", "--quiet", checkoutReference], { cwd: sourceDirectory });
+  // Git for Windows can leave an already-materialized worktree file in CRLF
+  // form after core.autocrlf is changed, even though the index still points at
+  // the exact LF blob. Legal files are release inputs, so materialize those
+  // audited paths directly from the verified commit object as raw bytes. This
+  // is independent of host checkout filters and does not alter source code.
+  for (const [upstreamRelative] of auditedUpstreamNotices) {
+    const blob = capturedBytes(
+      "git",
+      ["cat-file", "blob", `${lock.upstream.commit}:${upstreamRelative}`],
+      { cwd: sourceDirectory },
+    );
+    writeFileSync(join(sourceDirectory, upstreamRelative), blob);
+  }
   assertExactSource(sourceDirectory, lock);
 }
 
@@ -570,14 +599,6 @@ function main() {
   rmSync(noticesDirectory, { recursive: true, force: true });
   mkdirSync(noticesDirectory, { recursive: true });
   const legalRoot = join(repositoryRoot, "resources/legal/grok-build");
-  const auditedUpstreamNotices = [
-    ["LICENSE", "LICENSE"],
-    ["THIRD-PARTY-NOTICES", "THIRD-PARTY-NOTICES"],
-    ["crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md", "crates/xai-grok-tools/THIRD_PARTY_NOTICES.md"],
-    ["crates/codegen/xai-ratatui-inline/NOTICE", "crates/xai-ratatui-inline/NOTICE"],
-    ["crates/codegen/xai-ratatui-textarea/NOTICE", "crates/xai-ratatui-textarea/NOTICE"],
-    ["third_party/NOTICE", "third_party/NOTICE"],
-  ];
   for (const [upstreamRelative, packagedRelative] of auditedUpstreamNotices) {
     const upstream = readFileSync(join(sourceDirectory, upstreamRelative));
     const packaged = readFileSync(join(legalRoot, packagedRelative));
