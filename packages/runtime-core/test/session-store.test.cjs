@@ -24,7 +24,9 @@ describe("JsonlSessionStore", () => {
     );
     const records = await fixture.store.read("session-1");
     assert.deepEqual(records.map((record) => record.sequence), Array.from({ length: 20 }, (_, i) => i + 1));
-    assert.equal((await stat(join(fixture.root, "session-1.jsonl"))).mode & 0o777, 0o600);
+    const file = await stat(join(fixture.root, "session-1.jsonl"));
+    assert.equal(file.isFile(), true);
+    if (process.platform !== "win32") assert.equal(file.mode & 0o777, 0o600);
   });
 
   it("ignores and repairs an incomplete crash tail", async () => {
