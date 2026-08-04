@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import {
   addSbomChecksum,
@@ -23,7 +24,7 @@ import {
   verifySyftVersion
 } from "../generate-preview-sbom.mjs";
 
-const directory = path.dirname(new URL(import.meta.url).pathname);
+const directory = path.dirname(fileURLToPath(import.meta.url));
 const sbomRoot = path.resolve(directory, "..");
 const applicationVersion = JSON.parse(fs.readFileSync(path.resolve(sbomRoot, "..", "..", "package.json"), "utf8")).version;
 

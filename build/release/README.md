@@ -95,6 +95,24 @@ the following directories between runs:
 | Windows | `C:\xora-build-tools\native-cache` | Node, Electron, protoc, Syft, Cargo registry/git data, npm and Yarn downloads |
 | Windows | `%USERPROFILE%\.rustup` | The pinned Rust toolchain |
 
+Treat an image as a cache carrier, not as proof that a release is ready to resume.
+Before doing any compilation, classify what the image actually contains:
+
+1. **Tool installations** — Git, Python, Rustup and Visual Studio Build Tools.
+2. **Verified download caches** — pinned Node/Electron/protoc/Syft archives, Yarn/npm
+   packages and Cargo registry/git objects.
+3. **Platform build prerequisites** — Windows-only optional Node packages, Electron
+   headers and the MSVC Spectre libraries required by the selected toolset.
+4. **Reusable native outputs** — a Cargo target tree and, preferably, a staged Grok
+   sidecar whose binary, notices, `release.json` and ACP smoke result all verify.
+5. **Disposable release outputs** — application bundles, installers and SBOMs. These
+   are never accepted just because they exist on the image.
+
+The distinction matters: a multi-gigabyte Cargo cache avoids downloads, but a forced
+checkout can still invalidate timestamps and cause a full native relink. Conversely,
+a verified staged sidecar lets a UI-only release continue directly with the Electron
+build without rebuilding Grok.
+
 Do not reuse a previous source extraction or `node_modules` directory as the build
 work tree. Pass a new, short `--work-root`/`-WorkRoot` on every attempt. The scripts
 verify cached archives against `native-preview-tools.lock.json`; a mismatched archive
@@ -174,18 +192,65 @@ After transfer, compare the remote source archive SHA-256 with the coordinator's
 digest before invoking either builder. Build host addresses, passwords, private keys,
 proxy URLs and signing material must never be written to this repository.
 
+### Preflight before the expensive native build
+
+Run the preflight before invoking the Grok builder. A missing platform dependency
+must be repaired first; discovering it after a native link wastes the slowest part of
+the job.
+
+- Verify the source archive, plugin archive and every locally seeded package by hash.
+- Verify Node, Yarn, Electron, Rust, Cargo, protoc and Syft versions without installing
+  them again.
+- Confirm the exact Grok commit object and Cargo registry/git cache are present.
+- On Windows, resolve the lockfile on Windows and confirm platform-only optional
+  packages such as `@vscode/windows-ca-certs` are available in the npm/Yarn cache.
+  A dependency tree created on macOS or Linux is not a valid Windows dependency tree.
+- On Windows, verify the active MSVC toolset has the x64 Spectre libraries when a
+  native addon requests `SpectreMitigation`. For MSVC 14.44 this is the official
+  component `Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre`.
+- Verify the Electron headers and native-addon toolchain with a small rebuild before
+  starting Grok.
+- If a staged sidecar exists, verify its hash, target, metadata, legal files and ACP
+  initialization. Reuse it only when all of those checks pass.
+
+When the remote network is slow, download the exact npm tarball or Microsoft VSIX on
+the coordinator, verify it against the lockfile or official Visual Studio catalog,
+and transfer those immutable bytes. For a VSIX, install only the component files for
+the active toolset and architecture; do not copy an entire unverified Visual Studio
+tree. Record the URL, version, size and digest in the private build log, not in product
+configuration.
+
+### Resume policy
+
+Resume from the latest verified boundary rather than restarting the full script:
+
+| Verified boundary | Resume action |
+| --- | --- |
+| Downloads only | Fresh source tree, native build still required |
+| Cargo target plus exact Grok source/flags | Resume Cargo build; expect relink if timestamps or flags changed |
+| Staged Grok sidecar plus metadata/notices/ACP smoke | Skip Grok; build/test/package Electron |
+| Verified unpacked application | Generate installers and SBOM only |
+| Verified flat artifact bundle | Return to coordinator; do not rebuild |
+
+Never reuse an executable merely because its filename and version look correct. Every
+resume boundary is content-addressed and must pass the same release gates as a fresh
+build. Store a new output directory for each resume attempt so failed outputs cannot
+be mistaken for completed artifacts.
+
 ## Remote build and artifact return checklist
 
 1. Commit and test a clean release candidate.
 2. Generate one deterministic `git archive`; use the same bytes on every host.
-3. Inventory and reuse only the verified caches listed above.
-4. Start each native builder in a new work root and retain its log.
-5. Pull the outer bundle, `.sha256.txt` and `.build.json` to the coordinator.
-6. Verify the outer digest, safely extract the bundle, and rerun
+3. Run the platform preflight and inventory all five cache/output layers above.
+4. Seed missing locked assets from the coordinator before starting compilation.
+5. Reuse the newest verified boundary; do not rerun Grok after a verified sidecar.
+6. Start each remaining stage in a new work/output root and retain its log.
+7. Pull the outer bundle, `.sha256.txt` and `.build.json` to the coordinator.
+8. Verify the outer digest, safely extract the bundle, and rerun
    `build/sbom/verify-preview-assets.mjs` locally.
-7. Compare installer architecture, embedded Grok target, version and commit metadata.
-8. Generate a combined `SHA256SUMS.txt` before publishing any asset.
-9. Publish the immutable Git tag and GitHub Release, then mirror the same verified
+9. Compare installer architecture, embedded Grok target, version and commit metadata.
+10. Generate a combined `SHA256SUMS.txt` before publishing any asset.
+11. Publish the immutable Git tag and GitHub Release, then mirror the same verified
    files and checksum document to the website download service.
 
 If a remote download repeatedly stalls, stop that attempt and seed only the missing
