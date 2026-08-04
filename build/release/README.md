@@ -30,6 +30,11 @@ are scanned for every original prefix. The pinned AWS-LC dependency is built
 through CMake so its byte-swap feature probe is link-checked instead of being
 accepted at compile time and failing during the final Grok link.
 
+The dependency SBOM scan excludes `applications/electron/dist/**`: installers
+are generated outputs, while the unpacked payload is already scanned through a
+separate validated root. This prevents Syft from cataloguing the same Linux deb
+package more than once when AppImage and deb artifacts coexist in `dist/`.
+
 Language plugins are an audited local release input because the plugin staging
 directory is intentionally not part of the source archive. Transfer one verified
 plugin bundle to every native builder, compare its SHA-256 before extraction, and

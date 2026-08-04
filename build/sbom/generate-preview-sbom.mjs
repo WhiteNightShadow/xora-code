@@ -283,9 +283,15 @@ export function verifySyftVersion(binary, expectedVersion, spawn = spawnSync) {
   }
 }
 
-export function runSyft(binary, sourceDirectory, sbomPath, spawn = spawnSync) {
+export function runSyft(binary, sourceDirectory, sbomPath, spawn = spawnSync, exclusions = []) {
+  for (const exclusion of exclusions) {
+    if (typeof exclusion !== "string" || !/^\.\/[A-Za-z0-9*?._/-]+$/u.test(exclusion) || exclusion.includes("..")) {
+      fail("invalid Syft exclusion pattern");
+    }
+  }
   const environment = { ...process.env, SYFT_CHECK_FOR_APP_UPDATE: "false" };
-  const result = spawn(binary, ["dir:.", "-o", `cyclonedx-json=${sbomPath}`], {
+  const exclusionArguments = exclusions.flatMap(exclusion => ["--exclude", exclusion]);
+  const result = spawn(binary, ["dir:.", ...exclusionArguments, "-o", `cyclonedx-json=${sbomPath}`], {
     cwd: sourceDirectory,
     env: environment,
     encoding: "utf8",
@@ -482,7 +488,13 @@ export async function generatePreviewSbom(options, dependencies = {}) {
     // Syft 1.48.0. Merge the verified payload scan with a conservative scan of
     // the exact committed dependency tree used to produce it, instead of
     // publishing a deceptively tiny payload-only inventory.
-    runSyft(binary, repositoryRoot, dependencySbomPath, dependencies.spawnImpl);
+    // The dependency inventory must not recursively catalog the installers
+    // that were just produced under dist/. Besides double-counting the product,
+    // Linux Syft gives the AppImage and deb discoveries distinct bom-refs for
+    // one package. The unpacked payload is already scanned independently above.
+    runSyft(binary, repositoryRoot, dependencySbomPath, dependencies.spawnImpl, [
+      "./applications/electron/dist/**"
+    ]);
     const merged = normalizeProductComponent(mergeCycloneDxDocuments(
       JSON.parse(fs.readFileSync(packagedSbomPath, "utf8")),
       JSON.parse(fs.readFileSync(dependencySbomPath, "utf8"))

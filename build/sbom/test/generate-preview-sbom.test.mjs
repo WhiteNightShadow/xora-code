@@ -186,13 +186,19 @@ test("version and scan processes always use shell:false and exact Syft arguments
   };
   verifySyftVersion("/cache/syft", "1.48.0", spawn);
   runSyft("/cache/syft", root, sbom, spawn);
+  runSyft("/cache/syft", root, sbom, spawn, ["./applications/electron/dist/**"]);
   assert.deepEqual(calls.map(call => call.args), [
     ["version"],
-    ["dir:.", "-o", `cyclonedx-json=${sbom}`]
+    ["dir:.", "-o", `cyclonedx-json=${sbom}`],
+    ["dir:.", "--exclude", "./applications/electron/dist/**", "-o", `cyclonedx-json=${sbom}`]
   ]);
   for (const call of calls) assert.equal(call.options.shell, false);
   assert.equal(calls[1].options.cwd, root);
   assert.equal(calls[1].options.env.SYFT_CHECK_FOR_APP_UPDATE, "false");
+  assert.throws(
+    () => runSyft("/cache/syft", root, sbom, spawn, ["../dist/**"]),
+    /invalid Syft exclusion pattern/u
+  );
 });
 
 test("checksum merge is idempotent and collapses old SBOM entries", t => {
