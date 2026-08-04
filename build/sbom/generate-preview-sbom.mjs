@@ -358,7 +358,29 @@ export function normalizeProductComponent(document, { name, packageName, version
   const matches = (document.components ?? []).filter(component =>
     component?.name === packageName && component?.version === version && debPurl.test(component?.purl ?? ""));
   if (matches.length > 1) fail(`multiple ${packageName} product components were discovered`);
-  if (matches.length === 1) matches[0].name = name;
+  if (matches.length === 1) {
+    matches[0].name = name;
+  } else {
+    // The authoritative payload scan targets electron-builder's unpacked
+    // directory, so it intentionally does not contain the outer .deb.  The
+    // dependency scan excludes dist/** to avoid rediscovering freshly built
+    // installers.  Keep an explicit top-level application component in that
+    // valid combination instead of depending on package-manager discovery.
+    const purl = `pkg:generic/${packageName}@${version}`;
+    if (!(document.components ?? []).some(component => component?.purl === purl)) {
+      document.components = [
+        ...(document.components ?? []),
+        {
+          "bom-ref": purl,
+          type: "application",
+          name,
+          version,
+          purl,
+          licenses: [{ license: { id: "Apache-2.0" } }]
+        }
+      ];
+    }
+  }
   return document;
 }
 

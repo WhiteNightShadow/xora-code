@@ -290,6 +290,35 @@ test("Debian product component uses the public product name without changing ref
   );
 });
 
+test("unpacked payload inventory receives one explicit top-level product component", () => {
+  const document = {
+    components: [
+      { "bom-ref": "npm:xora-code", name: "xora-code", version: "0.2.4", purl: "pkg:npm/xora-code@0.2.4" }
+    ]
+  };
+  const normalized = normalizeProductComponent(document, {
+    name: "Xora Code",
+    packageName: "xora-code",
+    version: "0.2.4"
+  });
+  const product = normalized.components.find(component => component.purl === "pkg:generic/xora-code@0.2.4");
+  assert.deepEqual(product, {
+    "bom-ref": "pkg:generic/xora-code@0.2.4",
+    type: "application",
+    name: "Xora Code",
+    version: "0.2.4",
+    purl: "pkg:generic/xora-code@0.2.4",
+    licenses: [{ license: { id: "Apache-2.0" } }]
+  });
+
+  normalizeProductComponent(normalized, {
+    name: "Xora Code",
+    packageName: "xora-code",
+    version: "0.2.4"
+  });
+  assert.equal(normalized.components.filter(component => component.purl === "pkg:generic/xora-code@0.2.4").length, 1);
+});
+
 test("end-to-end wrapper verifies download hash, reuses cache, and updates checksums", async t => {
   const root = temporary(t, "xora-syft-integration");
   const packageRoot = path.join(root, "linux-unpacked");
