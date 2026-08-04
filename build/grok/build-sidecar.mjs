@@ -380,6 +380,12 @@ function assertExactSource(sourceDirectory, lock) {
 function checkoutExactSource(sourceDirectory, lock) {
   mkdirSync(sourceDirectory, { recursive: true });
   run("git", ["init", "--quiet"], { cwd: sourceDirectory });
+  // The build checkout is disposable and must preserve upstream blobs byte
+  // for byte. A Windows builder can otherwise inherit core.autocrlf=true and
+  // rewrite LICENSE/notices to CRLF, causing the legal-file gate to fail even
+  // though the pinned Git object is correct.
+  run("git", ["config", "core.autocrlf", "false"], { cwd: sourceDirectory });
+  run("git", ["config", "core.eol", "lf"], { cwd: sourceDirectory });
   let origin;
   try {
     // Read the literal repository setting. `git remote get-url` expands a
@@ -394,7 +400,7 @@ function checkoutExactSource(sourceDirectory, lock) {
     fail(`existing build checkout uses an unexpected origin: ${origin}`);
   }
   run("git", ["fetch", "--depth=1", "origin", lock.upstream.commit], { cwd: sourceDirectory });
-  run("git", ["checkout", "--detach", "--quiet", "FETCH_HEAD"], { cwd: sourceDirectory });
+  run("git", ["checkout", "--detach", "--force", "--quiet", "FETCH_HEAD"], { cwd: sourceDirectory });
   assertExactSource(sourceDirectory, lock);
 }
 

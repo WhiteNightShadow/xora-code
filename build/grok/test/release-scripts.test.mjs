@@ -256,6 +256,14 @@ test("native Grok and ripgrep builds attempt the verified Cargo cache before reg
   assert.match(source, /retrying through the configured locked registry/u);
 });
 
+test("pinned Grok checkout preserves legal files byte-for-byte on Windows", async () => {
+  const source = await readFile(new URL("../build-sidecar.mjs", import.meta.url), "utf8");
+  const autocrlf = source.indexOf('["config", "core.autocrlf", "false"]');
+  const eol = source.indexOf('["config", "core.eol", "lf"]');
+  const checkout = source.indexOf('["checkout", "--detach", "--force", "--quiet", "FETCH_HEAD"]');
+  assert.ok(autocrlf >= 0 && eol > autocrlf && checkout > eol);
+});
+
 test("source-built ripgrep version and native architecture checks fail closed", async (context) => {
   assert.doesNotThrow(() => assertRipgrepVersion("ripgrep 15.0.0\nfeatures:+pcre2", "15.0.0"));
   assert.throws(() => assertRipgrepVersion("ripgrep 15.0.1", "15.0.0"), /expected 15\.0\.0/u);

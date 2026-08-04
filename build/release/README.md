@@ -110,6 +110,11 @@ fresh image still falls back to the configured locked registry, while a cloned i
 can complete those native stages from its verified Cargo cache even when the Windows
 certificate-revocation service or the public index is temporarily unavailable.
 
+The disposable Grok checkout overrides host Git line-ending preferences with
+`core.autocrlf=false` and `core.eol=lf`, then performs a forced detached checkout.
+This keeps upstream LICENSE and notice bytes identical on Windows and prevents a
+previous failed attempt from leaking patched worktree state into a retry.
+
 Before starting a remote build, inventory the image rather than reinstalling tools:
 
 ```bash
