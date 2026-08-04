@@ -398,9 +398,15 @@ timeout = 120
 
     $DotSlashRoot = Join-Path $WorkTools "dotslash-$DotSlashVersion-win32-x64"
     $DotSlashExecutable = Join-Path $DotSlashRoot 'bin\dotslash.exe'
-    Invoke-Checked -File 'cargo.exe' -Arguments @(
+    $DotSlashInstallArguments = @(
         'install', 'dotslash', '--locked', '--version', $DotSlashVersion, '--root', $DotSlashRoot
     )
+    try {
+        Invoke-Checked -File 'cargo.exe' -Arguments (@($DotSlashInstallArguments) + '--offline')
+    } catch {
+        Write-Warning 'Verified Cargo cache is incomplete; retrying DotSlash installation through the locked official registry.'
+        Invoke-CheckedWithRetry -File 'cargo.exe' -Arguments $DotSlashInstallArguments -Attempts 3 -DelaySeconds 10
+    }
     $env:Path = "$(Join-Path $DotSlashRoot 'bin');$env:Path"
     $DotSlashVersionOutput = Assert-Version -File $DotSlashExecutable -Arguments @('--version') -Pattern "\b$([regex]::Escape($DotSlashVersion))\b"
 

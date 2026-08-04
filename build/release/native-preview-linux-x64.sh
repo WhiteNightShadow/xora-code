@@ -267,7 +267,10 @@ EOF
 export CARGO_HOME="$cargo_home"
 
 dotslash_root="$work_tools/dotslash-${dotslash_version}-linux-x64"
-cargo install dotslash --locked --version "$dotslash_version" --root "$dotslash_root"
+if ! cargo install dotslash --locked --offline --version "$dotslash_version" --root "$dotslash_root"; then
+    printf 'Verified Cargo cache is incomplete; retrying DotSlash installation through the locked official registry.\n'
+    cargo install dotslash --locked --version "$dotslash_version" --root "$dotslash_root"
+fi
 export PATH="$dotslash_root/bin:$PATH"
 dotslash --version | grep -F "$dotslash_version" >/dev/null || fail "wrong DotSlash version"
 

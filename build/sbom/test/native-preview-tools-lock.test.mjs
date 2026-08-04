@@ -85,6 +85,12 @@ test("native builders retry dependency installation only a bounded number of tim
   assert.equal(windowsScript.slice(windowsInstall).match(/Invoke-CheckedWithRetry -File \$YarnExecutable/gu)?.length, 1);
 });
 
+test("native builders reuse the verified Cargo cache before accessing the registry", () => {
+  assert.match(linuxScript, /cargo install dotslash --locked --offline --version/u);
+  assert.match(windowsScript, /@\(\$DotSlashInstallArguments\) \+ '--offline'/u);
+  assert.match(windowsScript, /Verified Cargo cache is incomplete/u);
+});
+
 test("native builders never download transitive browser payloads", () => {
   for (const script of [linuxScript, windowsScript]) {
     assert.match(script, /PUPPETEER_SKIP_DOWNLOAD/u);

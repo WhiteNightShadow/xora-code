@@ -100,6 +100,11 @@ work tree. Pass a new, short `--work-root`/`-WorkRoot` on every attempt. The scr
 verify cached archives against `native-preview-tools.lock.json`; a mismatched archive
 is rejected instead of being trusted.
 
+DotSlash installation is offline-first. A complete isolated Cargo cache is reused
+without contacting the registry; only an incomplete cache falls back to the locked
+official crates.io sparse index. This keeps cloned build images fast while retaining
+the same pinned version and post-install version verification.
+
 Before starting a remote build, inventory the image rather than reinstalling tools:
 
 ```bash
