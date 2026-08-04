@@ -378,8 +378,8 @@ archive.close()
     # Rustup continues to use its existing RUSTUP_HOME and standard proxy
     # variables. Cargo itself is isolated from the user profile and may only
     # resolve crates.io through Cargo's official sparse index.
-    $CargoHome = Join-Path $WorkTools 'cargo-home'
-    New-Item -ItemType Directory -Path $CargoHome | Out-Null
+    $CargoHome = Join-Path $ToolCache 'cargo-home'
+    New-Item -ItemType Directory -Path $CargoHome -Force | Out-Null
     $CargoConfig = @'
 [registries.crates-io]
 index = "sparse+https://index.crates.io/"

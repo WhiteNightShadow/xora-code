@@ -250,7 +250,7 @@ rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
 # Rustup continues to use its existing RUSTUP_HOME and standard proxy
 # variables. Cargo itself is isolated from ~/.cargo/config.toml and may only
 # resolve crates.io through Cargo's official sparse index.
-cargo_home="$work_tools/cargo-home"
+cargo_home="$tool_cache/cargo-home"
 mkdir -p -- "$cargo_home"
 cat > "$cargo_home/config.toml" <<'EOF'
 [registries.crates-io]

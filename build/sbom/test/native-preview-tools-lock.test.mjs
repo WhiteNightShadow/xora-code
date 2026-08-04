@@ -132,4 +132,6 @@ test("native builders isolate Cargo on the official sparse crates.io index", () 
   const windowsDotSlash = windowsScript.indexOf("'install', 'dotslash'");
   const windowsSidecar = windowsScript.indexOf("'build/grok/build-sidecar.mjs'");
   assert.ok(windowsRustup < windowsCargoHome && windowsCargoHome < windowsDotSlash && windowsDotSlash < windowsSidecar);
+  assert.match(linuxScript, /cargo_home="\$tool_cache\/cargo-home"/u);
+  assert.match(windowsScript, /\$CargoHome = Join-Path \$ToolCache 'cargo-home'/u);
 });

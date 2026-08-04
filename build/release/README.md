@@ -57,10 +57,10 @@ the following directories between runs:
 
 | Host | Reusable cache | Contents |
 | --- | --- | --- |
-| Linux | `~/.cache/xora-code/native-preview-tools` | Node, Electron, protoc, Syft, npm and Yarn downloads |
-| Linux | `~/.cargo` and `~/.rustup` | Cargo registry/git data and the pinned Rust toolchain |
-| Windows | `C:\xora-build-tools\native-cache` | Node, Electron, protoc, Syft, npm and Yarn downloads |
-| Windows | `%USERPROFILE%\.cargo` and `%USERPROFILE%\.rustup` | Cargo registry/git data and the pinned Rust toolchain |
+| Linux | `~/.cache/xora-code/native-preview-tools` | Node, Electron, protoc, Syft, Cargo registry/git data, npm and Yarn downloads |
+| Linux | `~/.rustup` | The pinned Rust toolchain |
+| Windows | `C:\xora-build-tools\native-cache` | Node, Electron, protoc, Syft, Cargo registry/git data, npm and Yarn downloads |
+| Windows | `%USERPROFILE%\.rustup` | The pinned Rust toolchain |
 
 Do not reuse a previous source extraction or `node_modules` directory as the build
 work tree. Pass a new, short `--work-root`/`-WorkRoot` on every attempt. The scripts
@@ -71,13 +71,13 @@ Before starting a remote build, inventory the image rather than reinstalling too
 
 ```bash
 # Linux
-du -sh ~/.cache/xora-code/native-preview-tools ~/.cargo ~/.rustup 2>/dev/null || true
+du -sh ~/.cache/xora-code/native-preview-tools ~/.rustup 2>/dev/null || true
 find ~/.cache/xora-code/native-preview-tools -maxdepth 2 -type f -print
 ```
 
 ```powershell
 # Windows
-$roots = @('C:\xora-build-tools\native-cache', "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup")
+$roots = @('C:\xora-build-tools\native-cache', "$env:USERPROFILE\.rustup")
 $roots | Where-Object { Test-Path $_ } | ForEach-Object {
     Get-ChildItem -LiteralPath $_ -Recurse -File -ErrorAction SilentlyContinue |
         Measure-Object Length -Sum
