@@ -11,6 +11,10 @@ Both builders:
 5. build unsigned preview installers, generate the pinned Syft CycloneDX SBOM, and verify every checksum and provenance field; and
 6. produce a flat asset bundle, an outer SHA-256 file, a non-sensitive build report, and a local build log.
 
+The Windows build also applies the audited build-only compatibility patch listed
+in `build/grok/PATCHES.md`. Its SHA-256 is pinned in `sidecar.lock.json`, and the
+builder refuses to apply it if either the upstream source or patch bytes differ.
+
 ## Prepare one immutable source archive
 
 Run this only from a clean local Git worktree after the release candidate has been committed:

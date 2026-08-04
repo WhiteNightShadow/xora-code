@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeSidecarReleaseMetadata } from "./release-metadata.mjs";
 
@@ -296,7 +296,10 @@ function checkoutExactSource(sourceDirectory, lock) {
   run("git", ["init", "--quiet"], { cwd: sourceDirectory });
   let origin;
   try {
-    origin = captured("git", ["remote", "get-url", "origin"], { cwd: sourceDirectory });
+    // Read the literal repository setting. `git remote get-url` expands a
+    // machine-local `url.*.insteadOf` cache/proxy rule and would make a pinned
+    // official origin appear different even though `.git/config` is correct.
+    origin = captured("git", ["config", "--get", "remote.origin.url"], { cwd: sourceDirectory });
   } catch {
     run("git", ["remote", "add", "origin", lock.upstream.repository], { cwd: sourceDirectory });
     origin = lock.upstream.repository;
@@ -307,6 +310,24 @@ function checkoutExactSource(sourceDirectory, lock) {
   run("git", ["fetch", "--depth=1", "origin", lock.upstream.commit], { cwd: sourceDirectory });
   run("git", ["checkout", "--detach", "--quiet", "FETCH_HEAD"], { cwd: sourceDirectory });
   assertExactSource(sourceDirectory, lock);
+}
+
+export function applySourcePatches({ sourceDirectory, lock, targetName }) {
+  const patches = lock.sourcePatches ?? [];
+  for (const patch of patches) {
+    if (!patch.targets.includes(targetName)) continue;
+    const patchPath = resolve(scriptDirectory, patch.file);
+    if (!patchPath.startsWith(`${scriptDirectory}${sep}`)) {
+      fail(`source patch escapes build/grok: ${patch.file}`);
+    }
+    const bytes = readFileSync(patchPath);
+    const actualHash = createHash("sha256").update(bytes).digest("hex");
+    if (actualHash !== patch.sha256) {
+      fail(`source patch ${patch.id} has SHA-256 ${actualHash}; expected ${patch.sha256}`);
+    }
+    run("git", ["apply", "--check", patchPath], { cwd: sourceDirectory });
+    run("git", ["apply", patchPath], { cwd: sourceDirectory });
+  }
 }
 
 function assertNativeToolchain(lock, target) {
@@ -344,6 +365,7 @@ function main() {
   const ripgrepTargetDirectory = join(targetDirectory, "ripgrep");
   mkdirSync(workDirectory, { recursive: true });
   checkoutExactSource(sourceDirectory, lock);
+  applySourcePatches({ sourceDirectory, lock, targetName });
   assertNativeToolchain(lock, target);
 
   const homeDirectory = homedir();
@@ -466,6 +488,7 @@ function main() {
     [join(repositoryRoot, "NOTICE.md"), "XORA-CODE-NOTICE.md"],
     [join(repositoryRoot, "THIRD-PARTY-NOTICES.md"), "THIRD-PARTY-NOTICES.md"],
     [join(repositoryRoot, "resources/legal/ripgrep/RIPGREP-SOURCE-BUILD-NOTICE.md"), "RIPGREP-SOURCE-BUILD-NOTICE.md"],
+    [join(repositoryRoot, "build/grok/PATCHES.md"), "GROK-BUILD-COMPATIBILITY-PATCHES.md"],
     [join(sourceDirectory, "LICENSE"), "GROK-BUILD-LICENSE"],
     [join(sourceDirectory, "THIRD-PARTY-NOTICES"), "GROK-BUILD-THIRD-PARTY-NOTICES"],
     [join(sourceDirectory, "crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md"), "GROK-TOOLS-THIRD-PARTY-NOTICES.md"],

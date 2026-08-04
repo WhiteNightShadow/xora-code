@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { generateKeyPairSync, verify } from "node:crypto";
+import { createHash, generateKeyPairSync, verify } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  applySourcePatches,
   assertCargoBuildPlan,
   assertNativeBinaryArchitecture,
   assertNoEmbeddedBuildPaths,
@@ -69,6 +70,29 @@ test("sidecar staging removes stale renamed notices before packaging", async () 
   assert.ok(cleanup >= 0 && copy > cleanup, "notice cleanup must run before the audited notice copy");
   assert.match(source, /XORA-CODE-LICENSE/u);
   assert.doesNotMatch(source, /\[join\(repositoryRoot, "LICENSE"\), "WHITENIGHT-CODE-LICENSE"\]/u);
+});
+
+test("Windows source compatibility patch is target-scoped and digest-pinned", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "xora-grok-patch-test-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const sourceDirectory = join(root, "source");
+  await mkdir(join(sourceDirectory, "crates/build/xai-proto-build/src"), { recursive: true });
+  const original = `fn marker() {\n    let _ = "/dev/stdout";\n}\n`;
+  const sourcePath = join(sourceDirectory, "crates/build/xai-proto-build/src/lib.rs");
+  await writeFile(sourcePath, original, "utf8");
+  execFileSync("git", ["init", "--quiet"], { cwd: sourceDirectory });
+  const patchBytes = `diff --git a/crates/build/xai-proto-build/src/lib.rs b/crates/build/xai-proto-build/src/lib.rs\n--- a/crates/build/xai-proto-build/src/lib.rs\n+++ b/crates/build/xai-proto-build/src/lib.rs\n@@ -1,3 +1,3 @@\n fn marker() {\n-    let _ = "/dev/stdout";\n+    let _ = "portable";\n }\n`;
+  const hash = createHash("sha256").update(patchBytes).digest("hex");
+  const relativePatch = `patches/${Date.now()}-fixture.patch`;
+  const repositoryPatch = join(repositoryRoot, "build/grok", relativePatch);
+  await writeFile(repositoryPatch, patchBytes, "utf8");
+  context.after(() => rm(repositoryPatch, { force: true }));
+  const lock = { sourcePatches: [{ id: "fixture", targets: ["win32-x64"], file: relativePatch, sha256: hash }] };
+
+  applySourcePatches({ sourceDirectory, lock, targetName: "linux-x64" });
+  assert.equal(await readFile(sourcePath, "utf8"), original);
+  applySourcePatches({ sourceDirectory, lock, targetName: "win32-x64" });
+  assert.match(await readFile(sourcePath, "utf8"), /portable/u);
 });
 
 test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and stripped", () => {
@@ -355,6 +379,7 @@ test("release manifests use independent Ed25519 signatures and complete target m
   const sidecarManifest = JSON.parse(await readFile(join(assets, "grok-sidecar-update.json"), "utf8"));
   assert.equal(appManifest.payload.sequence, 42);
   assert.equal(sidecarManifest.payload.upstream.commit, "98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce");
+  assert.equal(sidecarManifest.payload.patchSha256, "2737876ec3d0f38947566218a24d0c66d83d5d12311138aff45c586e0ab80d46");
   assert.deepEqual(sidecarManifest.payload.bundledTools.ripgrep, {
     package: "ripgrep",
     version: "15.0.0",

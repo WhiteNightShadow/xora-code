@@ -5,6 +5,13 @@ export interface GrokSidecarTarget {
   executableSuffix: "" | ".exe";
 }
 
+export interface GrokSourcePatch {
+  id: string;
+  targets: string[];
+  file: string;
+  sha256: string;
+}
+
 export interface GrokSidecarLock {
   schemaVersion: 1;
   upstream: {
@@ -31,6 +38,7 @@ export interface GrokSidecarLock {
       features: readonly ["pcre2"];
     };
   };
+  sourcePatches: GrokSourcePatch[];
   runtime: {
     packagedBinaryName: string;
     args: string[];
@@ -43,6 +51,7 @@ export interface GrokSidecarLock {
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/u;
 const PROTOC_VERSION_PATTERN = /^\d+\.\d+$/u;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
 function asRecord(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -147,6 +156,23 @@ export function validateGrokSidecarLock(input: unknown): GrokSidecarLock {
     if (!targets[requiredTarget]) throw new Error(`$lock.targets is missing ${requiredTarget}`);
   }
 
+  if (!Array.isArray(root.sourcePatches)) throw new Error("$lock.sourcePatches must be an array");
+  const sourcePatches = root.sourcePatches.map((candidate, index) => {
+    const path = `$lock.sourcePatches[${index}]`;
+    const patch = asRecord(candidate, path);
+    const id = stringField(patch, "id", path);
+    const file = stringField(patch, "file", path);
+    const sha256 = stringField(patch, "sha256", path);
+    if (!Array.isArray(patch.targets) || patch.targets.length === 0 || !patch.targets.every((target) => typeof target === "string" && targets[target])) {
+      throw new Error(`${path}.targets must contain known target names`);
+    }
+    if (file.startsWith("/") || file.includes("..") || !file.startsWith("patches/")) {
+      throw new Error(`${path}.file must stay within build/grok/patches`);
+    }
+    if (!SHA256_PATTERN.test(sha256)) throw new Error(`${path}.sha256 must be a lowercase SHA-256`);
+    return { id, targets: [...patch.targets] as string[], file, sha256 };
+  });
+
   return {
     schemaVersion: 1,
     upstream: {
@@ -166,6 +192,7 @@ export function validateGrokSidecarLock(input: unknown): GrokSidecarLock {
         features: ["pcre2"],
       },
     },
+    sourcePatches,
     runtime: {
       packagedBinaryName,
       args,

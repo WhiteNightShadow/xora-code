@@ -24,6 +24,14 @@
       "features": ["pcre2"]
     }
   },
+  "sourcePatches": [
+    {
+      "id": "windows-portable-protoc-output-v1",
+      "targets": ["win32-x64"],
+      "file": "patches/0001-windows-portable-protoc-dependency-output.patch",
+      "sha256": "2737876ec3d0f38947566218a24d0c66d83d5d12311138aff45c586e0ab80d46"
+    }
+  ],
   "runtime": {
     "packagedBinaryName": "grok",
     "args": ["--no-auto-update", "--cwd", "<root>", "agent", "--no-leader", "stdio"],

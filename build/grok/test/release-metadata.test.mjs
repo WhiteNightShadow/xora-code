@@ -23,6 +23,9 @@ function releaseFor(targetName) {
     rustTarget: lock.targets[targetName].rustTarget,
     cargoPackage: lock.toolchain.cargoPackage,
     cargoProfile: lock.toolchain.cargoProfile,
+    sourcePatches: lock.sourcePatches
+      .filter(patch => patch.targets.includes(targetName))
+      .map(({ id, sha256 }) => ({ id, sha256 })),
     bundledTools: {
       ripgrep: {
         package: lock.bundledTools.ripgrep.package,

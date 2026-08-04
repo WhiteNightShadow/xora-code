@@ -222,7 +222,9 @@ async function main() {
     version: lock.upstream.version,
     releasedAt: options.releasedAt,
     homeCompatEpoch: 1,
-    patchSha256: emptySha256,
+    patchSha256: lock.sourcePatches?.length === 1
+      ? lock.sourcePatches[0].sha256
+      : emptySha256,
     appCompatibility: {
       minimumVersion: options.appVersion,
       maximumVersion: options.appVersion,

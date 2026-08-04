@@ -1,0 +1,66 @@
+diff --git a/crates/build/xai-proto-build/src/lib.rs b/crates/build/xai-proto-build/src/lib.rs
+index 1185486..a35c234 100644
+--- a/crates/build/xai-proto-build/src/lib.rs
++++ b/crates/build/xai-proto-build/src/lib.rs
+@@ -113,11 +113,27 @@ impl XaiProtoBuilder {
+         }
+ 
+         // Can only process one input file when using --dependency_out=FILE.
+-        for proto in protos {
++        for (index, proto) in protos.into_iter().enumerate() {
++            // `/dev/stdout` and `/dev/null` are not available to native Windows
++            // protoc. Use Cargo's isolated build output directory instead and
++            // remove both temporary files after reading the dependency data.
++            let output_directory = PathBuf::from(
++                std::env::var_os("OUT_DIR").context("OUT_DIR is not set")?,
++            );
++            let dependency_path =
++                output_directory.join(format!("xai-proto-build-{index}.d"));
++            let descriptor_path =
++                output_directory.join(format!("xai-proto-build-{index}.bin"));
+             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
+             command
+-                .arg("--dependency_out=/dev/stdout")
+-                .arg("--descriptor_set_out=/dev/null");
++                .arg(format!(
++                    "--dependency_out={}",
++                    dependency_path.to_str().context("dependency path not UTF-8")?
++                ))
++                .arg(format!(
++                    "--descriptor_set_out={}",
++                    descriptor_path.to_str().context("descriptor path not UTF-8")?
++                ));
+ 
+             // Add protoc's well-known types include directory first (if found).
+             // This is needed for Bazel sandboxed builds where protoc and its
+@@ -139,19 +155,24 @@ impl XaiProtoBuilder {
+             command.stderr(Stdio::inherit());
+ 
+             let output = command.output().context("protoc command failed")?;
++            let _ = fs::remove_file(&descriptor_path);
+             if !output.status.success() {
++                let _ = fs::remove_file(&dependency_path);
+                 return Err(anyhow::anyhow!("protoc command failed"));
+             }
+ 
+-            let output =
+-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
++            let output = fs::read_to_string(&dependency_path)
++                .context("protoc dependency output could not be read")?;
++            fs::remove_file(&dependency_path)
++                .context("protoc dependency output could not be removed")?;
+ 
+             let mut lines = output.lines();
+             let first_line = lines.next().context("protoc command output is empty")?;
+-            let prefix = "/dev/null:";
+-            let rem = first_line.strip_prefix(prefix).with_context(|| {
+-                format!("protoc command output must start with /dev/null: {output:?}")
+-            })?;
++            // The target path can contain a Windows drive colon. Protoc emits
++            // the Makefile separator as `: `, so split on that full delimiter.
++            let (_, rem) = first_line.split_once(": ").with_context(|| {
++                format!("protoc dependency output has no target separator: {output:?}")
++            })?;
+             for line in iter::once(rem).chain(lines) {
+                 let line = line.trim();
+                 let line = line.strip_suffix("\\").unwrap_or(line);

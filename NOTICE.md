@@ -11,4 +11,10 @@ The distributed application may include third-party software. Each component rem
 - VS Code extensions installed from Open VSX or other registries, each under the license declared by its publisher.
 - Grok Build, when bundled by a distribution, licensed under Apache-2.0 together with its applicable third-party notices.
 
+The native Windows build applies the build-only compatibility change documented
+in `build/grok/PATCHES.md`. It replaces Unix-only protoc output devices with
+temporary files under Cargo `OUT_DIR`; it does not alter Grok Build runtime
+behavior. The patch is retained under the same Apache-2.0 terms as the modified
+upstream source.
+
 Release automation must generate a complete dependency inventory and include all required third-party license texts before publishing binary artifacts.

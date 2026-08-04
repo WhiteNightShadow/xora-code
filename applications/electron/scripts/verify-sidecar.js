@@ -102,6 +102,10 @@ function assertReleaseIdentity(release, lock, targetName) {
     assert(release.rustTarget === target.rustTarget, `Sidecar release metadata Rust target mismatch: expected ${target.rustTarget}.`);
     assert(release.cargoPackage === lock.toolchain.cargoPackage, 'Sidecar release metadata Cargo package mismatch.');
     assert(release.cargoProfile === lock.toolchain.cargoProfile, 'Sidecar release metadata Cargo profile mismatch.');
+    const expectedPatches = (lock.sourcePatches || [])
+        .filter(patch => patch.targets.includes(targetName))
+        .map(({ id, sha256 }) => ({ id, sha256 }));
+    assert(JSON.stringify(release.sourcePatches) === JSON.stringify(expectedPatches), 'Sidecar release metadata source patch mismatch.');
     assert(
         release.bundledTools?.ripgrep?.package === lock.bundledTools?.ripgrep?.package &&
         release.bundledTools?.ripgrep?.version === lock.bundledTools?.ripgrep?.version &&

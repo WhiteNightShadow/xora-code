@@ -19,6 +19,12 @@ describe("Grok sidecar lock", () => {
       source: "crates.io",
       features: ["pcre2"],
     });
+    assert.deepEqual(lock.sourcePatches, [{
+      id: "windows-portable-protoc-output-v1",
+      targets: ["win32-x64"],
+      file: "patches/0001-windows-portable-protoc-dependency-output.patch",
+      sha256: "2737876ec3d0f38947566218a24d0c66d83d5d12311138aff45c586e0ab80d46",
+    }]);
     assert.equal(lock.runtime.packagedBinaryName, "grok");
     assert.deepEqual(lock.runtime.args, [
       "--no-auto-update",
@@ -57,6 +63,7 @@ describe("Grok sidecar lock", () => {
           features: ["pcre2"],
         },
       },
+      sourcePatches: [],
       runtime: {
         packagedBinaryName: "grok",
         args: ["agent", "stdio"],
