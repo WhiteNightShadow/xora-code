@@ -179,6 +179,8 @@ test('an inactive session status update does not steal the active selection', ()
 test('file review opens immutable before and after snapshots in the native Theia Diff editor', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
+    const beforePath = path.resolve('/history/before-example.ts');
+    const afterPath = path.resolve('/history/after-example.ts');
     const opened = [];
     const notices = [];
     widget.model = { snapshot: { workspaceRoot: '/fixture' } };
@@ -192,16 +194,16 @@ test('file review opens immutable before and after snapshots in the native Theia
         diffId: 'diff-a',
         sessionId: 'a',
         path: 'src/example.ts',
-        oldPath: '/history/before-example.ts',
-        newPath: '/history/after-example.ts',
+        oldPath: beforePath,
+        newPath: afterPath,
         oldHash: 'a'.repeat(64),
         newHash: 'b'.repeat(64),
         diff: '-before\n+after'
     });
 
     assert.equal(opened.length, 1);
-    assert.equal(opened[0][0].path.fsPath(), '/history/before-example.ts');
-    assert.equal(opened[0][1].path.fsPath(), '/history/after-example.ts');
+    assert.equal(opened[0][0].path.fsPath(), beforePath);
+    assert.equal(opened[0][1].path.fsPath(), afterPath);
     assert.equal(opened[0][2], 'example.ts（Agent 修改）');
     assert.deepEqual(notices, []);
 });
@@ -210,11 +212,11 @@ test('file navigation resolves exact multi-root paths, nested suffix paths and f
     const { FileUri } = require('@theia/core/lib/common/file-uri');
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
-    const mainRoot = '/workspace/hello-doc';
-    const additionalRoot = '/workspace/shared-docs';
-    const nestedChinese = `${mainRoot}/技术分享/示例项目/材料/案例-滴滴估价-抓包样例.md`;
-    const exactAdditional = `${additionalRoot}/规范/接口说明.md`;
-    const external = '/external/交付文档/检查清单.md';
+    const mainRoot = path.resolve('/workspace/hello-doc');
+    const additionalRoot = path.resolve('/workspace/shared-docs');
+    const nestedChinese = path.join(mainRoot, '技术分享', '示例项目', '材料', '案例-滴滴估价-抓包样例.md');
+    const exactAdditional = path.join(additionalRoot, '规范', '接口说明.md');
+    const external = path.resolve('/external/交付文档/检查清单.md');
     const existing = new Set([nestedChinese, exactAdditional, external]);
     widget.model = {
         snapshot: {
@@ -223,7 +225,7 @@ test('file navigation resolves exact multi-root paths, nested suffix paths and f
         }
     };
     widget.roots = [mainRoot, additionalRoot];
-    widget.pathPlatform = () => 'linux';
+    widget.pathPlatform = () => process.platform === 'win32' ? 'win32' : 'linux';
     widget.fileService = {
         exists: async uri => existing.has(FileUri.fsPath(uri))
     };
@@ -253,8 +255,8 @@ test('file navigation resolves exact multi-root paths, nested suffix paths and f
     );
 
     widget.fileSearchService.find = async () => [
-        FileUri.create(`${mainRoot}/项目甲/材料/同名说明.md`).toString(),
-        FileUri.create(`${mainRoot}/项目乙/材料/同名说明.md`).toString()
+        FileUri.create(path.join(mainRoot, '项目甲', '材料', '同名说明.md')).toString(),
+        FileUri.create(path.join(mainRoot, '项目乙', '材料', '同名说明.md')).toString()
     ];
     assert.equal(await widget.resolveWorkspaceFileUri('材料/同名说明.md'), undefined,
         'equally ranked suffix matches must fail closed instead of opening the wrong file');

@@ -24,13 +24,15 @@ function registryHarness(initial) {
 
 test('new-session model choice remains the user default after changing project roots', async () => {
     const service = new FakeAgentHostService();
+    const projectA = path.resolve('/fixture/project-a');
+    const projectB = path.resolve('/fixture/project-b');
     await service.selectDefaultModel('grok-subscription', 'fixture-model');
-    await service.setWorkspaceRoot('/fixture/project-a');
-    await service.setWorkspaceRoot('/fixture/project-b');
+    await service.setWorkspaceRoot(projectA);
+    await service.setWorkspaceRoot(projectB);
 
     const snapshot = await service.getSnapshot();
     assert.equal(snapshot.selectedModel, 'fixture-model');
-    assert.equal(snapshot.workspaceRoot, '/fixture/project-b');
+    assert.equal(snapshot.workspaceRoot, projectB);
     assert.equal(snapshot.workspaceTrusted, false, 'a model preference must never grant project trust');
 });
 

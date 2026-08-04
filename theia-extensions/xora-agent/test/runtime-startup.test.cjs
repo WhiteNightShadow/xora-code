@@ -156,11 +156,13 @@ test('a project prewarm retries a transient crash and becomes ready without edit
 test('workspace attachment starts Agent standby before the Agent widget needs user input', async () => {
     widgetClass();
     const { WorkspaceTrustGuard } = require('../lib/browser/workspace-trust-guard');
+    const { FileUri } = require('@theia/core/lib/common/file-uri');
+    const fixtureRoot = path.resolve('/fixture');
     const guard = Object.create(WorkspaceTrustGuard.prototype);
     const calls = [];
     const snapshot = {
         phase: 'stopped',
-        workspaceRoot: '/fixture',
+        workspaceRoot: fixtureRoot,
         workspaceAttached: true,
         workspaceTrusted: false,
         providerId: 'xora-relay',
@@ -196,16 +198,15 @@ test('workspace attachment starts Agent standby before the Agent widget needs us
     guard.lastSynchronizationSignature = undefined;
     guard.agentStandbyKey = undefined;
 
-    const { FileUri } = require('@theia/core/lib/common/file-uri');
-    const roots = [{ resource: FileUri.create('/fixture') }];
+    const roots = [{ resource: FileUri.create(fixtureRoot) }];
     await guard.synchronize(roots, false);
     await flushAsyncWork();
 
     assert.deepEqual(calls, [
-        ['root', '/fixture'],
-        ['attach', { workspaceRoots: ['/fixture'], trusted: false }],
+        ['root', fixtureRoot],
+        ['attach', { workspaceRoots: [fixtureRoot], trusted: false }],
         ['providers'],
-        ['start', { workspaceRoot: '/fixture', providerId: 'xora-relay' }]
+        ['start', { workspaceRoot: fixtureRoot, providerId: 'xora-relay' }]
     ]);
     assert.equal(guard.agentStandbyKey, undefined);
 });

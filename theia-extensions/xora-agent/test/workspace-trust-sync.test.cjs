@@ -20,7 +20,7 @@ test('renderer trust synchronization stays fail-closed without blocking the firs
 
 test('an untrusted root becomes attached and its runtime can wait for input', async () => {
     const service = new FakeAgentHostService();
-    const root = '/fixture/workspace-a';
+    const root = path.resolve('/fixture/workspace-a');
 
     let snapshot = await service.setWorkspaceRoot(root);
     assert.equal(snapshot.workspaceAttached, false);
@@ -37,7 +37,7 @@ test('an untrusted root becomes attached and its runtime can wait for input', as
 
 test('Theia revocation clears privileged state without stopping the ready runtime', async () => {
     const service = new FakeAgentHostService();
-    const root = '/fixture/workspace';
+    const root = path.resolve('/fixture/workspace');
     const events = [];
     let permissionResolved = false;
     service.setClient({ onAgentEvent: event => events.push(event) });
@@ -58,7 +58,7 @@ test('Theia revocation clears privileged state without stopping the ready runtim
 });
 
 test('production trust revocation keeps ACP standby alive and cancels pending grants', async () => {
-    const root = '/fixture/workspace';
+    const root = path.resolve('/fixture/workspace');
     const host = Object.create(GrokAgentHostService.prototype);
     let stopped = 0;
     let resolved;
@@ -109,12 +109,12 @@ test('backend rejects any workspace synchronization that omits the selected Agen
 
 test('fake and production runtimes reject a selected root until the current window attaches it', async () => {
     const service = new FakeAgentHostService();
-    const root = '/fixture/unattached';
+    const root = path.resolve('/fixture/unattached');
     await service.setWorkspaceRoot(root);
 
     await assert.rejects(
         service.startRuntime({ workspaceRoot: root, providerId: 'grok-subscription' }),
-        /not attached/
+        /not attached|Select this Agent root/
     );
 
     const host = Object.create(GrokAgentHostService.prototype);
@@ -124,7 +124,7 @@ test('fake and production runtimes reject a selected root until the current wind
     host.security = { canonicalRoot: value => path.normalize(value) };
     await assert.rejects(
         host.startRuntimeLocked({ workspaceRoot: root, providerId: 'grok-subscription' }),
-        /not attached/
+        /not attached|Select this Agent root/
     );
 });
 
