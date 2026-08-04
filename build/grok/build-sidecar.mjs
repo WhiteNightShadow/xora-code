@@ -61,13 +61,21 @@ function nativeCompilerFlagsFor(pathRemaps, rustTarget) {
     // but silently ignores it (D9007). Keep the prerequisite next to every
     // audited mapping so native dependency diagnostics cannot retain runner
     // paths on newer Visual Studio toolchains.
+    // Do not remap the native build output directory. CMake's generated
+    // projects pass an absolute /Fd PDB path through cl.exe; applying
+    // /pathmap to that output path makes MSVC try to create the PDB under the
+    // virtual prefix and fail with C1090 before AWS-LC is compiled. Rust still
+    // receives the complete remap set, and the finished native binaries are
+    // scanned for every original path before they can be staged.
+    const safeNativeRemaps = pathRemaps.filter(({ label }) =>
+      label !== "target directory" && label !== "work directory");
     return [
       "/experimental:deterministic",
-      // CMake try-compile adds /Zi by default. Keep debug records embedded so
-      // /pathmap cannot turn an external PDB output path into a virtual path
-      // that MSVC then tries (and fails) to create on disk.
+      // Keep debug records embedded for direct compiler invocations. CMake may
+      // override this with /Zi, which is why output-directory remaps are also
+      // excluded above.
       "/Z7",
-      ...pathRemaps.map(({ from, to }) => `/pathmap:${from}=${to}`),
+      ...safeNativeRemaps.map(({ from, to }) => `/pathmap:${from}=${to}`),
     ];
   }
   return pathRemaps.map(({ from, to }) => `-ffile-prefix-map=${from}=${to}`);

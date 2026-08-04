@@ -187,7 +187,13 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
     assert.equal(plan.env.CC_SHELL_ESCAPED_FLAGS, "1");
     const windows = fixture.rustTarget.endsWith("-pc-windows-msvc");
     const nativeArguments = windows
-      ? ["/experimental:deterministic", "/Z7", ...pathRemaps.map(({ from, to }) => `/pathmap:${from}=${to}`)]
+      ? [
+        "/experimental:deterministic",
+        "/Z7",
+        ...pathRemaps
+          .filter(({ label }) => label !== "target directory" && label !== "work directory")
+          .map(({ from, to }) => `/pathmap:${from}=${to}`),
+      ]
       : pathRemaps.map(({ from, to }) => `-ffile-prefix-map=${from}=${to}`);
     const nativeFlags = nativeArguments.map(argument => `'${argument}'`).join(" ");
     assert.equal(plan.env.CFLAGS, nativeFlags);
