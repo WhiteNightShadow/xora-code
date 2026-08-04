@@ -11,6 +11,7 @@ const path = require('node:path');
 const test = require('node:test');
 const {
     assertNoBuildPathLeaks,
+    assertNoBuildPathLeaksInAllFiles,
     executablePayloads,
     findBuildPathLeak,
     findBuildPathLeakInBuffer,
@@ -278,6 +279,24 @@ test('fail-closed scan redacts the discovered path and scans app code plus execu
     assert.match(error.message, /addon\.node contains a macOS user-home build path/u);
     assert.match(error.message, /path value was redacted/u);
     assert.doesNotMatch(error.message, /private-builder|native\.cc/u);
+});
+
+test('afterPack scans every regular file, including extension source maps', t => {
+    const root = temporaryDirectory(t);
+    const extension = path.join(root, 'resources', 'app', 'plugins', 'language', 'extension.js.map');
+    const readme = path.join(root, 'resources', 'README.txt');
+    fs.mkdirSync(path.dirname(extension), { recursive: true });
+    fs.writeFileSync(extension, JSON.stringify({ sources: ['/Users/private-builder/work/extension.ts'] }));
+    fs.writeFileSync(readme, 'ordinary packaged documentation');
+
+    assert.equal(assertNoBuildPathLeaks(root).length, 0, 'executable-only scan should not see source maps');
+    assert.throws(() => assertNoBuildPathLeaksInAllFiles(root), /extension\.js\.map contains a macOS user-home build path/u);
+
+    fs.writeFileSync(extension, JSON.stringify({ sources: ['xora://source/extension.ts'] }));
+    assert.deepEqual(
+        assertNoBuildPathLeaksInAllFiles(root).map(file => path.relative(root, file)).sort(),
+        ['resources/README.txt', 'resources/app/plugins/language/extension.js.map']
+    );
 });
 
 test('native addon stripping uses an atomic temporary copy and preserves its mode', t => {

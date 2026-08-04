@@ -29,6 +29,11 @@ files:
 extraResources:
   - from: ../../plugins
     to: app/plugins
+    filter:
+      - "**/*"
+      # VS Code publishes large diagnostic source maps containing upstream CI
+      # paths. They are not used by the extension host at runtime.
+      - "!**/*.map"
   - from: ../../resources/sidecars/grok
     to: sidecars/grok
   - from: ../../LICENSE

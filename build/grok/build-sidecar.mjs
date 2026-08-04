@@ -56,8 +56,17 @@ function shellEscapeCompilerArgument(value) {
 }
 
 function nativeCompilerFlagsFor(pathRemaps, rustTarget) {
-  const prefix = rustTarget.endsWith("-pc-windows-msvc") ? "/pathmap:" : "-ffile-prefix-map=";
-  return pathRemaps.map(({ from, to }) => `${prefix}${from}=${to}`);
+  if (rustTarget.endsWith("-pc-windows-msvc")) {
+    // MSVC accepts /pathmap without failing when deterministic mode is absent,
+    // but silently ignores it (D9007). Keep the prerequisite next to every
+    // audited mapping so native dependency diagnostics cannot retain runner
+    // paths on newer Visual Studio toolchains.
+    return [
+      "/experimental:deterministic",
+      ...pathRemaps.map(({ from, to }) => `/pathmap:${from}=${to}`),
+    ];
+  }
+  return pathRemaps.map(({ from, to }) => `-ffile-prefix-map=${from}=${to}`);
 }
 
 function cargoEnvironment({ targetDirectory, pathRemaps, rustTarget, environment }) {
@@ -81,6 +90,7 @@ function cargoEnvironment({ targetDirectory, pathRemaps, rustTarget, environment
   delete env.CL;
   delete env._CL_;
   delete env.CC_SHELL_ESCAPED_FLAGS;
+  delete env.AWS_LC_SYS_CMAKE_BUILDER;
 
   // Rust path remapping does not cover C/C++ sources compiled by crates such
   // as tree-sitter. Apply the equivalent native compiler policy so __FILE__
@@ -91,6 +101,13 @@ function cargoEnvironment({ targetDirectory, pathRemaps, rustTarget, environment
   env.CC_SHELL_ESCAPED_FLAGS = "1";
   env.CFLAGS = nativeCompilerFlags;
   env.CXXFLAGS = nativeCompilerFlags;
+  if (rustTarget.endsWith("-pc-windows-msvc")) {
+    // aws-lc-sys 0.39.1's cc builder only compiles its builtin-swap probe.
+    // MSVC 14.44 accepts the undeclared builtin calls and fails much later at
+    // link time. The upstream CMake path performs a complete feature check and
+    // correctly falls back to the MSVC byte-swap intrinsics.
+    env.AWS_LC_SYS_CMAKE_BUILDER = "1";
+  }
   return env;
 }
 
@@ -187,6 +204,10 @@ function assertCargoEnvironment(env, { targetDirectory, pathRemaps, rustTarget }
     env.CXXFLAGS !== expectedNativeCompilerFlags
   ) {
     fail("native compiler flags must exactly enforce path remapping");
+  }
+  const expectsWindowsCmake = rustTarget.endsWith("-pc-windows-msvc");
+  if ((env.AWS_LC_SYS_CMAKE_BUILDER === "1") !== expectsWindowsCmake) {
+    fail("AWS-LC builder policy differs from the audited native target policy");
   }
   if (
     env.RUSTFLAGS !== undefined ||

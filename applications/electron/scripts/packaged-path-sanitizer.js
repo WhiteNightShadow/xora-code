@@ -241,6 +241,23 @@ function assertNoBuildPathLeaks(root) {
     return payloads.map(({ file }) => file);
 }
 
+function assertNoBuildPathLeaksInAllFiles(root) {
+    const payloads = regularFiles(root);
+    for (const { file } of payloads) {
+        const displayName = relativeName(root, file);
+        let leak;
+        try {
+            leak = scanFileForBuildPath(file);
+        } catch {
+            fail(`could not scan packaged file ${displayName}`);
+        }
+        if (leak) {
+            fail(`${displayName} contains a ${leak.kind} (${leak.encoding}, byte ${leak.offset}); the path value was redacted`);
+        }
+    }
+    return payloads.map(({ file }) => file);
+}
+
 function stripConfiguration(platform) {
     if (platform === 'darwin') return { command: '/usr/bin/strip', arguments: ['-S'] };
     if (platform === 'linux') return { command: 'strip', arguments: ['--strip-debug'] };
@@ -525,8 +542,8 @@ function sanitizePackagedOutput(context) {
     const { platform, root } = assertNativeAfterPackContext(context);
     const ripgrep = installSourceBuiltRipgrep(root, platform);
     const stripResult = stripNativeAddons(root, platform);
-    const scanned = assertNoBuildPathLeaks(root);
-    process.stdout.write(`Installed source-built ripgrep ${ripgrep.version}, sanitized ${stripResult.stripped.length} native addon(s), and scanned ${scanned.length} packaged executable payload(s).\n`);
+    const scanned = assertNoBuildPathLeaksInAllFiles(root);
+    process.stdout.write(`Installed source-built ripgrep ${ripgrep.version}, sanitized ${stripResult.stripped.length} native addon(s), and scanned ${scanned.length} packaged file(s).\n`);
     return { ...stripResult, ripgrep, scanned };
 }
 
@@ -534,6 +551,7 @@ module.exports = {
     BUILD_PATH_PATTERNS,
     assertNativeAfterPackContext,
     assertNoBuildPathLeaks,
+    assertNoBuildPathLeaksInAllFiles,
     executablePayloads,
     findBuildPathLeak,
     findBuildPathLeakInBuffer,

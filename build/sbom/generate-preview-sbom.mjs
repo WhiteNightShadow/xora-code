@@ -346,6 +346,16 @@ export function mergeCycloneDxDocuments(packaged, dependencyInventory) {
   };
 }
 
+export function normalizeProductComponent(document, { name, packageName, version }) {
+  const escapedPackage = packageName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const debPurl = new RegExp(`^pkg:deb/${escapedPackage}@${version.replaceAll(".", "\\.")}(?:\\?|$)`, "u");
+  const matches = (document.components ?? []).filter(component =>
+    component?.name === packageName && component?.version === version && debPurl.test(component?.purl ?? ""));
+  if (matches.length > 1) fail(`multiple ${packageName} product components were discovered`);
+  if (matches.length === 1) matches[0].name = name;
+  return document;
+}
+
 /**
  * Refuse to call a source-tree inventory a distribution SBOM. The scan root
  * must be electron-builder's unpacked application and must contain both the
@@ -473,10 +483,14 @@ export async function generatePreviewSbom(options, dependencies = {}) {
     // the exact committed dependency tree used to produce it, instead of
     // publishing a deceptively tiny payload-only inventory.
     runSyft(binary, repositoryRoot, dependencySbomPath, dependencies.spawnImpl);
-    const merged = mergeCycloneDxDocuments(
+    const merged = normalizeProductComponent(mergeCycloneDxDocuments(
       JSON.parse(fs.readFileSync(packagedSbomPath, "utf8")),
       JSON.parse(fs.readFileSync(dependencySbomPath, "utf8"))
-    );
+    ), {
+      name: applicationPackage.productName ?? "Xora Code",
+      packageName: "xora-code",
+      version: applicationPackage.version
+    });
     fs.writeFileSync(sbomPath, `${JSON.stringify(merged)}\n`, { flag: "wx", mode: 0o644 });
     sanitizeSbomBuildPaths(sbomPath, [packagedSource, repositoryRoot]);
   } finally {

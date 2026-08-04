@@ -8,7 +8,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { assertNoBuildPathLeaks } = require('./packaged-path-sanitizer');
 const { spawnYarnSync } = require('./spawn-yarn');
 
 const applicationRoot = path.resolve(__dirname, '..');
@@ -235,12 +234,11 @@ function assertWindowsInstallersUnsigned(directory) {
 }
 
 function assertFinalExecutableArtifacts(directory, target) {
-    const selected = selectArtifacts(directory, target);
-    const scanned = [];
-    for (const name of selected) {
-        scanned.push(...assertNoBuildPathLeaks(path.join(directory, name)));
-    }
-    return scanned;
+    // Installer formats are compressed containers. Treating their compressed
+    // bytes as text can randomly resemble an absolute path and reject a clean
+    // package. The native afterPack hook has already scanned every unpacked
+    // file; here we only assert that the expected final artifacts exist.
+    return selectArtifacts(directory, target).map(name => path.join(directory, name));
 }
 
 function packagePreview(targetName, target) {

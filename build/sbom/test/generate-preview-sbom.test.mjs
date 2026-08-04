@@ -15,6 +15,7 @@ import {
   generatePreviewSbom,
   loadLock,
   mergeCycloneDxDocuments,
+  normalizeProductComponent,
   parseArguments,
   runSyft,
   sanitizeSbomBuildPaths,
@@ -260,6 +261,27 @@ test("payload and locked dependency inventories merge without duplicate componen
     name: "xora:inventory-scope",
     value: "packaged-payload-plus-locked-build-dependencies"
   }]);
+});
+
+test("Debian product component uses the public product name without changing references", () => {
+  const document = {
+    components: [
+      { "bom-ref": "pkg:deb/xora-code@0.2.4?arch=amd64", name: "xora-code", version: "0.2.4", purl: "pkg:deb/xora-code@0.2.4?arch=amd64" },
+      { "bom-ref": "npm:xora-code", name: "xora-code", version: "0.2.4", purl: "pkg:npm/xora-code@0.2.4" }
+    ],
+    dependencies: [{ ref: "pkg:deb/xora-code@0.2.4?arch=amd64", dependsOn: ["npm:xora-code"] }]
+  };
+  const duplicate = structuredClone(document);
+  duplicate.components.push({ name: "xora-code", version: "0.2.4", purl: "pkg:deb/xora-code@0.2.4?arch=arm64" });
+  const normalized = normalizeProductComponent(document, { name: "Xora Code", packageName: "xora-code", version: "0.2.4" });
+  assert.equal(normalized.components[0].name, "Xora Code");
+  assert.equal(normalized.components[1].name, "xora-code");
+  assert.deepEqual(normalized.dependencies, document.dependencies);
+
+  assert.throws(
+    () => normalizeProductComponent(duplicate, { name: "Xora Code", packageName: "xora-code", version: "0.2.4" }),
+    /multiple xora-code product components/u
+  );
 });
 
 test("end-to-end wrapper verifies download hash, reuses cache, and updates checksums", async t => {

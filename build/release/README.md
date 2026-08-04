@@ -20,6 +20,20 @@ Rust and native C/C++ compilers. This covers dependency `__FILE__` strings as
 well as Rust diagnostics; the release gate rejects any binary that still embeds
 the runner home, work tree, Cargo cache, or Rustup cache path.
 
+On Windows, the native remap includes MSVC deterministic mode because recent
+toolchains otherwise accept but ignore `/pathmap`. The pinned AWS-LC dependency
+is built through CMake so its byte-swap feature probe is link-checked instead of
+being accepted at compile time and failing during the final Grok link.
+
+Language plugins are an audited local release input because the plugin staging
+directory is intentionally not part of the source archive. Transfer one verified
+plugin bundle to every native builder, compare its SHA-256 before extraction, and
+record that digest in the build log. Published extension source maps are excluded:
+they are not required at runtime and commonly retain upstream CI paths. The
+`afterPack` release gate scans every regular file in the unpacked application;
+compressed installer bytes are validated structurally and by checksum rather than
+searched as text, avoiding false positives from compression entropy.
+
 ## Prepare one immutable source archive
 
 Run this only from a clean local Git worktree after the release candidate has been committed:
@@ -114,6 +128,12 @@ scp xora-code-<commit>.tar.gz \
 scp xora-code-<commit>.tar.gz native-preview-windows-x64.ps1 `
     native-preview-tools.lock.json <windows-builder>:C:/xora-input/<short-commit>/
 ```
+
+If the committed source archive intentionally omits the generated `plugins/`
+directory, create one plugin archive locally, hash it once, and copy those exact
+bytes to both builders. Extract it only under the fresh source root and refuse the
+build when the remote digest differs. Never reuse a mutable plugin directory from
+an older work tree.
 
 After transfer, compare the remote source archive SHA-256 with the coordinator's
 digest before invoking either builder. Build host addresses, passwords, private keys,

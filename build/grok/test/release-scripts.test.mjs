@@ -138,6 +138,7 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
       CXXFLAGS_x86_64_unknown_linux_gnu: "ambient",
       CPPFLAGS: "ambient",
       CL: "ambient",
+      AWS_LC_SYS_CMAKE_BUILDER: "0",
       [fixture.ambientTargetFlags]: "ambient",
     };
     const ripgrepInstall = createRipgrepInstallPlan({
@@ -184,12 +185,14 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
     assert.equal(plan.env.CL, undefined);
     assert.equal(plan.env.CXXFLAGS_x86_64_unknown_linux_gnu, undefined);
     assert.equal(plan.env.CC_SHELL_ESCAPED_FLAGS, "1");
-    const nativePrefix = fixture.rustTarget.endsWith("-pc-windows-msvc") ? "/pathmap:" : "-ffile-prefix-map=";
-    const nativeFlags = pathRemaps
-      .map(({ from, to }) => `'${nativePrefix}${from}=${to}'`)
-      .join(" ");
+    const windows = fixture.rustTarget.endsWith("-pc-windows-msvc");
+    const nativeArguments = windows
+      ? ["/experimental:deterministic", ...pathRemaps.map(({ from, to }) => `/pathmap:${from}=${to}`)]
+      : pathRemaps.map(({ from, to }) => `-ffile-prefix-map=${from}=${to}`);
+    const nativeFlags = nativeArguments.map(argument => `'${argument}'`).join(" ");
     assert.equal(plan.env.CFLAGS, nativeFlags);
     assert.equal(plan.env.CXXFLAGS, nativeFlags);
+    assert.equal(plan.env.AWS_LC_SYS_CMAKE_BUILDER, windows ? "1" : undefined);
     assert.equal(plan.env.GROK_SHELL_BUNDLE_RG_PATH, bundledRipgrepPath);
     assert.equal(plan.env.GROK_TOOLS_BUNDLE_RG_PATH, bundledRipgrepPath);
     const flags = plan.env.CARGO_ENCODED_RUSTFLAGS.split("\u001f");

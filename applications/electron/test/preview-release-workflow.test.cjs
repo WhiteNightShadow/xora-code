@@ -80,6 +80,7 @@ test('preview packaging creates installers without formal signing or update mani
     assert.match(macHook, /stripNativeAddons/u);
     assert.match(macHook, /assertNoBuildPathLeaks\(bundle\)/u);
     assert.match(builderConfiguration, /^afterPack: \.\/scripts\/sanitize-after-pack\.js$/mu);
+    assert.match(builderConfiguration, /from: \.\.\/\.\.\/plugins[\s\S]*!\*\*\/\*\.map/u);
     assert.match(sanitizerHook, /sanitizePackagedOutput\(context\)/u);
 
     for (const forbidden of [
@@ -147,22 +148,13 @@ test('packager strips signing credentials and stages only target installers plus
     assert.throws(() => selectArtifacts(dist, TARGETS['darwin-arm64']), /formal update manifests/u);
 });
 
-test('packager rejects a build path in final installer executables and redacts its value', t => {
+test('packager verifies final compressed installers structurally after unpacked payload scanning', t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-preview-final-scan-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const installer = path.join(root, `Xora Code-${applicationVersion}-win-x64.exe`);
     fs.writeFileSync(installer, String.raw`debug=D:\Users\private-builder\work\xora\installer.cc`);
 
-    let error;
-    try {
-        assertFinalExecutableArtifacts(root, TARGETS['win32-x64']);
-    } catch (caught) {
-        error = caught;
-    }
-    assert.ok(error instanceof Error);
-    assert.match(error.message, /Windows user or CI build path/u);
-    assert.doesNotMatch(error.message, /private-builder|installer\.cc/u);
-
-    fs.writeFileSync(installer, 'https://docs.example.test/D:/Users/example/work/setup');
     assert.deepEqual(assertFinalExecutableArtifacts(root, TARGETS['win32-x64']), [installer]);
+    fs.rmSync(installer);
+    assert.throws(() => assertFinalExecutableArtifacts(root, TARGETS['win32-x64']), /required \.exe installer was not produced/u);
 });
