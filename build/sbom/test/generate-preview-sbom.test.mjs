@@ -225,14 +225,15 @@ test("SBOM sanitization removes the native checkout root from all string fields"
   }));
   sanitizeSbomBuildPaths(sbom, root);
   const contents = fs.readFileSync(sbom, "utf8");
+  const sanitized = JSON.parse(contents);
   assert.equal(contents.includes(root), false);
-  assert.match(contents, /\/node_modules\/example\/binary/u);
-  assert.match(contents, /\/yarn\.lock/u);
+  assert.equal(sanitized.components[0].name.replaceAll("\\", "/"), "/node_modules/example/binary");
+  assert.equal(sanitized.components[0].properties[0].value.replaceAll("\\", "/"), "/yarn.lock");
 });
 
 test("distribution SBOM input must be an unpacked application with shipped sidecar and legal assets", t => {
   const root = temporary(t, "xora-syft-package-root");
-  assert.throws(() => validatePackagedApplicationRoot(root, "linux-x64"), /missing resources\/app\.asar/u);
+  assert.throws(() => validatePackagedApplicationRoot(root, "linux-x64"), /missing resources[\\/]app\.asar/u);
   for (const relative of [
     "resources/app.asar",
     "resources/sidecars/grok/grok",

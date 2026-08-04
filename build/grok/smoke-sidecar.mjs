@@ -19,12 +19,19 @@ function fail(message) {
   throw new Error(`Grok ACP smoke test failed: ${message}`);
 }
 
-function binaryArgument() {
+function binaryInvocation() {
   const index = process.argv.indexOf("--binary");
   if (index < 0 || !process.argv[index + 1]) {
-    fail("usage: node build/grok/smoke-sidecar.mjs --binary <path>");
+    fail("usage: node build/grok/smoke-sidecar.mjs --binary <path> [--binary-arg <value>]");
   }
-  return resolve(process.argv[index + 1]);
+  const args = [];
+  for (let argumentIndex = 2; argumentIndex < process.argv.length; argumentIndex += 1) {
+    if (process.argv[argumentIndex] !== "--binary-arg") continue;
+    if (!process.argv[argumentIndex + 1]) fail("--binary-arg requires a value");
+    args.push(process.argv[argumentIndex + 1]);
+    argumentIndex += 1;
+  }
+  return { binary: resolve(process.argv[index + 1]), args };
 }
 
 function killProcessTree(child) {
@@ -62,7 +69,7 @@ async function withTimeout(promise, milliseconds, label) {
 }
 
 async function main() {
-  const binary = binaryArgument();
+  const { binary, args: binaryArgs } = binaryInvocation();
   const lock = JSON.parse(await readFile(lockPath, "utf8"));
   const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
   const home = await mkdtemp(join(tmpdir(), "whitenight-grok-smoke-"));
@@ -72,7 +79,7 @@ async function main() {
     : undefined;
   await mkdir(workspace, { recursive: true });
 
-  const version = spawnSync(binary, ["--version"], { encoding: "utf8", windowsHide: true });
+  const version = spawnSync(binary, [...binaryArgs, "--version"], { encoding: "utf8", windowsHide: true });
   if (version.status !== 0 || !version.stdout.includes(lock.upstream.version)) {
     fail(`--version did not report ${lock.upstream.version}`);
   }
@@ -102,7 +109,7 @@ async function main() {
 
   const runtimeArgs = lock.runtime.args.map((value) => (value === "<root>" ? workspace : value));
   if (debugFile) runtimeArgs.push("--debug", "--debug-file", debugFile);
-  const child = spawn(binary, runtimeArgs, {
+  const child = spawn(binary, [...binaryArgs, ...runtimeArgs], {
     detached: process.platform !== "win32",
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],

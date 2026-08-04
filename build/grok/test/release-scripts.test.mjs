@@ -58,9 +58,20 @@ async function createAssets(directory) {
 async function createFakeGrok(path, body) {
   await writeFile(path, `#!/usr/bin/env node\n${body}\n`, "utf8");
   await chmod(path, 0o755);
-  const version = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 5_000 });
+  const command = process.platform === "win32" ? process.execPath : path;
+  const args = process.platform === "win32" ? [path] : [];
+  const version = spawnSync(command, [...args, "--version"], { encoding: "utf8", timeout: 5_000 });
   assert.equal(version.status, 0, version.stderr);
   assert.match(version.stdout, /0\.2\.102/u);
+  return { command, args };
+}
+
+function smokeArguments(fakeGrok) {
+  return [
+    smokeScript,
+    "--binary", fakeGrok.command,
+    ...fakeGrok.args.flatMap((argument) => ["--binary-arg", argument]),
+  ];
 }
 
 test("sidecar staging removes stale renamed notices before packaging", async () => {
@@ -351,7 +362,7 @@ test("ACP smoke keeps eager model discovery on a loopback fixture", async (conte
   const root = await mkdtemp(join(tmpdir(), "xora-sidecar-smoke-test-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const binary = join(root, "fake-grok.mjs");
-  await createFakeGrok(binary, `
+  const fakeGrok = await createFakeGrok(binary, `
 import { createInterface } from "node:readline";
 if (process.argv.includes("--version")) {
   process.stdout.write("grok 0.2.102 (smoke fixture)\\n");
@@ -377,7 +388,7 @@ lines.on("line", (line) => {
   }
 });`);
 
-  const result = spawnSync(process.execPath, [smokeScript, "--binary", binary], {
+  const result = spawnSync(process.execPath, smokeArguments(fakeGrok), {
     encoding: "utf8",
     timeout: 10_000,
   });
@@ -389,7 +400,7 @@ test("ACP smoke reports an early sidecar exit without waiting for request timeou
   const root = await mkdtemp(join(tmpdir(), "xora-sidecar-exit-test-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const binary = join(root, "fake-grok.mjs");
-  await createFakeGrok(binary, `
+  const fakeGrok = await createFakeGrok(binary, `
 if (process.argv.includes("--version")) {
   process.stdout.write("grok 0.2.102 (exit fixture)\\n");
   process.exit(0);
@@ -397,7 +408,7 @@ if (process.argv.includes("--version")) {
 process.exit(23);`);
 
   const startedAt = Date.now();
-  const result = spawnSync(process.execPath, [smokeScript, "--binary", binary], {
+  const result = spawnSync(process.execPath, smokeArguments(fakeGrok), {
     encoding: "utf8",
     timeout: 10_000,
   });
