@@ -253,7 +253,8 @@ test('real node-pty Windows prebuilds are sanitized without changing their lengt
 test('fail-closed scan redacts the discovered path and scans app code plus executables', t => {
     const root = temporaryDirectory(t);
     const native = path.join(root, 'addon.node');
-    const executable = path.join(root, 'xora-code');
+    const executableName = process.platform === 'win32' ? 'xora-code.exe' : 'xora-code';
+    const executable = path.join(root, executableName);
     const applicationCode = path.join(root, 'app.asar');
     const documentation = path.join(root, 'README.txt');
     fs.writeFileSync(native, 'native payload');
@@ -264,7 +265,7 @@ test('fail-closed scan redacts the discovered path and scans app code plus execu
 
     assert.deepEqual(
         executablePayloads(root).map(({ file }) => path.basename(file)).sort(),
-        ['addon.node', 'app.asar', 'xora-code']
+        ['addon.node', 'app.asar', executableName]
     );
     assert.equal(assertNoBuildPathLeaks(root).length, 3);
 
@@ -294,7 +295,7 @@ test('afterPack scans every regular file, including extension source maps', t =>
 
     fs.writeFileSync(extension, JSON.stringify({ sources: ['xora://source/extension.ts'] }));
     assert.deepEqual(
-        assertNoBuildPathLeaksInAllFiles(root).map(file => path.relative(root, file)).sort(),
+        assertNoBuildPathLeaksInAllFiles(root).map(file => path.relative(root, file).replaceAll(path.sep, '/')).sort(),
         ['resources/README.txt', 'resources/app/plugins/language/extension.js.map']
     );
 });
@@ -319,7 +320,7 @@ test('native addon stripping uses an atomic temporary copy and preserves its mod
     assert.equal(calls[0].args[0], '-S');
     assert.notEqual(calls[0].args.at(-1), addon);
     assert.equal(fs.readFileSync(addon, 'utf8'), 'sanitized native addon');
-    assert.equal(fs.statSync(addon).mode & 0o777, 0o755);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(addon).mode & 0o777, 0o755);
     assert.deepEqual(fs.readdirSync(path.dirname(addon)), ['addon.node']);
 });
 
