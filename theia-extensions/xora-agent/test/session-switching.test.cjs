@@ -212,11 +212,12 @@ test('file navigation resolves exact multi-root paths, nested suffix paths and f
     const { FileUri } = require('@theia/core/lib/common/file-uri');
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
-    const mainRoot = path.resolve('/workspace/hello-doc');
-    const additionalRoot = path.resolve('/workspace/shared-docs');
+    const nativePath = value => FileUri.fsPath(FileUri.create(path.resolve(value)));
+    const mainRoot = nativePath('/workspace/hello-doc');
+    const additionalRoot = nativePath('/workspace/shared-docs');
     const nestedChinese = path.join(mainRoot, '技术分享', '示例项目', '材料', '案例-滴滴估价-抓包样例.md');
     const exactAdditional = path.join(additionalRoot, '规范', '接口说明.md');
-    const external = path.resolve('/external/交付文档/检查清单.md');
+    const external = nativePath('/external/交付文档/检查清单.md');
     const existing = new Set([nestedChinese, exactAdditional, external]);
     widget.model = {
         snapshot: {

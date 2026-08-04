@@ -157,7 +157,7 @@ test('workspace attachment starts Agent standby before the Agent widget needs us
     widgetClass();
     const { WorkspaceTrustGuard } = require('../lib/browser/workspace-trust-guard');
     const { FileUri } = require('@theia/core/lib/common/file-uri');
-    const fixtureRoot = path.resolve('/fixture');
+    const fixtureRoot = FileUri.fsPath(FileUri.create(path.resolve('/fixture')));
     const guard = Object.create(WorkspaceTrustGuard.prototype);
     const calls = [];
     const snapshot = {
