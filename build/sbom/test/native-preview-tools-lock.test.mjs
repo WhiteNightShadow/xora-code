@@ -85,6 +85,13 @@ test("native builders retry dependency installation only a bounded number of tim
   assert.equal(windowsScript.slice(windowsInstall).match(/Invoke-CheckedWithRetry -File \$YarnExecutable/gu)?.length, 1);
 });
 
+test("native builders never download transitive browser payloads", () => {
+  for (const script of [linuxScript, windowsScript]) {
+    assert.match(script, /PUPPETEER_SKIP_DOWNLOAD/u);
+    assert.match(script, /PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD/u);
+  }
+});
+
 test("native builders clear ambient runtime and compiler injection hooks", () => {
   for (const script of [linuxScript, windowsScript]) {
     for (const name of ["NODE_OPTIONS", "PYTHONPATH", "RUSTC_WRAPPER", "CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS"]) {

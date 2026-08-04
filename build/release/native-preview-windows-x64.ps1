@@ -423,6 +423,10 @@ timeout = 120
     $env:npm_config_python = (Get-Command python.exe).Source
     $env:npm_config_msvs_version = '2022'
     $env:ELECTRON_CACHE = Join-Path $ToolCache 'electron-cache'
+    # Puppeteer is transitive build/test tooling; its browser payload is not
+    # shipped or used by Xora Code. Ignore incomplete browser caches on images.
+    $env:PUPPETEER_SKIP_DOWNLOAD = 'true'
+    $env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'
     $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
     $env:CARGO_INCREMENTAL = '0'
     $env:CARGO_NET_GIT_FETCH_WITH_CLI = 'true'

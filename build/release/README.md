@@ -128,6 +128,12 @@ If a remote download repeatedly stalls, stop that attempt and seed only the miss
 locked asset from the coordinator. Do not switch to an arbitrary mirror without
 updating the lock and reviewing its provenance.
 
+Puppeteer and Playwright browser payloads are intentionally skipped by both native
+builders. They are transitive development dependencies, are not included in the
+desktop application, and must not make a release depend on a multi-hundred-megabyte
+browser download. The Electron runtime used by the product remains locked and
+verified independently.
+
 ## Publication boundary
 
 The output is intentionally unsigned preview material. These scripts never create a release, update a mutable tag, or claim production signing. Pull the bundle, `.sha256.txt`, and `.build.json` back to the trusted coordinator; verify the outer digest, safely extract it, run `build/sbom/verify-preview-assets.mjs` again, and only then upload the individual preview assets to an immutable GitHub prerelease.

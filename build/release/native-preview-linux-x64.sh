@@ -285,6 +285,11 @@ export YARN_CACHE_FOLDER="$tool_cache/yarn-cache"
 export npm_config_cache="$tool_cache/npm-cache"
 export npm_config_python="$(command -v python3)"
 export ELECTRON_CACHE="$tool_cache/electron-cache"
+# Puppeteer is a transitive build/test dependency. Xora Code neither embeds nor
+# launches its downloaded browsers, so never let a partial browser cache make a
+# native desktop build depend on another large CDN download.
+export PUPPETEER_SKIP_DOWNLOAD=true
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 export CSC_IDENTITY_AUTO_DISCOVERY=false
 export CARGO_INCREMENTAL=0
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
