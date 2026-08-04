@@ -51,7 +51,16 @@ function rustFlagsFor(pathRemaps) {
   ];
 }
 
-function cargoEnvironment({ targetDirectory, pathRemaps, environment }) {
+function shellEscapeCompilerArgument(value) {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function nativeCompilerFlagsFor(pathRemaps, rustTarget) {
+  const prefix = rustTarget.endsWith("-pc-windows-msvc") ? "/pathmap:" : "-ffile-prefix-map=";
+  return pathRemaps.map(({ from, to }) => `${prefix}${from}=${to}`);
+}
+
+function cargoEnvironment({ targetDirectory, pathRemaps, rustTarget, environment }) {
   const env = {
     ...environment,
     CARGO_INCREMENTAL: "0",
@@ -66,7 +75,22 @@ function cargoEnvironment({ targetDirectory, pathRemaps, environment }) {
   delete env.CARGO_BUILD_RUSTFLAGS;
   for (const name of Object.keys(env)) {
     if (/^CARGO_TARGET_.*_RUSTFLAGS$/u.test(name)) delete env[name];
+    if (/^(?:CFLAGS|CXXFLAGS)(?:_|$)/u.test(name)) delete env[name];
   }
+  delete env.CPPFLAGS;
+  delete env.CL;
+  delete env._CL_;
+  delete env.CC_SHELL_ESCAPED_FLAGS;
+
+  // Rust path remapping does not cover C/C++ sources compiled by crates such
+  // as tree-sitter. Apply the equivalent native compiler policy so __FILE__
+  // and diagnostic strings cannot disclose a runner or shared cache path.
+  const nativeCompilerFlags = nativeCompilerFlagsFor(pathRemaps, rustTarget)
+    .map(shellEscapeCompilerArgument)
+    .join(" ");
+  env.CC_SHELL_ESCAPED_FLAGS = "1";
+  env.CFLAGS = nativeCompilerFlags;
+  env.CXXFLAGS = nativeCompilerFlags;
   return env;
 }
 
@@ -75,6 +99,7 @@ export function createRipgrepInstallPlan({
   installRoot,
   targetDirectory,
   pathRemaps,
+  rustTarget,
   environment = process.env,
 }) {
   const ripgrep = lock.bundledTools.ripgrep;
@@ -94,11 +119,11 @@ export function createRipgrepInstallPlan({
       targetDirectory,
       ripgrep.package,
     ],
-    env: cargoEnvironment({ targetDirectory, pathRemaps, environment }),
+    env: cargoEnvironment({ targetDirectory, pathRemaps, rustTarget, environment }),
   };
 }
 
-export function assertRipgrepInstallPlan(plan, { lock, installRoot, targetDirectory, pathRemaps }) {
+export function assertRipgrepInstallPlan(plan, { lock, installRoot, targetDirectory, pathRemaps, rustTarget }) {
   const ripgrep = lock.bundledTools.ripgrep;
   const expectedArgs = [
     "install",
@@ -117,17 +142,18 @@ export function assertRipgrepInstallPlan(plan, { lock, installRoot, targetDirect
   if (plan.file !== "cargo" || JSON.stringify(plan.args) !== JSON.stringify(expectedArgs)) {
     fail("ripgrep Cargo install command differs from the audited locked source build");
   }
-  assertCargoEnvironment(plan.env, { targetDirectory, pathRemaps });
+  assertCargoEnvironment(plan.env, { targetDirectory, pathRemaps, rustTarget });
 }
 
 export function createCargoBuildPlan({
   lock,
   targetDirectory,
   pathRemaps,
+  rustTarget,
   bundledRipgrepPath,
   environment = process.env,
 }) {
-  const env = cargoEnvironment({ targetDirectory, pathRemaps, environment });
+  const env = cargoEnvironment({ targetDirectory, pathRemaps, rustTarget, environment });
   if (bundledRipgrepPath !== undefined) {
     env.GROK_SHELL_BUNDLE_RG_PATH = bundledRipgrepPath;
     env.GROK_TOOLS_BUNDLE_RG_PATH = bundledRipgrepPath;
@@ -139,7 +165,7 @@ export function createCargoBuildPlan({
   };
 }
 
-function assertCargoEnvironment(env, { targetDirectory, pathRemaps }) {
+function assertCargoEnvironment(env, { targetDirectory, pathRemaps, rustTarget }) {
   if (
     env.CARGO_INCREMENTAL !== "0" ||
     env.CARGO_TARGET_DIR !== targetDirectory ||
@@ -152,12 +178,27 @@ function assertCargoEnvironment(env, { targetDirectory, pathRemaps }) {
   if (JSON.stringify(actualRustFlags) !== JSON.stringify(expectedRustFlags)) {
     fail("encoded Rust flags must exactly enforce path remapping and symbol stripping");
   }
+  const expectedNativeCompilerFlags = nativeCompilerFlagsFor(pathRemaps, rustTarget)
+    .map(shellEscapeCompilerArgument)
+    .join(" ");
+  if (
+    env.CC_SHELL_ESCAPED_FLAGS !== "1" ||
+    env.CFLAGS !== expectedNativeCompilerFlags ||
+    env.CXXFLAGS !== expectedNativeCompilerFlags
+  ) {
+    fail("native compiler flags must exactly enforce path remapping");
+  }
   if (
     env.RUSTFLAGS !== undefined ||
     env.CARGO_BUILD_RUSTFLAGS !== undefined ||
-    Object.keys(env).some((name) => /^CARGO_TARGET_.*_RUSTFLAGS$/u.test(name))
+    env.CPPFLAGS !== undefined ||
+    env.CL !== undefined ||
+    env._CL_ !== undefined ||
+    Object.keys(env).some((name) =>
+      /^CARGO_TARGET_.*_RUSTFLAGS$/u.test(name) ||
+      (/^(?:CFLAGS|CXXFLAGS)_/u.test(name)))
   ) {
-    fail("ambient Rust flags must not override the audited build policy");
+    fail("ambient compiler flags must not override the audited build policy");
   }
 }
 
@@ -165,13 +206,14 @@ export function assertCargoBuildPlan(plan, {
   lock,
   targetDirectory,
   pathRemaps,
+  rustTarget,
   bundledRipgrepPath,
 }) {
   const expectedArgs = ["build", "-p", lock.toolchain.cargoPackage, "--profile", lock.toolchain.cargoProfile];
   if (plan.file !== "cargo" || JSON.stringify(plan.args) !== JSON.stringify(expectedArgs)) {
     fail("Cargo command differs from the audited package/profile invocation");
   }
-  assertCargoEnvironment(plan.env, { targetDirectory, pathRemaps });
+  assertCargoEnvironment(plan.env, { targetDirectory, pathRemaps, rustTarget });
   if (
     plan.env.GROK_SHELL_BUNDLE_RG_PATH !== bundledRipgrepPath ||
     plan.env.GROK_TOOLS_BUNDLE_RG_PATH !== bundledRipgrepPath
@@ -382,12 +424,14 @@ function main() {
     installRoot: ripgrepInstallRoot,
     targetDirectory: ripgrepTargetDirectory,
     pathRemaps,
+    rustTarget: target.rustTarget,
   });
   assertRipgrepInstallPlan(ripgrepInstall, {
     lock,
     installRoot: ripgrepInstallRoot,
     targetDirectory: ripgrepTargetDirectory,
     pathRemaps,
+    rustTarget: target.rustTarget,
   });
   run(ripgrepInstall.file, ripgrepInstall.args, { cwd: workDirectory, env: ripgrepInstall.env });
 
@@ -410,12 +454,14 @@ function main() {
     lock,
     targetDirectory,
     pathRemaps,
+    rustTarget: target.rustTarget,
     bundledRipgrepPath: ripgrepBinary,
   });
   assertCargoBuildPlan(cargoBuild, {
     lock,
     targetDirectory,
     pathRemaps,
+    rustTarget: target.rustTarget,
     bundledRipgrepPath: ripgrepBinary,
   });
   if (process.platform === "win32") {

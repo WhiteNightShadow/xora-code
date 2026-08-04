@@ -15,6 +15,11 @@ The Windows build also applies the audited build-only compatibility patch listed
 in `build/grok/PATCHES.md`. Its SHA-256 is pinned in `sidecar.lock.json`, and the
 builder refuses to apply it if either the upstream source or patch bytes differ.
 
+The Grok and bundled ripgrep builds apply equivalent source-path remapping to
+Rust and native C/C++ compilers. This covers dependency `__FILE__` strings as
+well as Rust diagnostics; the release gate rejects any binary that still embeds
+the runner home, work tree, Cargo cache, or Rustup cache path.
+
 ## Prepare one immutable source archive
 
 Run this only from a clean local Git worktree after the release candidate has been committed:

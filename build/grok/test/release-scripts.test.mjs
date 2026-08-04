@@ -108,6 +108,7 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
       homeDirectory: "/Users/build user",
       cargoHome: "/Users/build user/.cargo",
       rustupHome: "/Users/build user/.rustup",
+      rustTarget: "aarch64-apple-darwin",
       ambientTargetFlags: "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
     },
     {
@@ -117,6 +118,7 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
       homeDirectory: String.raw`C:\Users\builder`,
       cargoHome: String.raw`C:\Users\builder\.cargo`,
       rustupHome: String.raw`C:\Users\builder\.rustup`,
+      rustTarget: "x86_64-pc-windows-msvc",
       ambientTargetFlags: "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
     },
   ];
@@ -132,6 +134,10 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
       RUSTFLAGS: "-Cdebuginfo=2",
       CARGO_ENCODED_RUSTFLAGS: "ambient",
       CARGO_BUILD_RUSTFLAGS: "ambient",
+      CFLAGS: "ambient",
+      CXXFLAGS_x86_64_unknown_linux_gnu: "ambient",
+      CPPFLAGS: "ambient",
+      CL: "ambient",
       [fixture.ambientTargetFlags]: "ambient",
     };
     const ripgrepInstall = createRipgrepInstallPlan({
@@ -139,6 +145,7 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
       installRoot: ripgrepInstallRoot,
       targetDirectory: ripgrepTargetDirectory,
       pathRemaps,
+      rustTarget: fixture.rustTarget,
       environment,
     });
     assert.deepEqual(ripgrepInstall.args, [
@@ -154,12 +161,14 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
       installRoot: ripgrepInstallRoot,
       targetDirectory: ripgrepTargetDirectory,
       pathRemaps,
+      rustTarget: fixture.rustTarget,
     }));
 
     const plan = createCargoBuildPlan({
       lock,
       targetDirectory: fixture.targetDirectory,
       pathRemaps,
+      rustTarget: fixture.rustTarget,
       bundledRipgrepPath,
       environment,
     });
@@ -171,6 +180,16 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
     assert.equal(plan.env.RUSTFLAGS, undefined);
     assert.equal(plan.env.CARGO_BUILD_RUSTFLAGS, undefined);
     assert.equal(plan.env[fixture.ambientTargetFlags], undefined);
+    assert.equal(plan.env.CPPFLAGS, undefined);
+    assert.equal(plan.env.CL, undefined);
+    assert.equal(plan.env.CXXFLAGS_x86_64_unknown_linux_gnu, undefined);
+    assert.equal(plan.env.CC_SHELL_ESCAPED_FLAGS, "1");
+    const nativePrefix = fixture.rustTarget.endsWith("-pc-windows-msvc") ? "/pathmap:" : "-ffile-prefix-map=";
+    const nativeFlags = pathRemaps
+      .map(({ from, to }) => `'${nativePrefix}${from}=${to}'`)
+      .join(" ");
+    assert.equal(plan.env.CFLAGS, nativeFlags);
+    assert.equal(plan.env.CXXFLAGS, nativeFlags);
     assert.equal(plan.env.GROK_SHELL_BUNDLE_RG_PATH, bundledRipgrepPath);
     assert.equal(plan.env.GROK_TOOLS_BUNDLE_RG_PATH, bundledRipgrepPath);
     const flags = plan.env.CARGO_ENCODED_RUSTFLAGS.split("\u001f");
@@ -183,6 +202,7 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
       lock,
       targetDirectory: fixture.targetDirectory,
       pathRemaps,
+      rustTarget: fixture.rustTarget,
       bundledRipgrepPath,
     }));
 
@@ -195,6 +215,7 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
         lock,
         targetDirectory: fixture.targetDirectory,
         pathRemaps,
+        rustTarget: fixture.rustTarget,
         bundledRipgrepPath,
       }),
       /path remapping and symbol stripping/u,
@@ -209,6 +230,7 @@ test("sidecar and source-built ripgrep Cargo plans are pinned, remapped, and str
         lock,
         targetDirectory: fixture.targetDirectory,
         pathRemaps,
+        rustTarget: fixture.rustTarget,
         bundledRipgrepPath,
       }),
       /same audited ripgrep binary/u,
