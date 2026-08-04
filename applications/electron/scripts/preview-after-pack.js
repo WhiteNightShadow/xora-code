@@ -10,7 +10,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const {
     assertNativeAfterPackContext,
-    assertNoBuildPathLeaks,
+    assertNoBuildPathLeaksInAllFiles,
     installSourceBuiltRipgrep,
     stripNativeAddons
 } = require('./packaged-path-sanitizer');
@@ -92,8 +92,8 @@ async function previewAfterPack(context) {
             fail('the macOS preview must be ad-hoc signed without a Developer ID team');
         }
         if (sha256(sidecar) !== release.sha256) fail('ad-hoc signing invalidated the audited Grok release hash');
-        const scanned = assertNoBuildPathLeaks(bundle);
-        process.stdout.write(`Installed source-built ripgrep ${ripgrep.version}, sanitized ${stripResult.stripped.length} native addon(s), and scanned ${scanned.length} packaged executable payload(s).\n`);
+        const scanned = assertNoBuildPathLeaksInAllFiles(bundle);
+        process.stdout.write(`Installed source-built ripgrep ${ripgrep.version}, sanitized ${stripResult.stripped.length} native addon(s), and scanned ${scanned.length} packaged file(s).\n`);
     } finally {
         fs.rmSync(backupDirectory, { recursive: true, force: true });
     }

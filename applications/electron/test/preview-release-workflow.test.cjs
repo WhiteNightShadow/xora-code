@@ -78,7 +78,8 @@ test('preview packaging creates installers without formal signing or update mani
     assert.match(macHook, /Signature=adhoc/u);
     assert.match(macHook, /TeamIdentifier=not set/u);
     assert.match(macHook, /stripNativeAddons/u);
-    assert.match(macHook, /assertNoBuildPathLeaks\(bundle\)/u);
+    assert.match(macHook, /assertNoBuildPathLeaksInAllFiles\(bundle\)/u);
+    assert.doesNotMatch(macHook, /assertNoBuildPathLeaks\(bundle\)/u);
     assert.match(builderConfiguration, /^afterPack: \.\/scripts\/sanitize-after-pack\.js$/mu);
     assert.match(builderConfiguration, /from: \.\.\/\.\.\/plugins[\s\S]*!\*\*\/\*\.map/u);
     assert.match(sanitizerHook, /sanitizePackagedOutput\(context\)/u);
