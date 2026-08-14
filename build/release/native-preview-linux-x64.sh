@@ -10,6 +10,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 tool_lock="$script_dir/native-preview-tools.lock.json"
 source_archive=""
 source_sha256=""
+plugin_archive=""
+plugin_sha256=""
 commit=""
 work_root=""
 output_directory=""
@@ -20,6 +22,8 @@ usage() {
 Usage: native-preview-linux-x64.sh \
   --source-archive <xora-code-<full-sha>.tar.gz> \
   --source-sha256 <sha256> \
+  --plugin-archive <xora-code-plugins.tar.gz> \
+  --plugin-sha256 <sha256> \
   --commit <40-character-lowercase-git-sha> \
   --work-root <new-empty-build-directory> \
   --output-dir <artifact-output-directory> \
@@ -70,6 +74,8 @@ while (($#)); do
     case "$1" in
         --source-archive) source_archive="${2:-}"; shift 2 ;;
         --source-sha256) source_sha256="${2:-}"; shift 2 ;;
+        --plugin-archive) plugin_archive="${2:-}"; shift 2 ;;
+        --plugin-sha256) plugin_sha256="${2:-}"; shift 2 ;;
         --commit) commit="${2:-}"; shift 2 ;;
         --work-root) work_root="${2:-}"; shift 2 ;;
         --output-dir) output_directory="${2:-}"; shift 2 ;;
@@ -84,6 +90,8 @@ done
 [[ $(uname -m) == x86_64 ]] || fail "this script requires a native x86_64 host"
 [[ -f "$source_archive" && ! -L "$source_archive" ]] || fail "source archive is missing or is a symbolic link"
 [[ "$source_sha256" =~ ^[0-9a-f]{64}$ ]] || fail "--source-sha256 must be lowercase SHA-256"
+[[ -f "$plugin_archive" && ! -L "$plugin_archive" ]] || fail "plugin archive is missing or is a symbolic link"
+[[ "$plugin_sha256" =~ ^[0-9a-f]{64}$ ]] || fail "--plugin-sha256 must be lowercase SHA-256"
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "--commit must be a full lowercase Git SHA"
 assert_clean_absolute_path "$work_root" "--work-root"
 assert_clean_absolute_path "$output_directory" "--output-dir"
@@ -203,6 +211,14 @@ tar -xzf "$source_archive" --strip-components=1 --no-same-owner --no-same-permis
 [[ ! -e "$source_directory/.git" && ! -e "$source_directory/node_modules" ]] || fail "source archive contains forbidden repository state"
 cmp -s -- "$tool_lock" "$source_directory/build/release/native-preview-tools.lock.json" || fail "external tool lock differs from the committed source"
 cmp -s -- "${BASH_SOURCE[0]}" "$source_directory/build/release/native-preview-linux-x64.sh" || fail "running Linux builder differs from the committed source"
+plugin_extractor="$source_directory/build/release/extract-plugin-seed.py"
+[[ -f "$plugin_extractor" && ! -L "$plugin_extractor" ]] || fail "committed plugin seed extractor is missing or is a symbolic link"
+plugin_directory="$source_directory/plugins"
+mkdir -p -- "$plugin_directory"
+python3 "$plugin_extractor" \
+    --archive "$plugin_archive" \
+    --sha256 "$plugin_sha256" \
+    --destination "$plugin_directory"
 
 download_verified() {
     local url="$1" expected_hash="$2" expected_size="$3" destination="$4"
@@ -341,20 +357,21 @@ rust_version_output="$(rustc --version)"
 dotslash_version_output="$(dotslash --version | head -n 1)"
 protoc_version_output="$(protoc --version)"
 sidecar_version_output="$(resources/sidecars/grok/grok --version | head -n 1)"
-python3 - "$report" "$commit" "$source_sha256" "$bundle_name" "$bundle_sha256" \
+python3 - "$report" "$commit" "$source_sha256" "$plugin_sha256" "$bundle_name" "$bundle_sha256" \
     "$node_version_output" "$yarn_version_output" "$rust_version_output" "$dotslash_version_output" \
     "$protoc_version_output" "$sidecar_version_output" <<'PY'
 import datetime
 import json
 import sys
 
-report, commit, source_hash, bundle, bundle_hash, node, yarn, rust, dotslash, protoc, sidecar = sys.argv[1:]
+report, commit, source_hash, plugin_hash, bundle, bundle_hash, node, yarn, rust, dotslash, protoc, sidecar = sys.argv[1:]
 document = {
     "schemaVersion": 1,
     "product": "xora-code",
     "commit": commit,
     "target": "linux-x64",
     "sourceArchiveSha256": source_hash,
+    "pluginArchiveSha256": plugin_hash,
     "node": node,
     "yarn": yarn,
     "rust": rust,

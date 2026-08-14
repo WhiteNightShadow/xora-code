@@ -9,6 +9,7 @@ const releaseRoot = new URL("../../release/", import.meta.url);
 const lock = JSON.parse(fs.readFileSync(new URL("native-preview-tools.lock.json", releaseRoot), "utf8"));
 const linuxScript = fs.readFileSync(new URL("native-preview-linux-x64.sh", releaseRoot), "utf8");
 const windowsScript = fs.readFileSync(new URL("native-preview-windows-x64.ps1", releaseRoot), "utf8");
+const pluginExtractor = fs.readFileSync(new URL("extract-plugin-seed.py", releaseRoot), "utf8");
 
 test("native remote builders pin every toolchain input", () => {
   assert.equal(lock.schemaVersion, 1);
@@ -47,6 +48,21 @@ test("native builders require an externally verified archive and full commit", (
   assert.match(linuxScript, /archive\.pax_headers\.get\("comment"/u);
   assert.match(windowsScript, /pax_headers\.get\("comment"/u);
   assert.doesNotMatch(`${linuxScript}\n${windowsScript}`, /(?:password|api[_-]?key)\s*=/iu);
+});
+
+test("native builders require and report one content-addressed plugin seed", () => {
+  assert.match(linuxScript, /--plugin-archive/u);
+  assert.match(linuxScript, /--plugin-sha256/u);
+  assert.match(windowsScript, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$PluginArchive/u);
+  assert.match(windowsScript, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$PluginSha256/u);
+  for (const script of [linuxScript, windowsScript]) {
+    assert.match(script, /extract-plugin-seed\.py/u);
+    assert.match(script, /pluginArchiveSha256/u);
+  }
+  assert.match(pluginExtractor, /plugin archive SHA-256 mismatch/u);
+  assert.match(pluginExtractor, /plugin archive contains a source map/u);
+  assert.match(pluginExtractor, /plugin archive contains a link or special file/u);
+  assert.match(pluginExtractor, /plugin archive entry is outside plugins\//u);
 });
 
 test("Windows verifies the Git archive commit without PowerShell 5 native argv quoting", () => {

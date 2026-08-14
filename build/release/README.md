@@ -5,11 +5,12 @@ These scripts reproduce the release-blocking Linux x64 and Windows x64 preview j
 Both builders:
 
 1. verify a deterministic `git archive` by its caller-supplied SHA-256 and full commit, then confirm the uploaded builder and tool lock exactly match the committed copies;
-2. install or verify the versions in `native-preview-tools.lock.json` (Node.js 24, Yarn Classic 1.22.22, Rust 1.92.0, DotSlash 0.5.7, and protoc 29.3);
-3. build Grok Build from the pinned upstream commit on the native host;
-4. run ACP smoke tests, metadata checks, all workspace tests, and Grok release-safety tests;
-5. build unsigned preview installers, generate the pinned Syft CycloneDX SBOM, and verify every checksum and provenance field; and
-6. produce a flat asset bundle, an outer SHA-256 file, a non-sensitive build report, and a local build log.
+2. require one independently hashed language-plugin seed, reject links, path traversal, cross-platform ambiguous names and source maps, and extract it only into the fresh `source/plugins` directory;
+3. install or verify the versions in `native-preview-tools.lock.json` (Node.js 24, Yarn Classic 1.22.22, Rust 1.92.0, DotSlash 0.5.7, and protoc 29.3);
+4. build Grok Build from the pinned upstream commit on the native host;
+5. run ACP smoke tests, metadata checks, all workspace tests, and Grok release-safety tests;
+6. build unsigned preview installers, generate the pinned Syft CycloneDX SBOM, and verify every checksum and provenance field; and
+7. produce a flat asset bundle, an outer SHA-256 file, a non-sensitive build report (including `pluginArchiveSha256`), and a local build log.
 
 The Windows build also applies the audited build-only compatibility patch listed
 in `build/grok/PATCHES.md`. Its SHA-256 is pinned in `sidecar.lock.json`, and the
@@ -35,10 +36,11 @@ are generated outputs, while the unpacked payload is already scanned through a
 separate validated root. This prevents Syft from cataloguing the same Linux deb
 package more than once when AppImage and deb artifacts coexist in `dist/`.
 
-Language plugins are an audited local release input because the plugin staging
-directory is intentionally not part of the source archive. Transfer one verified
-plugin bundle to every native builder, compare its SHA-256 before extraction, and
-record that digest in the build log. Published extension source maps are excluded:
+Language plugins are a required, audited local release input because the generated
+plugin staging directory is intentionally not part of the source archive. Transfer
+one verified gzip-compressed tar bundle to every native builder. The builders compare
+its SHA-256 before extraction and record that digest in both the build log and build
+report. Published extension source maps are rejected:
 they are not required at runtime and commonly retain upstream CI paths. The
 `afterPack` release gate scans every regular file in the unpacked application;
 compressed installer bytes are validated structurally and by checksum rather than
@@ -56,6 +58,28 @@ shasum -a 256 "/tmp/xora-code-$commit.tar.gz"
 
 Transfer that exact archive, its digest, and the three build inputs in this directory (the two native scripts and their tool lock) to each native host. Never rebuild the archive separately per host.
 
+## Prepare one immutable plugin seed
+
+Create this archive once on the trusted coordinator after `yarn download:plugins` and
+`yarn ensure:plugins` pass. The archive must have one `plugins/` root, contain only
+regular files and directories, and contain no `*.map` files. The release extractor
+also rejects links, path traversal, case-colliding paths and Windows-ambiguous names.
+
+```bash
+commit="$(git rev-parse HEAD)"
+plugin_stage="$(mktemp -d)"
+mkdir -p "$plugin_stage/plugins"
+rsync -a --exclude='.gitkeep' --exclude='*.map' plugins/ "$plugin_stage/plugins/"
+find "$plugin_stage/plugins" -type f -iname '*.map' -delete
+COPYFILE_DISABLE=1 tar -C "$plugin_stage" -czf "/tmp/xora-code-plugins-$commit.tar.gz" plugins
+shasum -a 256 "/tmp/xora-code-plugins-$commit.tar.gz"
+rm -rf "$plugin_stage"
+```
+
+Use the exact same plugin archive bytes and lowercase SHA-256 on Linux and Windows.
+The seed is required even when a previous build image already contains a mutable
+`plugins/` directory; cached or work-tree plugin directories are never trusted.
+
 ## Linux x64
 
 Host prerequisites are `curl`, `git`, `python3`, `rustup`, a C/C++ toolchain, `make`, `tar`, `unzip`, and `xz`. Use a new, short work directory for every attempt:
@@ -64,6 +88,8 @@ Host prerequisites are `curl`, `git`, `python3`, `rustup`, a C/C++ toolchain, `m
 bash ./native-preview-linux-x64.sh \
   --source-archive /tmp/xora-code-0123456789abcdef0123456789abcdef01234567.tar.gz \
   --source-sha256 <archive-sha256> \
+  --plugin-archive /tmp/xora-code-plugins-0123456789abcdef0123456789abcdef01234567.tar.gz \
+  --plugin-sha256 <plugin-archive-sha256> \
   --commit 0123456789abcdef0123456789abcdef01234567 \
   --work-root /tmp/xora-linux-0123456789ab \
   --output-dir /tmp/xora-output
@@ -77,6 +103,8 @@ The Windows host must already have Git, Python, rustup, and Visual Studio 2022 C
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\native-preview-windows-x64.ps1 `
   -SourceArchive C:\xora-input\xora-code-0123456789abcdef0123456789abcdef01234567.tar.gz `
   -SourceSha256 <archive-sha256> `
+  -PluginArchive C:\xora-input\xora-code-plugins-0123456789abcdef0123456789abcdef01234567.tar.gz `
+  -PluginSha256 <plugin-archive-sha256> `
   -Commit 0123456789abcdef0123456789abcdef01234567 `
   -WorkRoot C:\xora\0123456789ab `
   -OutputDirectory C:\xora-output
@@ -171,22 +199,21 @@ platform-specific Electron archive, Node archive, protoc and Syft.
 Transfer the immutable source archive and build inputs separately from the cache:
 
 ```bash
-scp xora-code-<commit>.tar.gz \
+scp xora-code-<commit>.tar.gz xora-code-plugins-<commit>.tar.gz \
     native-preview-linux-x64.sh native-preview-tools.lock.json \
     <linux-builder>:/tmp/xora-input-<short-commit>/
 ```
 
 ```powershell
 # Run from the coordinator with OpenSSH scp; credentials remain outside the repo.
-scp xora-code-<commit>.tar.gz native-preview-windows-x64.ps1 `
+scp xora-code-<commit>.tar.gz xora-code-plugins-<commit>.tar.gz native-preview-windows-x64.ps1 `
     native-preview-tools.lock.json <windows-builder>:C:/xora-input/<short-commit>/
 ```
 
-If the committed source archive intentionally omits the generated `plugins/`
-directory, create one plugin archive locally, hash it once, and copy those exact
-bytes to both builders. Extract it only under the fresh source root and refuse the
-build when the remote digest differs. Never reuse a mutable plugin directory from
-an older work tree.
+The generated `plugins/` payload is always supplied through the required plugin seed.
+The tracked `plugins/.gitkeep` placeholder is removed only after the complete archive
+passes validation. Extraction refuses to replace any other pre-existing content and
+can only write beneath the fresh source tree's `plugins/` directory.
 
 After transfer, compare the remote source archive SHA-256 with the coordinator's
 digest before invoking either builder. Build host addresses, passwords, private keys,

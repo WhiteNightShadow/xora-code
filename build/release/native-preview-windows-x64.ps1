@@ -5,6 +5,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$SourceArchive,
     [Parameter(Mandatory = $true)][string]$SourceSha256,
+    [Parameter(Mandatory = $true)][string]$PluginArchive,
+    [Parameter(Mandatory = $true)][string]$PluginSha256,
     [Parameter(Mandatory = $true)][string]$Commit,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
@@ -147,11 +149,21 @@ if (((Get-Item -LiteralPath $SourceArchive).Attributes -band [IO.FileAttributes]
 if ($SourceSha256 -cnotmatch '^[0-9a-f]{64}$') {
     Fail '-SourceSha256 must be lowercase SHA-256'
 }
+if (-not (Test-Path -LiteralPath $PluginArchive -PathType Leaf)) {
+    Fail 'plugin archive is missing'
+}
+if (((Get-Item -LiteralPath $PluginArchive).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    Fail 'plugin archive must not be a symbolic link or reparse point'
+}
+if ($PluginSha256 -cnotmatch '^[0-9a-f]{64}$') {
+    Fail '-PluginSha256 must be lowercase SHA-256'
+}
 if ($Commit -cnotmatch '^[0-9a-f]{40}$') {
     Fail '-Commit must be a full lowercase Git SHA'
 }
 
 $SourceArchive = [IO.Path]::GetFullPath($SourceArchive)
+$PluginArchive = [IO.Path]::GetFullPath($PluginArchive)
 $WorkRoot = Assert-AbsoluteNonRootPath -Value $WorkRoot -Label '-WorkRoot'
 $OutputDirectory = Assert-AbsoluteNonRootPath -Value $OutputDirectory -Label '-OutputDirectory'
 $ToolCache = Assert-AbsoluteNonRootPath -Value $ToolCache -Label '-ToolCache'
@@ -317,6 +329,17 @@ archive.close()
     if ($RunningBuilderHash -ne $CommittedBuilderHash) {
         Fail 'running Windows builder differs from the committed source'
     }
+    $PluginExtractor = Join-Path $SourceDirectory 'build\release\extract-plugin-seed.py'
+    if (-not (Test-Path -LiteralPath $PluginExtractor -PathType Leaf) -or
+        (((Get-Item -LiteralPath $PluginExtractor).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        Fail 'committed plugin seed extractor is missing or is a symbolic link'
+    }
+    $PluginDirectory = Join-Path $SourceDirectory 'plugins'
+    New-Item -ItemType Directory -Path $PluginDirectory -Force | Out-Null
+    Invoke-Checked -File 'python.exe' -Arguments @(
+        $PluginExtractor, '--archive', $PluginArchive,
+        '--sha256', $PluginSha256, '--destination', $PluginDirectory
+    )
 
     $NodeArchive = Join-Path $ToolCache $NodeArchiveName
     $NodeDirectory = Join-Path $WorkTools $NodeDirectoryName
@@ -510,6 +533,7 @@ timeout = 120
         commit = $Commit
         target = 'win32-x64'
         sourceArchiveSha256 = $SourceSha256
+        pluginArchiveSha256 = $PluginSha256
         node = $NodeVersionOutput
         yarn = $YarnVersionOutput
         rust = $RustVersionOutput
