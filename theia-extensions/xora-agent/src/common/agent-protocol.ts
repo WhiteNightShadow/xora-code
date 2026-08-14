@@ -29,6 +29,28 @@ export type ProviderProtocol =
     | 'openai-chat-completions'
     | 'anthropic-messages';
 
+/** Canonical values accepted by Grok Build 0.2.102 model TOML. */
+export const PROVIDER_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+export type ProviderReasoningEffort = typeof PROVIDER_REASONING_EFFORTS[number];
+
+/**
+ * Explicit per-model reasoning catalogue for a custom Provider. When this
+ * object is absent, automatic mode normally leaves Grok Build model fields
+ * untouched; a small versioned backend policy may supply capabilities for an
+ * exact, officially known model. Explicit user choices always take priority.
+ */
+export interface ProviderReasoningConfiguration {
+    options: ProviderReasoningEffort[];
+    defaultEffort: ProviderReasoningEffort;
+}
+
+/**
+ * Version of Xora's deliberately small automatic reasoning capability table.
+ * Bumping this value makes future additions auditable instead of silently
+ * expanding what an existing custom endpoint is told to support.
+ */
+export const PROVIDER_REASONING_AUTO_POLICY_VERSION = 1;
+
 /** Grok catalog id used for the managed xAI/compatible-relay profile. */
 export const XAI_MANAGED_MODEL_ID = 'xora-xai-api';
 
@@ -64,7 +86,33 @@ export type ProviderProfile = ProviderProfileBase & ({
 } | {
     kind: 'custom';
     protocol: ProviderProtocol;
+    /** Absent means automatic runtime/provider discovery. */
+    reasoning?: ProviderReasoningConfiguration;
 });
+
+/**
+ * Resolve the reasoning catalogue written to Grok Build for one Provider.
+ *
+ * Explicit user configuration always wins. Automatic mode is intentionally
+ * fail-closed: policy v1 recognizes only the canonical Grok 4.6 Responses
+ * model id whose public capability includes xhigh. A relay using another
+ * model id or protocol receives no inferred fields and remains responsible
+ * for advertising its own capabilities.
+ */
+export function effectiveProviderReasoningConfiguration(
+    profile: ProviderProfile,
+    policyVersion = PROVIDER_REASONING_AUTO_POLICY_VERSION
+): ProviderReasoningConfiguration | undefined {
+    if (profile.kind !== 'custom') return undefined;
+    if (profile.reasoning) return profile.reasoning;
+    if (policyVersion !== 1
+        || profile.protocol !== 'openai-responses'
+        || profile.model !== 'grok-4.6') return undefined;
+    return {
+        options: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'high'
+    };
+}
 
 export interface AuthenticationResult {
     status: 'authenticated' | 'confirmation-required';
@@ -103,6 +151,24 @@ export interface AgentModelOption {
     name: string;
     description?: string;
     contextWindow?: number;
+    /**
+     * Session-scoped reasoning choices advertised by this exact ACP model.
+     * Empty/absent means the model does not expose a selectable effort menu.
+     * Values remain strings so future Grok Build levels and remapped ids do
+     * not require a Xora Code release.
+     */
+    reasoningOptions?: AgentReasoningOption[];
+}
+
+export interface AgentReasoningOption {
+    /** Stable UI/menu id supplied by the model catalogue. */
+    id: string;
+    /** Canonical value sent as `_meta.reasoningEffort`. */
+    value: string;
+    name: string;
+    description?: string;
+    /** True when this option matches the model catalogue's default effort. */
+    default?: boolean;
 }
 
 export type AgentContextCompactionStatus = 'idle' | 'running' | 'failed' | 'cancelled';
@@ -136,6 +202,8 @@ export interface SessionRecord {
     /** Non-secret generation binding this ACP session to one Provider identity/configuration. */
     providerRuntimeEpoch?: string;
     model?: string;
+    /** Canonical ACP reasoning effort value selected for this session. */
+    reasoningEffort?: string;
     sidecarVersion?: string;
     /** ACP modes are descriptive, session-scoped state and contain no secrets. */
     availableModes?: AgentSessionMode[];
@@ -163,6 +231,13 @@ export interface RuntimeSnapshot {
     workspaceTrusted: boolean;
     providerId: string;
     /**
+     * Monotonic, credential-free version of the saved Provider metadata.
+     * Runtime snapshots change for many unrelated reasons; this dedicated
+     * value lets renderers invalidate their ProviderProfile cache only when
+     * account/model settings actually changed.
+     */
+    providerProfilesRevision?: number;
+    /**
      * Safe, credential-free knowledge established by an explicit Grok login,
      * logout, or a successfully initialized subscription runtime. `unknown`
      * must never be rendered as "未登录" because Xora Code deliberately does
@@ -173,6 +248,13 @@ export interface RuntimeSnapshot {
     capabilities?: AgentCapabilities;
     models: AgentModelOption[];
     selectedModel?: string;
+    /** Current canonical effort for the active ACP session, when advertised. */
+    selectedReasoningEffort?: string;
+    /**
+     * Application-wide preference for the selected Provider/model. New
+     * sessions use this value after validating it against the live catalogue.
+     */
+    preferredReasoningEffort?: string;
     sessions: SessionRecord[];
     activeSessionId?: string;
     /** Latest authoritative Grok context state, keyed by Xora app session id. */
@@ -201,6 +283,8 @@ export interface CreateSessionRequest {
     workspaceRoot: string;
     providerId: string;
     model?: string;
+    /** Initial effort requested for the selected model; applied via set_model. */
+    reasoningEffort?: string;
     title?: string;
     additionalDirectories?: string[];
     /** Optional initial ACP mode, applied immediately after `session/new`. */
@@ -243,6 +327,13 @@ export interface AgentAttachmentSummary {
     byteSize: number;
     sha256: string;
     name?: string;
+    /**
+     * Workspace-relative, Xora-managed image path. Keeping the path (rather
+     * than the base64 payload) makes a sent attachment reopenable after an
+     * application restart and gives older ACP runtimes a safe file-tool
+     * fallback when they do not advertise native image blocks.
+     */
+    workspacePath?: string;
 }
 
 export interface PromptRequest {
@@ -534,6 +625,20 @@ export type AgentHostEvent =
     }
     | { kind: 'error'; sessionId?: string; turnId?: string; code: string; message: string; recoverable: boolean };
 
+export interface SessionHistoryPageRequest {
+    /** Opaque stable cursor returned by the following page. Omit for the newest page. */
+    before?: string;
+    /** Number of stored events to return. Electron clamps this to a safe bound. */
+    limit?: number;
+}
+
+export interface SessionHistoryPage {
+    events: AgentHostEvent[];
+    /** Cursor for the page immediately preceding this one. */
+    before?: string;
+    hasMore: boolean;
+}
+
 export interface ManagementResult {
     ok: boolean;
     data?: unknown;
@@ -583,6 +688,8 @@ export interface AgentHostService extends RpcServer<AgentHostClient> {
     createSession(request: CreateSessionRequest): Promise<SessionRecord>;
     loadSession(appSessionId: string): Promise<SessionRecord>;
     getSessionHistory(appSessionId: string): Promise<AgentHostEvent[]>;
+    /** Reads bounded JSONL pages newest-first while preserving event order within each page. */
+    getSessionHistoryPage(appSessionId: string, request?: SessionHistoryPageRequest): Promise<SessionHistoryPage>;
     /** Exports one completed, redacted conversation through Electron's native save dialog. */
     exportSession(appSessionId: string): Promise<ExportSessionResult>;
     /** Renames a local session title without touching ACP history content. */
@@ -598,11 +705,14 @@ export interface AgentHostService extends RpcServer<AgentHostClient> {
     /** Persists one permission mode for all projects, sessions and windows. */
     setPermissionMode(mode: AgentPermissionMode): Promise<RuntimeSnapshot>;
     respondPermission(decision: PermissionDecision): Promise<void>;
-    selectModel(sessionId: string, modelId: string): Promise<void>;
+    /** Atomically selects a model and, when supplied, one option advertised by that model. */
+    selectModel(sessionId: string, modelId: string, reasoningEffort?: string): Promise<void>;
+    /** Selects a server-advertised reasoning option for one hydrated session. */
+    selectReasoningEffort(appSessionId: string, effort: string): Promise<void>;
     /** Changes the next-turn ACP mode for one hydrated session. */
     setSessionMode(appSessionId: string, modeId: string): Promise<SessionRecord>;
     /** Sets the user-level default for new sessions across projects and windows. */
-    selectDefaultModel(providerId: string, modelId: string): Promise<RuntimeSnapshot>;
+    selectDefaultModel(providerId: string, modelId: string, reasoningEffort?: string): Promise<RuntimeSnapshot>;
     revertDiff(diffId: string): Promise<void>;
     listProviders(): Promise<ProviderProfile[]>;
     selectProvider(providerId: string): Promise<RuntimeSnapshot>;

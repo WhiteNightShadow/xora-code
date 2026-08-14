@@ -144,7 +144,7 @@ test('Agent composer accepts pasted images without replacing the native IME text
     const styles = fs.readFileSync(path.join(__dirname, '../src/browser/style/agent.css'), 'utf8');
     assert.match(source, /onPaste=\{event => \{[\s\S]*?this\.handleImagePaste\(event\);[\s\S]*?\}\}/);
     assert.match(source, /Do not preventDefault/);
-    assert.match(source, /aria-label='添加图片'/);
+    assert.match(source, /aria-label=\{this\.draftImages\.length \? `添加图片，当前已有 \$\{this\.draftImages\.length\} 张` : '添加图片'\}/);
     assert.doesNotMatch(source, /aria-label='选择工作区文件'/,
         'workspace files stay available through the slash menu without a duplicate file-shaped toolbar button');
     assert.match(source, /case 'file':[\s\S]*?await this\.pickWorkspaceFilesForPrompt\(\)/,
@@ -152,21 +152,33 @@ test('Agent composer accepts pasted images without replacing the native IME text
     assert.match(source, /accept='image\/png,image\/jpeg,image\/webp'/);
     assert.match(source, /className='xora-composer-attachments'/);
     assert.match(source, /className='xora-composer-image-error'/);
-    assert.match(source, /runtime\.capabilities\?\.prompt\.image !== true/);
+    assert.match(source, /renderDraftImages\(snapshot\.capabilities\?\.prompt\.image === false\)/);
+    assert.match(source, /将作为项目图片附件发送/);
+    assert.doesNotMatch(source, /if \(submission\.attachments\.length && runtime\.capabilities\?\.prompt\.image !== true\)/,
+        'older ACP runtimes use the workspace attachment fallback instead of blocking Send');
     assert.match(source, /attachments: PromptImageAttachment\[\]/);
     assert.match(source, /this\.consumeDraftImages\(submission\.draftAttachmentIds\)/);
     assert.match(source, /generation !== this\.imageReadGeneration/);
     assert.match(source, /contextKey !== this\.imageDraftContextKey\(\)/);
-    assert.match(source, /this\.reconcileAgentContext\(\)/);
+    assert.match(source, /const providerProfilesChanged = this\.reconcileProviderProfiles\(\)/);
+    assert.match(source, /this\.reconcileAgentContext\(providerProfilesChanged\)/);
     assert.match(source, /protected composerDrafts = new Map<string, ComposerDraftState>\(\)/);
     assert.match(source, /this\.storeActiveComposerDraft\(\)/);
     assert.match(source, /this\.activateComposerLane\(current\)/);
     assert.doesNotMatch(source, /aria-label='Agent 服务'/);
     assert.match(source, /this\.imagePreviewCloseButton\?\.focus\(\)/);
     assert.match(source, /aria-haspopup='dialog'/);
+    assert.match(source, /className='xora-composer-image-thumb'/);
+    assert.match(source, /className='xora-composer-image-copy'/);
+    assert.match(source, /<small>图片 · \{this\.formatByteSize\(image\.byteSize\)\}<\/small>/);
     assert.doesNotMatch(source, /aria-modal='true'/);
     assert.match(styles, /\.xora-composer-image-preview/);
+    assert.match(styles, /\.xora-composer-image-copy/);
+    assert.match(styles, /\.xora-composer-image-fallback-hint/);
     assert.match(styles, /\.xora-image-preview-dialog/);
+    assert.match(source, /attachment\.workspacePath \? <button/);
+    assert.match(source, /this\.openWorkspacePath\(attachment\.workspacePath!, \{ reveal: true \}\)/);
+    assert.match(styles, /\.xora-message-attachment\.is-openable/);
     assert.doesNotMatch(source, /contentEditable/);
 });
 
@@ -212,7 +224,7 @@ test('image submissions and session restores stay bound to their original Agent 
     assert.doesNotMatch(source, /此历史仅供查看，请新建会话/);
     assert.match(source, /generation !== this\.sessionLoadGeneration \|\| this\.imageDraftContextKey\(\) !== targetContextKey/);
     assert.match(source, /this\.observedAgentContextKey = targetContextKey;\s*this\.activateComposerLane\(targetContextKey\);\s*this\.model\.showSessionHistory\(session, cachedHistory \?\? \[\]\)/);
-    assert.match(source, /if \(!cachedHistory\) \{[\s\S]*?getSessionHistory\(session\.appSessionId\)[\s\S]*?mergeHistoryCatchup\(history, catchup\)[\s\S]*?showSessionHistory\(session, completeHistory\)/);
+    assert.match(source, /if \(!cachedHistory\) \{[\s\S]*?readSessionHistoryPage\(session\.appSessionId[\s\S]*?mergeHistoryCatchup\(page\.events, catchup\)[\s\S]*?showSessionHistory\(session, completeHistory\)/);
     assert.match(draftStoreSource, /this\.composerDraftState\(\)\.set\(key, \{[\s\S]*?text: this\.prompt \?\? ''[\s\S]*?images: \[\.\.\.\(this\.draftImages \?\? \[\]\)\]/,
         'switching away must save text and images under the old conversation lane');
     assert.match(draftRestoreSource, /const draft = this\.composerDraftState\(\)\.get\(key\)[\s\S]*?this\.prompt = draft\?\.text \?\? ''[\s\S]*?this\.draftImages = \[\.\.\.\(draft\?\.images \?\? \[\]\)\]/,
@@ -453,46 +465,103 @@ test('Agent history, context and model controls keep the sidebar concise and tru
     assert.match(source, /计费 usage 不参与这里的计算/);
     assert.match(source, /已自动整理 \{summary\.compactionCount\} 次/);
     assert.match(source, /summarizeAgentContext\(snapshot, this\.model\.transcript\)/);
-    assert.match(source, /renderModelOptions\(modelChoiceGroups\)/);
+    assert.match(source, /renderModelConfigurationOptions\(modelChoiceGroups, snapshot\)/);
     assert.match(source, /agentModelChoiceGroups\(this\.providers, snapshot, active\)/);
     assert.match(source, /decodeAgentModelChoice\(modelId\)/);
     assert.doesNotMatch(source, /await this\.service\.selectProvider\(providerId\)/,
         'the composer must not switch Provider credentials; that belongs to Settings');
-    assert.match(source, /选择当前模型服务提供的模型/);
+    assert.match(source, /选择模型；支持时可在模型下选择思考等级/);
     assert.doesNotMatch(source, /selectDefaultModel\(providerId, catalogModelId\)/);
     assert.doesNotMatch(source, /shouldShowModelSelector\(snapshot, active\)/);
     assert.match(source, /className='xora-model-control'/);
     assert.match(source, /void this\.loadModelOptions\(\)/);
     assert.match(source, /await this\.service\.startRuntime\(\{ workspaceRoot: root, providerId \}\)/);
-    assert.match(source, /model: this\.newSessionModel \?\? this\.model\.snapshot\.selectedModel/);
+    assert.match(source, /const modelId = this\.newSessionModel \?\? this\.model\.snapshot\.selectedModel/);
+    assert.match(source, /model: modelId/);
+    assert.match(source, /reasoningEffort: this\.newSessionReasoningEffortForRequest\(modelId\)/,
+        'a cold draft lets Electron validate the durable effort after ACP advertises the model catalogue');
     assert.match(styles, /mask: url\('\.\/agent-mark\.png'\)/);
     assert.doesNotMatch(source, /<option value=''>\{active\?\.model \?\? '默认模型'\}<\/option>/);
 });
 
-test('Agent composer keeps model, permission and the two supported task modes on one row', () => {
+test('Agent composer keeps semantic settings and compact task actions on one responsive row', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
     const styles = fs.readFileSync(path.join(__dirname, '../src/browser/style/agent.css'), 'utf8');
     const selectorStart = source.indexOf("<div className='xora-composer-selectors'>");
-    const selectorEnd = source.indexOf("<span className='xora-image-live'", selectorStart);
+    const selectorEnd = source.indexOf("<div className='xora-composer-secondary'>", selectorStart);
     const selectors = source.slice(selectorStart, selectorEnd);
     assert.ok(selectorStart >= 0 && selectorEnd > selectorStart);
-    assert.match(selectors, /aria-label='Agent 模型'/);
+    assert.match(selectors, /aria-label='Agent 模型与思考等级'/);
+    assert.doesNotMatch(selectors, /aria-label='Agent 思考等级'/,
+        'reasoning is a second-level choice beneath its model instead of another crowded selector');
     assert.match(selectors, /aria-label='Agent 全局权限'/);
-    assert.match(selectors, /aria-label='任务执行方式'/);
-    assert.match(selectors, /<option value='standard'>常规<\/option>/);
-    assert.match(selectors, /<option value='continuous'[^>]*>持续完成<\/option>/);
+    assert.match(selectors, /<option value='request-approval'>请求审批<\/option>/);
+    assert.match(selectors, /<option value='full-access'>完全访问<\/option>/);
+    assert.doesNotMatch(selectors, /aria-label=\{`任务与引用选项：/);
+    assert.doesNotMatch(selectors, /codicon-settings/);
+    assert.doesNotMatch(selectors, /aria-label='任务执行方式'/);
     assert.doesNotMatch(selectors, /<option value='plan'|先规划/);
     assert.doesNotMatch(selectors, /aria-label='Agent 服务'/);
-    assert.ok(selectors.indexOf("aria-label='Agent 模型'") < selectors.indexOf("aria-label='Agent 全局权限'"));
-    assert.match(styles, /\.xora-composer-selectors\s*\{[\s\S]*?flex-wrap: nowrap;/);
-    assert.match(styles, /\.xora-composer-selectors label\s*\{[\s\S]*?flex: 1 1 0;/);
+    assert.ok(selectors.indexOf("aria-label='Agent 模型与思考等级'") < selectors.indexOf("aria-label='Agent 全局权限'"));
+    assert.match(source, /<optgroup key=\{`\$\{group\.providerId\}:\$\{choice\.modelId\}`\} label=\{choice\.label\}>/);
+    assert.match(source, /\{choice\.label\} · \{this\.reasoningOptionLabel\(option\)\}/);
+    assert.match(source, /\{choice\.label\}\{reasoning\[0\] \? ` · \$\{this\.reasoningOptionLabel\(reasoning\[0\]\)\}` : ''\}/,
+        'a model with one advertised effort must still show that effort in the collapsed selector');
+    assert.match(source, /selectModelConfiguration\(active, event\.currentTarget\.value\)/);
+    const secondaryStart = source.indexOf("<div className='xora-composer-secondary'>", selectorEnd);
+    const secondaryEnd = source.indexOf("</div>\n                    </div>\n                    {composerImageError", secondaryStart);
+    const secondary = source.slice(secondaryStart, secondaryEnd);
+    assert.ok(secondaryStart >= 0 && secondaryEnd > secondaryStart);
+    assert.match(secondary, /aria-label=\{`打开任务与引用选项：当前为/);
+    assert.match(secondary, /className='xora-composer-utility-group'/);
+    assert.match(secondary, /role='group' aria-label='任务方式、附件与上下文'/);
+    assert.match(secondary, /taskMode === 'continuous' \? 'codicon-sync' : 'codicon-list-selection'/);
+    assert.match(secondary, /className='xora-composer-tool xora-composer-attachment-trigger'/);
+    assert.match(secondary, /xora-context-trigger xora-composer-tool/);
+    assert.match(secondary, /className='xora-composer-submit-group'/);
+    assert.match(source, /className='xora-task-mode-segment'/);
+    assert.match(source, /const showComposerGate = composerGate\?\.kind === 'restore' \|\| composerGate\?\.kind === 'plan-approval';/,
+        'the no-project state stays in the placeholder instead of duplicating a large gate below it');
+    assert.match(source, /selectComposerTaskMode\('standard'\)/);
+    assert.match(source, /selectComposerTaskMode\('continuous'\)/);
+    const taskModeStart = source.indexOf('protected selectComposerTaskMode(mode: ComposerTaskMode)');
+    const taskModeEnd = source.indexOf('protected sessionModeIsPlan', taskModeStart);
+    assert.ok(taskModeStart >= 0 && taskModeEnd > taskModeStart);
+    assert.doesNotMatch(source.slice(taskModeStart, taskModeEnd), /requestRuntimePrewarm/,
+        'changing a local task mode must not race a runtime/session restore');
+    assert.match(source, /引用文件/);
+    assert.doesNotMatch(source, /Enter 发送/);
+    assert.match(styles, /\.xora-composer-actions\s*\{[\s\S]*?display: flex;[\s\S]*?flex-direction: row;[\s\S]*?align-items: center;/);
+    assert.match(styles, /\.xora-composer-selectors\s*\{[\s\S]*?display: flex;[\s\S]*?flex: 1 1 auto;/);
+    assert.match(styles, /\.xora-composer-selectors \.xora-model-control\s*\{[\s\S]*?min-width: 72px;[\s\S]*?flex: 1 1 120px;/);
+    assert.match(styles, /\.xora-composer-options-trigger\s*\{[\s\S]*?min-width: 26px;/);
+    assert.match(styles, /\.xora-composer-secondary\s*\{[\s\S]*?flex: 0 0 auto;[\s\S]*?justify-content: flex-end;/);
+    assert.match(styles, /\.xora-composer-utility-group\s*\{[\s\S]*?display: flex;/);
+    assert.match(styles, /\.xora-composer-utility-group \.xora-composer-tool \+ \.xora-composer-tool/);
+    assert.match(styles, /@container \(max-width: 410px\)[\s\S]*?\.xora-composer-tool,[\s\S]*?width: 24px;/);
+    assert.match(styles, /\.xora-composer-references\s*\{[\s\S]*?overflow-x: auto;/);
+});
+
+test('long conversations render the newest 180 records and progressively reveal older history', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
+    assert.match(source, /const MAX_RENDERED_TRANSCRIPT_ENTRIES = 180/);
+    assert.match(source, /paneTranscript\.slice\(-this\.renderedTranscriptLimit\)/);
+    assert.match(source, /`加载更早记录 · 还有 \$\{hiddenTranscriptCount\} 条`/);
+    assert.match(source, /this\.renderedTranscriptLimit = Math\.min\([\s\S]*?\+ MAX_RENDERED_TRANSCRIPT_ENTRIES/);
+    assert.match(source, /getSessionHistoryPage\(appSessionId, request\)/);
+    assert.match(source, /before: pageState\.before/);
+    assert.match(source, /\[\.\.\.page\.events, \.\.\.pageState\.events\]/);
+    assert.match(source, /this\.transcriptPrependAnchor = node[\s\S]*?\{ scrollHeight: node\.scrollHeight, scrollTop: node\.scrollTop \}/);
+    assert.match(source, /node\.scrollTop = Math\.max\(0, node\.scrollHeight - anchor\.scrollHeight \+ anchor\.scrollTop\)/);
+    assert.match(source, /protected resetTranscriptWindow\(\): void/);
+    assert.match(source, /protected async openSession[\s\S]*?this\.resetTranscriptWindow\(\)/);
 });
 
 test('Agent permission mode is explicit, application-wide and confirmed before full access', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
     assert.match(source, /aria-label='Agent 全局权限'/);
     assert.match(source, /<option value='request-approval'>请求审批<\/option>/);
-    assert.match(source, /<option value='full-access'>完全访问权限<\/option>/);
+    assert.match(source, /<option value='full-access'>完全访问<\/option>/);
     assert.match(source, /所有项目、会话和窗口/);
     assert.match(source, /访问整块磁盘/);
     assert.match(source, /setPermissionMode\(mode\)/);

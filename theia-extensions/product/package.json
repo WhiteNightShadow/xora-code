@@ -1,6 +1,6 @@
 {
   "name": "@xora-code/product-extension",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "Xora Code product branding and welcome experience",
   "license": "Apache-2.0",
@@ -27,7 +27,7 @@
     "@theia/terminal": "1.73.1",
     "@theia/timeline": "1.73.1",
     "@theia/workspace": "1.73.1",
-    "@xora-code/agent": "0.2.4"
+    "@xora-code/agent": "0.2.5"
   },
   "devDependencies": {
     "@types/node": "18.19.39",

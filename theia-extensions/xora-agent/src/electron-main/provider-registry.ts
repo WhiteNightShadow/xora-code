@@ -4,7 +4,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { parse as parseToml } from 'smol-toml';
-import { ProviderProfile, ProviderProtocol, XAI_MANAGED_MODEL_ID } from '../common/agent-protocol';
+import {
+    effectiveProviderReasoningConfiguration,
+    PROVIDER_REASONING_EFFORTS,
+    ProviderProfile,
+    ProviderProtocol,
+    ProviderReasoningConfiguration,
+    ProviderReasoningEffort,
+    XAI_MANAGED_MODEL_ID
+} from '../common/agent-protocol';
 import { normalizeProviderBaseUrl } from './provider-network';
 import {
     LEGACY_MANAGED_BLOCK_END as LEGACY_BLOCK_END,
@@ -63,6 +71,12 @@ interface ProviderFile {
     authenticationConsents?: Record<string, AuthenticationConsent>;
     /** User-level defaults shared by every project/window. Model IDs are not credentials. */
     preferredModels?: Record<string, string>;
+    /**
+     * Per-Provider, per-catalog-model reasoning defaults. Keeping the model
+     * dimension lets a user switch to an older model and later return to the
+     * previous effort without applying an unsupported value in between.
+     */
+    preferredReasoningEfforts?: Record<string, Record<string, string>>;
     /** Non-secret UUID generations used to prevent ACP sessions crossing credentials/endpoints. */
     runtimeEpochs?: Record<string, string>;
     /** Last known Grok result. Runtime initialization remains authoritative. */
@@ -101,6 +115,8 @@ export class ProviderRegistry {
     // Keep using the legacy shared lock for one compatibility epoch so Xora
     // Code and an older desktop build cannot edit ~/.grok concurrently.
     protected readonly lockPath = path.join(this.grokHomePath, '.whitenight-code.lock');
+    /** Process-local generation shared by every Electron window/service. */
+    protected profilesRevision = 0;
 
     constructor(protected readonly vault: SecretVault) {
         // A process may have stopped between the three atomic Provider writes.
@@ -150,7 +166,15 @@ export class ProviderRegistry {
         const profiles: ProviderProfile[] = [
             { id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription', managed: true },
             this.xaiProfile(file),
-            ...file.providers.map(profile => ({ ...profile }))
+            ...file.providers.map(profile => ({
+                ...profile,
+                ...(profile.kind === 'custom' && profile.reasoning ? {
+                    reasoning: {
+                        ...profile.reasoning,
+                        options: [...profile.reasoning.options]
+                    }
+                } : {})
+            }))
         ];
         return profiles.map(profile => profile.kind === 'grok-subscription' ? profile : {
             ...profile,
@@ -161,6 +185,15 @@ export class ProviderRegistry {
 
     get(id: string): ProviderProfile | undefined {
         return this.list().find(profile => profile.id === id);
+    }
+
+    providerProfilesRevision(): number {
+        return Number.isSafeInteger(this.profilesRevision) ? this.profilesRevision : 0;
+    }
+
+    protected bumpProviderProfilesRevision(): void {
+        const current = this.providerProfilesRevision();
+        this.profilesRevision = current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1;
     }
 
     selectedProviderId(): string {
@@ -202,8 +235,19 @@ export class ProviderRegistry {
         return file.preferredModels?.[providerId] ?? profile.model;
     }
 
-    selectPreferredModel(providerId: string, modelId: string): void {
+    preferredReasoningEffort(providerId: string, modelId: string): string | undefined {
+        const file = this.readMetadata();
+        const profile = this.profileFromFile(file, providerId);
+        if (!profile) return undefined;
+        const catalogModel = profile.kind === 'custom' ? profile.id : this.validateModelId(modelId);
+        return file.preferredReasoningEfforts?.[providerId]?.[catalogModel];
+    }
+
+    selectPreferredModel(providerId: string, modelId: string, reasoningEffort?: string): void {
         const model = this.validateModelId(modelId);
+        const effort = reasoningEffort === undefined
+            ? undefined
+            : this.validateReasoningPreference(reasoningEffort);
         this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
             const file = this.readMetadata();
             const profile = this.profileFromFile(file, providerId);
@@ -213,8 +257,42 @@ export class ProviderRegistry {
             // Never persist an upstream relay id as the custom catalog preference.
             const preferred = profile.kind === 'custom' ? profile.id : model;
             file.preferredModels = file.preferredModels ?? {};
-            if (file.preferredModels[providerId] === preferred) return;
             file.preferredModels[providerId] = preferred;
+            if (effort !== undefined) {
+                file.preferredReasoningEfforts = file.preferredReasoningEfforts ?? {};
+                file.preferredReasoningEfforts[providerId] = file.preferredReasoningEfforts[providerId] ?? {};
+                file.preferredReasoningEfforts[providerId][preferred] = effort;
+            }
+            this.writeMetadata(file);
+        });
+    }
+
+    selectPreferredReasoningEffort(providerId: string, modelId: string, reasoningEffort: string | undefined): void {
+        const model = this.validateModelId(modelId);
+        const effort = reasoningEffort === undefined
+            ? undefined
+            : this.validateReasoningPreference(reasoningEffort);
+        this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
+            const file = this.readMetadata();
+            const profile = this.profileFromFile(file, providerId);
+            if (!profile) throw new Error('所选模型服务已不存在。');
+            const catalogModel = profile.kind === 'custom' ? profile.id : model;
+            if (effort === undefined) {
+                if (!file.preferredReasoningEfforts?.[providerId]?.[catalogModel]) return;
+                delete file.preferredReasoningEfforts[providerId][catalogModel];
+                if (Object.keys(file.preferredReasoningEfforts[providerId]).length === 0) {
+                    delete file.preferredReasoningEfforts[providerId];
+                }
+                if (Object.keys(file.preferredReasoningEfforts).length === 0) {
+                    delete file.preferredReasoningEfforts;
+                }
+                this.writeMetadata(file);
+                return;
+            }
+            if (file.preferredReasoningEfforts?.[providerId]?.[catalogModel] === effort) return;
+            file.preferredReasoningEfforts = file.preferredReasoningEfforts ?? {};
+            file.preferredReasoningEfforts[providerId] = file.preferredReasoningEfforts[providerId] ?? {};
+            file.preferredReasoningEfforts[providerId][catalogModel] = effort;
             this.writeMetadata(file);
         });
     }
@@ -319,10 +397,14 @@ export class ProviderRegistry {
     }
 
     save(input: ProviderProfile, apiKey?: string): ProviderProfile {
-        return this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
+        const saved = this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => {
             this.recoverInterruptedProviderUpdateUnlocked();
             return this.saveUnlocked(input, apiKey);
         });
+        // Only publish a new generation after the TOML, metadata and optional
+        // credential transaction has committed successfully.
+        this.bumpProviderProfilesRevision();
+        return saved;
     }
 
     protected saveUnlocked(input: ProviderProfile, apiKey?: string): ProviderProfile {
@@ -575,10 +657,12 @@ export class ProviderRegistry {
             this.vault.delete(secretRef);
             this.clearProviderUpdateMarker();
         });
+        this.bumpProviderProfilesRevision();
     }
 
     delete(id: string): void {
         this.withFileLock(this.metadataLockPath, 'Another Xora Code process is updating Providers. Please retry.', () => this.deleteUnlocked(id));
+        this.bumpProviderProfilesRevision();
     }
 
     protected deleteUnlocked(id: string): void {
@@ -592,6 +676,7 @@ export class ProviderRegistry {
             file.selectedProviderId = 'grok-subscription';
         }
         if (file.preferredModels) delete file.preferredModels[id];
+        if (file.preferredReasoningEfforts) delete file.preferredReasoningEfforts[id];
         if (file.runtimeEpochs) delete file.runtimeEpochs[id];
         this.clearAuthenticationConsentUnlocked(file, id);
         if (profile?.secretRef) {
@@ -1258,6 +1343,7 @@ export class ProviderRegistry {
         if (!Number.isSafeInteger(contextWindow) || contextWindow < 1024) {
             throw new Error('Context window must be a positive integer of at least 1024.');
         }
+        const reasoning = this.validateReasoningConfiguration(input.reasoning);
         return {
             id: input.id,
             name,
@@ -1267,11 +1353,34 @@ export class ProviderRegistry {
             model: this.validateModelId(input.model),
             contextWindow,
             backendSearch,
+            ...(reasoning ? { reasoning } : {}),
             // Secret references are derived exclusively by Electron main. A
             // renderer must never alias another Provider's vault entry.
             secretRef: `provider:${input.id}`,
             managed: false
         };
+    }
+
+    protected validateReasoningConfiguration(
+        input: ProviderReasoningConfiguration | undefined
+    ): ProviderReasoningConfiguration | undefined {
+        if (input === undefined) return undefined;
+        if (!input || typeof input !== 'object' || !Array.isArray(input.options)) {
+            throw new Error('思考等级配置无效；请选择自动检测或至少一个明确等级。');
+        }
+        const requested = new Set(input.options);
+        if (requested.size !== input.options.length || requested.size === 0
+            || [...requested].some(value => !PROVIDER_REASONING_EFFORTS.includes(value))) {
+            throw new Error('思考等级选项必须是互不重复的有效等级。');
+        }
+        if (!PROVIDER_REASONING_EFFORTS.includes(input.defaultEffort)
+            || !requested.has(input.defaultEffort)) {
+            throw new Error('默认思考等级必须包含在已启用的等级中。');
+        }
+        // Canonical ordering keeps providers.json and managed TOML stable even
+        // when a renderer submits checkbox values in a different DOM order.
+        const options = PROVIDER_REASONING_EFFORTS.filter(value => requested.has(value));
+        return { options, defaultEffort: input.defaultEffort };
     }
 
     protected validateXaiSettings(input: Extract<ProviderProfile, { kind: 'xai-api-key' }>): XaiApiSettings | undefined {
@@ -1313,6 +1422,14 @@ export class ProviderRegistry {
             throw new Error('模型 ID 必须包含 1-256 个字符，且不能包含换行。');
         }
         return model;
+    }
+
+    protected validateReasoningPreference(input: string): string {
+        const effort = input.trim();
+        if (!effort || effort.length > 128 || /[\r\n\0]/.test(effort)) {
+            throw new Error('思考等级必须包含 1-128 个字符，且不能包含换行。');
+        }
+        return effort;
     }
 
     protected xaiProfile(file: ProviderFile): Extract<ProviderProfile, { kind: 'xai-api-key' }> {
@@ -1366,6 +1483,17 @@ export class ProviderRegistry {
             `context_window = ${profile.contextWindow ?? 500_000}`,
             `supports_backend_search = ${profile.backendSearch === true}`
         ];
+        const reasoning = effectiveProviderReasoningConfiguration(profile);
+        if (reasoning) {
+            const reasoningOptions = reasoning.options.map(value =>
+                `{ value = ${JSON.stringify(value)}, label = ${JSON.stringify(providerReasoningLabel(value))}, default = ${value === reasoning.defaultEffort} }`
+            ).join(', ');
+            lines.push(
+                'supports_reasoning_effort = true',
+                `reasoning_effort = ${JSON.stringify(reasoning.defaultEffort)}`,
+                `reasoning_efforts = [${reasoningOptions}]`
+            );
+        }
         if (profile.protocol === 'anthropic-messages') {
             lines.push(`extra_headers = { "x-api-key" = "\${${env}}", "anthropic-version" = "2023-06-01" }`);
         } else {
@@ -1734,6 +1862,23 @@ export class ProviderRegistry {
                         }
                     }
                 }
+                const preferredReasoningEfforts: Record<string, Record<string, string>> = {};
+                if (file.preferredReasoningEfforts && typeof file.preferredReasoningEfforts === 'object') {
+                    for (const [providerId, values] of Object.entries(file.preferredReasoningEfforts).slice(0, 128)) {
+                        if (providerId !== 'grok-subscription'
+                            && providerId !== 'xai-api-key'
+                            && !PROFILE_ID.test(providerId)) continue;
+                        if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+                        const sanitized: Record<string, string> = {};
+                        for (const [modelId, value] of Object.entries(values).slice(0, 128)) {
+                            if (typeof value !== 'string') continue;
+                            try {
+                                sanitized[this.validateModelId(modelId)] = this.validateReasoningPreference(value);
+                            } catch { /* ignore malformed optional preferences */ }
+                        }
+                        if (Object.keys(sanitized).length) preferredReasoningEfforts[providerId] = sanitized;
+                    }
+                }
                 const runtimeEpochs: Record<string, string> = {};
                 if (file.runtimeEpochs && typeof file.runtimeEpochs === 'object') {
                     for (const [id, value] of Object.entries(file.runtimeEpochs).slice(0, 128)) {
@@ -1757,6 +1902,7 @@ export class ProviderRegistry {
                     ...(xaiApi ? { xaiApi } : {}),
                     ...(Object.keys(authenticationConsents).length ? { authenticationConsents } : {}),
                     ...(Object.keys(preferredModels).length ? { preferredModels } : {}),
+                    ...(Object.keys(preferredReasoningEfforts).length ? { preferredReasoningEfforts } : {}),
                     ...(Object.keys(runtimeEpochs).length ? { runtimeEpochs } : {}),
                     ...(subscriptionAuthState ? { subscriptionAuthState } : {}),
                     ...(file.subscriptionAuthMigrationComplete === true ? { subscriptionAuthMigrationComplete: true } : {})
@@ -1885,7 +2031,31 @@ function sameProviderConfiguration(left: ProviderProfile | undefined, right: Pro
         && left.baseUrl === right.baseUrl
         && left.model === right.model
         && left.contextWindow === right.contextWindow
-        && left.backendSearch === right.backendSearch;
+        && left.backendSearch === right.backendSearch
+        && sameReasoningConfiguration(
+            left.kind === 'custom' ? left.reasoning : undefined,
+            right.kind === 'custom' ? right.reasoning : undefined
+        );
+}
+
+function sameReasoningConfiguration(
+    left: ProviderReasoningConfiguration | undefined,
+    right: ProviderReasoningConfiguration | undefined
+): boolean {
+    return left?.defaultEffort === right?.defaultEffort
+        && left?.options.length === right?.options.length
+        && (left?.options.every((value, index) => value === right?.options[index]) ?? true);
+}
+
+function providerReasoningLabel(value: ProviderReasoningEffort): string {
+    switch (value) {
+        case 'none': return '关闭';
+        case 'minimal': return '最少';
+        case 'low': return '低';
+        case 'medium': return '中';
+        case 'high': return '高';
+        case 'xhigh': return '极高';
+    }
 }
 
 function fsyncDirectory(directory: string): void {

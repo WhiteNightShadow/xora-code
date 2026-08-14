@@ -76,13 +76,29 @@ test('桌面外壳只移除次要 chrome，保留菜单栏、项目树、终端�
     const shellContribution = fs.readFileSync(path.join(__dirname, '../src/browser/xora-shell-contribution.ts'), 'utf8');
 
     assert.match(shellContribution, /xora-compact-workbench/);
+    assert.match(shellContribution, /xora-product-shell/);
+    assert.match(shellContribution, /document\.body\.classList\.add\(PRODUCT_SHELL_CLASS, COMPACT_WORKBENCH_CLASS\)/,
+        '产品精简标记不应依赖 Electron bridge');
     assert.match(css, /xora-compact-workbench[\s\S]*?#main-toolbar[\s\S]*?display:\s*none\s*!important/);
-    assert.match(css, /#theia-left-content-panel\s*>\s*\.theia-app-sidebar-container/);
+    assert.match(css, /body\.xora-product-shell #theia-left-content-panel \.theia-app-sidebar-container/);
+    assert.match(css, /\.theia-app-sidebar-container\.xora-activity-rail-hidden/);
+    assert.match(css, /flex:\s*0\s+0\s+0\s*!important/);
     assert.match(css, /xora-compact-workbench[\s\S]*?#theia-statusBar[\s\S]*?display:\s*none\s*!important/);
     // Windows/Linux must keep the application MenuBar visible (not hide the whole top panel).
     assert.match(css, /#theia-top-panel\s*>\s*:not\(#theia-drag-panel\):not\(#window-controls\):not\(\.p-MenuBar\):not\(\.lm-MenuBar\)/);
     assert.match(css, /xora-platform-darwin #main-toolbar[\s\S]*?min-height:\s*30px/);
     assert.doesNotMatch(css, /#theia-bottom-(?:content|split)-panel[^{]*\{[^}]*display:\s*none/);
+});
+
+test('Activity Bar 在旧布局恢复后仍被隐藏，但不从 Theia shell 中移除', () => {
+    const shellContribution = fs.readFileSync(path.join(__dirname, '../src/browser/xora-shell-contribution.ts'), 'utf8');
+
+    assert.match(shellContribution, /onDidInitializeLayout[\s\S]*?this\.hideActivityRail\(\)/);
+    assert.match(shellContribution, /#theia-left-content-panel \.theia-app-sidebar-container/);
+    assert.match(shellContribution, /activityRail\.classList\.add\(HIDDEN_ACTIVITY_RAIL_CLASS\)/);
+    assert.match(shellContribution, /activityRail\.setAttribute\('aria-hidden', 'true'\)/);
+    assert.doesNotMatch(shellContribution, /activityRail\.(?:remove|dispose|close)\(/,
+        '隐藏 Activity Bar 不应破坏 Theia 对已注册视图的管理');
 });
 
 test('工作台就绪后不会继续等待默认的八百毫秒加载层动画', () => {

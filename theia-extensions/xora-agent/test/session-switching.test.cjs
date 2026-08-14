@@ -5,6 +5,8 @@ const test = require('node:test');
 
 const { AgentViewModel } = require('../lib/browser/agent-view-model');
 const {
+    agentModelChoiceGroups,
+    encodeAgentModelConfiguration,
     encodeAgentModelChoice,
     PROVIDER_DEFAULT_MODEL_CHOICE_ID
 } = require('../lib/browser/agent-model-options');
@@ -1073,6 +1075,64 @@ test('editing the current API profile preserves history but cannot auto-restore 
     }]);
 });
 
+test('editing only custom reasoning capabilities restarts the stale runtime before its rotated epoch can be used', async () => {
+    let profile = {
+        id: 'xora-relay',
+        name: 'Relay',
+        kind: 'custom',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.6',
+        reasoning: { options: ['high'], defaultEffort: 'high' },
+        secretRef: 'provider:xora-relay',
+        credentialConfigured: true
+    };
+    const host = Object.create(GrokAgentHostService.prototype);
+    let stops = 0;
+    host.lifecycleTail = Promise.resolve();
+    host.providers = {
+        get: id => id === profile.id ? profile : undefined,
+        save: next => {
+            profile = { ...next, credentialConfigured: true };
+            return profile;
+        }
+    };
+    host.providerId = profile.id;
+    host.phase = 'ready';
+    host.supervisor = { running: true };
+    host.acp = {};
+    host.activeSessionId = 'historical-session';
+    host.sessionLoadGeneration = 1;
+    host.loadedSessionIds = new Set(['historical-session']);
+    host.sessions = { markProviderSessionsReadOnly: () => [], list: () => [] };
+    host.activePrompts = new Map();
+    host.stopRuntimeLocked = async () => {
+        stops += 1;
+        host.phase = 'stopped';
+        host.supervisor.running = false;
+        host.acp = undefined;
+        host.models = [];
+    };
+    host.onProviderDefaultsChanged = () => undefined;
+    const invalidations = [];
+    host.onProviderRuntimeInvalidated = change => invalidations.push(change);
+    host.emitSnapshot = () => undefined;
+
+    await host.saveProvider({
+        ...profile,
+        reasoning: { options: ['high', 'xhigh'], defaultEffort: 'xhigh' }
+    });
+
+    assert.equal(stops, 1);
+    assert.equal(host.activeSessionId, undefined);
+    assert.equal(host.sessionLoadGeneration, 2);
+    assert.deepEqual(invalidations, [{
+        providerId: profile.id,
+        reason: 'configuration',
+        invalidateSession: true
+    }]);
+});
+
 test('a Provider invalidation clears matching stopped peers but never touches another Provider', async () => {
     const createPeer = providerId => {
         const host = Object.create(GrokAgentHostService.prototype);
@@ -1595,7 +1655,8 @@ test('restoring same-Provider history uses the current global model instead of t
     let record = session('same-provider-history', 'idle', {
         providerId: 'grok-subscription',
         providerRuntimeEpoch: 'subscription-epoch',
-        model: 'historical-model'
+        model: 'historical-model',
+        reasoningEffort: 'xhigh'
     });
     const requests = [];
     host.sessionLoadGeneration = 0;
@@ -1608,7 +1669,14 @@ test('restoring same-Provider history uses the current global model instead of t
     host.runtimeProviderEpoch = 'subscription-epoch';
     host.models = [
         { id: 'historical-model', name: 'Historical model' },
-        { id: 'current-global-model', name: 'Current global model' }
+        {
+            id: 'current-global-model',
+            name: 'Current global model',
+            reasoningOptions: [
+                { id: 'quick', value: 'low', name: 'Quick', default: true },
+                { id: 'deep', value: 'xhigh', name: 'Deep' }
+            ]
+        }
     ];
     host.sessions = {
         get: id => id === record.appSessionId ? record : undefined,
@@ -1645,10 +1713,15 @@ test('restoring same-Provider history uses the current global model instead of t
     assert.equal(requests[0].params._meta.modelId, 'current-global-model');
     assert.deepEqual(requests[1], {
         method: 'session/set_model',
-        params: { sessionId: record.acpSessionId, modelId: 'current-global-model' }
+        params: {
+            sessionId: record.acpSessionId,
+            modelId: 'current-global-model',
+            _meta: { reasoningEffort: 'xhigh' }
+        }
     });
     assert.equal(loaded.model, 'current-global-model');
     assert.equal(record.model, 'current-global-model');
+    assert.equal(record.reasoningEffort, 'xhigh');
     assert.equal(host.selectedModel, 'current-global-model');
 });
 
@@ -1785,6 +1858,64 @@ test('a new session can load ACP models before its first prompt', async () => {
     assert.equal(widget.newSessionModel, 'grok-fixture');
 });
 
+test('a Provider metadata revision hot-reloads the same custom model without letting an older read win', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const staleRead = deferred();
+    const oldProfiles = [{
+        id: 'xora-relay',
+        name: 'Relay',
+        kind: 'custom',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.5',
+        secretRef: 'provider:xora-relay',
+        credentialConfigured: true
+    }];
+    const newProfiles = [{ ...oldProfiles[0], model: 'grok-4.6' }];
+    let reads = 0;
+
+    widget.providerRefreshTail = Promise.resolve();
+    widget.providers = oldProfiles;
+    widget.observedProviderProfilesRevision = 1;
+    widget.model = {
+        snapshot: {
+            providerId: 'xora-relay',
+            providerProfilesRevision: 1,
+            models: [{ id: 'xora-relay', name: 'xora-relay' }],
+            selectedModel: 'xora-relay',
+            sessions: [],
+            permissionMode: 'request-approval'
+        }
+    };
+    widget.service = {
+        listProviders: async () => {
+            reads += 1;
+            if (reads === 1) {
+                await staleRead.promise;
+                return oldProfiles;
+            }
+            return newProfiles;
+        }
+    };
+    widget.requestRuntimePrewarm = () => undefined;
+    widget.update = () => undefined;
+    widget.showInlineNotice = error => assert.fail(error);
+
+    const firstRefresh = widget.refreshProviders();
+    widget.model.snapshot.providerProfilesRevision = 2;
+    assert.equal(widget.reconcileProviderProfiles(), true);
+    staleRead.resolve();
+    await firstRefresh;
+    await widget.providerRefreshTail;
+
+    const groups = agentModelChoiceGroups(widget.providers, widget.model.snapshot);
+    assert.equal(reads, 2);
+    assert.equal(groups[0].choices[0].label, 'grok-4.6');
+    assert.equal(groups[0].choices[0].modelId, 'xora-relay', 'ACP keeps the credential-safe local alias');
+    assert.equal(widget.reconcileProviderProfiles(), false, 'ordinary snapshots at the same revision do not reread metadata');
+});
+
 test('a stale cross-Provider model event is ignored because service switching belongs to Settings', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
@@ -1845,6 +1976,184 @@ test('a stale cross-Provider model event is ignored because service switching be
     assert.match(widget.inlineNotice.message, /模型服务已变化/);
     assert.equal(widget.newSessionModel, undefined);
     assert.equal(widget.modelOptionsLoading, false);
+});
+
+test('model selection waits for the visible old-Provider history to rebind and shares the hydration flight', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const restore = deferred();
+    const timeline = [];
+    const historical = session('old-history', 'idle', { providerId: 'old-relay', model: 'old-relay' });
+    const rebound = { ...historical, providerId: 'grok-subscription', model: 'grok-4.6' };
+
+    widget.sessionLoading = false;
+    widget.modelSelectionLoading = false;
+    widget.hasPromptLaneWork = () => false;
+    widget.agentContextKey = () => 'current-provider-history';
+    widget.sameWorkspaceRoot = (left, right) => left === right;
+    widget.ensureSessionHydrated = async () => {
+        timeline.push('hydrate');
+        return restore.promise;
+    };
+    widget.model = {
+        snapshot: {
+            phase: 'ready',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription',
+            activeSessionId: historical.appSessionId,
+            selectedModel: 'grok-build',
+            models: [{ id: 'grok-build' }, { id: 'grok-4.6' }],
+            sessions: [historical]
+        },
+        updateSession: loaded => {
+            timeline.push(`session:${loaded.providerId}`);
+            widget.model.snapshot.sessions = [loaded];
+        },
+        refresh: async () => timeline.push('refresh')
+    };
+    widget.service = {
+        selectModel: async (sessionId, modelId) => timeline.push(`select:${sessionId}:${modelId}`)
+    };
+    widget.update = () => undefined;
+
+    const switching = widget.selectModel(
+        historical,
+        encodeAgentModelChoice('grok-subscription', 'grok-4.6')
+    );
+    await Promise.resolve();
+    assert.equal(widget.modelSelectionLoading, true);
+    assert.deepEqual(timeline, ['hydrate']);
+
+    // A second click while the first selector action is waiting must neither
+    // start another hydration nor race another session/set_model request.
+    await widget.selectModel(
+        historical,
+        encodeAgentModelChoice('grok-subscription', 'grok-build')
+    );
+    assert.deepEqual(timeline, ['hydrate']);
+
+    restore.resolve(rebound);
+    await switching;
+
+    assert.deepEqual(timeline, [
+        'hydrate',
+        'session:grok-subscription',
+        'select:old-history:grok-4.6',
+        'refresh'
+    ]);
+    assert.equal(widget.modelSelectionLoading, false);
+});
+
+test('reasoning selection waits for current-Provider hydration without blocking the composer', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const restore = deferred();
+    const timeline = [];
+    const historical = session('reasoning-history', 'idle', { providerId: 'old-relay' });
+    const rebound = { ...historical, providerId: 'grok-subscription', model: 'grok-4.6' };
+
+    widget.sessionLoading = false;
+    widget.modelSelectionLoading = false;
+    widget.hasPromptLaneWork = () => false;
+    widget.agentContextKey = () => 'reasoning-history-key';
+    widget.sameWorkspaceRoot = (left, right) => left === right;
+    widget.ensureSessionHydrated = async () => restore.promise;
+    widget.model = {
+        snapshot: {
+            phase: 'ready',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription',
+            activeSessionId: historical.appSessionId,
+            sessions: [historical]
+        },
+        updateSession: loaded => timeline.push(`session:${loaded.providerId}`),
+        refresh: async () => timeline.push('refresh')
+    };
+    widget.service = {
+        selectReasoningEffort: async (sessionId, effort) => timeline.push(`reasoning:${sessionId}:${effort}`)
+    };
+    widget.update = () => undefined;
+
+    const switching = widget.selectReasoningEffort(historical, 'deep', [
+        { id: 'deep', value: 'xhigh', name: 'Deep' }
+    ]);
+    await Promise.resolve();
+    assert.equal(widget.modelSelectionLoading, true);
+    assert.equal(widget.sessionLoading, false, 'only model controls become busy; drafting stays available');
+    restore.resolve(rebound);
+    await switching;
+
+    assert.deepEqual(timeline, [
+        'session:grok-subscription',
+        'reasoning:reasoning-history:xhigh',
+        'refresh'
+    ]);
+    assert.equal(widget.modelSelectionLoading, false);
+});
+
+test('one model menu atomically applies the selected model and its nested reasoning level', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const timeline = [];
+    const active = session('combined-model-choice', 'idle', { model: 'grok-build' });
+
+    widget.sessionLoading = false;
+    widget.modelSelectionLoading = false;
+    widget.hasPromptLaneWork = () => false;
+    widget.agentContextKey = () => 'combined-model-key';
+    widget.sameWorkspaceRoot = (left, right) => left === right;
+    widget.ensureSessionHydrated = async () => active;
+    widget.model = {
+        snapshot: {
+            phase: 'ready',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription',
+            activeSessionId: active.appSessionId,
+            selectedModel: 'grok-build',
+            models: [{
+                id: 'grok-4.6',
+                name: 'Grok 4.6',
+                reasoningOptions: [
+                    { id: 'high', value: 'high', name: 'High' },
+                    { id: 'deep', value: 'xhigh', name: 'Deep' }
+                ]
+            }],
+            sessions: [active]
+        },
+        updateSession: () => timeline.push('session'),
+        refresh: async () => timeline.push('refresh')
+    };
+    widget.service = {
+        selectModel: async (sessionId, modelId, effort) => timeline.push(`model:${sessionId}:${modelId}:${effort}`)
+    };
+    widget.update = () => undefined;
+
+    await widget.selectModelConfiguration(active, encodeAgentModelConfiguration(
+        encodeAgentModelChoice('grok-subscription', 'grok-4.6'),
+        'xhigh'
+    ));
+
+    assert.deepEqual(timeline, [
+        'session',
+        'model:combined-model-choice:grok-4.6:xhigh',
+        'refresh'
+    ]);
+    assert.equal(widget.modelSelectionLoading, false);
+});
+
+test('auth-required to ready resumes visible history hydration exactly once', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    let hydrations = 0;
+    widget.observedRuntimePhase = 'auth-required';
+    widget.model = { snapshot: { phase: 'ready' } };
+    widget.hydrateActiveSessionInBackground = async () => { hydrations += 1; };
+
+    widget.reconcileRuntimePrewarmState();
+    widget.reconcileRuntimePrewarmState();
+
+    assert.equal(hydrations, 1);
+    assert.equal(widget.observedRuntimePhase, 'ready');
 });
 
 test('a failed default-model write rolls the optimistic new-session selector back', async () => {
@@ -2753,6 +3062,55 @@ test('cached local history becomes visible before ACP session restore completes'
     assert.equal(visibleBeforeRestore, true, `timeline before restore: ${timeline.join(' -> ')}`);
 });
 
+test('reopening the visible conversation hydrates it when the current Provider key is not ready', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const historical = session('visible-old-provider', 'idle', { providerId: 'old-relay' });
+    const rebound = { ...historical, providerId: 'grok-subscription', model: 'grok-4.6' };
+    const timeline = [];
+
+    widget.sessionLoadGeneration = 0;
+    widget.agentContextGeneration = 0;
+    widget.sessionHistoryCatchup = new Map();
+    widget.sessionHistoryPages = new Map();
+    widget.hydratedSessionKeys = new Set();
+    widget.roots = ['/fixture'];
+    widget.sessionLoading = false;
+    widget.workspaceRestorePending = false;
+    widget.rememberOpenSessionTab = () => undefined;
+    widget.agentContextKey = () => 'current-provider-visible-session';
+    widget.imageDraftContextKey = () => 'current-provider-visible-session';
+    widget.storeActiveComposerDraft = () => undefined;
+    widget.resetTranscriptWindow = () => undefined;
+    widget.activateComposerLane = () => undefined;
+    widget.cachedSessionHistory = () => [];
+    widget.followTranscript = () => undefined;
+    widget.update = () => undefined;
+    widget.model = {
+        snapshot: {
+            phase: 'ready',
+            activeSessionId: historical.appSessionId,
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription',
+            sessions: [historical]
+        },
+        showSessionHistory: () => timeline.push('history-visible'),
+        updateSession: loaded => timeline.push(`hydrated:${loaded.providerId}`)
+    };
+    widget.ensureSessionHydrated = async () => {
+        timeline.push('load-session');
+        return rebound;
+    };
+
+    await widget.openSession(historical);
+
+    assert.deepEqual(timeline, [
+        'history-visible',
+        'load-session',
+        'hydrated:grok-subscription'
+    ]);
+});
+
 test('reopening a cached hydrated history performs no JSONL or ACP round trip', async () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);
@@ -2928,6 +3286,63 @@ test('a maximum-sized history is reduced with one notification and a bounded vie
     // This budget covers reduction only. DOM rendering needs its own windowing
     // or incremental-render contract in the widget.
     assert.ok(elapsed < 750, `history reduction took ${elapsed.toFixed(1)} ms`);
+});
+
+test('reaching the top fetches an older backend page and preserves the visible scroll anchor', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const record = session('a', 'idle');
+    const newest = {
+        kind: 'text-delta', sessionId: 'a', role: 'assistant', text: 'newest'
+    };
+    const older = {
+        kind: 'text-delta', sessionId: 'a', role: 'assistant', text: 'older'
+    };
+    let requested;
+    let scrollHeight = 1_000;
+    let scrollTop = 0;
+    const node = {
+        get scrollHeight() { return scrollHeight; },
+        clientHeight: 400,
+        get scrollTop() { return scrollTop; },
+        set scrollTop(value) { scrollTop = value; }
+    };
+
+    widget.agentPaneView = 'conversation';
+    widget.activityFilter = 'all';
+    widget.renderedTranscriptLimit = 180;
+    widget.sessionLoadGeneration = 7;
+    widget.sessionHistoryCatchup = new Map();
+    widget.sessionHistoryPages = new Map([['a', {
+        events: [newest], before: 'opaque-before', hasMore: true
+    }]]);
+    widget.sessionHistoryCache = new Map();
+    widget.model = {
+        snapshot: { activeSessionId: 'a', sessions: [record] },
+        transcript: [{ id: 'newest', kind: 'assistant', text: 'newest', payload: newest }],
+        showSessionHistory: (_record, events) => {
+            widget.model.transcript = events.map((event, index) => ({
+                id: String(index), kind: 'assistant', text: event.text, payload: event
+            }));
+        }
+    };
+    widget.service = {
+        getSessionHistoryPage: async (_sessionId, request) => {
+            requested = request;
+            return { events: [older], hasMore: false };
+        }
+    };
+    widget.update = () => { scrollHeight = 1_200; };
+    widget.showInlineNotice = message => assert.fail(message);
+
+    await widget.revealEarlierTranscript(node);
+    widget.bindTranscriptNode(node);
+
+    assert.deepEqual(requested, { before: 'opaque-before', limit: 180 });
+    assert.deepEqual(widget.model.transcript.map(entry => entry.text), ['older', 'newest']);
+    assert.equal(scrollTop, 200, 'prepending must keep the previous first visible row anchored');
+    assert.equal(widget.transcriptHistoryRevealPending, false);
+    assert.equal(widget.sessionHistoryPages.get('a').hasMore, false);
 });
 
 test('transcript follows committed output only while the reader remains near the bottom', () => {

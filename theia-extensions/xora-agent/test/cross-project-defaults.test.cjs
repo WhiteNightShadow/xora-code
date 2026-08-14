@@ -36,6 +36,23 @@ test('new-session model choice remains the user default after changing project r
     assert.equal(snapshot.workspaceTrusted, false, 'a model preference must never grant project trust');
 });
 
+test('fake host persists a canonical reasoning value per session', async () => {
+    const service = new FakeAgentHostService();
+    const session = await service.createSession({
+        workspaceRoot: path.resolve('/fixture/project-a'),
+        providerId: 'grok-subscription',
+        model: 'grok',
+        reasoningEffort: 'low'
+    });
+    assert.equal(session.reasoningEffort, 'low');
+    await service.selectReasoningEffort(session.appSessionId, 'deep');
+    const snapshot = await service.getSnapshot();
+    assert.equal(snapshot.selectedReasoningEffort, 'xhigh');
+    assert.equal(snapshot.sessions[0].reasoningEffort, 'xhigh');
+    await assert.rejects(() => service.selectReasoningEffort(session.appSessionId, 'future-level'),
+        /not advertised/);
+});
+
 test('legacy subscription confirmation is imported once and external change invalidates the hint', () => {
     const { registry, current } = registryHarness({
         schemaVersion: 1,
@@ -132,6 +149,182 @@ test('model metadata accepts only a positive safe integer context window', () =>
     assert.equal(host.models[2].contextWindow, 64_000);
 });
 
+test('ACP model reasoning metadata stays server-driven and forward-compatible', () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.providerId = 'grok-subscription';
+    host.models = [];
+    host.providers = {
+        get: () => ({ id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription' }),
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.onProviderDefaultsChanged = () => undefined;
+    host.emitSnapshot = () => undefined;
+
+    host.acceptModelState({
+        currentModelId: 'future-model',
+        availableModels: [{
+            id: 'future-model',
+            name: 'Future model',
+            _meta: {
+                supportsReasoningEffort: true,
+                reasoningEffort: 'xhigh',
+                reasoningEfforts: [
+                    { id: 'quick', value: 'low', label: 'Quick', description: 'Low latency' },
+                    { id: 'deep', value: 'xhigh', label: 'Deep' },
+                    { id: 'future', value: 'quantum', label: 'Future level' }
+                ]
+            }
+        }, {
+            id: 'legacy-model',
+            name: 'Legacy model',
+            _meta: { supportsReasoningEffort: false }
+        }]
+    });
+
+    assert.deepEqual(host.models[0].reasoningOptions, [
+        { id: 'quick', value: 'low', name: 'Quick', description: 'Low latency' },
+        { id: 'deep', value: 'xhigh', name: 'Deep', default: true },
+        { id: 'future', value: 'quantum', name: 'Future level' }
+    ]);
+    assert.equal(host.models[1].reasoningOptions, undefined,
+        'old/unsupported models must not show an effort selector');
+    assert.equal(host.resolveReasoningEffort('future-model', 'deep'), 'xhigh');
+    assert.equal(host.resolveReasoningEffort('future-model', 'quantum'), 'quantum');
+    assert.equal(host.resolveReasoningEffort('future-model', 'max'), undefined);
+});
+
+test('production Grok 4.6 wire metadata resolves one model-level default despite duplicate item flags', () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.providerId = 'grok-subscription';
+    host.models = [];
+    host.providers = {
+        get: () => ({ id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription' }),
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.onProviderDefaultsChanged = () => undefined;
+    host.emitSnapshot = () => undefined;
+
+    // Exact capability shape observed from bundled Grok Build 0.2.102.
+    host.acceptModelState({
+        currentModelId: 'grok-4.6',
+        availableModels: [{
+            modelId: 'grok-4.6',
+            name: 'Grok 4.6',
+            _meta: {
+                totalContextTokens: 500_000,
+                agentType: 'grok-build-plan',
+                supportsReasoningEffort: true,
+                reasoningEffort: 'high',
+                reasoningEfforts: [
+                    { id: 'xhigh', value: 'xhigh', label: 'Extra High Effort', default: true },
+                    { id: 'high', value: 'high', label: 'High Effort', default: true },
+                    { id: 'medium', value: 'medium', label: 'Medium Effort', default: false },
+                    { id: 'low', value: 'low', label: 'Low Effort', default: false }
+                ]
+            }
+        }]
+    }, false, 'replace');
+
+    assert.deepEqual(host.models[0].reasoningOptions.map(option => option.value),
+        ['xhigh', 'high', 'medium', 'low']);
+    assert.deepEqual(host.models[0].reasoningOptions.filter(option => option.default).map(option => option.value),
+        ['high'], 'model-level reasoningEffort is the sole default authority when usable');
+});
+
+test('an item default is used only when model-level reasoning effort is absent', () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.providerId = 'grok-subscription';
+    host.models = [];
+    host.providers = {
+        get: () => ({ id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription' }),
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.onProviderDefaultsChanged = () => undefined;
+    host.emitSnapshot = () => undefined;
+    host.acceptModelState({
+        currentModelId: 'future-model',
+        availableModels: [{
+            modelId: 'future-model',
+            _meta: {
+                supportsReasoningEffort: true,
+                reasoningEfforts: [
+                    { value: 'high', default: false },
+                    { value: 'future', default: true },
+                    { value: 'other', default: true }
+                ]
+            }
+        }]
+    }, false, 'replace');
+    assert.deepEqual(host.models[0].reasoningOptions.filter(option => option.default).map(option => option.value),
+        ['future']);
+});
+
+test('supported ACP models without a usable effort list use the pinned Grok fallback menu', () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.providerId = 'grok-subscription';
+    host.models = [];
+    host.providers = {
+        get: () => ({ id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription' }),
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.onProviderDefaultsChanged = () => undefined;
+    host.emitSnapshot = () => undefined;
+    host.acceptModelState({
+        currentModelId: 'reasoning-model',
+        availableModels: [{
+            id: 'reasoning-model',
+            name: 'Reasoning model',
+            _meta: { supportsReasoningEffort: true, reasoningEffort: 'high' }
+        }]
+    });
+    assert.deepEqual(host.models[0].reasoningOptions.map(option => option.value),
+        ['xhigh', 'high', 'medium', 'low']);
+    assert.equal(host.models[0].reasoningOptions.find(option => option.default).value, 'high');
+});
+
+test('session-scoped model metadata cannot erase initialize-time reasoning capabilities', () => {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.providerId = 'grok-subscription';
+    host.models = [];
+    host.providers = {
+        get: () => ({ id: 'grok-subscription', name: 'Grok 订阅', kind: 'grok-subscription' }),
+        preferredModelId: () => undefined,
+        selectPreferredModel: () => undefined
+    };
+    host.onProviderDefaultsChanged = () => undefined;
+    host.emitSnapshot = () => undefined;
+
+    host.acceptModelState({
+        currentModelId: 'grok-4.6',
+        availableModels: [{
+            id: 'grok-4.6',
+            name: 'Grok 4.6',
+            description: 'Initialize catalogue',
+            _meta: {
+                totalContextTokens: 500_000,
+                supportsReasoningEffort: true,
+                reasoningEffort: 'high',
+                reasoningEfforts: [
+                    { id: 'high', value: 'high', label: 'High' },
+                    { id: 'deep', value: 'xhigh', label: 'Deep' }
+                ]
+            }
+        }]
+    }, false, 'replace');
+    host.acceptModelState({
+        currentModelId: 'grok-4.6',
+        availableModels: [{ id: 'grok-4.6', name: 'Grok 4.6' }]
+    }, false, 'merge');
+
+    assert.equal(host.models[0].description, 'Initialize catalogue');
+    assert.equal(host.models[0].contextWindow, 500_000);
+    assert.deepEqual(host.models[0].reasoningOptions.map(option => option.value), ['high', 'xhigh']);
+});
+
 test('production wiring keeps Provider/model/auth hints global but trust and MCP credentials project-scoped', () => {
     const root = path.join(__dirname, '..', 'src');
     const provider = fs.readFileSync(path.join(root, 'electron-main/provider-registry.ts'), 'utf8');
@@ -154,8 +347,9 @@ test('production wiring keeps Provider/model/auth hints global but trust and MCP
     assert.match(host, /this\.selectedModel = preferred/);
     assert.match(host, /providerAllowsCatalogModel\(this\.providerId, state\.currentModelId\)/,
         'a model advertised by ACP must still belong to the selected Provider');
-    assert.match(host, /selectDefaultModel\(providerId: string, modelId: string\)/);
-    assert.match(protocol, /selectDefaultModel\(providerId: string, modelId: string\): Promise<RuntimeSnapshot>/);
+    assert.match(host, /selectDefaultModel\(providerId: string, modelId: string, reasoningEffort\?: string\)/);
+    assert.match(protocol,
+        /selectDefaultModel\(providerId: string, modelId: string, reasoningEffort\?: string\): Promise<RuntimeSnapshot>/);
     assert.match(manager, /providers\.invalidateSubscriptionAuthStatus\(\)/);
 
     assert.match(host, /providers\.mcpEnvironment\(root\)/, 'MCP secrets remain rooted to the selected project');

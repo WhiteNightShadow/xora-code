@@ -27,6 +27,15 @@ test('custom API defaults use Responses, 500k context and backend search', () =>
     assert.equal(profile.backendSearch, true);
 });
 
+test('Provider metadata generations advance only when Electron publishes a committed change', () => {
+    const registry = Object.create(ProviderRegistry.prototype);
+    assert.equal(registry.providerProfilesRevision(), 0);
+    registry.bumpProviderProfilesRevision();
+    assert.equal(registry.providerProfilesRevision(), 1);
+    registry.bumpProviderProfilesRevision();
+    assert.equal(registry.providerProfilesRevision(), 2);
+});
+
 test('credential RPC exposes only configured state and can clear a Provider secret', async () => {
     const service = new FakeAgentHostService();
     const xai = (await service.listProviders()).find(provider => provider.id === 'xai-api-key');
@@ -1163,6 +1172,29 @@ test('subscription login and logout stop an active runtime before changing share
     const snapshot = await service.getSnapshot();
     assert.equal(snapshot.phase, 'stopped');
     assert.match(snapshot.message, /退出/);
+});
+
+test('successful subscription login invalidates an in-flight history activation before switching Provider', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/electron-main/grok-agent-host-service.ts'), 'utf8');
+    const loginStart = source.indexOf('async loginGrokSubscription(): Promise<ManagementResult>');
+    const logoutStart = source.indexOf('async logoutGrokSubscription(): Promise<ManagementResult>', loginStart);
+    assert.ok(loginStart >= 0 && logoutStart > loginStart);
+
+    const login = source.slice(loginStart, logoutStart);
+    const successfulResult = login.indexOf('if (result.ok)');
+    const invalidateLoad = login.indexOf('++this.sessionLoadGeneration', successfulResult);
+    const selectSubscription = login.indexOf("this.providers.selectProvider('grok-subscription')", successfulResult);
+    const clearActiveSession = login.indexOf('this.activeSessionId = undefined', successfulResult);
+    assert.ok(successfulResult >= 0);
+    assert.ok(invalidateLoad > successfulResult);
+    assert.ok(selectSubscription > invalidateLoad);
+    assert.ok(clearActiveSession > selectSubscription);
+
+    const loadStart = source.indexOf('async loadSession(appSessionId: string): Promise<SessionRecord>');
+    const loadEnd = source.indexOf('protected async loadSessionUncoalesced(', loadStart);
+    const load = source.slice(loadStart, loadEnd);
+    assert.match(load, /const activationGeneration = \+\+this\.sessionLoadGeneration/);
+    assert.match(load, /activationGeneration === this\.sessionLoadGeneration[\s\S]*this\.activeSessionId = appSessionId/);
 });
 
 test('ACP subscription authentication adopts the coordinator final epoch and a failed mutation cannot create a session', async () => {

@@ -3,11 +3,28 @@ const test = require('node:test');
 
 const {
     agentModelChoiceGroups,
+    decodeAgentModelConfiguration,
     decodeAgentModelChoice,
+    encodeAgentModelConfiguration,
     PROVIDER_DEFAULT_MODEL_CHOICE_ID,
     selectedAgentModelChoice,
     XAI_MANAGED_MODEL_ID
 } = require('../lib/browser/agent-model-options');
+
+test('model and reasoning selections share one opaque, forward-compatible value', () => {
+    const modelChoice = 'xora-model:grok-subscription:grok-4.6';
+    const encoded = encodeAgentModelConfiguration(modelChoice, 'future/xhigh+');
+
+    assert.deepEqual(decodeAgentModelConfiguration(encoded), {
+        modelChoice,
+        reasoningEffort: 'future/xhigh+'
+    });
+    assert.deepEqual(decodeAgentModelConfiguration(encodeAgentModelConfiguration(modelChoice)), {
+        modelChoice,
+        reasoningEffort: undefined
+    });
+    assert.equal(decodeAgentModelConfiguration('grok-4.6'), undefined);
+});
 
 function snapshot(providerId, models = [], selectedModel) {
     return {

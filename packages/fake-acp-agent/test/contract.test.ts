@@ -220,6 +220,40 @@ test("session/load replays deterministic history", async () => {
   }
 });
 
+test("session/set_model round-trips a remapped reasoning effort through model state", async () => {
+  const rpc = new RpcHarness();
+  try {
+    const initialized = await rpc.request<Record<string, unknown>>("initialize", { protocolVersion: 1 });
+    const initialState = (initialized._meta as Record<string, unknown>).modelState as {
+      availableModels: Array<{ id: string; _meta?: Record<string, unknown> }>;
+    };
+    const model = initialState.availableModels.find((candidate) => candidate.id === "grok");
+    assert.equal(model?._meta?.supportsReasoningEffort, true);
+    assert.ok(Array.isArray(model?._meta?.reasoningEfforts));
+
+    await rpc.request("authenticate", { methodId: "grok.com" });
+    const { sessionId } = await rpc.request<{ sessionId: string }>("session/new", {
+      cwd: "/fixture/project",
+      mcpServers: [],
+    });
+    await rpc.request("session/set_model", {
+      sessionId,
+      modelId: "grok",
+      _meta: { reasoningEffort: "deep" },
+    });
+    const notification = await rpc.waitForNotification("_x.ai/model_state_updated", (message) => {
+      const params = isRecord(message.params) ? message.params : {};
+      const state = isRecord(params.modelState) ? params.modelState : {};
+      if (state.currentModelId !== "grok" || !Array.isArray(state.availableModels)) return false;
+      const current = state.availableModels.find((candidate) => isRecord(candidate) && candidate.id === "grok");
+      return isRecord(current) && isRecord(current._meta) && current._meta.reasoningEffort === "xhigh";
+    });
+    assert.ok(notification);
+  } finally {
+    await rpc.close();
+  }
+});
+
 test("session advertises native Goal capability through available_commands_update", async () => {
   const rpc = new RpcHarness();
   try {

@@ -33,6 +33,11 @@ export interface AgentMarkdownProps {
 
 /** Relative or absolute source-file paths commonly emitted in Agent replies. */
 const FILE_PATH_PATTERN = /(?:(?:[A-Za-z]:)?(?:\/|\\)[\w.@%+=,-]+(?:\/|\\)[\w.@%+=,-./\\]+|[\w.-]+(?:\/[\w.-]+)+\.\w{1,12})(?::\d{1,6})?/g;
+/** Plain HTTP(S) links emitted by an Agent. Links are recognized before file
+ * paths so the `//host/path.ext` portion of a URL can never become a workspace
+ * file button. */
+const HTTP_URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`，。；：！？、（）【】《》“”‘’]+/giu;
+const URL_TRAILING_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?', '，', '。', '；', '：', '！', '？', '、']);
 
 interface FenceStart {
     readonly size: number;
@@ -309,6 +314,49 @@ function renderTextWithPaths(
     keyPrefix: string,
     onOpenPath?: (path: string) => void
 ): React.ReactNode[] {
+    if (!text) {
+        return [];
+    }
+    const nodes: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let urlMatch: RegExpExecArray | null;
+    HTTP_URL_PATTERN.lastIndex = 0;
+    while ((urlMatch = HTTP_URL_PATTERN.exec(text)) !== null) {
+        const { url, trailing } = splitUrlTrailingPunctuation(urlMatch[0]);
+        if (urlMatch.index > lastIndex) {
+            nodes.push(...renderFilePaths(
+                text.slice(lastIndex, urlMatch.index),
+                `${keyPrefix}-before-url-${urlMatch.index}`,
+                onOpenPath
+            ));
+        }
+        nodes.push(isSafeHttpUrl(url)
+            ? <a
+                key={`${keyPrefix}-url-${urlMatch.index}`}
+                className='xora-agent-markdown-link'
+                href={url}
+                target='_blank'
+                rel='noopener noreferrer'
+                title='在浏览器中打开链接'>
+                {renderUrlLabel(url, `${keyPrefix}-url-${urlMatch.index}`)}
+            </a>
+            : url);
+        if (trailing) {
+            nodes.push(trailing);
+        }
+        lastIndex = urlMatch.index + urlMatch[0].length;
+    }
+    if (lastIndex < text.length) {
+        nodes.push(...renderFilePaths(text.slice(lastIndex), `${keyPrefix}-after-url-${lastIndex}`, onOpenPath));
+    }
+    return nodes.length ? nodes : renderFilePaths(text, keyPrefix, onOpenPath);
+}
+
+function renderFilePaths(
+    text: string,
+    keyPrefix: string,
+    onOpenPath?: (path: string) => void
+): React.ReactNode[] {
     if (!onOpenPath || !text) {
         return text ? [text] : [];
     }
@@ -341,6 +389,45 @@ function renderTextWithPaths(
         nodes.push(text.slice(lastIndex));
     }
     return nodes.length ? nodes : [text];
+}
+
+function splitUrlTrailingPunctuation(raw: string): { readonly url: string; readonly trailing: string } {
+    let end = raw.length;
+    while (end > 0 && URL_TRAILING_PUNCTUATION.has(raw[end - 1])) {
+        end -= 1;
+    }
+    for (const [opening, closing] of [['(', ')'], ['[', ']'], ['{', '}']] as const) {
+        while (end > 0 && raw[end - 1] === closing
+            && countCharacter(raw.slice(0, end), closing) > countCharacter(raw.slice(0, end), opening)) {
+            end -= 1;
+        }
+    }
+    return { url: raw.slice(0, end), trailing: raw.slice(end) };
+}
+
+function countCharacter(value: string, character: string): number {
+    let count = 0;
+    for (const candidate of value) {
+        if (candidate === character) count += 1;
+    }
+    return count;
+}
+
+function renderUrlLabel(value: string, keyPrefix: string): React.ReactNode[] {
+    return value.split(/([?&][^?&=]{1,32}=)/g).filter(Boolean).map((part, index) =>
+        /^[?&].{1,32}=$/.test(part)
+            ? <span key={`${keyPrefix}-parameter-${index}`} className='xora-agent-markdown-link-parameter'>{part}</span>
+            : part
+    );
+}
+
+function isSafeHttpUrl(value: string): boolean {
+    try {
+        const parsed = new URL(value);
+        return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !!parsed.hostname;
+    } catch {
+        return false;
+    }
 }
 
 function looksLikeFilePath(value: string): boolean {

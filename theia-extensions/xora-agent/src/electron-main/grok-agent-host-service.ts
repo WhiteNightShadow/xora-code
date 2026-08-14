@@ -26,6 +26,7 @@ import {
     AgentToolLocation,
     AgentToolPresentation,
     AgentModelOption,
+    AgentReasoningOption,
     AgentPlanApprovalRequestEvent,
     AgentPlanEvent,
     AgentSessionMode,
@@ -46,7 +47,10 @@ import {
     PromptRequest,
     ProviderProfile,
     ProviderProtocol,
+    ProviderReasoningConfiguration,
     RuntimeSnapshot,
+    SessionHistoryPage,
+    SessionHistoryPageRequest,
     SessionRecord,
     StartRuntimeRequest,
     SynchronizeWorkspaceTrustRequest,
@@ -57,7 +61,7 @@ import {
 } from '../common/agent-protocol';
 import { normalizeWindowsFilesystemPath } from '../common/workspace-path';
 import { ProviderRegistry } from './provider-registry';
-import { validatePromptImageAttachments } from './prompt-image-attachments';
+import { persistPromptImagesToWorkspace, validatePromptImageAttachments } from './prompt-image-attachments';
 import { normalizeProviderBaseUrl, providerModelsEndpoint, requestProviderJson } from './provider-network';
 import { McpRuntimeProjection, mergeMcpManagementResults } from './mcp-management';
 import { RuntimeMcpIssue, RuntimeMcpRegistry, RuntimeMcpSnapshot } from './runtime-mcp-registry';
@@ -616,7 +620,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.4' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.5' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -624,7 +628,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.2.4'
+                    clientVersion: '0.2.5'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
@@ -912,6 +916,15 @@ export class GrokAgentHostService implements AgentHostService {
             : provider?.kind === 'xai-api-key' && provider.model
                 ? XAI_MANAGED_MODEL_ID
                 : globallySelectedModel ?? requestedModel ?? runtimeSelectedModel;
+        const persistedReasoningEffort = effectiveModel && typeof this.providers.preferredReasoningEffort === 'function'
+            ? this.providers.preferredReasoningEffort(request.providerId, effectiveModel)
+            : undefined;
+        const explicitReasoningEffort = this.resolveReasoningEffort(effectiveModel, request.reasoningEffort);
+        if (request.reasoningEffort && !explicitReasoningEffort) {
+            throw new Error('The requested reasoning effort is not advertised by the selected model.');
+        }
+        const requestedReasoningEffort = explicitReasoningEffort
+            ?? this.calibrateReasoningEffort(effectiveModel, persistedReasoningEffort);
         const meta: Record<string, unknown> = {};
         if (effectiveModel) meta.modelId = effectiveModel;
         const params: Record<string, unknown> = {
@@ -957,6 +970,7 @@ export class GrokAgentHostService implements AgentHostService {
         let resolvedModel = typeof createdModelState?.currentModelId === 'string'
             ? createdModelState.currentModelId
             : effectiveModel;
+        let resolvedReasoningEffort = modelStateReasoningEffort(createdModelState);
         let incompatibleWithGlobalDefaults = false;
         let reconciledChangedDefaults = false;
         let reconcileError: unknown;
@@ -965,25 +979,37 @@ export class GrokAgentHostService implements AgentHostService {
         const latestModel = latestProvider === request.providerId
             ? this.defaultModelId(request.providerId)
             : undefined;
+        const modelToApply = latestModel ?? effectiveModel;
+        const latestPersistedReasoning = modelToApply && typeof this.providers.preferredReasoningEffort === 'function'
+            ? this.providers.preferredReasoningEffort(request.providerId, modelToApply)
+            : undefined;
+        const latestReasoningEffort = this.calibrateReasoningEffort(
+            modelToApply,
+            latestPersistedReasoning ?? requestedReasoningEffort
+        );
         reconciledDefaultsGeneration = this.providerDefaultsGeneration;
         if (latestProvider !== request.providerId
             || latestEpoch !== runtimeProviderEpoch
             || this.runtimeProviderEpoch !== runtimeProviderEpoch) {
             incompatibleWithGlobalDefaults = true;
-        } else if (latestModel && createdModelState?.currentModelId !== latestModel) {
+        } else if (modelToApply && ((latestModel && createdModelState?.currentModelId !== latestModel)
+            || (!!latestReasoningEffort && resolvedReasoningEffort !== latestReasoningEffort))) {
             try {
-                if (this.models.length > 0 && !this.models.some(model => model.id === latestModel)) {
+                if (this.models.length > 0 && !this.models.some(model => model.id === modelToApply)) {
                     throw new Error('The newly selected global model is not advertised by this ACP runtime.');
                 }
                 const modelResult = await acp.request<Record<string, unknown>>('session/set_model', {
                     sessionId: result.sessionId,
-                    modelId: latestModel
+                    modelId: modelToApply,
+                    ...(latestReasoningEffort ? { _meta: this.reasoningMeta(latestReasoningEffort) } : {})
                 });
                 const confirmedModel = modelStateFrom(modelResult)?.currentModelId;
-                if (confirmedModel && confirmedModel !== latestModel) {
+                if (confirmedModel && confirmedModel !== modelToApply) {
                     throw new Error('The sidecar did not apply the application-wide model.');
                 }
-                resolvedModel = latestModel;
+                resolvedModel = modelToApply;
+                resolvedReasoningEffort = latestReasoningEffort
+                    ?? modelStateReasoningEffort(modelStateFrom(modelResult));
                 reconciledChangedDefaults = true;
                 reconciledDefaultsGeneration = this.providerDefaultsGeneration;
                 // A second change while set_model was in flight is not replayed
@@ -991,7 +1017,8 @@ export class GrokAgentHostService implements AgentHostService {
                 // and let the latest defaults create a clean successor.
                 if (this.providers.selectedProviderId() !== request.providerId
                     || this.providers.runtimeEpoch(request.providerId) !== runtimeProviderEpoch
-                    || this.defaultModelId(request.providerId) !== resolvedModel
+                    || (latestModel !== undefined
+                        && this.defaultModelId(request.providerId) !== resolvedModel)
                     || this.providerDefaultsGeneration !== reconciledDefaultsGeneration) {
                     incompatibleWithGlobalDefaults = true;
                 }
@@ -1025,6 +1052,7 @@ export class GrokAgentHostService implements AgentHostService {
             providerId: request.providerId,
             providerRuntimeEpoch: runtimeProviderEpoch,
             model: resolvedModel,
+            reasoningEffort: resolvedReasoningEffort,
             sidecarVersion: this.sidecarVersion,
             ...(sessionModes.availableModes.length ? { availableModes: sessionModes.availableModes } : {}),
             ...(sessionModes.currentModeId ? { currentModeId: sessionModes.currentModeId } : {})
@@ -1189,18 +1217,28 @@ export class GrokAgentHostService implements AgentHostService {
                 const latestGlobalModel = this.defaultModelId(record.providerId);
                 const restoredModelState = modelStateFrom(result);
                 this.acceptModelState(restoredModelState, false);
+                const desiredReasoningEffort = this.desiredReasoningEffort(
+                    latestGlobalModel,
+                    record.reasoningEffort
+                );
+                let restoredReasoningEffort = modelStateReasoningEffort(restoredModelState);
                 // As with session/new, `_meta.modelId` is only a hint. An
                 // omitted currentModelId does not prove that a restored
                 // historical session adopted the global model.
                 if (latestGlobalModel
-                    && restoredModelState?.currentModelId !== latestGlobalModel) {
+                    && (restoredModelState?.currentModelId !== latestGlobalModel
+                        || (!!desiredReasoningEffort && restoredReasoningEffort !== desiredReasoningEffort))) {
                     if (this.models.length > 0 && !this.models.some(model => model.id === latestGlobalModel)) {
                         throw new Error('The application-wide model is not advertised by this ACP runtime.');
                     }
                     await this.requireReady().request('session/set_model', {
                         sessionId: record.acpSessionId,
-                        modelId: latestGlobalModel
+                        modelId: latestGlobalModel,
+                        ...(desiredReasoningEffort
+                            ? { _meta: this.reasoningMeta(desiredReasoningEffort) }
+                            : {})
                     });
+                    restoredReasoningEffort = desiredReasoningEffort;
                     if (restoreRuntimeGeneration !== this.runtimeGeneration) {
                         throw new Error('The Agent runtime changed while restoring this conversation.');
                     }
@@ -1220,6 +1258,7 @@ export class GrokAgentHostService implements AgentHostService {
                 const requiresDurableUpdate = currentRecord.status !== 'idle'
                     || currentRecord.sidecarVersion !== this.sidecarVersion
                     || (!!restoredModel && currentRecord.model !== restoredModel)
+                    || currentRecord.reasoningEffort !== restoredReasoningEffort
                     || !sameSessionModes(currentRecord, sessionModes);
                 // A repeated history activation is descriptive, not a new
                 // durable state transition. Avoid lock + temp file + two fsyncs
@@ -1229,6 +1268,7 @@ export class GrokAgentHostService implements AgentHostService {
                         status: 'idle',
                         sidecarVersion: this.sidecarVersion,
                         ...(restoredModel ? { model: restoredModel } : {}),
+                        reasoningEffort: restoredReasoningEffort,
                         ...(sessionModes.availableModes.length ? { availableModes: sessionModes.availableModes } : {}),
                         ...(sessionModes.currentModeId ? { currentModeId: sessionModes.currentModeId } : {})
                     })
@@ -1309,6 +1349,29 @@ export class GrokAgentHostService implements AgentHostService {
             }
         }
         return history;
+    }
+
+    async getSessionHistoryPage(
+        appSessionId: string,
+        request: SessionHistoryPageRequest = {}
+    ): Promise<SessionHistoryPage> {
+        if (!this.knownSessionIds.has(appSessionId) && !this.sessions.get(appSessionId)) {
+            throw new Error('Unknown Xora Code session.');
+        }
+        this.knownSessionIds.add(appSessionId);
+        if (!request.before) {
+            this.flushAssistantTextDeltas(appSessionId);
+            this.flushThoughtDeltas(appSessionId);
+        }
+        const providerRuntimeEpoch = this.sessions.get(appSessionId)?.providerRuntimeEpoch;
+        const page = this.sessions.readEventPage(appSessionId, request);
+        return {
+            ...page,
+            events: deepRedact(page.events, this.currentSecrets).filter(event => {
+                if (event.kind !== 'goal-state' && event.kind !== 'task-contract') return true;
+                return !!providerRuntimeEpoch && event.providerRuntimeEpoch === providerRuntimeEpoch;
+            })
+        };
     }
 
     async exportSession(appSessionId: string): Promise<ExportSessionResult> {
@@ -1556,11 +1619,6 @@ export class GrokAgentHostService implements AgentHostService {
         if (request.attachments !== undefined && !Array.isArray(request.attachments)) {
             throw new Error('Image attachments must be an array.');
         }
-        if (request.attachments?.length && this.capabilities?.prompt.image !== true) {
-            // ACP capabilities are affirmative: missing, stale or false means
-            // images must not cross the sidecar boundary.
-            throw new Error('The active Agent does not support image prompts.');
-        }
         const images = validatePromptImageAttachments(request.attachments);
         if (!request.text.length && !images.blocks.length) throw new Error('A prompt cannot be empty.');
         const admitted = await this.withCurrentIntegrationRead(record.workspaceRoot, async () => {
@@ -1599,12 +1657,21 @@ export class GrokAgentHostService implements AgentHostService {
             // Any contract belongs only to the live Plan turn that obtained
             // its approval. A stale value may never alter a later user turn.
             this.pendingApprovedPlanState().delete(request.sessionId);
-            const wireText = continuous
+            const persistedImages = persistPromptImagesToWorkspace(
+                refreshedRecord.workspaceRoot,
+                request.sessionId,
+                images
+            );
+            const nativeImagePrompt = this.capabilities?.prompt.image === true;
+            const formattedUserPrompt = continuous
                 ? formatContinuousGoalPrompt(request.text)
                 : formatAgentWirePrompt(request.text);
+            const wireText = nativeImagePrompt
+                ? formattedUserPrompt
+                : formatImageFileFallbackPrompt(formattedUserPrompt, persistedImages.workspacePaths);
             const prompt = [
                 ...(wireText.length ? [{ type: 'text' as const, text: wireText }] : []),
-                ...images.blocks
+                ...(nativeImagePrompt ? images.blocks : [])
             ];
             const turnId = crypto.randomUUID();
             const promptStartedAt = process.hrtime.bigint();
@@ -1632,7 +1699,7 @@ export class GrokAgentHostService implements AgentHostService {
                 sessionId: request.sessionId,
                 role: 'user',
                 text: request.text,
-                ...(images.summaries.length ? { attachments: images.summaries } : {})
+                ...(persistedImages.summaries.length ? { attachments: persistedImages.summaries } : {})
             });
             const running = this.sessions.update(request.sessionId, { status: 'running' });
             this.emit({ kind: 'session', session: running });
@@ -1792,23 +1859,26 @@ export class GrokAgentHostService implements AgentHostService {
         if (request.attachments !== undefined && !Array.isArray(request.attachments)) {
             throw new Error('Image attachments must be an array.');
         }
-        if (request.attachments?.length && this.capabilities?.prompt.image !== true) {
-            throw new Error('The active Agent does not support image guidance.');
-        }
         const images = validatePromptImageAttachments(request.attachments);
         if (!request.text.length && !images.blocks.length) throw new Error('Guidance cannot be empty.');
 
+        const persistedImages = persistPromptImagesToWorkspace(record.workspaceRoot, request.sessionId, images);
+        const nativeImagePrompt = this.capabilities?.prompt.image === true;
+        const guidanceText = nativeImagePrompt
+            ? request.text
+            : formatImageFileFallbackPrompt(request.text, persistedImages.workspacePaths);
+
         const interjectionId = crypto.randomUUID();
         const content = [
-            ...(request.text.length ? [{ type: 'text' as const, text: request.text }] : []),
-            ...images.blocks
+            ...(guidanceText.length ? [{ type: 'text' as const, text: guidanceText }] : []),
+            ...(nativeImagePrompt ? images.blocks : [])
         ];
         // ACP extension methods are encoded on the wire with a leading
         // underscore. The typed Rust client adds it automatically; Xora's
         // raw JSON-RPC transport must do so explicitly.
         const result = await acp.request<Record<string, unknown>>('_x.ai/interject', {
             sessionId: record.acpSessionId,
-            text: request.text,
+            text: guidanceText,
             interjectionId,
             content
         }, { timeoutMs: 0 });
@@ -1827,7 +1897,7 @@ export class GrokAgentHostService implements AgentHostService {
             text: request.text,
             guidance: true,
             messageId: interjectionId,
-            ...(images.summaries.length ? { attachments: images.summaries } : {})
+            ...(persistedImages.summaries.length ? { attachments: persistedImages.summaries } : {})
         });
         return { status: 'accepted', interjectionId };
     }
@@ -1920,7 +1990,59 @@ export class GrokAgentHostService implements AgentHostService {
         }
     }
 
-    async selectModel(appSessionId: string, modelId: string): Promise<void> {
+    /** Resolve either a server menu id or its canonical wire value. */
+    protected resolveReasoningEffort(modelId: string | undefined, effort: string | undefined): string | undefined {
+        const token = asReasoningToken(effort);
+        if (!modelId || !token) return undefined;
+        const option = this.models.find(model => model.id === modelId)?.reasoningOptions
+            ?.find(candidate => candidate.id === token || candidate.value === token);
+        return option?.value;
+    }
+
+    /** Preserve an existing effort when valid; otherwise use the advertised default. */
+    protected calibrateReasoningEffort(modelId: string | undefined, effort: string | undefined): string | undefined {
+        if (!modelId) return undefined;
+        const model = this.models.find(candidate => candidate.id === modelId);
+        if (!model?.reasoningOptions?.length) return undefined;
+        return this.resolveReasoningEffort(modelId, effort)
+            ?? model.reasoningOptions.find(option => option.default)?.value;
+    }
+
+    /** Read the durable application preference without consulting the runtime.
+     *
+     * A newly opened window intentionally publishes a snapshot before ACP
+     * model discovery finishes.  Keeping this raw value separate prevents a
+     * valid global preference from briefly disappearing while `models` is
+     * empty.  Every value sent to ACP is still resolved/calibrated through the
+     * live catalogue below.
+     */
+    protected persistedReasoningEffort(modelId: string | undefined): string | undefined {
+        if (!modelId || typeof this.providers.preferredReasoningEffort !== 'function') return undefined;
+        return this.providers.preferredReasoningEffort(this.providerId, modelId);
+    }
+
+    /** Resolve the durable application preference against the live catalogue.
+     * Older test doubles may not expose the new registry method, so absence is
+     * equivalent to an installation that has not saved a preference yet. */
+    protected preferredReasoningEffort(modelId: string | undefined): string | undefined {
+        return this.resolveReasoningEffort(modelId, this.persistedReasoningEffort(modelId));
+    }
+
+    protected desiredReasoningEffort(
+        modelId: string | undefined,
+        sessionFallback?: string
+    ): string | undefined {
+        return this.calibrateReasoningEffort(
+            modelId,
+            this.preferredReasoningEffort(modelId) ?? sessionFallback
+        );
+    }
+
+    protected reasoningMeta(effort: string | undefined): Record<string, unknown> | undefined {
+        return effort ? { reasoningEffort: effort } : undefined;
+    }
+
+    async selectModel(appSessionId: string, modelId: string, reasoningEffort?: string): Promise<void> {
         if (modelId === PROVIDER_DEFAULT_MODEL_CHOICE_ID) {
             throw new Error('The internal Provider default choice is not an ACP model id.');
         }
@@ -1944,33 +2066,91 @@ export class GrokAgentHostService implements AgentHostService {
             if (!this.providerAllowsCatalogModel(this.providerId, modelId)) {
                 throw new Error('The selected model does not belong to the current model service.');
             }
+            const requestedReasoningEffort = reasoningEffort
+                ? this.resolveReasoningEffort(modelId, reasoningEffort)
+                : undefined;
+            if (reasoningEffort && !requestedReasoningEffort) {
+                throw new Error('The selected reasoning effort is not advertised by this model.');
+            }
             const recordEpoch = record.providerRuntimeEpoch ?? 'legacy-v1';
             if (this.runtimeProviderEpoch !== recordEpoch
                 || recordEpoch !== this.providers.runtimeEpoch(record.providerId)) {
                 throw new Error('The Provider changed after this session was created. Start a new session.');
             }
 
-            // Persist first. If this fails, ACP remains untouched and every
-            // window continues to agree on the previous application default.
-            this.providers.selectPreferredModel(this.providerId, modelId);
-            this.onProviderDefaultsChanged();
+            const resolvedReasoningEffort = requestedReasoningEffort
+                ?? this.desiredReasoningEffort(modelId, record.reasoningEffort);
+            // Persist the model and effort atomically before mutating ACP. If
+            // the file write fails, every window remains on the old default.
+            const preferredModelChanged = this.providers.preferredModelId(this.providerId) !== modelId;
+            const preferredReasoningChanged = typeof this.providers.preferredReasoningEffort === 'function'
+                && this.providers.preferredReasoningEffort(this.providerId, modelId) !== resolvedReasoningEffort;
+            this.providers.selectPreferredModel(this.providerId, modelId, resolvedReasoningEffort);
+            if (preferredModelChanged || preferredReasoningChanged) this.onProviderDefaultsChanged();
             try {
                 await this.requireReady().request('session/set_model', {
                     sessionId: record.acpSessionId,
-                    modelId
+                    modelId,
+                    ...(resolvedReasoningEffort ? { _meta: this.reasoningMeta(resolvedReasoningEffort) } : {})
                 });
             } catch (error) {
                 await this.retireSessionAfterGlobalModelFailure(record, modelId, error);
                 throw error;
             }
             this.selectedModel = modelId;
-            const updated = this.sessions.update(appSessionId, { model: modelId });
+            const updated = this.sessions.update(appSessionId, {
+                model: modelId,
+                reasoningEffort: resolvedReasoningEffort
+            });
             this.emit({ kind: 'session', session: updated });
             this.emitSnapshot();
         });
     }
 
-    async selectDefaultModel(providerId: string, modelId: string): Promise<RuntimeSnapshot> {
+    async selectReasoningEffort(appSessionId: string, effort: string): Promise<void> {
+        return this.withLifecycle(async () => {
+            if (this.activePrompts.size > 0) {
+                throw new Error('请等待当前任务结束后再修改思考等级。');
+            }
+            const record = this.sessions.get(appSessionId);
+            if (!record?.acpSessionId || record.status === 'read-only') {
+                throw new Error('Select a live session before choosing a reasoning effort.');
+            }
+            if (record.providerId !== this.providerId
+                || this.providers.selectedProviderId() !== this.providerId
+                || this.activeSessionId !== appSessionId
+                || !this.loadedSessionIds.has(appSessionId)) {
+                throw new Error('The selected conversation is not the active global Provider session.');
+            }
+            const modelId = record.model ?? this.selectedModel;
+            if (!modelId || !this.models.some(model => model.id === modelId)) {
+                throw new Error('The active model is not advertised by the ACP runtime.');
+            }
+            const resolved = this.resolveReasoningEffort(modelId, effort);
+            if (!resolved) {
+                throw new Error('The selected reasoning effort is not advertised by this model.');
+            }
+            const recordEpoch = record.providerRuntimeEpoch ?? 'legacy-v1';
+            if (this.runtimeProviderEpoch !== recordEpoch
+                || recordEpoch !== this.providers.runtimeEpoch(record.providerId)) {
+                throw new Error('The Provider changed after this session was created. Start a new session.');
+            }
+            const preferredChanged = typeof this.providers.preferredReasoningEffort === 'function'
+                && this.providers.preferredReasoningEffort(this.providerId, modelId) !== resolved;
+            this.providers.selectPreferredReasoningEffort(this.providerId, modelId, resolved);
+            if (preferredChanged) this.onProviderDefaultsChanged();
+            await this.requireReady().request('session/set_model', {
+                sessionId: record.acpSessionId,
+                modelId,
+                _meta: this.reasoningMeta(resolved)
+            });
+            const updated = this.sessions.update(appSessionId, { reasoningEffort: resolved });
+            this.emit({ kind: 'session', session: updated });
+            this.emitSnapshot();
+        });
+    }
+
+    async selectDefaultModel(providerId: string, modelId: string, reasoningEffort?: string): Promise<RuntimeSnapshot> {
         if (modelId === PROVIDER_DEFAULT_MODEL_CHOICE_ID) {
             throw new Error('The internal Provider default choice cannot be saved as a model.');
         }
@@ -1987,7 +2167,15 @@ export class GrokAgentHostService implements AgentHostService {
             if (!this.providerAllowsCatalogModel(providerId, modelId)) {
                 throw new Error('所选模型不属于当前模型服务。');
             }
-            this.providers.selectPreferredModel(providerId, modelId);
+            const requestedReasoningEffort = reasoningEffort
+                ? this.resolveReasoningEffort(modelId, reasoningEffort)
+                : undefined;
+            if (reasoningEffort && !requestedReasoningEffort) {
+                throw new Error('所选思考等级不在当前模型提供的列表中。');
+            }
+            const resolvedReasoningEffort = requestedReasoningEffort
+                ?? this.desiredReasoningEffort(modelId);
+            this.providers.selectPreferredModel(providerId, modelId, resolvedReasoningEffort);
             this.onProviderDefaultsChanged();
 
             const active = this.activeSessionId ? this.sessions.get(this.activeSessionId) : undefined;
@@ -2151,7 +2339,11 @@ export class GrokAgentHostService implements AgentHostService {
                     || previous.baseUrl !== profile.baseUrl
                     || previous.model !== profile.model
                     || previous.contextWindow !== profile.contextWindow
-                    || previous.backendSearch !== profile.backendSearch);
+                    || previous.backendSearch !== profile.backendSearch
+                    || !sameProviderReasoningConfiguration(
+                        previous.kind === 'custom' ? previous.reasoning : undefined,
+                        profile.kind === 'custom' ? profile.reasoning : undefined
+                    ));
             const invalidatesExistingRuntime = !!previous && (apiKey !== undefined || runtimeConfigurationChanged);
             const invalidatesCurrentProvider = invalidatesExistingRuntime && profile.id === this.providerId;
             if (invalidatesCurrentProvider && (this.runtimeActive || this.phase !== 'stopped')) {
@@ -2180,9 +2372,13 @@ export class GrokAgentHostService implements AgentHostService {
                 });
             }
             this.onProviderDefaultsChanged();
-            if (invalidatesCurrentProvider) {
-                this.emitSnapshot('模型服务配置已更新；为保护会话隔离，已开始一个新会话。');
-            }
+            // A Provider display name or another non-runtime field can change
+            // without invalidating the sidecar. Publish the new profile
+            // generation in every case so the Agent selector updates now,
+            // rather than only after the next application launch.
+            this.emitSnapshot(invalidatesCurrentProvider
+                ? '模型服务配置已更新；为保护会话隔离，已开始一个新会话。'
+                : undefined);
             return saved;
         });
     }
@@ -2266,6 +2462,11 @@ export class GrokAgentHostService implements AgentHostService {
                     });
                 });
                 if (result.ok) {
+                    // A login may finish while an older Provider session/load
+                    // is still unwinding. Revoke its activation authority
+                    // before publishing the subscription as the new global
+                    // Provider so the late result cannot restore the old tab.
+                    ++this.sessionLoadGeneration;
                     this.providers.selectProvider('grok-subscription');
                     this.providers.rememberAuthenticationConfirmation('grok-subscription');
                     this.providerId = 'grok-subscription';
@@ -2743,9 +2944,32 @@ export class GrokAgentHostService implements AgentHostService {
             // is replaying. Treat notifications as descriptive catalog/runtime
             // state: they can bootstrap a missing preference, but can never
             // replace an explicit application-wide selection.
-            this.acceptModelState(state);
-            if (preferred && typeof state?.currentModelId === 'string'
-                && state.currentModelId !== preferred) {
+            this.acceptModelState(state, false);
+            const acpSessionId = asString(record?.sessionId);
+            const appSessionId = acpSessionId ? this.acpSessionLookup.get(acpSessionId) : undefined;
+            let reasoningPreferenceMismatch = false;
+            if (appSessionId) {
+                const session = this.sessions.get(appSessionId);
+                const effort = modelStateReasoningEffort(state);
+                // Only an explicit session-scoped effort is authoritative
+                // enough to detect drift.  Some compatible sidecars omit the
+                // field, which must not trigger a synchronization loop.
+                if (session && effort !== undefined && appSessionId === this.activeSessionId) {
+                    const desired = this.desiredReasoningEffort(
+                        preferred ?? state?.currentModelId ?? session.model,
+                        session.reasoningEffort
+                    );
+                    reasoningPreferenceMismatch = desired !== undefined && effort !== desired;
+                }
+                if (session && session.reasoningEffort !== effort) {
+                    const updated = this.sessions.update(appSessionId, { reasoningEffort: effort });
+                    this.emit({ kind: 'session', session: updated });
+                }
+            }
+            this.emitSnapshot();
+            if ((preferred && typeof state?.currentModelId === 'string'
+                && state.currentModelId !== preferred)
+                || reasoningPreferenceMismatch) {
                 // Re-apply the durable preference after the current turn (or
                 // immediately while idle). If ACP cannot apply it, the session
                 // is retired rather than sending a prompt to the wrong model.
@@ -3222,11 +3446,22 @@ export class GrokAgentHostService implements AgentHostService {
                     }
                     const modelState = modelStateFrom(result);
                     this.acceptModelState(modelState, false);
-                    if (selectedModel && modelState?.currentModelId !== selectedModel) {
+                    const reasoningEffort = this.desiredReasoningEffort(
+                        selectedModel,
+                        record.reasoningEffort
+                    );
+                    if (selectedModel && (modelState?.currentModelId !== selectedModel
+                        || (!!reasoningEffort
+                            && modelStateReasoningEffort(modelState) !== reasoningEffort))) {
                         await this.requireReady().request('session/set_model', {
                             sessionId: record.acpSessionId,
-                            modelId: selectedModel
+                            modelId: selectedModel,
+                            ...(reasoningEffort ? { _meta: this.reasoningMeta(reasoningEffort) } : {})
                         });
+                    }
+                    if (record.reasoningEffort !== reasoningEffort) {
+                        const updated = this.sessions.update(appSessionId, { reasoningEffort });
+                        this.emit({ kind: 'session', session: updated });
                     }
                     if (!this.providerAuthorityIsCurrent(providerId, runtimeEpoch)) {
                         throw new Error('The Provider changed while this conversation was being restored.');
@@ -3324,7 +3559,11 @@ export class GrokAgentHostService implements AgentHostService {
         // ACP session (or an initialize response created before a switch)
         // reports another current model. A missing preference may still be
         // initialized from the sidecar's first authoritative catalogue.
-        this.acceptModelState(modelStateFrom(response), emitSnapshot);
+        // `initialize` is the only ACP boundary that describes the complete
+        // process-wide model catalogue. Session responses and notifications
+        // may contain only the models relevant to one conversation, so they
+        // must never be allowed to shrink this authoritative runtime view.
+        this.acceptModelState(modelStateFrom(response), emitSnapshot, 'replace');
     }
 
     /**
@@ -3349,7 +3588,8 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected acceptModelState(
         state: ModelState | undefined,
-        emitSnapshot = true
+        emitSnapshot = true,
+        catalogUpdate: 'merge' | 'replace' = 'merge'
     ): void {
         if (!state) {
             return;
@@ -3361,6 +3601,7 @@ export class GrokAgentHostService implements AgentHostService {
                     return [];
                 }
                 const meta = asRecord(candidate._meta) ?? asRecord(candidate.meta);
+                const reasoningOptions = parseReasoningOptions(meta);
                 return [{
                     id,
                     name: asString(candidate.name) ?? id,
@@ -3369,16 +3610,30 @@ export class GrokAgentHostService implements AgentHostService {
                     // publishes the configured window as totalContextTokens.
                     // Keep the older field as a compatibility fallback.
                     contextWindow: asPositiveSafeInteger(meta?.totalContextTokens)
-                        ?? asPositiveSafeInteger(candidate.contextWindow)
+                        ?? asPositiveSafeInteger(candidate.contextWindow),
+                    ...(reasoningOptions.length ? { reasoningOptions } : {})
                 }];
             });
-            if ((this.restoringSessionCounts?.size ?? 0) > 0) {
-                // Grok can publish a session-scoped catalogue while replaying
-                // history. Merge it into the initialize-time runtime catalogue
-                // instead of hiding the user's globally selected model and
-                // needlessly forcing this conversation onto a fresh session.
+            if (catalogUpdate === 'merge') {
+                // Grok can publish a session-scoped catalogue from session/new,
+                // session/load and model-state notifications. Merge it into the
+                // initialize-time runtime catalogue instead of hiding models
+                // that remain valid for this sidecar (notably after a Provider
+                // rebind attaches old local history to a fresh ACP session).
                 const merged = new Map(this.models.map(model => [model.id, model]));
-                for (const model of advertisedModels) merged.set(model.id, model);
+                for (const model of advertisedModels) {
+                    const existing = merged.get(model.id);
+                    merged.set(model.id, existing ? {
+                        ...existing,
+                        ...model,
+                        // Session-scoped modelState responses are allowed to
+                        // omit capability metadata. Only initialize/replace
+                        // may intentionally clear those runtime capabilities.
+                        description: model.description ?? existing.description,
+                        contextWindow: model.contextWindow ?? existing.contextWindow,
+                        reasoningOptions: model.reasoningOptions ?? existing.reasoningOptions
+                    } : model);
+                }
                 this.models = [...merged.values()];
             } else {
                 this.models = advertisedModels;
@@ -4535,6 +4790,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (this.workspaceRoot) {
             try { workspaceTrusted = this.isWorkspaceTrusted(this.workspaceRoot); } catch { /* fail closed */ }
         }
+        const sessions = this.sessions.list();
         return {
             revision: this.snapshotRevision,
             phase: this.phase,
@@ -4542,6 +4798,7 @@ export class GrokAgentHostService implements AgentHostService {
             workspaceAttached: !!this.workspaceRoot && this.attachedWorkspaceRoots.has(this.workspaceRoot),
             workspaceTrusted,
             providerId: this.providerId,
+            providerProfilesRevision: this.providers.providerProfilesRevision?.() ?? 0,
             grokSubscriptionAuthStatus: this.grokSubscriptionAuthStatus,
             sidecarVersion: this.sidecarVersion,
             capabilities: this.capabilities,
@@ -4551,7 +4808,15 @@ export class GrokAgentHostService implements AgentHostService {
                 .filter(model => model.id !== XAI_MANAGED_MODEL_ID)
                 .map(model => ({ ...model })),
             selectedModel: this.selectedModel,
-            sessions: this.sessions.list(),
+            selectedReasoningEffort: this.activeSessionId
+                ? sessions.find(session => session.appSessionId === this.activeSessionId)?.reasoningEffort
+                : undefined,
+            // This is deliberately the raw, credential-free preference.  The
+            // renderer needs it during the cold window between root selection
+            // and ACP catalogue discovery.  Prompt/session paths continue to
+            // validate it with `desiredReasoningEffort` before it reaches ACP.
+            preferredReasoningEffort: this.persistedReasoningEffort(this.selectedModel),
+            sessions,
             activeSessionId: this.activeSessionId,
             sessionContexts: Object.fromEntries(
                 [...this.contextStates().entries()].map(([sessionId, context]) => [sessionId, { ...context }])
@@ -4653,24 +4918,30 @@ export class GrokAgentHostService implements AgentHostService {
         let resolvedModel = typeof createdModelState?.currentModelId === 'string'
             ? createdModelState.currentModelId
             : selectedModel;
+        let resolvedReasoningEffort = modelStateReasoningEffort(createdModelState);
         const latestModel = this.defaultModelId(providerId);
+        const desiredReasoningEffort = this.desiredReasoningEffort(latestModel, record.reasoningEffort);
         // session/new's modelId is a hint, not confirmation. Grok 0.2.102 can
         // omit modelState while retaining the initialize-time OIDC model, so
         // an absent currentModelId must also be followed by an explicit
         // session/set_model to the selected Provider catalogue alias.
-        if (latestModel && createdModelState?.currentModelId !== latestModel) {
+        if (latestModel && (createdModelState?.currentModelId !== latestModel
+            || (!!desiredReasoningEffort && resolvedReasoningEffort !== desiredReasoningEffort))) {
             if (this.models.length > 0 && !this.models.some(model => model.id === latestModel)) {
                 throw new Error('The application-wide model is not advertised by this ACP runtime.');
             }
             const modelResult = await acp.request<Record<string, unknown>>('session/set_model', {
                 sessionId: result.sessionId,
-                modelId: latestModel
+                modelId: latestModel,
+                ...(desiredReasoningEffort ? { _meta: this.reasoningMeta(desiredReasoningEffort) } : {})
             });
             const confirmedModel = modelStateFrom(modelResult)?.currentModelId;
             if (confirmedModel && confirmedModel !== latestModel) {
                 throw new Error('The sidecar did not apply the application-wide model.');
             }
             resolvedModel = latestModel;
+            resolvedReasoningEffort = desiredReasoningEffort
+                ?? modelStateReasoningEffort(modelStateFrom(modelResult));
         }
         if (runtimeGeneration !== this.runtimeGeneration) {
             throw new Error('The Agent runtime changed while reconnecting this conversation.');
@@ -4707,6 +4978,7 @@ export class GrokAgentHostService implements AgentHostService {
             providerId,
             providerRuntimeEpoch: runtimeEpoch,
             model: resolvedModel,
+            reasoningEffort: resolvedReasoningEffort,
             sidecarVersion: this.sidecarVersion,
             availableModes: sessionModes.availableModes,
             currentModeId: sessionModes.currentModeId,
@@ -4751,7 +5023,11 @@ export class GrokAgentHostService implements AgentHostService {
             || recordEpoch !== this.providers.runtimeEpoch(record.providerId)) {
             throw new Error('The Provider changed after this session was created.');
         }
-        if (record.model !== globallySelectedModel) {
+        const reasoningEffort = this.desiredReasoningEffort(
+            globallySelectedModel,
+            record.reasoningEffort
+        );
+        if (record.model !== globallySelectedModel || record.reasoningEffort !== reasoningEffort) {
             if (this.activePrompts.has(record.appSessionId)) {
                 throw new Error('请等待当前任务结束后再同步全局模型。');
             }
@@ -4760,7 +5036,8 @@ export class GrokAgentHostService implements AgentHostService {
             }
             await this.requireReady().request('session/set_model', {
                 sessionId: record.acpSessionId,
-                modelId: globallySelectedModel
+                modelId: globallySelectedModel,
+                ...(reasoningEffort ? { _meta: this.reasoningMeta(reasoningEffort) } : {})
             });
             // Another window may have selected a different global model while
             // the ACP request was pending. Never publish the old request as
@@ -4771,7 +5048,10 @@ export class GrokAgentHostService implements AgentHostService {
                 || this.defaultModelId(record.providerId) !== globallySelectedModel) {
                 throw new Error('The application-wide model changed while this session was synchronizing.');
             }
-            const updated = this.sessions.update(record.appSessionId, { model: globallySelectedModel });
+            const updated = this.sessions.update(record.appSessionId, {
+                model: globallySelectedModel,
+                reasoningEffort
+            });
             this.selectedModel = globallySelectedModel;
             this.emit({ kind: 'session', session: updated });
             return updated;
@@ -5893,6 +6173,18 @@ export function formatAgentWirePrompt(text: string): string {
     return `${text}\n\n${CHINESE_AGENT_LANGUAGE_HINT}`;
 }
 
+/**
+ * Compatibility path for ACP runtimes that can inspect image files through
+ * tools but do not advertise native image content blocks. The renderer keeps
+ * displaying the user's exact text; only the sidecar wire prompt receives the
+ * project-relative, Xora-owned paths.
+ */
+export function formatImageFileFallbackPrompt(text: string, workspacePaths: readonly string[]): string {
+    if (!workspacePaths.length) return text;
+    const files = workspacePaths.map((workspacePath, index) => `${index + 1}. ${workspacePath}`).join('\n');
+    return `${text}${text ? '\n\n' : ''}<xora_image_attachments>\nThe user attached these project-local images. Read the image files with the available file tool before completing the request:\n${files}\n</xora_image_attachments>`;
+}
+
 function prefersChineseAgentLanguage(text: string): boolean {
     return /[\u3400-\u9fff]/u.test(text)
         && !/(?:请|使用|用|以).{0,12}(?:英文|英语)|respond\s+(?:in|using)\s+english|answer\s+(?:in|using)\s+english/iu.test(text);
@@ -6068,6 +6360,84 @@ function asSafeInteger(value: unknown): number | undefined {
 
 function asPositiveSafeInteger(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * ACP extension tokens are intentionally not an enum: Grok Build accepts
+ * server-remapped ids (for example an id such as `deep` whose value is
+ * `xhigh`) and future servers may add levels without a Xora release.
+ */
+function asReasoningToken(value: unknown): string | undefined {
+    const token = asString(value)?.trim();
+    if (!token || token.length > 64 || /[\u0000-\u001f\u007f]/.test(token)) return undefined;
+    return token;
+}
+
+function parseReasoningOptions(meta: Record<string, unknown> | undefined): AgentReasoningOption[] {
+    if (meta?.supportsReasoningEffort !== true) return [];
+    const defaultEffort = asReasoningToken(meta.reasoningEffort);
+    const seen = new Set<string>();
+    const options: AgentReasoningOption[] = [];
+    let firstAdvertisedDefaultId: string | undefined;
+    const advertised = Array.isArray(meta.reasoningEfforts) ? meta.reasoningEfforts : [];
+    for (const raw of advertised.slice(0, 32)) {
+        const item = asRecord(raw);
+        const bare = asReasoningToken(raw);
+        const value = asReasoningToken(item?.value) ?? bare;
+        const id = asReasoningToken(item?.id) ?? value;
+        if (!id || !value || seen.has(id)) continue;
+        seen.add(id);
+        const name = safeUiText(asString(item?.label) ?? asString(item?.name), 80) ?? id;
+        const description = safeUiText(asString(item?.description), 240);
+        if (!firstAdvertisedDefaultId && item?.default === true) {
+            firstAdvertisedDefaultId = id;
+        }
+        options.push({
+            id,
+            value,
+            name,
+            ...(description ? { description } : {})
+        });
+    }
+    if (options.length) {
+        // Grok Build 0.2.102's production Grok 4.6 catalogue has shipped with
+        // both xhigh and high marked `default: true` while the model-level
+        // `reasoningEffort` remains high. The model-level current value is the
+        // authority; only when it is absent/unusable may the first item flag
+        // provide a default. Always publish exactly one default at most.
+        const selectedDefault = defaultEffort
+            ? options.find(option => option.value === defaultEffort || option.id === defaultEffort)
+            : undefined;
+        const fallbackDefault = selectedDefault
+            ?? options.find(option => option.id === firstAdvertisedDefaultId);
+        return options.map(option => option === fallbackDefault
+            ? { ...option, default: true }
+            : option);
+    }
+    // Grok Build 0.2.102's documented ACP fallback for a supported model
+    // whose server omits (or sends an unusable) reasoningEfforts table.
+    return [
+        ['xhigh', 'Maximum reasoning'],
+        ['high', 'Heavy reasoning'],
+        ['medium', 'Balanced reasoning'],
+        ['low', 'Faster, lighter reasoning']
+    ].map(([value, description]) => ({
+        id: value,
+        value,
+        name: value,
+        description,
+        ...(value === defaultEffort ? { default: true } : {})
+    }));
+}
+
+function modelStateReasoningEffort(state: ModelState | undefined): string | undefined {
+    if (!state?.currentModelId || !Array.isArray(state.availableModels)) return undefined;
+    const current = state.availableModels.find(candidate =>
+        (asString(candidate.modelId) ?? asString(candidate.id)) === state.currentModelId);
+    const meta = asRecord(current?._meta) ?? asRecord(current?.meta);
+    return meta?.supportsReasoningEffort === true
+        ? asReasoningToken(meta.reasoningEffort)
+        : undefined;
 }
 
 function modelStateFrom(value: { _meta?: Record<string, unknown>; models?: unknown }): ModelState | undefined {
@@ -6456,4 +6826,13 @@ function safeExportFileName(value: string): string {
         .trim()
         .slice(0, 96);
     return normalized || 'Xora-Code-会话';
+}
+
+function sameProviderReasoningConfiguration(
+    left: ProviderReasoningConfiguration | undefined,
+    right: ProviderReasoningConfiguration | undefined
+): boolean {
+    return left?.defaultEffort === right?.defaultEffort
+        && left?.options.length === right?.options.length
+        && (left?.options.every((value, index) => value === right?.options[index]) ?? true);
 }

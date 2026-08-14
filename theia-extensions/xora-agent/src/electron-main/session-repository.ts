@@ -2,7 +2,7 @@ import { app } from 'electron';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { AgentHostEvent, SessionRecord } from '../common/agent-protocol';
+import { AgentHostEvent, SessionHistoryPage, SessionHistoryPageRequest, SessionRecord } from '../common/agent-protocol';
 
 interface SessionIndex {
     schemaVersion: 1;
@@ -35,6 +35,16 @@ const MAX_EVENT_LOG_BYTES = 16 * 1024 * 1024;
 const MAX_CACHED_EVENTS = 5000;
 const MAX_CACHED_SESSIONS = 12;
 const MAX_CACHED_DIFF_PATHS = MAX_CACHED_EVENTS * 2;
+const DEFAULT_HISTORY_PAGE_EVENTS = 180;
+const MAX_HISTORY_PAGE_EVENTS = 1000;
+const HISTORY_SCAN_BLOCK_BYTES = 64 * 1024;
+
+interface HistoryCursor {
+    v: 1;
+    device: number;
+    inode: number;
+    offset: number;
+}
 
 /** Crash-safe, renderer-independent index plus redacted append-only event logs. */
 export class AgentSessionRepository {
@@ -304,6 +314,84 @@ export class AgentSessionRepository {
             ? this.prepareDiffImagePathCache(appSessionId)
             : undefined;
         return visible.map(event => this.restoreDiffImagePaths(appSessionId, event, diffCache));
+    }
+
+    /**
+     * Reads a page by complete JSONL byte boundaries. Buffer newline scanning
+     * means a block may begin in the middle of both a UTF-8 sequence and a
+     * JSON line without corrupting the adjacent complete record.
+     */
+    readEventPage(appSessionId: string, request: SessionHistoryPageRequest = {}): SessionHistoryPage {
+        if (!/^[0-9a-f-]{36}$/i.test(appSessionId)) throw new Error('Unsafe session identifier.');
+        const limit = Math.max(1, Math.min(MAX_HISTORY_PAGE_EVENTS,
+            Number.isSafeInteger(request.limit) ? request.limit! : DEFAULT_HISTORY_PAGE_EVENTS));
+        const target = path.join(this.root, `${appSessionId}.jsonl`);
+        let stat: fs.Stats | undefined;
+        try {
+            stat = fs.statSync(target);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+
+        const cursor = request.before ? decodeHistoryCursor(request.before) : undefined;
+        if (cursor && (!stat || cursor.device !== stat.dev || cursor.inode !== stat.ino
+            || cursor.offset < 0 || cursor.offset > stat.size)) {
+            throw new Error('Agent history changed; reload the conversation before requesting older records.');
+        }
+        const pending = request.before ? [] : (this.pendingEvents.get(appSessionId)?.events ?? []);
+        const visiblePending = pending.slice(-limit);
+        const durableLimit = Math.max(0, limit - visiblePending.length);
+        const end = cursor?.offset ?? stat?.size ?? 0;
+        const durablePage = stat && durableLimit > 0
+            ? this.readDurableEventPage(target, appSessionId, end, durableLimit)
+            : { events: [] as AgentHostEvent[], start: end };
+        const events = [...durablePage.events, ...visiblePending];
+        const hasMore = durablePage.start > 0 || (!!stat && durableLimit === 0 && end > 0);
+        const before = hasMore && stat
+            ? encodeHistoryCursor({ v: 1, device: stat.dev, inode: stat.ino, offset: durablePage.start })
+            : undefined;
+        const diffCache = events.some(event => event.kind === 'diff')
+            ? this.prepareDiffImagePathCache(appSessionId)
+            : undefined;
+        return {
+            events: events.map(event => this.restoreDiffImagePaths(appSessionId, event, diffCache)),
+            before,
+            hasMore
+        };
+    }
+
+    protected readDurableEventPage(
+        target: string,
+        appSessionId: string,
+        end: number,
+        limit: number
+    ): { events: AgentHostEvent[]; start: number } {
+        let start = end;
+        let contents = Buffer.alloc(0);
+        let selected: Array<{ event: AgentHostEvent; start: number }> = [];
+        while (start > 0 && selected.length < limit) {
+            const nextStart = Math.max(0, start - HISTORY_SCAN_BLOCK_BYTES);
+            const descriptor = fs.openSync(target, 'r');
+            try {
+                const chunk = Buffer.allocUnsafe(start - nextStart);
+                let read = 0;
+                while (read < chunk.length) {
+                    const count = fs.readSync(descriptor, chunk, read, chunk.length - read, nextStart + read);
+                    if (count <= 0) break;
+                    read += count;
+                }
+                contents = Buffer.concat([chunk.subarray(0, read), contents]);
+            } finally {
+                fs.closeSync(descriptor);
+            }
+            start = nextStart;
+            selected = parseStoredEventBufferFromEnd(contents, appSessionId, start, end, limit);
+        }
+        selected.reverse();
+        return {
+            events: selected.map(item => item.event),
+            start: selected[0]?.start ?? end
+        };
     }
 
     protected readEventFileRange(target: string, start: number, length: number): string {
@@ -788,6 +876,56 @@ function parseStoredEventChunk(
         }
     }
     return { events, trailingPartial };
+}
+
+function parseStoredEventBufferFromEnd(
+    contents: Buffer,
+    appSessionId: string,
+    absoluteStart: number,
+    absoluteEnd: number,
+    limit: number
+): Array<{ event: AgentHostEvent; start: number }> {
+    const selected: Array<{ event: AgentHostEvent; start: number }> = [];
+    let lineEnd = contents.lastIndexOf(0x0a);
+    // Ignore a cross-process partial append after the last newline.
+    if (lineEnd < 0) return selected;
+    while (lineEnd >= 0 && selected.length < limit) {
+        const previousNewline = contents.lastIndexOf(0x0a, lineEnd - 1);
+        const lineStart = previousNewline + 1;
+        // A buffer which starts mid-line cannot safely parse its first slice.
+        if (previousNewline < 0 && absoluteStart > 0) break;
+        const line = contents.subarray(lineStart, lineEnd).toString('utf8');
+        if (line.trim()) {
+            try {
+                const envelope = JSON.parse(line) as { event?: unknown };
+                if (isStoredEvent(envelope.event, appSessionId)) {
+                    selected.push({ event: envelope.event, start: absoluteStart + lineStart });
+                }
+            } catch {
+                // Isolate a malformed record and keep scanning older lines.
+            }
+        }
+        lineEnd = previousNewline;
+    }
+    // `absoluteEnd` documents that the caller's cursor is an exclusive byte
+    // boundary; keep it part of this helper's checked contract.
+    void absoluteEnd;
+    return selected;
+}
+
+function encodeHistoryCursor(cursor: HistoryCursor): string {
+    return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeHistoryCursor(value: string): HistoryCursor {
+    try {
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<HistoryCursor>;
+        if (parsed.v !== 1 || !Number.isSafeInteger(parsed.device) || !Number.isSafeInteger(parsed.inode)
+            || !Number.isSafeInteger(parsed.offset)) throw new Error();
+        return parsed as HistoryCursor;
+    } catch {
+        throw new Error('Invalid Agent history cursor.');
+    }
 }
 
 function isStoredEvent(value: unknown, appSessionId: string): value is AgentHostEvent {

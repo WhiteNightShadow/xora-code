@@ -9,6 +9,26 @@ const {
     removeModelTableFromToml,
     removeModelTablesFromToml
 } = require('../lib/electron-main/provider-toml');
+const { ProviderRegistry } = require('../lib/electron-main/provider-registry');
+const {
+    effectiveProviderReasoningConfiguration,
+    PROVIDER_REASONING_AUTO_POLICY_VERSION
+} = require('../lib/common/agent-protocol');
+
+function customProvider(protocol = 'openai-responses', reasoning) {
+    return {
+        id: 'xora-reasoning-test',
+        name: 'Reasoning test',
+        kind: 'custom',
+        protocol,
+        baseUrl: 'https://api.example.com/v1',
+        model: 'provider-model',
+        contextWindow: 500000,
+        backendSearch: false,
+        secretRef: 'provider:xora-reasoning-test',
+        ...(reasoning ? { reasoning } : {})
+    };
+}
 
 test('removeModelTable strips both bare and quoted model tables', () => {
     const source = [
@@ -84,4 +104,90 @@ test('removeMarkedManagedBlocks removes complete marker pairs only', () => {
     assert.doesNotMatch(cleaned, /xora-a/);
     assert.match(cleaned, /\[ui\]/);
     assert.match(cleaned, /\[cli\]/);
+});
+
+test('custom Provider reasoning is opt-in, canonical and emitted with Grok Build 0.2.102 field names', () => {
+    const registry = Object.create(ProviderRegistry.prototype);
+    const automatic = registry.validate(customProvider());
+    assert.equal(automatic.reasoning, undefined);
+    assert.doesNotMatch(registry.managedToml(automatic), /reasoning_effort/);
+
+    const grok46Auto = registry.validate({
+        ...customProvider(),
+        model: 'grok-4.6'
+    });
+    assert.equal(grok46Auto.reasoning, undefined,
+        'automatic capabilities remain derived instead of being persisted as an explicit user choice');
+    const automaticModel = parseToml(registry.managedToml(grok46Auto)).model['xora-reasoning-test'];
+    assert.equal(automaticModel.supports_reasoning_effort, true);
+    assert.equal(automaticModel.reasoning_effort, 'high');
+    assert.deepEqual(automaticModel.reasoning_efforts, [
+        { value: 'low', label: '低', default: false },
+        { value: 'medium', label: '中', default: false },
+        { value: 'high', label: '高', default: true },
+        { value: 'xhigh', label: '极高', default: false }
+    ]);
+    assert.equal(PROVIDER_REASONING_AUTO_POLICY_VERSION, 1);
+    assert.equal(effectiveProviderReasoningConfiguration(grok46Auto, 2), undefined,
+        'an unknown future policy version must fail closed instead of inheriting v1 inference');
+
+    for (const input of [
+        { ...customProvider(), model: 'Grok-4.6' },
+        { ...customProvider(), model: 'grok-4.6-preview' },
+        { ...customProvider('openai-chat-completions'), model: 'grok-4.6' },
+        { ...customProvider('anthropic-messages'), model: 'grok-4.6' }
+    ]) {
+        const model = parseToml(registry.managedToml(registry.validate(input))).model['xora-reasoning-test'];
+        assert.equal(model.supports_reasoning_effort, undefined,
+            'automatic reasoning inference is exact, versioned and protocol-scoped');
+    }
+
+    for (const protocol of ['openai-responses', 'openai-chat-completions', 'anthropic-messages']) {
+        const profile = registry.validate(customProvider(protocol, {
+            options: ['xhigh', 'low', 'high'],
+            defaultEffort: 'xhigh'
+        }));
+        assert.deepEqual(profile.reasoning, {
+            options: ['low', 'high', 'xhigh'],
+            defaultEffort: 'xhigh'
+        });
+        const toml = registry.managedToml(profile);
+        const parsed = parseToml(toml);
+        const model = parsed.model['xora-reasoning-test'];
+        assert.equal(model.supports_reasoning_effort, true);
+        assert.equal(model.reasoning_effort, 'xhigh');
+        assert.deepEqual(model.reasoning_efforts, [
+            { value: 'low', label: '低', default: false },
+            { value: 'high', label: '高', default: false },
+            { value: 'xhigh', label: '极高', default: true }
+        ]);
+    }
+
+    const explicitGrok46 = registry.validate({
+        ...customProvider(),
+        model: 'grok-4.6',
+        reasoning: { options: ['low', 'xhigh'], defaultEffort: 'xhigh' }
+    });
+    const explicitModel = parseToml(registry.managedToml(explicitGrok46)).model['xora-reasoning-test'];
+    assert.equal(explicitModel.reasoning_effort, 'xhigh', 'explicit configuration must win over auto policy');
+    assert.deepEqual(explicitModel.reasoning_efforts, [
+        { value: 'low', label: '低', default: false },
+        { value: 'xhigh', label: '极高', default: true }
+    ]);
+});
+
+test('custom Provider reasoning rejects invalid and ambiguous defaults', () => {
+    const registry = Object.create(ProviderRegistry.prototype);
+    assert.throws(() => registry.validate(customProvider('openai-responses', {
+        options: [],
+        defaultEffort: 'medium'
+    })), /思考等级/);
+    assert.throws(() => registry.validate(customProvider('openai-responses', {
+        options: ['low', 'high'],
+        defaultEffort: 'xhigh'
+    })), /默认思考等级/);
+    assert.throws(() => registry.validate(customProvider('openai-responses', {
+        options: ['high', 'high'],
+        defaultEffort: 'high'
+    })), /思考等级选项/);
 });

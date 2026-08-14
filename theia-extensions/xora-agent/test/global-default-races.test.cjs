@@ -231,6 +231,78 @@ test('session/new without modelState explicitly selects a custom relay alias bef
     assert.equal(records.get(created.appSessionId).model, provider.id);
 });
 
+test('session/new applies a requested reasoning effort before the conversation becomes active', async () => {
+    const host = baseHost();
+    const records = attachSessionRepository(host);
+    const requests = [];
+    host.models = [{
+        id: 'model-1',
+        name: 'Model 1',
+        reasoningOptions: [
+            { id: 'quick', value: 'low', name: 'Quick', default: true },
+            { id: 'deep', value: 'xhigh', name: 'Deep' }
+        ]
+    }];
+    host.providers = {
+        selectedProviderId: () => 'grok-subscription',
+        runtimeEpoch: () => 'subscription-epoch',
+        preferredModelId: () => 'model-1',
+        get: id => ({ id, name: 'Grok subscription', kind: 'grok-subscription' }),
+        selectPreferredModel: () => undefined
+    };
+    host.acp = {
+        request: async (method, params) => {
+            requests.push({ method, params, activeSessionId: host.activeSessionId });
+            if (method === 'session/new') {
+                return {
+                    sessionId: 'acp-reasoning',
+                    _meta: {
+                        modelState: {
+                            currentModelId: 'model-1',
+                            availableModels: [{
+                                id: 'model-1',
+                                _meta: {
+                                    supportsReasoningEffort: true,
+                                    reasoningEffort: 'low',
+                                    reasoningEfforts: [
+                                        { id: 'quick', value: 'low' },
+                                        { id: 'deep', value: 'xhigh' }
+                                    ]
+                                }
+                            }]
+                        }
+                    }
+                };
+            }
+            if (method === 'session/set_model') return {};
+            throw new Error(`unexpected ACP method ${method}`);
+        }
+    };
+
+    const created = await host.createSession({
+        workspaceRoot: '/fixture',
+        providerId: 'grok-subscription',
+        model: 'model-1',
+        reasoningEffort: 'deep'
+    });
+
+    assert.deepEqual(requests.map(({ method, params }) => ({ method, params })), [{
+        method: 'session/new',
+        params: { cwd: '/fixture', mcpServers: [], _meta: { modelId: 'model-1' } }
+    }, {
+        method: 'session/set_model',
+        params: {
+            sessionId: 'acp-reasoning',
+            modelId: 'model-1',
+            _meta: { reasoningEffort: 'xhigh' }
+        }
+    }]);
+    assert.equal(requests[1].activeSessionId, undefined,
+        'the first prompt cannot race ahead of the effort switch');
+    assert.equal(created.reasoningEffort, 'xhigh');
+    assert.equal(records.get(created.appSessionId).reasoningEffort, 'xhigh');
+});
+
 test('session/new cannot activate an ABA-stale result after defaults generation changes while pending', async () => {
     const host = baseHost();
     let record;
@@ -416,6 +488,203 @@ test('historical model-state notification during session/load cannot replace the
         assert.equal(finalRecord.model, 'model-2');
         assert.equal(host.selectedModel, 'model-2');
     }
+});
+
+test('active reasoning drift notification resynchronizes the global preference only when explicit', () => {
+    const host = baseHost();
+    const active = session('reasoning-notification-drift', {
+        model: 'model-1',
+        reasoningEffort: 'xhigh'
+    });
+    const records = attachSessionRepository(host, [active]);
+    const notificationHandlers = new Map();
+    let synchronizations = 0;
+    host.activeSessionId = active.appSessionId;
+    host.loadedSessionIds.add(active.appSessionId);
+    host.acpSessionLookup.set(active.acpSessionId, active.appSessionId);
+    host.models = [{
+        id: 'model-1',
+        name: 'Model 1',
+        reasoningOptions: [
+            { id: 'high', value: 'high', name: 'High', default: true },
+            { id: 'deep', value: 'xhigh', name: 'Deep' }
+        ]
+    }];
+    host.providers = {
+        selectedProviderId: () => 'grok-subscription',
+        preferredModelId: () => 'model-1',
+        preferredReasoningEffort: () => 'xhigh',
+        get: id => ({ id, name: 'Grok subscription', kind: 'grok-subscription' })
+    };
+    host.notifyProviderDefaultsChanged = () => { synchronizations += 1; };
+    host.acp = {
+        onNotification: (method, handler) => notificationHandlers.set(method, handler),
+        onRequest: () => undefined,
+        onError: () => undefined
+    };
+    host.bindAcp(host.acp);
+
+    const notifyModelState = meta => notificationHandlers.get('_x.ai/model_state_updated')({
+        sessionId: active.acpSessionId,
+        modelState: {
+            currentModelId: 'model-1',
+            availableModels: [{
+                modelId: 'model-1',
+                name: 'Model 1',
+                _meta: {
+                    supportsReasoningEffort: true,
+                    reasoningEfforts: [
+                        { id: 'high', value: 'high', label: 'High' },
+                        { id: 'deep', value: 'xhigh', label: 'Deep' }
+                    ],
+                    ...meta
+                }
+            }]
+        }
+    });
+
+    notifyModelState({});
+    assert.equal(synchronizations, 0,
+        'an omitted reasoningEffort is compatible metadata, not evidence of drift');
+
+    notifyModelState({ reasoningEffort: 'high' });
+    assert.equal(synchronizations, 1,
+        'an explicit high report must re-apply the durable xhigh preference');
+    assert.equal(records.get(active.appSessionId).reasoningEffort, 'high',
+        'the notification remains descriptive until the serialized global synchronization runs');
+});
+
+test('cross-Provider history rebind preserves the initialize catalogue and can select Grok 4.6', async () => {
+    const host = baseHost();
+    const historical = session('relay-history', {
+        providerId: 'xora-relay',
+        providerRuntimeEpoch: 'relay-epoch',
+        model: 'xora-relay'
+    });
+    const records = attachSessionRepository(host, [historical]);
+    let preferredModel = 'grok-build';
+    const subscription = { id: 'grok-subscription', name: 'Grok subscription', kind: 'grok-subscription' };
+    const relay = {
+        id: 'xora-relay',
+        name: 'Relay',
+        kind: 'custom',
+        protocol: 'openai-responses',
+        baseUrl: 'https://relay.example.invalid/v1',
+        model: 'grok-4.5',
+        secretRef: 'provider:xora-relay'
+    };
+    host.providers = {
+        selectedProviderId: () => subscription.id,
+        runtimeEpoch: providerId => providerId === relay.id ? 'relay-epoch' : 'subscription-epoch',
+        preferredModelId: providerId => providerId === subscription.id ? preferredModel : relay.id,
+        selectPreferredModel: (providerId, modelId) => {
+            assert.equal(providerId, subscription.id);
+            preferredModel = modelId;
+        },
+        get: id => id === subscription.id ? subscription : id === relay.id ? relay : undefined,
+        list: () => [subscription, relay]
+    };
+    host.providerId = subscription.id;
+    host.runtimeProviderEpoch = 'subscription-epoch';
+    host.selectedModel = preferredModel;
+    host.acceptModelState = (...args) =>
+        GrokAgentHostService.prototype.acceptModelState.call(host, ...args);
+    host.acceptSessionModeCapability = () => undefined;
+    host.scheduleMcpStatusRefresh = () => undefined;
+    host.publishContextState = () => undefined;
+    host.contextStates = () => new Map();
+    host.contextEventHighwaters = new Map();
+    host.sessionGoalStateMap = () => new Map();
+    host.sessionPlanState = () => new Map();
+    host.pendingApprovedPlanState = () => new Map();
+    host.sessionTaskContractState = () => new Map();
+    host.replayedGoalStateMap = () => new Map();
+    host.pendingPlanApprovalState = () => new Map();
+    host.acpGoalCapabilityState = () => new Map();
+    host.updateTaskContractLifecycle = () => undefined;
+    host.lifecycleTail = Promise.resolve();
+    host.onProviderDefaultsChanged = () => undefined;
+
+    // Only initialize owns replacement semantics: an obsolete process model
+    // disappears when the subscription runtime advertises its full catalogue.
+    host.models = [{ id: 'obsolete-runtime-model', name: 'Obsolete runtime model' }];
+    host.acceptInitialize({
+        protocolVersion: 1,
+        agentCapabilities: {},
+        authMethods: [],
+        _meta: {
+            modelState: {
+                currentModelId: 'grok-build',
+                availableModels: [
+                    { modelId: 'grok-build', name: 'Grok Build' },
+                    {
+                        modelId: 'grok-4.6',
+                        name: 'Grok 4.6',
+                        _meta: {
+                            supportsReasoningEffort: true,
+                            reasoningEffort: 'high',
+                            reasoningEfforts: [
+                                { id: 'high', value: 'high', label: 'High' },
+                                { id: 'deep', value: 'xhigh', label: 'Deep' }
+                            ]
+                        }
+                    },
+                    { modelId: 'grok-4.5', name: 'Grok 4.5' }
+                ]
+            }
+        }
+    }, false);
+    assert.deepEqual(host.models.map(model => model.id), ['grok-build', 'grok-4.6', 'grok-4.5']);
+
+    const requests = [];
+    host.acp = {
+        request: async (method, params) => {
+            requests.push({ method, params });
+            if (method === 'session/new') {
+                // Grok Build can return a session-scoped subset here. It is
+                // not authority to erase grok-4.6 from the runtime catalogue.
+                return {
+                    sessionId: 'acp-subscription-history',
+                    _meta: {
+                        modelState: {
+                            currentModelId: 'grok-build',
+                            availableModels: [{ modelId: 'grok-build', name: 'Grok Build' }]
+                        }
+                    }
+                };
+            }
+            if (method === 'session/set_model') return {};
+            throw new Error(`unexpected ACP method ${method}`);
+        }
+    };
+
+    const rebound = await host.loadSession(historical.appSessionId);
+
+    assert.equal(rebound.appSessionId, historical.appSessionId,
+        'Provider rebinding must preserve the local conversation identity');
+    assert.equal(rebound.acpSessionId, 'acp-subscription-history');
+    assert.equal(rebound.providerId, subscription.id);
+    assert.equal(records.size, 1, 'rebinding must not create a second local conversation');
+    assert.deepEqual(host.models.map(model => model.id), ['grok-build', 'grok-4.6', 'grok-4.5'],
+        'a session-scoped modelState must not shrink the initialize catalogue');
+    assert.deepEqual(requests.map(request => request.method), ['session/new'],
+        'old prompts and the old Provider ACP session must never be replayed');
+    assert.equal(JSON.stringify(requests[0].params).includes(historical.acpSessionId), false);
+
+    await host.selectModel(historical.appSessionId, 'grok-4.6', 'xhigh');
+
+    assert.equal(preferredModel, 'grok-4.6');
+    assert.equal(records.get(historical.appSessionId).model, 'grok-4.6');
+    assert.equal(records.get(historical.appSessionId).reasoningEffort, 'xhigh');
+    assert.equal(records.get(historical.appSessionId).appSessionId, historical.appSessionId);
+    assert.deepEqual(requests[1], {
+        method: 'session/set_model',
+        params: {
+            sessionId: 'acp-subscription-history',
+            modelId: 'grok-4.6',
+            _meta: { reasoningEffort: 'xhigh' }
+        }
+    });
 });
 
 test('runtime start rejects a stale Provider before launch even if peer defaults notification is delayed', async () => {

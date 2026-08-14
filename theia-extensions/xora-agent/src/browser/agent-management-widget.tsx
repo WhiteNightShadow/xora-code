@@ -3,7 +3,18 @@ import { ReactWidget } from '@theia/core/lib/browser';
 import { MessageService } from '@theia/core/lib/common';
 import { Message } from '@theia/core/shared/@lumino/messaging';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { AgentHostService, ComponentUpdateStatus, ManagementRequest, ManagementResult, ProviderProfile, ProviderProtocol, RuntimeSnapshot } from '../common/agent-protocol';
+import {
+    AgentHostService,
+    ComponentUpdateStatus,
+    ManagementRequest,
+    ManagementResult,
+    PROVIDER_REASONING_EFFORTS,
+    ProviderProfile,
+    ProviderProtocol,
+    ProviderReasoningConfiguration,
+    ProviderReasoningEffort,
+    RuntimeSnapshot
+} from '../common/agent-protocol';
 import {
     AGENT_CODE_HIGHLIGHT_STYLES,
     AgentCodeHighlightStyle,
@@ -46,6 +57,15 @@ const GENERIC_CONTAINER_KEYS = new Set(['data', 'entries', 'items', 'list', 'res
 const NESTED_METADATA_KEYS = new Set(['config', 'configuration', 'details', 'health', 'metadata', 'origin', 'spec']);
 const CONTAINER_METADATA_KEYS = new Set(['count', 'cursor', 'errors', 'message', 'next', 'page', 'schema', 'schemaversion', 'success', 'total', 'warnings']);
 const MANAGEMENT_ENTRY_COLLATOR = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+const DEFAULT_PROVIDER_REASONING_OPTIONS: ProviderReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
+const PROVIDER_REASONING_LABELS: Record<ProviderReasoningEffort, string> = {
+    none: '关闭',
+    minimal: '最低',
+    low: '低',
+    medium: '中',
+    high: '高',
+    xhigh: '极高（xhigh）'
+};
 
 function isJsonObject(value: unknown): value is JsonObject {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -106,6 +126,73 @@ function displayValue(value: unknown): string | undefined {
         }
     }
     return undefined;
+}
+
+function providerReasoningFromForm(form: FormData): ProviderReasoningConfiguration | undefined {
+    if (form.get('reasoningMode') !== 'configured') return undefined;
+    const requested = new Set(form.getAll('reasoningOption').map(value => String(value)));
+    const options = PROVIDER_REASONING_EFFORTS.filter(value => requested.has(value));
+    return {
+        options,
+        defaultEffort: String(form.get('reasoningDefault') ?? '') as ProviderReasoningEffort
+    };
+}
+
+function ProviderReasoningFields(props: { configuration?: ProviderReasoningConfiguration }): React.ReactElement {
+    const [mode, setMode] = React.useState<'auto' | 'configured'>(props.configuration ? 'configured' : 'auto');
+    const [options, setOptions] = React.useState<ProviderReasoningEffort[]>(
+        props.configuration?.options ?? []
+    );
+    const [defaultEffort, setDefaultEffort] = React.useState<ProviderReasoningEffort>(
+        props.configuration?.defaultEffort ?? 'medium'
+    );
+    const effectiveDefault = options.includes(defaultEffort) ? defaultEffort : options[0] ?? 'medium';
+    const toggleOption = (effort: ProviderReasoningEffort, checked: boolean): void => {
+        const next = checked
+            ? PROVIDER_REASONING_EFFORTS.filter(value => value === effort || options.includes(value))
+            : options.filter(value => value !== effort);
+        setOptions(next);
+        if (!next.includes(defaultEffort) && next.length) setDefaultEffort(next[0]);
+    };
+    const selectMode = (next: 'auto' | 'configured'): void => {
+        setMode(next);
+        if (next === 'configured' && options.length === 0) {
+            setOptions(DEFAULT_PROVIDER_REASONING_OPTIONS);
+            setDefaultEffort('medium');
+        }
+    };
+    return <details className='xora-provider-reasoning'>
+        <summary>动态思考等级 · {mode === 'auto' ? '自动检测' : '明确配置'}</summary>
+        <p className='xora-muted'>自动检测不会写入模型能力；仅在服务明确支持时配置，适用于 Responses、Chat Completions 和 Anthropic Messages。</p>
+        <label>配置方式<select
+            name='reasoningMode'
+            value={mode}
+            onChange={event => selectMode(event.currentTarget.value as 'auto' | 'configured')}>
+            <option value='auto'>由 Grok Build / 模型服务自动检测</option>
+            <option value='configured'>明确声明可用等级</option>
+        </select></label>
+        <fieldset disabled={mode !== 'configured'}>
+            <legend>可选等级</legend>
+            {PROVIDER_REASONING_EFFORTS.map(effort => <label key={effort} className='xora-provider-checkbox'>
+                <input
+                    name='reasoningOption'
+                    type='checkbox'
+                    value={effort}
+                    checked={options.includes(effort)}
+                    onChange={event => toggleOption(effort, event.currentTarget.checked)}
+                />
+                <span>{PROVIDER_REASONING_LABELS[effort]}</span>
+            </label>)}
+        </fieldset>
+        <label>默认等级<select
+            required={mode === 'configured'}
+            disabled={mode !== 'configured' || options.length === 0}
+            name='reasoningDefault'
+            value={effectiveDefault}
+            onChange={event => setDefaultEffort(event.currentTarget.value as ProviderReasoningEffort)}>
+            {options.map(effort => <option key={effort} value={effort}>{PROVIDER_REASONING_LABELS[effort]}</option>)}
+        </select></label>
+    </details>;
 }
 
 function booleanValue(value: unknown): boolean | undefined {
@@ -453,6 +540,7 @@ export class AgentManagementWidget extends ReactWidget {
                         <input name='backendSearch' type='checkbox' defaultChecked />
                         <span>启用服务端联网搜索（仅 Responses 协议有效）</span>
                     </label>
+                    <ProviderReasoningFields />
                     <label>API 密钥<input required name='apiKey' type='password' autoComplete='off' /></label>
                     <button className='theia-button main' type='submit'>保存并使用</button>
                 </form>
@@ -541,6 +629,7 @@ export class AgentManagementWidget extends ReactWidget {
                     <input name='backendSearch' type='checkbox' defaultChecked={provider.backendSearch === true} />
                     <span>启用服务端联网搜索（仅 Responses 协议有效）</span>
                 </label>
+                <ProviderReasoningFields configuration={provider.reasoning} />
                 <label>替换 API 密钥（可选）
                     <input name='apiKey' type='password' autoComplete='off' placeholder='留空则保持当前密钥' />
                 </label>
@@ -910,6 +999,7 @@ export class AgentManagementWidget extends ReactWidget {
             model: String(form.get('model')),
             contextWindow: Number(form.get('contextWindow')),
             backendSearch: form.get('backendSearch') === 'on',
+            reasoning: providerReasoningFromForm(form),
             secretRef: `provider:${id}`
         };
         try {
@@ -960,6 +1050,7 @@ export class AgentManagementWidget extends ReactWidget {
             model: String(form.get('model') ?? ''),
             contextWindow: Number(form.get('contextWindow')),
             backendSearch: form.get('backendSearch') === 'on',
+            reasoning: providerReasoningFromForm(form),
             secretRef: existing.secretRef,
             managed: false
         };

@@ -131,6 +131,22 @@ test('built-in xAI settings are absent while custom API configuration remains co
     assert.match(source, /await this\.service\.selectProvider\(provider\.id\)/);
 });
 
+test('custom Providers expose model-independent reasoning configuration without changing legacy auto profiles', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
+    const protocol = fs.readFileSync(path.join(__dirname, '../src/common/agent-protocol.ts'), 'utf8');
+    assert.match(protocol, /PROVIDER_REASONING_EFFORTS = \['none', 'minimal', 'low', 'medium', 'high', 'xhigh'\]/);
+    assert.match(protocol, /reasoning\?: ProviderReasoningConfiguration/);
+    assert.match(source, /动态思考等级 · \{mode === 'auto' \? '自动检测' : '明确配置'\}/);
+    assert.match(source, /name='reasoningMode'/);
+    assert.match(source, /<option value='auto'>由 Grok Build \/ 模型服务自动检测<\/option>/);
+    assert.match(source, /name='reasoningOption'/);
+    assert.match(source, /name='reasoningDefault'/);
+    assert.match(source, /reasoning: providerReasoningFromForm\(form\)/g);
+    assert.match(source, /<ProviderReasoningFields \/>/);
+    assert.match(source, /<ProviderReasoningFields configuration=\{provider\.reasoning\} \/>/);
+    assert.doesNotMatch(source, /grok-4\.6[\s\S]*reasoningMode/);
+});
+
 test('model service selection lives in settings and uses the shared backend switch', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-management-widget.tsx'), 'utf8');
     const agentSource = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');

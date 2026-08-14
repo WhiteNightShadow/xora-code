@@ -135,3 +135,91 @@ test('Provider session retirement honors the cross-process index lock', () => {
         fs.rmSync(root, { recursive: true, force: true });
     }
 });
+
+test('history pages read beyond the legacy 5000-event and 16MiB tail without breaking UTF-8 lines', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-pages-'));
+    const appSessionId = '00000000-0000-4000-8000-000000000099';
+    const target = path.join(root, `${appSessionId}.jsonl`);
+    fs.mkdirSync(root, { recursive: true });
+    const padding = '历史记录'.repeat(800);
+    const lines = Array.from({ length: 5205 }, (_, index) => JSON.stringify({
+        schemaVersion: 1,
+        timestamp: '2026-08-13T00:00:00.000Z',
+        event: {
+            kind: 'text-delta',
+            sessionId: appSessionId,
+            role: 'assistant',
+            text: `${index}:${padding}`
+        }
+    }));
+    fs.writeFileSync(target, `${lines.join('\n')}\n`, { mode: 0o600 });
+    assert.ok(fs.statSync(target).size > 16 * 1024 * 1024);
+    const repository = new AgentSessionRepository(root);
+    try {
+        const restored = [];
+        let before;
+        do {
+            const page = repository.readEventPage(appSessionId, { before, limit: 173 });
+            restored.unshift(...page.events.map(event => Number(event.text.split(':', 1)[0])));
+            before = page.before;
+            if (!page.hasMore) break;
+            assert.ok(before, 'every non-final page must expose an opaque cursor');
+        } while (true);
+        assert.equal(restored.length, 5205);
+        assert.deepEqual(restored, Array.from({ length: 5205 }, (_, index) => index));
+    } finally {
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('newest history page includes unflushed events once and older pages stay durable-only', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-pending-page-'));
+    const appSessionId = '00000000-0000-4000-8000-000000000098';
+    const repository = new AgentSessionRepository(root);
+    try {
+        for (let index = 0; index < 70; index += 1) {
+            repository.appendEvent(appSessionId, {
+                kind: 'text-delta', sessionId: appSessionId, role: 'assistant', text: String(index)
+            });
+        }
+        repository.appendEvent(appSessionId, {
+            kind: 'text-delta', sessionId: appSessionId, role: 'assistant', text: 'pending'
+        });
+        const newest = repository.readEventPage(appSessionId, { limit: 8 });
+        assert.deepEqual(newest.events.map(event => event.text), ['63', '64', '65', '66', '67', '68', '69', 'pending']);
+        assert.equal(newest.hasMore, true);
+        const older = repository.readEventPage(appSessionId, { before: newest.before, limit: 8 });
+        assert.equal(older.events.some(event => event.text === 'pending'), false);
+    } finally {
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('history cursor fails closed when the append-only file identity changes', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-stale-page-'));
+    const appSessionId = '00000000-0000-4000-8000-000000000097';
+    const target = path.join(root, `${appSessionId}.jsonl`);
+    const line = text => `${JSON.stringify({
+        schemaVersion: 1,
+        timestamp: '2026-08-13T00:00:00.000Z',
+        event: { kind: 'text-delta', sessionId: appSessionId, role: 'assistant', text }
+    })}\n`;
+    fs.writeFileSync(target, `${line('first')}${line('second')}`, { mode: 0o600 });
+    const repository = new AgentSessionRepository(root);
+    try {
+        const newest = repository.readEventPage(appSessionId, { limit: 1 });
+        assert.ok(newest.before);
+        const replacement = `${target}.replacement`;
+        fs.writeFileSync(replacement, `${line('replacement')}${line('tail')}`, { mode: 0o600 });
+        fs.renameSync(replacement, target);
+        assert.throws(
+            () => repository.readEventPage(appSessionId, { before: newest.before, limit: 1 }),
+            /history changed/
+        );
+    } finally {
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});

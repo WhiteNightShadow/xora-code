@@ -1,20 +1,31 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 const { AcpRemoteError } = require('@xora-code/acp-client');
 
 const {
     GrokAgentHostService,
-    formatAgentWirePrompt
+    formatAgentWirePrompt,
+    formatImageFileFallbackPrompt
 } = require('../lib/electron-main/grok-agent-host-service');
 const {
     MAX_PROMPT_IMAGE_BYTES,
+    persistPromptImagesToWorkspace,
     validatePromptImageAttachments
 } = require('../lib/electron-main/prompt-image-attachments');
 const { FakeAgentHostService } = require('../lib/node/fake-agent-host-service');
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+const APP_SESSION_ID = '11111111-1111-4111-8111-111111111111';
+const tempRoots = [];
+
+test.afterEach(() => {
+    while (tempRoots.length) fs.rmSync(tempRoots.pop(), { recursive: true, force: true });
+});
 
 function attachment(mimeType = 'image/png', contents = PNG_SIGNATURE, name) {
     return {
@@ -25,12 +36,14 @@ function attachment(mimeType = 'image/png', contents = PNG_SIGNATURE, name) {
 }
 
 function hostHarness(imageCapability) {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-image-test-'));
+    tempRoots.push(workspaceRoot);
     const host = Object.create(GrokAgentHostService.prototype);
     const session = {
-        appSessionId: 'app-session',
+        appSessionId: APP_SESSION_ID,
         acpSessionId: 'acp-session',
         title: 'fixture',
-        workspaceRoot: '/fixture',
+        workspaceRoot,
         providerId: 'grok-subscription',
         createdAt: '2026-07-19T00:00:00.000Z',
         updatedAt: '2026-07-19T00:00:00.000Z',
@@ -89,21 +102,28 @@ function hostHarness(imageCapability) {
     return { host, events, requests };
 }
 
-test('image capability false fails closed before creating an ACP request or history event', async () => {
+test('image capability false falls back to a stable workspace image path', async () => {
     const { host, events, requests } = hostHarness(false);
-    await assert.rejects(
-        host.sendPrompt({ sessionId: 'app-session', text: '看图', attachments: [attachment()] }),
-        /does not support image prompts/
-    );
-    assert.deepEqual(requests, []);
-    assert.deepEqual(events, []);
+    await host.sendPrompt({ sessionId: APP_SESSION_ID, text: '看图', attachments: [attachment()] });
+    const digest = crypto.createHash('sha256').update(PNG_SIGNATURE).digest('hex');
+    const workspacePath = `.xora/attachments/${APP_SESSION_ID}/${digest}.png`;
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].params.prompt, [{
+        type: 'text',
+        text: formatImageFileFallbackPrompt(formatAgentWirePrompt('看图'), [workspacePath])
+    }]);
+    assert.deepEqual(fs.readFileSync(path.join(host.workspaceRoot, workspacePath)), PNG_SIGNATURE);
+    const userEvent = events.find(event => event.kind === 'text-delta' && event.role === 'user');
+    assert.equal(userEvent.text, '看图', 'the visible user text remains exact');
+    assert.equal(userEvent.attachments[0].workspacePath, workspacePath);
+    assert.equal(JSON.stringify(userEvent).includes(attachment().data), false);
 });
 
 test('image capability true emits exact ACP image blocks and persists metadata only', async () => {
     const image = attachment('image/png', PNG_SIGNATURE, '截图.png');
     const { host, events, requests } = hostHarness(true);
 
-    await host.sendPrompt({ sessionId: 'app-session', text: '解释这张图', attachments: [image] });
+    await host.sendPrompt({ sessionId: APP_SESSION_ID, text: '解释这张图', attachments: [image] });
 
     assert.equal(requests.length, 1);
     assert.equal(requests[0].method, 'session/prompt');
@@ -117,7 +137,7 @@ test('image capability true emits exact ACP image blocks and persists metadata o
     const userEvent = events.find(event => event.kind === 'text-delta' && event.role === 'user');
     assert.deepEqual(userEvent, {
         kind: 'text-delta',
-        sessionId: 'app-session',
+        sessionId: APP_SESSION_ID,
         role: 'user',
         text: '解释这张图',
         attachments: [{
@@ -125,7 +145,8 @@ test('image capability true emits exact ACP image blocks and persists metadata o
             mimeType: 'image/png',
             byteSize: PNG_SIGNATURE.length,
             sha256: crypto.createHash('sha256').update(PNG_SIGNATURE).digest('hex'),
-            name: '截图.png'
+            name: '截图.png',
+            workspacePath: `.xora/attachments/${APP_SESSION_ID}/${crypto.createHash('sha256').update(PNG_SIGNATURE).digest('hex')}.png`
         }]
     });
     assert.equal(JSON.stringify(userEvent).includes(image.data), false);
@@ -138,10 +159,10 @@ test('image capability true emits exact ACP image blocks and persists metadata o
 test('guidance uses the ACP-encoded _x.ai/interject route without cancelling the running turn', async () => {
     const image = attachment('image/png', PNG_SIGNATURE, '引导.png');
     const { host, events, requests } = hostHarness(true);
-    host.activePrompts.set('app-session', { cancel: () => assert.fail('guidance must not cancel the turn') });
+    host.activePrompts.set(APP_SESSION_ID, { cancel: () => assert.fail('guidance must not cancel the turn') });
 
     const result = await host.guidePrompt({
-        sessionId: 'app-session',
+        sessionId: APP_SESSION_ID,
         text: '先保留现有实现，再检查边界条件',
         attachments: [image]
     });
@@ -170,7 +191,7 @@ test('guidance uses the ACP-encoded _x.ai/interject route without cancelling the
 
 test('guidance keeps the renderer queue authoritative when the turn already ended', async () => {
     const { host, events, requests } = hostHarness(true);
-    const result = await host.guidePrompt({ sessionId: 'app-session', text: '继续检查' });
+    const result = await host.guidePrompt({ sessionId: APP_SESSION_ID, text: '继续检查' });
     assert.deepEqual(result, { status: 'not-running' });
     assert.deepEqual(requests, []);
     assert.deepEqual(events, []);
@@ -238,6 +259,29 @@ test('validator enforces count, per-image and aggregate decoded byte limits', ()
             attachment('image/jpeg', second)
         ]),
         /5 MiB or smaller in total/
+    );
+});
+
+test('workspace fallback refuses symlink redirection and corrupted content-addressed files', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-image-safety-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-image-outside-'));
+    tempRoots.push(root, outside);
+    fs.mkdirSync(path.join(root, '.xora'));
+    fs.symlinkSync(outside, path.join(root, '.xora', 'attachments'));
+    const images = validatePromptImageAttachments([attachment()]);
+    assert.throws(
+        () => persistPromptImagesToWorkspace(root, APP_SESSION_ID, images),
+        /unsafe workspace attachment directory/
+    );
+
+    fs.unlinkSync(path.join(root, '.xora', 'attachments'));
+    const sessionDirectory = path.join(root, '.xora', 'attachments', APP_SESSION_ID);
+    fs.mkdirSync(sessionDirectory, { recursive: true });
+    const digest = crypto.createHash('sha256').update(PNG_SIGNATURE).digest('hex');
+    fs.writeFileSync(path.join(sessionDirectory, `${digest}.png`), Buffer.from('corrupt'));
+    assert.throws(
+        () => persistPromptImagesToWorkspace(root, APP_SESSION_ID, images),
+        /corrupted workspace image attachment/
     );
 });
 

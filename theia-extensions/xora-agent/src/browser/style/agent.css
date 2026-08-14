@@ -1990,6 +1990,26 @@ form.xora-provider-form,
     font-size: 11px;
 }
 
+button.xora-message-attachment {
+    font-family: inherit;
+    text-align: left;
+}
+
+.xora-message-attachment.is-openable {
+    cursor: pointer;
+    transition: border-color 100ms ease, background-color 100ms ease;
+}
+
+.xora-message-attachment.is-openable:hover {
+    border-color: color-mix(in srgb, var(--theia-focusBorder) 55%, var(--theia-widget-border));
+    background: color-mix(in srgb, var(--theia-focusBorder) 9%, var(--theia-editorWidget-background));
+}
+
+.xora-message-attachment.is-openable:focus-visible {
+    outline: 1px solid var(--theia-focusBorder);
+    outline-offset: 1px;
+}
+
 .xora-message-attachment > span:nth-child(2) {
     min-width: 0;
     overflow: hidden;
@@ -2261,6 +2281,23 @@ form.xora-provider-form,
 .xora-agent-markdown strong {
     color: var(--theia-foreground);
     font-weight: 650;
+}
+
+.xora-agent-markdown-link {
+    color: var(--theia-textLink-foreground, var(--theia-focusBorder));
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.xora-agent-markdown-link:hover,
+.xora-agent-markdown-link:focus-visible {
+    color: var(--theia-textLink-activeForeground, var(--theia-textLink-foreground));
+    text-decoration: underline;
+}
+
+.xora-agent-markdown-link-parameter {
+    white-space: nowrap;
 }
 
 .xora-agent-markdown-inline-code {
@@ -3037,14 +3074,27 @@ form.xora-provider-form,
 }
 
 .xora-history-window-notice {
+    display: flex;
+    width: fit-content;
+    max-width: calc(100% - (2 * var(--xora-agent-pad)));
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
     margin: 5px var(--xora-agent-pad) 9px;
     padding: 6px 9px;
+    border: 0;
     border-radius: 6px;
     color: var(--theia-descriptionForeground);
     background: color-mix(in srgb, var(--theia-editorWidget-background) 72%, transparent);
     font-size: 10px;
     line-height: 1.4;
     text-align: center;
+    cursor: pointer;
+}
+
+.xora-history-window-notice:hover {
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-list-hoverBackground) 80%, transparent);
 }
 
 .xora-jump-latest {
@@ -3100,15 +3150,18 @@ form.xora-provider-form,
 
 .xora-composer-references {
     display: flex;
-    flex-wrap: wrap;
+    overflow-x: auto;
+    overflow-y: hidden;
     gap: 6px;
     padding: 9px 10px 1px;
+    scrollbar-width: thin;
 }
 
 .xora-composer-reference {
     display: inline-flex;
     min-width: 0;
-    max-width: 100%;
+    max-width: min(220px, 72%);
+    flex: 0 0 auto;
     align-items: center;
     gap: 5px;
     padding: 4px 7px;
@@ -3153,17 +3206,18 @@ form.xora-provider-form,
 
 .xora-composer-attachments {
     display: flex;
-    gap: 7px;
+    gap: 6px;
     overflow-x: auto;
-    padding: 9px 10px 1px;
+    padding: 8px 10px 1px;
     scrollbar-width: thin;
 }
 
 .xora-composer-image {
     position: relative;
-    width: 50px;
-    height: 50px;
-    flex: 0 0 50px;
+    width: 150px;
+    min-width: 112px;
+    height: 42px;
+    flex: 0 1 150px;
     overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--theia-widget-border) 82%, transparent);
     border-radius: 8px;
@@ -3171,29 +3225,69 @@ form.xora-provider-form,
 }
 
 .xora-composer-image-preview {
-    display: block;
+    display: grid;
     width: 100%;
     height: 100%;
-    padding: 0;
+    box-sizing: border-box;
+    grid-template-columns: 32px minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    padding: 4px 24px 4px 4px;
     border: 0;
+    color: var(--theia-foreground);
     background: transparent;
     cursor: zoom-in;
+    text-align: left;
+}
+
+.xora-composer-image-thumb {
+    display: block;
+    width: 32px;
+    height: 32px;
+    overflow: hidden;
+    border-radius: 5px;
+    background: var(--theia-editor-background);
 }
 
 .xora-composer-image-preview img {
     display: block;
-    width: 100%;
-    height: 100%;
+    width: 32px;
+    height: 32px;
     object-fit: cover;
+}
+
+.xora-composer-image-copy {
+    display: grid;
+    min-width: 0;
+    gap: 1px;
+}
+
+.xora-composer-image-copy strong,
+.xora-composer-image-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.xora-composer-image-copy strong {
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+.xora-composer-image-copy small {
+    color: var(--theia-descriptionForeground);
+    font-size: 9px;
+    font-weight: 400;
 }
 
 .xora-composer-image-remove {
     position: absolute;
-    top: 3px;
-    right: 3px;
+    top: 50%;
+    right: 4px;
     display: grid;
     width: 18px;
     height: 18px;
+    transform: translateY(-50%);
     padding: 0;
     border: 0;
     border-radius: 50%;
@@ -3209,10 +3303,35 @@ form.xora-provider-form,
 }
 
 .xora-composer-image-reading {
-    display: grid;
-    place-items: center;
+    display: flex;
+    box-sizing: border-box;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 9px;
     color: var(--theia-descriptionForeground);
     border-style: dashed;
+}
+
+.xora-composer-image-reading > .codicon {
+    flex: 0 0 auto;
+}
+
+.xora-composer-image-fallback-hint {
+    display: inline-flex;
+    min-width: 112px;
+    max-width: 150px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 5px;
+    padding: 0 3px;
+    color: color-mix(in srgb, var(--theia-descriptionForeground) 84%, transparent);
+    font-size: 9.5px;
+    line-height: 1.35;
+}
+
+.xora-composer-image-fallback-hint .codicon {
+    flex: 0 0 auto;
+    font-size: 11px;
 }
 
 .xora-image-preview-scrim {
@@ -3351,43 +3470,76 @@ form.xora-provider-form,
 }
 
 .xora-composer-actions {
+    /* Keep the semantic selectors and compact task actions on one stable row.
+       Every group may shrink, but none wraps or moves while a task starts. */
     display: flex;
-    min-height: 34px;
+    flex-direction: row;
     align-items: center;
-    gap: 7px;
-    margin: 0;
-    padding: 2px 5px 5px 8px;
+    width: 100%;
+    min-height: 30px;
+    box-sizing: border-box;
+    justify-content: flex-start;
+    gap: 6px;
+    margin: 2px 0 0;
+    padding: 0 6px 5px 8px;
 }
 
 .xora-composer-selectors {
     display: flex;
+    width: auto;
+    flex: 1 1 auto;
     min-width: 0;
-    flex: 1;
     align-items: center;
     gap: 4px;
-    flex-wrap: nowrap;
+}
+
+.xora-composer-secondary {
+    display: flex;
+    width: auto;
+    flex: 0 0 auto;
+    min-width: 0;
+    min-height: 27px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+}
+
+.xora-composer-submit-group {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 5px;
 }
 
 .xora-composer-selectors label {
     display: flex;
     min-width: 0;
-    max-width: none;
-    flex: 1 1 0;
+    height: 27px;
+    box-sizing: border-box;
     align-items: center;
-    gap: 2px;
+    padding: 0 3px 0 7px;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 52%, transparent);
+    border-radius: 6px;
     color: var(--theia-descriptionForeground);
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 48%, transparent);
 }
 
-.xora-composer-selectors .xora-task-mode-control {
-    max-width: 94px;
-    flex: 0 1 94px;
+.xora-composer-selectors .xora-model-control {
+    min-width: 72px;
+    flex: 1 1 120px;
+}
+
+.xora-composer-selectors .xora-permission-mode-control {
+    width: 94px;
+    min-width: 72px;
+    flex: 0 0 94px;
 }
 
 .xora-composer-selectors select {
     min-width: 0;
-    max-width: 100%;
-    height: 26px;
-    padding: 0 15px 0 2px;
+    width: 100%;
+    height: 25px;
+    padding: 0 13px 0 0;
     overflow: hidden;
     border: 0;
     border-radius: 4px;
@@ -3401,6 +3553,14 @@ form.xora-provider-form,
 .xora-composer-selectors label:hover,
 .xora-composer-selectors select:hover:not(:disabled) {
     color: var(--theia-foreground);
+}
+
+.xora-composer-selectors label:focus-within {
+    border-color: color-mix(in srgb, var(--theia-focusBorder) 70%, var(--theia-widget-border));
+}
+
+.xora-permission-mode-control.is-full-access {
+    color: color-mix(in srgb, var(--theia-charts-yellow, #cca700) 82%, var(--theia-foreground));
 }
 
 .xora-composer-tool {
@@ -3434,6 +3594,70 @@ form.xora-provider-form,
 
 .xora-composer-tool-label {
     display: none;
+}
+
+.xora-composer-utility-group {
+    display: flex;
+    height: 26px;
+    flex: 0 0 auto;
+    align-items: center;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 58%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--theia-editorWidget-background) 42%, transparent);
+}
+
+.xora-composer-utility-group .xora-composer-tool {
+    border-radius: 0;
+}
+
+.xora-composer-utility-group .xora-composer-tool + .xora-composer-tool {
+    border-left: 1px solid color-mix(in srgb, var(--theia-widget-border) 54%, transparent);
+}
+
+.xora-composer-utility-group .xora-context-trigger {
+    border-radius: 0;
+}
+
+.xora-composer-options-trigger {
+    width: 26px;
+    min-width: 26px;
+    padding: 0;
+}
+
+.xora-composer-options-trigger .xora-composer-tool-label {
+    display: none;
+}
+
+.xora-composer-options-trigger.is-continuous {
+    color: var(--theia-focusBorder);
+}
+
+.xora-composer-tool-chevron {
+    opacity: .66;
+    font-size: 11px;
+}
+
+.xora-composer-attachment-trigger {
+    position: relative;
+}
+
+.xora-composer-attachment-count {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    display: grid;
+    min-width: 11px;
+    height: 11px;
+    box-sizing: border-box;
+    place-items: center;
+    padding: 0 2px;
+    border-radius: 6px;
+    color: var(--theia-button-foreground);
+    background: var(--theia-focusBorder);
+    font-size: 7px;
+    font-weight: 700;
+    line-height: 1;
 }
 
 /* Slash command palette — anchored above the whole composer block */
@@ -3472,6 +3696,65 @@ form.xora-provider-form,
     color: var(--theia-descriptionForeground);
     font-size: 10px;
     white-space: nowrap;
+}
+
+.xora-slash-menu-quick {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 8px;
+    border-bottom: 1px solid color-mix(in srgb, var(--theia-widget-border) 72%, transparent);
+}
+
+.xora-task-mode-segment {
+    display: grid;
+    min-width: 0;
+    flex: 1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px;
+    padding: 2px;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--theia-input-background) 76%, transparent);
+}
+
+.xora-task-mode-segment button,
+.xora-slash-menu-file {
+    display: flex;
+    min-width: 0;
+    height: 27px;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 5px;
+    color: var(--theia-descriptionForeground);
+    background: transparent;
+    font: inherit;
+    font-size: 10px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.xora-task-mode-segment button.active {
+    color: var(--theia-foreground);
+    background: color-mix(in srgb, var(--theia-button-secondaryBackground) 78%, transparent);
+    box-shadow: 0 1px 4px color-mix(in srgb, #000 18%, transparent);
+}
+
+.xora-task-mode-segment button:disabled {
+    opacity: .42;
+    cursor: default;
+}
+
+.xora-slash-menu-file {
+    flex: 0 0 auto;
+    border: 1px solid color-mix(in srgb, var(--theia-widget-border) 82%, transparent);
+}
+
+.xora-slash-menu-file:hover {
+    color: var(--theia-foreground);
+    background: var(--theia-toolbar-hoverBackground);
 }
 
 .xora-slash-menu-error {
@@ -3608,13 +3891,6 @@ form.xora-provider-form,
     border-radius: 5px;
     color: var(--theia-input-foreground);
     background: var(--theia-input-background);
-}
-
-.xora-composer-hint {
-    flex: 0 0 auto;
-    color: var(--theia-descriptionForeground);
-    font-size: 10px;
-    white-space: nowrap;
 }
 
 .xora-image-live {
@@ -4004,10 +4280,6 @@ form.xora-provider-form,
 }
 
 @container (max-width: 500px) {
-    .xora-composer-hint {
-        display: none;
-    }
-
     .xora-current-provider-card {
         align-items: stretch;
         flex-direction: column;
@@ -4058,26 +4330,59 @@ form.xora-provider-form,
         padding-right: 16px;
     }
 
-    .xora-composer-selectors label > .codicon {
-        display: none;
-    }
-
     .xora-composer-actions {
-        align-items: center;
+        min-height: 28px;
+        gap: 3px;
+        padding-right: 5px;
+        padding-left: 6px;
     }
 
     .xora-composer-selectors {
-        flex-wrap: nowrap;
+        gap: 2px;
     }
 
     .xora-composer-image {
-        width: 44px;
-        height: 44px;
-        flex-basis: 44px;
+        width: 126px;
+        min-width: 106px;
+        height: 40px;
+        flex-basis: 126px;
     }
 
     .xora-composer-selectors select {
         width: 100%;
+        font-size: 9px;
+    }
+
+    .xora-composer-selectors .xora-model-control {
+        min-width: 60px;
+    }
+
+    .xora-composer-selectors .xora-permission-mode-control {
+        width: 88px;
+        min-width: 88px;
+        flex-basis: 88px;
+    }
+
+    .xora-composer-secondary,
+    .xora-composer-submit-group {
+        gap: 3px;
+    }
+
+    .xora-composer-tool,
+    .xora-composer-options-trigger {
+        width: 24px;
+        min-width: 24px;
+        flex-basis: 24px;
+    }
+
+    .xora-composer-submit {
+        width: 28px;
+        height: 28px;
+        flex-basis: 28px;
+    }
+
+    .xora-composer-reference small {
+        display: none;
     }
 
     .xora-activity-summary {

@@ -29,6 +29,7 @@ interface Session {
   readonly id: string;
   readonly cwd: string;
   modelId: string;
+  reasoningEffort: string | undefined;
   modeId: "default" | "plan";
   mcpServers: McpServerConfig[];
   mcpState: "initializing" | "ready";
@@ -264,6 +265,7 @@ export class FakeAcpAgent {
       id,
       cwd: params.cwd,
       modelId: typeof requestedModel === "string" ? requestedModel : MODEL_STATE_FIXTURE.currentModelId,
+      reasoningEffort: "high",
       modeId: "default",
       mcpServers,
       mcpState: mcpServers.length === 0 ? "ready" : "initializing",
@@ -279,7 +281,7 @@ export class FakeAcpAgent {
         ],
       },
       configOptions: [modelConfigOption()],
-      _meta: { modelState: modelState(session.modelId) },
+      _meta: { modelState: modelState(session.modelId, session.reasoningEffort) },
     });
     await this.#notifyModelState(id, session.modelId);
     await this.#sessionUpdate(id, AVAILABLE_COMMANDS_FIXTURE);
@@ -299,6 +301,7 @@ export class FakeAcpAgent {
       id: params.sessionId,
       cwd: params.cwd,
       modelId: typeof requestedModel === "string" ? requestedModel : MODEL_STATE_FIXTURE.currentModelId,
+      reasoningEffort: "high",
       modeId: "default",
       mcpServers,
       mcpState: mcpServers.length === 0 ? "ready" : "initializing",
@@ -318,7 +321,7 @@ export class FakeAcpAgent {
         availableModes: [{ id: "default", name: "Agent" }, { id: "plan", name: "Plan" }],
       },
       configOptions: [modelConfigOption()],
-      _meta: { modelState: modelState(session.modelId) },
+      _meta: { modelState: modelState(session.modelId, session.reasoningEffort) },
     });
     await this.#notifyModelState(session.id, session.modelId);
     await this.#sessionUpdate(session.id, AVAILABLE_COMMANDS_FIXTURE);
@@ -582,8 +585,21 @@ export class FakeAcpAgent {
       return;
     }
     session.modelId = modelId;
+    const reasoningEffort = asRecord(params?._meta)?.reasoningEffort;
+    const target = asRecord(MODEL_STATE_FIXTURE.availableModels.find((model) => model.id === modelId));
+    const targetMeta = asRecord(target?._meta);
+    const options = targetMeta?.reasoningEfforts;
+    const offered = Array.isArray(options)
+      ? options.some(option => {
+        const candidate = asRecord(option);
+        return candidate?.id === reasoningEffort || candidate?.value === reasoningEffort;
+      })
+      : false;
+    session.reasoningEffort = typeof reasoningEffort === "string" && offered
+      ? reasoningEffort === "deep" ? "xhigh" : reasoningEffort
+      : typeof targetMeta?.reasoningEffort === "string" ? targetMeta.reasoningEffort : undefined;
     await this.#respondResult(request.id, {});
-    await this.#notifyModelState(sessionId, modelId);
+    await this.#notifyModelState(sessionId, modelId, session.reasoningEffort);
   }
 
   async #setMode(request: JsonRpcRequest): Promise<void> {
@@ -760,14 +776,14 @@ export class FakeAcpAgent {
     return { id, promise };
   }
 
-  async #notifyModelState(sessionId: string, currentModelId?: string): Promise<void> {
+  async #notifyModelState(sessionId: string, currentModelId?: string, reasoningEffort?: string): Promise<void> {
     await this.#send({
       jsonrpc: "2.0",
       method: "_x.ai/model_state_updated",
       params: {
         sessionId,
         modelState: currentModelId
-          ? { ...MODEL_STATE_FIXTURE, currentModelId }
+          ? modelState(currentModelId, reasoningEffort)
           : MODEL_STATE_FIXTURE,
       },
     });
@@ -816,8 +832,17 @@ function modelConfigOption(): Record<string, unknown> {
   };
 }
 
-function modelState(currentModelId: string): Record<string, unknown> {
-  return { ...MODEL_STATE_FIXTURE, currentModelId };
+function modelState(currentModelId: string, reasoningEffort?: string): Record<string, unknown> {
+  return {
+    ...MODEL_STATE_FIXTURE,
+    currentModelId,
+    availableModels: MODEL_STATE_FIXTURE.availableModels.map(model => {
+      const record = asRecord(model);
+      const meta = asRecord(record?._meta);
+      if (model.id !== currentModelId || !reasoningEffort || meta?.supportsReasoningEffort !== true) return model;
+      return { ...model, _meta: { ...meta, reasoningEffort } };
+    }),
+  };
 }
 
 function textPrompt(prompt: unknown): string {

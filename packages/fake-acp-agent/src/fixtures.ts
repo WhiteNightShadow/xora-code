@@ -8,6 +8,15 @@ export const MODEL_STATE_FIXTURE = Object.freeze({
       id: "grok",
       name: "Grok (default)",
       description: "Deterministic fake of the Grok Build model alias",
+      _meta: Object.freeze({
+        supportsReasoningEffort: true,
+        reasoningEffort: "high",
+        reasoningEfforts: Object.freeze([
+          Object.freeze({ id: "low", value: "low", label: "Low" }),
+          Object.freeze({ id: "high", value: "high", label: "High", description: "Fixture default" }),
+          Object.freeze({ id: "deep", value: "xhigh", label: "Deep" }),
+        ]),
+      }),
     }),
     Object.freeze({
       id: "grok-4.5",

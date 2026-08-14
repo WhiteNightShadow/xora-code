@@ -24,6 +24,7 @@ export interface AgentModelChoiceGroup {
 }
 
 const MODEL_CHOICE_PREFIX = 'xora-model:';
+const MODEL_CONFIGURATION_PREFIX = 'xora-model-configuration:';
 
 /** Keep upstream model ids intact on the wire while presenting stable product copy. */
 export function agentModelDisplayName(modelId: string, advertisedName?: string): string {
@@ -48,6 +49,28 @@ export function decodeAgentModelChoice(value: string): { providerId: string; mod
         const providerId = decodeURIComponent(value.slice(MODEL_CHOICE_PREFIX.length, separator));
         const modelId = decodeURIComponent(value.slice(separator + 1));
         return providerId && modelId ? { providerId, modelId } : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/** One native selector can present a model and, beneath it, the reasoning
+ * levels advertised for that exact model. Keep the encoded value opaque so a
+ * future server-defined reasoning token cannot collide with a model id. */
+export function encodeAgentModelConfiguration(modelChoice: string, reasoningEffort?: string): string {
+    return `${MODEL_CONFIGURATION_PREFIX}${encodeURIComponent(modelChoice)}:${encodeURIComponent(reasoningEffort ?? '')}`;
+}
+
+export function decodeAgentModelConfiguration(
+    value: string
+): { modelChoice: string; reasoningEffort?: string } | undefined {
+    if (!value.startsWith(MODEL_CONFIGURATION_PREFIX)) return undefined;
+    const separator = value.indexOf(':', MODEL_CONFIGURATION_PREFIX.length);
+    if (separator < 0) return undefined;
+    try {
+        const modelChoice = decodeURIComponent(value.slice(MODEL_CONFIGURATION_PREFIX.length, separator));
+        const reasoningEffort = decodeURIComponent(value.slice(separator + 1));
+        return modelChoice ? { modelChoice, reasoningEffort: reasoningEffort || undefined } : undefined;
     } catch {
         return undefined;
     }

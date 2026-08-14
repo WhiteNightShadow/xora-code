@@ -137,6 +137,34 @@ test('API routes remain code while explicit source-file paths are clickable', ()
     assert.match(html, /title="打开 src\/dashboard\/exec-trend\.ts"/);
 });
 
+test('long signed URLs stay one link instead of turning their path into a workspace file', () => {
+    const url = 'https://rent-ai-insight-social-media.oss-cn-hangzhou.aliyuncs.com/social/douyin/douyin_6_2026081311_001_564dbe/7673121759495722112/cover.webp?OSSAccessKeyId=LTAI5t7N2CfXpwWSf1qxiRW4&Expires=2101952567&Signature=X%2Bg%2B%2B';
+    const html = renderToStaticMarkup(React.createElement(AgentMarkdown, {
+        text: `封面：\n${url}\n视频：${url}。`,
+        onOpenPath: () => undefined
+    }));
+
+    assert.equal((html.match(/class="xora-agent-markdown-link"/g) ?? []).length, 2);
+    assert.match(html, /class="xora-agent-markdown-link-parameter">\?OSSAccessKeyId=<\/span>/);
+    assert.match(html, new RegExp(`href="${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replaceAll('&', '&amp;')}"`));
+    assert.match(html, /target="_blank" rel="noopener noreferrer"/);
+    assert.doesNotMatch(html, /title="打开 \/rent-ai-insight/);
+    assert.doesNotMatch(html, /xora-file-link/);
+    assert.match(html, /<\/a>。/);
+});
+
+test('only HTTP and HTTPS text becomes an external link', () => {
+    const html = renderToStaticMarkup(React.createElement(AgentMarkdown, {
+        text: '安全 https://example.test/a.js，保持 javascript:alert(1) 和 `https://example.test/code.js` 为文本。',
+        onOpenPath: () => undefined
+    }));
+
+    assert.equal((html.match(/class="xora-agent-markdown-link"/g) ?? []).length, 1);
+    assert.match(html, /href="https:\/\/example\.test\/a\.js"/);
+    assert.doesNotMatch(html, /href="javascript:/);
+    assert.match(html, /<code class="xora-agent-markdown-inline-code">https:\/\/example\.test\/code\.js<\/code>/);
+});
+
 test('marks an unfinished fenced block for streaming presentation', () => {
     const html = renderToStaticMarkup(React.createElement(AgentMarkdown, { text: '```\npartial' }));
     assert.match(html, /class="[^"]*\bxora-agent-markdown-code\b[^"]*\bis-streaming\b[^"]*"/);

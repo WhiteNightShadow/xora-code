@@ -20,6 +20,8 @@ import {
     PromptRequest,
     ProviderProfile,
     RuntimeSnapshot,
+    SessionHistoryPage,
+    SessionHistoryPageRequest,
     SessionRecord,
     StartRuntimeRequest,
     SynchronizeWorkspaceTrustRequest
@@ -42,16 +44,27 @@ export class FakeAgentHostService implements AgentHostService {
     ];
     protected configuredCredentials = new Set<string>();
     protected preferredModels = new Map<string, string>([['grok-subscription', 'grok']]);
+    protected preferredReasoningEfforts = new Map<string, string>();
     protected snapshot: RuntimeSnapshot = {
         revision: 0,
         phase: 'stopped',
         workspaceAttached: false,
         workspaceTrusted: false,
         providerId: 'grok-subscription',
+        providerProfilesRevision: 0,
         grokSubscriptionAuthStatus: 'unknown',
         sidecarVersion: 'fake-0.1.0',
         models: [
-            { id: 'grok', name: 'Grok (fixture)', contextWindow: 1_000_000 },
+            {
+                id: 'grok',
+                name: 'Grok (fixture)',
+                contextWindow: 1_000_000,
+                reasoningOptions: [
+                    { id: 'low', value: 'low', name: 'Low' },
+                    { id: 'high', value: 'high', name: 'High', default: true },
+                    { id: 'deep', value: 'xhigh', name: 'Deep' }
+                ]
+            },
             { id: 'fixture-model', name: 'Fixture Model', contextWindow: 128_000 }
         ],
         selectedModel: 'grok',
@@ -173,6 +186,8 @@ export class FakeAgentHostService implements AgentHostService {
             workspaceRoot: request.workspaceRoot,
             providerId: request.providerId,
             model: request.model ?? this.snapshot.selectedModel,
+            reasoningEffort: request.reasoningEffort
+                ?? ((request.model ?? this.snapshot.selectedModel) === 'grok' ? 'high' : undefined),
             sidecarVersion: this.snapshot.sidecarVersion,
             availableModes: [{ id: 'code', name: 'Code' }, { id: 'plan', name: 'Plan' }],
             currentModeId: request.modeId ?? 'code',
@@ -182,6 +197,7 @@ export class FakeAgentHostService implements AgentHostService {
         };
         this.snapshot.sessions.unshift(session);
         this.snapshot.activeSessionId = id;
+        this.snapshot.selectedReasoningEffort = session.reasoningEffort;
         this.client?.onAgentEvent({ kind: 'session', session });
         this.publishSnapshot();
         return session;
@@ -190,6 +206,7 @@ export class FakeAgentHostService implements AgentHostService {
     async loadSession(appSessionId: string): Promise<SessionRecord> {
         const session = this.requireSession(appSessionId);
         this.snapshot.activeSessionId = appSessionId;
+        this.snapshot.selectedReasoningEffort = session.reasoningEffort;
         this.client?.onAgentEvent({ kind: 'session', session });
         this.publishSnapshot();
         return session;
@@ -218,6 +235,13 @@ export class FakeAgentHostService implements AgentHostService {
 
     async getSessionHistory(_appSessionId: string): Promise<AgentHostEvent[]> {
         return [];
+    }
+
+    async getSessionHistoryPage(
+        _appSessionId: string,
+        _request: SessionHistoryPageRequest = {}
+    ): Promise<SessionHistoryPage> {
+        return { events: [], hasMore: false };
     }
 
     async exportSession(_appSessionId: string): Promise<ExportSessionResult> {
@@ -510,19 +534,58 @@ export class FakeAgentHostService implements AgentHostService {
         pending?.resolve();
     }
 
-    async selectModel(sessionId: string, modelId: string): Promise<void> {
+    async selectModel(sessionId: string, modelId: string, reasoningEffort?: string): Promise<void> {
         const session = this.requireSession(sessionId);
         session.model = modelId;
+        const model = this.snapshot.models.find(candidate => candidate.id === modelId);
+        const requestedReasoning = reasoningEffort
+            ? model?.reasoningOptions?.find(option => option.value === reasoningEffort || option.id === reasoningEffort)
+            : undefined;
+        if (reasoningEffort && !requestedReasoning) {
+            throw new Error('The selected reasoning effort is not advertised by this model.');
+        }
+        session.reasoningEffort = requestedReasoning?.value
+            ?? model?.reasoningOptions
+                ?.find(option => option.value === session.reasoningEffort || option.id === session.reasoningEffort)?.value
+            ?? model?.reasoningOptions?.find(option => option.default)?.value;
         session.updatedAt = new Date().toISOString();
         this.snapshot.selectedModel = modelId;
+        this.snapshot.selectedReasoningEffort = session.reasoningEffort;
         this.preferredModels.set(this.snapshot.providerId, modelId);
+        if (session.reasoningEffort) {
+            this.preferredReasoningEfforts.set(`${this.snapshot.providerId}:${modelId}`, session.reasoningEffort);
+            this.snapshot.preferredReasoningEffort = session.reasoningEffort;
+        }
         this.client?.onAgentEvent({ kind: 'session', session });
         this.publishSnapshot();
     }
 
-    async selectDefaultModel(providerId: string, modelId: string): Promise<RuntimeSnapshot> {
+    async selectReasoningEffort(appSessionId: string, effort: string): Promise<void> {
+        const session = this.requireSession(appSessionId);
+        const model = this.snapshot.models.find(candidate => candidate.id === session.model);
+        const option = model?.reasoningOptions?.find(candidate =>
+            candidate.id === effort || candidate.value === effort);
+        if (!option) throw new Error('The selected reasoning effort is not advertised by this model.');
+        session.reasoningEffort = option.value;
+        this.snapshot.selectedReasoningEffort = option.value;
+        this.snapshot.preferredReasoningEffort = option.value;
+        this.preferredReasoningEfforts.set(`${this.snapshot.providerId}:${session.model}`, option.value);
+        session.updatedAt = new Date().toISOString();
+        this.client?.onAgentEvent({ kind: 'session', session });
+        this.publishSnapshot();
+    }
+
+    async selectDefaultModel(providerId: string, modelId: string, reasoningEffort?: string): Promise<RuntimeSnapshot> {
         if (providerId !== this.snapshot.providerId) throw new Error('Select the Provider first.');
         this.preferredModels.set(providerId, modelId);
+        const model = this.snapshot.models.find(candidate => candidate.id === modelId);
+        const resolved = reasoningEffort
+            ? model?.reasoningOptions?.find(option => option.id === reasoningEffort || option.value === reasoningEffort)?.value
+            : this.preferredReasoningEfforts.get(`${providerId}:${modelId}`)
+                ?? model?.reasoningOptions?.find(option => option.default)?.value;
+        if (reasoningEffort && !resolved) throw new Error('Unsupported reasoning effort.');
+        if (resolved) this.preferredReasoningEfforts.set(`${providerId}:${modelId}`, resolved);
+        this.snapshot.preferredReasoningEffort = resolved;
         if (!this.snapshot.activeSessionId) this.snapshot.selectedModel = modelId;
         return this.publishSnapshot();
     }
@@ -589,6 +652,8 @@ export class FakeAgentHostService implements AgentHostService {
         }
         if (apiKey) this.configuredCredentials.add(profile.id);
         this.authenticationConfirmations.delete(profile.id);
+        this.bumpProviderProfilesRevision();
+        this.publishSnapshot();
         return {
             ...saved,
             credentialConfigured: this.configuredCredentials.has(saved.id)
@@ -603,6 +668,7 @@ export class FakeAgentHostService implements AgentHostService {
         this.configuredCredentials.delete(providerId);
         this.authenticationConfirmations.delete(providerId);
         this.snapshot.message = 'Provider credential cleared.';
+        this.bumpProviderProfilesRevision();
         this.publishSnapshot();
     }
 
@@ -610,6 +676,8 @@ export class FakeAgentHostService implements AgentHostService {
         this.providerProfiles = this.providerProfiles.filter(profile => profile.id !== providerId || profile.managed);
         this.configuredCredentials.delete(providerId);
         this.authenticationConfirmations.delete(providerId);
+        this.bumpProviderProfilesRevision();
+        this.publishSnapshot();
     }
 
     async loginGrokSubscription(): Promise<ManagementResult> {
@@ -675,6 +743,11 @@ export class FakeAgentHostService implements AgentHostService {
         const snapshot = this.cloneSnapshot();
         this.client?.onAgentEvent({ kind: 'snapshot', snapshot });
         return snapshot;
+    }
+
+    protected bumpProviderProfilesRevision(): void {
+        const current = this.snapshot.providerProfilesRevision ?? 0;
+        this.snapshot.providerProfilesRevision = current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1;
     }
 
     protected cloneSnapshot(): RuntimeSnapshot {

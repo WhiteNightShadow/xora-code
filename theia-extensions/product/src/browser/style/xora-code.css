@@ -186,15 +186,20 @@ body.xora-compact-workbench.xora-electron-frameless.xora-platform-darwin #main-t
     display: none !important;
 }
 
-/* Hide only the activity rail. The adjacent project tree remains mounted and
-   retains its saved width, selection, context menus and resize sash. */
-body.xora-compact-workbench.xora-electron-frameless #theia-left-content-panel > .theia-app-sidebar-container {
+/* Hide only the activity rail. This is a Xora product invariant and must not
+   depend on Electron's preload bridge or on a particular restored DOM depth.
+   The adjacent project tree and the rail node itself remain mounted so Theia
+   keeps its saved width, view registrations, context menus and resize sash. */
+body.xora-product-shell #theia-left-content-panel .theia-app-sidebar-container,
+#theia-left-content-panel .theia-app-sidebar-container.xora-activity-rail-hidden {
     display: none !important;
     width: 0 !important;
     min-width: 0 !important;
     max-width: 0 !important;
+    flex: 0 0 0 !important;
     overflow: hidden;
     border: 0;
+    pointer-events: none;
 }
 
 body.xora-compact-workbench.xora-electron-frameless #theia-left-content-panel.theia-mod-collapsed {
