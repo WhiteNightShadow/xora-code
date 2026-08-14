@@ -16,8 +16,9 @@ interface PendingEventBatch {
 }
 
 interface EventFileCache {
-    device: number;
-    inode: number;
+    /** Lossless decimal identities from fs.BigIntStats (not JS numbers). */
+    device: string;
+    inode: string;
     /** Number of file bytes represented by events/trailingPartial. */
     size: number;
     events: AgentHostEvent[];
@@ -41,9 +42,16 @@ const HISTORY_SCAN_BLOCK_BYTES = 64 * 1024;
 
 interface HistoryCursor {
     v: 1;
-    device: number;
-    inode: number;
+    /** Opaque 64-bit file identity components encoded without precision loss. */
+    device: string;
+    inode: string;
     offset: number;
+}
+
+interface EventFileStat {
+    device: string;
+    inode: string;
+    size: number;
 }
 
 /** Crash-safe, renderer-independent index plus redacted append-only event logs. */
@@ -267,11 +275,11 @@ export class AgentSessionRepository {
         const target = path.join(this.root, `${appSessionId}.jsonl`);
         let durable: AgentHostEvent[] = [];
         try {
-            const stat = fs.statSync(target);
+            const stat = this.readEventFileStat(target);
             const cached = this.eventCache.get(appSessionId);
             const canReadIncrementally = !!cached
-                && cached.device === stat.dev
-                && cached.inode === stat.ino
+                && cached.device === stat.device
+                && cached.inode === stat.inode
                 && stat.size >= cached.size
                 && stat.size - cached.size <= MAX_EVENT_LOG_BYTES;
             if (canReadIncrementally && cached) {
@@ -291,8 +299,8 @@ export class AgentSessionRepository {
                 const contents = this.readEventFileRange(target, start, stat.size - start);
                 const parsed = parseStoredEventChunk(contents, appSessionId, start > 0);
                 const next: EventFileCache = {
-                    device: stat.dev,
-                    inode: stat.ino,
+                    device: stat.device,
+                    inode: stat.inode,
                     size: stat.size,
                     events: parsed.events.slice(-MAX_CACHED_EVENTS),
                     trailingPartial: parsed.trailingPartial
@@ -326,15 +334,15 @@ export class AgentSessionRepository {
         const limit = Math.max(1, Math.min(MAX_HISTORY_PAGE_EVENTS,
             Number.isSafeInteger(request.limit) ? request.limit! : DEFAULT_HISTORY_PAGE_EVENTS));
         const target = path.join(this.root, `${appSessionId}.jsonl`);
-        let stat: fs.Stats | undefined;
+        let stat: EventFileStat | undefined;
         try {
-            stat = fs.statSync(target);
+            stat = this.readEventFileStat(target);
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         }
 
         const cursor = request.before ? decodeHistoryCursor(request.before) : undefined;
-        if (cursor && (!stat || cursor.device !== stat.dev || cursor.inode !== stat.ino
+        if (cursor && (!stat || cursor.device !== stat.device || cursor.inode !== stat.inode
             || cursor.offset < 0 || cursor.offset > stat.size)) {
             throw new Error('Agent history changed; reload the conversation before requesting older records.');
         }
@@ -348,7 +356,7 @@ export class AgentSessionRepository {
         const events = [...durablePage.events, ...visiblePending];
         const hasMore = durablePage.start > 0 || (!!stat && durableLimit === 0 && end > 0);
         const before = hasMore && stat
-            ? encodeHistoryCursor({ v: 1, device: stat.dev, inode: stat.ino, offset: durablePage.start })
+            ? encodeHistoryCursor({ v: 1, device: stat.device, inode: stat.inode, offset: durablePage.start })
             : undefined;
         const diffCache = events.some(event => event.kind === 'diff')
             ? this.prepareDiffImagePathCache(appSessionId)
@@ -357,6 +365,25 @@ export class AgentSessionRepository {
             events: events.map(event => this.restoreDiffImagePaths(appSessionId, event, diffCache)),
             before,
             hasMore
+        };
+    }
+
+    /**
+     * Node exposes Windows volume/file indexes through 64-bit stat fields.
+     * Reading those fields as numbers can silently round them above 2^53,
+     * producing a cursor which its own decoder rejects or aliases with another
+     * file. Keep the identity lossless and only convert the byte size after a
+     * checked range validation because fs.readSync still consumes numbers.
+     */
+    protected readEventFileStat(target: string): EventFileStat {
+        const stat = fs.statSync(target, { bigint: true });
+        if (stat.size < 0n || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+            throw new Error('Agent history file is too large to page safely.');
+        }
+        return {
+            device: stat.dev.toString(10),
+            inode: stat.ino.toString(10),
+            size: Number(stat.size)
         };
     }
 
@@ -919,13 +946,25 @@ function encodeHistoryCursor(cursor: HistoryCursor): string {
 
 function decodeHistoryCursor(value: string): HistoryCursor {
     try {
-        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<HistoryCursor>;
-        if (parsed.v !== 1 || !Number.isSafeInteger(parsed.device) || !Number.isSafeInteger(parsed.inode)
-            || !Number.isSafeInteger(parsed.offset)) throw new Error();
-        return parsed as HistoryCursor;
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Record<string, unknown>;
+        const device = decodeHistoryIdentity(parsed.device);
+        const inode = decodeHistoryIdentity(parsed.inode);
+        if (parsed.v !== 1 || device === undefined || inode === undefined
+            || !Number.isSafeInteger(parsed.offset) || (parsed.offset as number) < 0) throw new Error();
+        return { v: 1, device, inode, offset: parsed.offset as number };
     } catch {
         throw new Error('Invalid Agent history cursor.');
     }
+}
+
+function decodeHistoryIdentity(value: unknown): string | undefined {
+    // Accept safe numeric v1 cursors created by earlier Xora versions, while
+    // every new cursor uses the string form needed for Windows 64-bit indexes.
+    if (typeof value === 'number') {
+        return Number.isSafeInteger(value) && value >= 0 ? String(value) : undefined;
+    }
+    if (typeof value !== 'string' || !/^(?:0|[1-9]\d{0,31})$/.test(value)) return undefined;
+    return value;
 }
 
 function isStoredEvent(value: unknown, appSessionId: string): value is AgentHostEvent {

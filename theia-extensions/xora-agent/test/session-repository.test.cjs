@@ -197,6 +197,43 @@ test('newest history page includes unflushed events once and older pages stay du
     }
 });
 
+test('history cursors preserve 64-bit Windows file identities without Number truncation', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-windows-cursor-'));
+    const appSessionId = '00000000-0000-4000-8000-000000000096';
+    const target = path.join(root, `${appSessionId}.jsonl`);
+    const windowsDevice = '18446744073709551615';
+    const windowsInode = '9223372036854775809';
+    const line = text => `${JSON.stringify({
+        schemaVersion: 1,
+        timestamp: '2026-08-13T00:00:00.000Z',
+        event: { kind: 'text-delta', sessionId: appSessionId, role: 'assistant', text }
+    })}\n`;
+    fs.writeFileSync(target, `${line('first')}${line('second')}`, { mode: 0o600 });
+    const nativeStatSync = fs.statSync;
+    fs.statSync = (file, options) => {
+        const stat = nativeStatSync(file, options);
+        if (file !== target || !options || options.bigint !== true) return stat;
+        return { ...stat, dev: BigInt(windowsDevice), ino: BigInt(windowsInode) };
+    };
+    const repository = new AgentSessionRepository(root);
+    try {
+        const newest = repository.readEventPage(appSessionId, { limit: 1 });
+        assert.deepEqual(newest.events.map(event => event.text), ['second']);
+        assert.ok(newest.before);
+        const decoded = JSON.parse(Buffer.from(newest.before, 'base64url').toString('utf8'));
+        assert.equal(decoded.device, windowsDevice);
+        assert.equal(decoded.inode, windowsInode);
+
+        const older = repository.readEventPage(appSessionId, { before: newest.before, limit: 1 });
+        assert.deepEqual(older.events.map(event => event.text), ['first']);
+        assert.equal(older.hasMore, false);
+    } finally {
+        fs.statSync = nativeStatSync;
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('history cursor fails closed when the append-only file identity changes', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-stale-page-'));
     const appSessionId = '00000000-0000-4000-8000-000000000097';
