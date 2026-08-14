@@ -27,6 +27,20 @@ const REQUIRED_LEGAL = [
     'third_party/NOTICE'
 ];
 
+const STAGED_NOTICE_SOURCES = Object.freeze([
+    [path.join(ROOT, 'LICENSE'), 'XORA-CODE-LICENSE'],
+    [path.join(ROOT, 'NOTICE.md'), 'XORA-CODE-NOTICE.md'],
+    [path.join(ROOT, 'THIRD-PARTY-NOTICES.md'), 'THIRD-PARTY-NOTICES.md'],
+    [path.join(ROOT, 'resources', 'legal', 'ripgrep', 'RIPGREP-SOURCE-BUILD-NOTICE.md'), 'RIPGREP-SOURCE-BUILD-NOTICE.md'],
+    [path.join(ROOT, 'build', 'grok', 'PATCHES.md'), 'GROK-BUILD-COMPATIBILITY-PATCHES.md'],
+    [path.join(LEGAL_ROOT, 'LICENSE'), 'GROK-BUILD-LICENSE'],
+    [path.join(LEGAL_ROOT, 'THIRD-PARTY-NOTICES'), 'GROK-BUILD-THIRD-PARTY-NOTICES'],
+    [path.join(LEGAL_ROOT, 'crates', 'xai-grok-tools', 'THIRD_PARTY_NOTICES.md'), 'GROK-TOOLS-THIRD-PARTY-NOTICES.md'],
+    [path.join(LEGAL_ROOT, 'crates', 'xai-ratatui-inline', 'NOTICE'), 'XAI-RATATUI-INLINE-NOTICE'],
+    [path.join(LEGAL_ROOT, 'crates', 'xai-ratatui-textarea', 'NOTICE'), 'XAI-RATATUI-TEXTAREA-NOTICE'],
+    [path.join(LEGAL_ROOT, 'third_party', 'NOTICE'), 'GROK-VENDORED-NOTICE']
+]);
+
 async function main() {
     const lock = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
     const targetName = targetForRuntime(process.platform, process.arch);
@@ -48,6 +62,7 @@ async function main() {
         }
         throw new Error(message);
     }
+    verifyStagedSidecarNotices(SIDECAR_ROOT);
     assertRegularFile(executablePath, 'Grok Build sidecar must be a non-symlink regular file.');
     const stat = fs.statSync(executablePath);
     if (process.platform !== 'win32') assert((stat.mode & 0o111) !== 0, 'Grok Build sidecar is not executable.');
@@ -80,6 +95,39 @@ function assertRegularFile(candidate, message) {
     let stat;
     try { stat = fs.lstatSync(candidate); } catch { throw new Error(message); }
     assert(stat.isFile() && !stat.isSymbolicLink(), message);
+}
+
+function verifyStagedSidecarNotices(sidecarRoot) {
+    const noticesDirectory = path.join(sidecarRoot, 'notices');
+    let noticesStat;
+    try { noticesStat = fs.lstatSync(noticesDirectory); } catch { throw new Error('Staged Grok notices directory is missing.'); }
+    assert(noticesStat.isDirectory() && !noticesStat.isSymbolicLink(), 'Staged Grok notices path must be a non-symlink directory.');
+
+    const expectedNames = STAGED_NOTICE_SOURCES.map(([, stagedName]) => stagedName).sort();
+    const actualNames = fs.readdirSync(noticesDirectory).sort();
+    if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+        const expected = new Set(expectedNames);
+        const actual = new Set(actualNames);
+        const missing = expectedNames.filter(name => !actual.has(name));
+        const extra = actualNames.filter(name => !expected.has(name));
+        throw new Error(`Staged Grok notice set mismatch (missing=${JSON.stringify(missing)}, extra=${JSON.stringify(extra)}).`);
+    }
+
+    for (const [source, stagedName] of STAGED_NOTICE_SOURCES) {
+        assertRegularNonemptyFile(source, `Authoritative Grok notice is missing, empty, or unsafe: ${source}`);
+        const staged = path.join(noticesDirectory, stagedName);
+        assertRegularNonemptyFile(staged, `Staged Grok notice is missing, empty, or unsafe: ${stagedName}`);
+        assert(
+            fs.readFileSync(staged).equals(fs.readFileSync(source)),
+            `Staged Grok notice does not match its authoritative source: ${stagedName}`
+        );
+    }
+}
+
+function assertRegularNonemptyFile(candidate, message) {
+    let stat;
+    try { stat = fs.lstatSync(candidate); } catch { throw new Error(message); }
+    assert(stat.isFile() && !stat.isSymbolicLink() && stat.size > 0, message);
 }
 
 function targetForRuntime(platform, arch) {
@@ -178,7 +226,7 @@ function smokeAcpInitialize(binary, lockedArgs) {
     });
 }
 
-module.exports = { assertReleaseIdentity, targetForRuntime };
+module.exports = { assertReleaseIdentity, targetForRuntime, verifyStagedSidecarNotices };
 
 if (require.main === module) {
     main().catch(error => {
