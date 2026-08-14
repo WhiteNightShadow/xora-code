@@ -10,6 +10,7 @@ const lock = JSON.parse(fs.readFileSync(new URL("native-preview-tools.lock.json"
 const linuxScript = fs.readFileSync(new URL("native-preview-linux-x64.sh", releaseRoot), "utf8");
 const windowsScript = fs.readFileSync(new URL("native-preview-windows-x64.ps1", releaseRoot), "utf8");
 const pluginExtractor = fs.readFileSync(new URL("extract-plugin-seed.py", releaseRoot), "utf8");
+const sidecarImporter = fs.readFileSync(new URL("import-staged-sidecar.py", releaseRoot), "utf8");
 
 test("native remote builders pin every toolchain input", () => {
   assert.equal(lock.schemaVersion, 1);
@@ -63,6 +64,51 @@ test("native builders require and report one content-addressed plugin seed", () 
   assert.match(pluginExtractor, /plugin archive contains a source map/u);
   assert.match(pluginExtractor, /plugin archive contains a link or special file/u);
   assert.match(pluginExtractor, /plugin archive entry is outside plugins\//u);
+});
+
+test("native builders default to a source build and only reuse an explicitly selected staged sidecar", () => {
+  assert.match(linuxScript, /--staged-sidecar-dir/u);
+  assert.match(linuxScript, /sidecar_build_mode="source-build"/u);
+  assert.match(linuxScript, /if \[\[ "\$sidecar_build_mode" == source-build \]\]; then[\s\S]*?build\/grok\/build-sidecar\.mjs/u);
+  assert.match(windowsScript, /\[string\]\$StagedSidecarDirectory/u);
+  assert.doesNotMatch(windowsScript, /\[Parameter\(Mandatory = \$true\)\]\[string\]\$StagedSidecarDirectory/u);
+  assert.match(windowsScript, /\$SidecarBuildMode = 'source-build'/u);
+  assert.match(windowsScript, /if \(\$SidecarBuildMode -eq 'source-build'\)[\s\S]*?'build\/grok\/build-sidecar\.mjs'/u);
+  for (const script of [linuxScript, windowsScript]) {
+    assert.match(script, /import-staged-sidecar\.py/u);
+    assert.match(script, /reused-staged/u);
+    assert.match(script, /sidecarBuildMode/u);
+    assert.match(script, /stagedSidecarBinarySha256/u);
+  }
+});
+
+test("staged sidecar reuse is fail-closed and still runs the complete release verification chain", () => {
+  assert.match(linuxScript, /--staged-sidecar-dir must be a real directory, not a link/u);
+  assert.match(windowsScript, /-StagedSidecarDirectory must be a real directory, not a link or reparse point/u);
+  for (const script of [linuxScript, windowsScript]) {
+    const importer = script.indexOf("import-staged-sidecar.py");
+    const smoke = script.lastIndexOf("build/grok/smoke-sidecar.mjs");
+    const metadata = script.lastIndexOf("build/grok/release-metadata.mjs");
+    const workspaceTests = script.lastIndexOf("yarn test") >= 0
+      ? script.lastIndexOf("yarn test")
+      : script.lastIndexOf("@('test')");
+    const grokTests = Math.max(script.lastIndexOf("build/grok/test"), script.lastIndexOf("build\\grok\\test"));
+    const electronVerify = script.lastIndexOf("verify:sidecar:preview");
+    assert.ok(importer >= 0 && smoke > importer);
+    assert.ok(metadata > smoke);
+    assert.ok(workspaceTests > metadata);
+    assert.ok(grokTests > metadata);
+    assert.ok(electronVerify > grokTests);
+  }
+  assert.match(sidecarImporter, /source file structure mismatch/u);
+  assert.match(sidecarImporter, /source contains a link or special file/u);
+  assert.match(sidecarImporter, /source contains a hard-linked file/u);
+  assert.match(sidecarImporter, /destination is not a fresh source sidecar directory/u);
+  assert.match(sidecarImporter, /staged README\.md differs from the committed source/u);
+  assert.match(sidecarImporter, /source and destination must not overlap/u);
+  for (const name of ["release.json", "packaging-tools/", "notices/", "GROK-BUILD-COMPATIBILITY-PATCHES.md"]) {
+    assert.match(sidecarImporter, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  }
 });
 
 test("Windows verifies the Git archive commit without PowerShell 5 native argv quoting", () => {

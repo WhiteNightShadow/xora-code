@@ -10,6 +10,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Commit,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
+    [string]$StagedSidecarDirectory,
     [string]$ToolCache = (Join-Path $env:LOCALAPPDATA 'XoraCode\native-preview-tools'),
     [string]$ToolLock
 )
@@ -168,6 +169,13 @@ $WorkRoot = Assert-AbsoluteNonRootPath -Value $WorkRoot -Label '-WorkRoot'
 $OutputDirectory = Assert-AbsoluteNonRootPath -Value $OutputDirectory -Label '-OutputDirectory'
 $ToolCache = Assert-AbsoluteNonRootPath -Value $ToolCache -Label '-ToolCache'
 $ToolLock = [IO.Path]::GetFullPath($ToolLock)
+if (-not [string]::IsNullOrWhiteSpace($StagedSidecarDirectory)) {
+    $StagedSidecarDirectory = Assert-AbsoluteNonRootPath -Value $StagedSidecarDirectory -Label '-StagedSidecarDirectory'
+    if (-not (Test-Path -LiteralPath $StagedSidecarDirectory -PathType Container) -or
+        (((Get-Item -LiteralPath $StagedSidecarDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        Fail '-StagedSidecarDirectory must be a real directory, not a link or reparse point'
+    }
+}
 if ($WorkRoot.Length -gt 80) {
     Fail '-WorkRoot must remain short (80 characters or fewer) for native Windows dependencies'
 }
@@ -334,12 +342,27 @@ archive.close()
         (((Get-Item -LiteralPath $PluginExtractor).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
         Fail 'committed plugin seed extractor is missing or is a symbolic link'
     }
+    $SidecarImporter = Join-Path $SourceDirectory 'build\release\import-staged-sidecar.py'
+    if (-not (Test-Path -LiteralPath $SidecarImporter -PathType Leaf) -or
+        (((Get-Item -LiteralPath $SidecarImporter).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        Fail 'committed staged sidecar importer is missing or is a symbolic link'
+    }
     $PluginDirectory = Join-Path $SourceDirectory 'plugins'
     New-Item -ItemType Directory -Path $PluginDirectory -Force | Out-Null
     Invoke-Checked -File 'python.exe' -Arguments @(
         $PluginExtractor, '--archive', $PluginArchive,
         '--sha256', $PluginSha256, '--destination', $PluginDirectory
     )
+
+    $SidecarBuildMode = 'source-build'
+    if (-not [string]::IsNullOrWhiteSpace($StagedSidecarDirectory)) {
+        Invoke-Checked -File 'python.exe' -Arguments @(
+            $SidecarImporter, '--source', $StagedSidecarDirectory,
+            '--destination', (Join-Path $SourceDirectory 'resources\sidecars\grok'),
+            '--target', 'win32-x64'
+        )
+        $SidecarBuildMode = 'reused-staged'
+    }
 
     $NodeArchive = Join-Path $ToolCache $NodeArchiveName
     $NodeDirectory = Join-Path $WorkTools $NodeDirectoryName
@@ -467,10 +490,14 @@ timeout = 120
     Invoke-CheckedWithRetry -File $YarnExecutable -Arguments @(
         'install', '--frozen-lockfile', '--non-interactive'
     ) -WorkingDirectory $SourceDirectory -Attempts 3 -DelaySeconds 10
-    Invoke-Checked -File $NodeExecutable -Arguments @(
-        'build/grok/build-sidecar.mjs', '--work-dir', $GrokWork,
-        '--target', 'win32-x64', '--stage-dir', 'resources/sidecars/grok'
-    ) -WorkingDirectory $SourceDirectory
+    if ($SidecarBuildMode -eq 'source-build') {
+        Invoke-Checked -File $NodeExecutable -Arguments @(
+            'build/grok/build-sidecar.mjs', '--work-dir', $GrokWork,
+            '--target', 'win32-x64', '--stage-dir', 'resources/sidecars/grok'
+        ) -WorkingDirectory $SourceDirectory
+    }
+    $StagedSidecarBinary = Join-Path $SourceDirectory 'resources\sidecars\grok\grok.exe'
+    $StagedSidecarBinarySha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $StagedSidecarBinary).Hash.ToLowerInvariant()
     Invoke-Checked -File $NodeExecutable -Arguments @(
         'build/grok/smoke-sidecar.mjs', '--binary', 'resources/sidecars/grok/grok.exe'
     ) -WorkingDirectory $SourceDirectory
@@ -534,6 +561,8 @@ timeout = 120
         target = 'win32-x64'
         sourceArchiveSha256 = $SourceSha256
         pluginArchiveSha256 = $PluginSha256
+        sidecarBuildMode = $SidecarBuildMode
+        stagedSidecarBinarySha256 = $StagedSidecarBinarySha256
         node = $NodeVersionOutput
         yarn = $YarnVersionOutput
         rust = $RustVersionOutput

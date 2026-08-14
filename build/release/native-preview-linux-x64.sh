@@ -12,6 +12,7 @@ source_archive=""
 source_sha256=""
 plugin_archive=""
 plugin_sha256=""
+staged_sidecar_directory=""
 commit=""
 work_root=""
 output_directory=""
@@ -27,6 +28,7 @@ Usage: native-preview-linux-x64.sh \
   --commit <40-character-lowercase-git-sha> \
   --work-root <new-empty-build-directory> \
   --output-dir <artifact-output-directory> \
+  [--staged-sidecar-dir <previously-verified-stage-directory>] \
   [--tool-cache <persistent-tool-cache>] \
   [--tool-lock <native-preview-tools.lock.json>]
 
@@ -76,6 +78,7 @@ while (($#)); do
         --source-sha256) source_sha256="${2:-}"; shift 2 ;;
         --plugin-archive) plugin_archive="${2:-}"; shift 2 ;;
         --plugin-sha256) plugin_sha256="${2:-}"; shift 2 ;;
+        --staged-sidecar-dir) staged_sidecar_directory="${2:-}"; shift 2 ;;
         --commit) commit="${2:-}"; shift 2 ;;
         --work-root) work_root="${2:-}"; shift 2 ;;
         --output-dir) output_directory="${2:-}"; shift 2 ;;
@@ -96,6 +99,11 @@ done
 assert_clean_absolute_path "$work_root" "--work-root"
 assert_clean_absolute_path "$output_directory" "--output-dir"
 assert_clean_absolute_path "$tool_cache" "--tool-cache"
+if [[ -n "$staged_sidecar_directory" ]]; then
+    assert_clean_absolute_path "$staged_sidecar_directory" "--staged-sidecar-dir"
+    [[ -d "$staged_sidecar_directory" && ! -L "$staged_sidecar_directory" ]] || \
+        fail "--staged-sidecar-dir must be a real directory, not a link"
+fi
 [[ -f "$tool_lock" && ! -L "$tool_lock" ]] || fail "tool lock is missing or is a symbolic link"
 [[ ! -e "$work_root" ]] || fail "work root already exists: $work_root"
 
@@ -213,12 +221,23 @@ cmp -s -- "$tool_lock" "$source_directory/build/release/native-preview-tools.loc
 cmp -s -- "${BASH_SOURCE[0]}" "$source_directory/build/release/native-preview-linux-x64.sh" || fail "running Linux builder differs from the committed source"
 plugin_extractor="$source_directory/build/release/extract-plugin-seed.py"
 [[ -f "$plugin_extractor" && ! -L "$plugin_extractor" ]] || fail "committed plugin seed extractor is missing or is a symbolic link"
+sidecar_importer="$source_directory/build/release/import-staged-sidecar.py"
+[[ -f "$sidecar_importer" && ! -L "$sidecar_importer" ]] || fail "committed staged sidecar importer is missing or is a symbolic link"
 plugin_directory="$source_directory/plugins"
 mkdir -p -- "$plugin_directory"
 python3 "$plugin_extractor" \
     --archive "$plugin_archive" \
     --sha256 "$plugin_sha256" \
     --destination "$plugin_directory"
+
+sidecar_build_mode="source-build"
+if [[ -n "$staged_sidecar_directory" ]]; then
+    python3 "$sidecar_importer" \
+        --source "$staged_sidecar_directory" \
+        --destination "$source_directory/resources/sidecars/grok" \
+        --target linux-x64
+    sidecar_build_mode="reused-staged"
+fi
 
 download_verified() {
     local url="$1" expected_hash="$2" expected_size="$3" destination="$4"
@@ -318,10 +337,13 @@ export GIT_CONFIG_VALUE_0=true
 
 cd -- "$source_directory"
 run_with_retry 3 10 yarn install --frozen-lockfile --non-interactive
-node build/grok/build-sidecar.mjs \
-    --work-dir "$grok_work" \
-    --target linux-x64 \
-    --stage-dir resources/sidecars/grok
+if [[ "$sidecar_build_mode" == source-build ]]; then
+    node build/grok/build-sidecar.mjs \
+        --work-dir "$grok_work" \
+        --target linux-x64 \
+        --stage-dir resources/sidecars/grok
+fi
+staged_sidecar_binary_sha256="$(sha256sum resources/sidecars/grok/grok | awk '{print $1}')"
 node build/grok/smoke-sidecar.mjs --binary resources/sidecars/grok/grok
 node build/grok/release-metadata.mjs --verify --stage-dir resources/sidecars/grok --target linux-x64
 yarn build
@@ -357,14 +379,15 @@ rust_version_output="$(rustc --version)"
 dotslash_version_output="$(dotslash --version | head -n 1)"
 protoc_version_output="$(protoc --version)"
 sidecar_version_output="$(resources/sidecars/grok/grok --version | head -n 1)"
-python3 - "$report" "$commit" "$source_sha256" "$plugin_sha256" "$bundle_name" "$bundle_sha256" \
+python3 - "$report" "$commit" "$source_sha256" "$plugin_sha256" "$sidecar_build_mode" \
+    "$staged_sidecar_binary_sha256" "$bundle_name" "$bundle_sha256" \
     "$node_version_output" "$yarn_version_output" "$rust_version_output" "$dotslash_version_output" \
     "$protoc_version_output" "$sidecar_version_output" <<'PY'
 import datetime
 import json
 import sys
 
-report, commit, source_hash, plugin_hash, bundle, bundle_hash, node, yarn, rust, dotslash, protoc, sidecar = sys.argv[1:]
+report, commit, source_hash, plugin_hash, sidecar_mode, sidecar_hash, bundle, bundle_hash, node, yarn, rust, dotslash, protoc, sidecar = sys.argv[1:]
 document = {
     "schemaVersion": 1,
     "product": "xora-code",
@@ -372,6 +395,8 @@ document = {
     "target": "linux-x64",
     "sourceArchiveSha256": source_hash,
     "pluginArchiveSha256": plugin_hash,
+    "sidecarBuildMode": sidecar_mode,
+    "stagedSidecarBinarySha256": sidecar_hash,
     "node": node,
     "yarn": yarn,
     "rust": rust,

@@ -7,10 +7,10 @@ Both builders:
 1. verify a deterministic `git archive` by its caller-supplied SHA-256 and full commit, then confirm the uploaded builder and tool lock exactly match the committed copies;
 2. require one independently hashed language-plugin seed, reject links, path traversal, cross-platform ambiguous names and source maps, and extract it only into the fresh `source/plugins` directory;
 3. install or verify the versions in `native-preview-tools.lock.json` (Node.js 24, Yarn Classic 1.22.22, Rust 1.92.0, DotSlash 0.5.7, and protoc 29.3);
-4. build Grok Build from the pinned upstream commit on the native host;
+4. build Grok Build from the pinned upstream commit on the native host by default, or import one explicitly selected, previously staged sidecar through the strict reuse boundary described below;
 5. run ACP smoke tests, metadata checks, all workspace tests, and Grok release-safety tests;
 6. build unsigned preview installers, generate the pinned Syft CycloneDX SBOM, and verify every checksum and provenance field; and
-7. produce a flat asset bundle, an outer SHA-256 file, a non-sensitive build report (including `pluginArchiveSha256`), and a local build log.
+7. produce a flat asset bundle, an outer SHA-256 file, a non-sensitive build report (including `pluginArchiveSha256`, `sidecarBuildMode`, and `stagedSidecarBinarySha256`), and a local build log.
 
 The Windows build also applies the audited build-only compatibility patch listed
 in `build/grok/PATCHES.md`. Its SHA-256 is pinned in `sidecar.lock.json`, and the
@@ -95,6 +95,13 @@ bash ./native-preview-linux-x64.sh \
   --output-dir /tmp/xora-output
 ```
 
+To reuse an already staged and independently verified Linux sidecar, add an
+absolute, non-root path to that exact stage directory:
+
+```bash
+  --staged-sidecar-dir /opt/xora-verified/sidecar-linux-x64
+```
+
 ## Windows x64
 
 The Windows host must already have Git, Python, rustup, and Visual Studio 2022 C++ Build Tools. Run from 64-bit Windows PowerShell 5.1 or later, using a short work path:
@@ -108,6 +115,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\native-preview-windows
   -Commit 0123456789abcdef0123456789abcdef01234567 `
   -WorkRoot C:\xora\0123456789ab `
   -OutputDirectory C:\xora-output
+```
+
+To reuse an already staged and independently verified Windows sidecar, add:
+
+```powershell
+  -StagedSidecarDirectory C:\xora-verified\sidecar-win32-x64
 ```
 
 ## Reusing a prepared build image
@@ -248,6 +261,26 @@ tree. Record the URL, version, size and digest in the private build log, not in 
 configuration.
 
 ### Resume policy
+
+Sidecar reuse is opt-in. Omitting `--staged-sidecar-dir` or
+`-StagedSidecarDirectory` always performs the pinned source build. A supplied
+directory must be absolute, non-root, a real directory rather than a link or
+Windows reparse point, and must contain exactly the regular-file structure
+produced by the current `build/grok/build-sidecar.mjs`: the platform Grok
+binary and checksum, `release.json`, the source-built ripgrep helper and
+checksum, the committed README, and the complete fixed notice set. Extra,
+missing, empty, symbolic-linked, hard-linked or special entries are rejected
+before the fresh source tree is changed. The staged README must byte-match the
+current committed README, and the importer refuses a destination containing
+anything except that fresh README.
+
+Import is not acceptance. After copying, both builders still run `grok
+--version`, ACP initialize smoke, exact `release.json` verification, all
+workspace tests, Grok release-safety tests, Electron `verify:sidecar:preview`,
+packaging, SBOM generation, and preview-asset verification. Any target,
+version, source revision, binary hash, bundled ripgrep, notice, test or package
+inconsistency fails closed. The build report records `reused-staged` versus
+`source-build` plus the SHA-256 of the actual staged binary that was packaged.
 
 Resume from the latest verified boundary rather than restarting the full script:
 
