@@ -199,8 +199,8 @@ export class FakeAgentHostService implements AgentHostService {
         this.snapshot.activeSessionId = id;
         this.snapshot.selectedReasoningEffort = session.reasoningEffort;
         this.client?.onAgentEvent({ kind: 'session', session });
-        this.publishSnapshot();
-        return session;
+        const snapshot = this.publishSnapshot();
+        return { ...session, authorityRevision: snapshot.revision };
     }
 
     async loadSession(appSessionId: string): Promise<SessionRecord> {

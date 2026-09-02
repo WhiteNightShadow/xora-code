@@ -4,9 +4,56 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { AgentHostEvent, SessionHistoryPage, SessionHistoryPageRequest, SessionRecord } from '../common/agent-protocol';
 
+interface DurablePromptClaim {
+    ownerId: string;
+    token: string;
+    processId: number;
+    acquiredAt: string;
+}
+
+interface StoredSessionRecord extends SessionRecord {
+    /** Electron-main-only lease; removed from every renderer-facing snapshot. */
+    _promptClaim?: DurablePromptClaim;
+    /** Provider invalidation requested while the prompt lease was active. */
+    _pendingReadOnly?: boolean;
+}
+
 interface SessionIndex {
     schemaVersion: 1;
-    sessions: SessionRecord[];
+    sessions: StoredSessionRecord[];
+}
+
+export interface SessionPromptClaim {
+    record: SessionRecord;
+    token: string;
+}
+
+export const SESSION_NOT_FOUND = 'SESSION_NOT_FOUND' as const;
+
+/**
+ * A stable backend error for a renderer which still references a session that
+ * another Xora Code window has already removed. Keep this distinct from ACP
+ * remote errors: retrying the same local id can never succeed and must never
+ * replay the prompt implicitly.
+ */
+export class SessionNotFoundError extends Error {
+    readonly code = SESSION_NOT_FOUND;
+
+    constructor(readonly appSessionId: string) {
+        // The stable prefix survives Theia/Electron RPC serialization even
+        // when custom Error properties are not carried to the renderer.
+        super(`${SESSION_NOT_FOUND}: Unknown Xora Code session.`);
+        this.name = 'SessionNotFoundError';
+    }
+}
+
+export class SessionPromptConflictError extends Error {
+    readonly code = 'SESSION_PROMPT_CONFLICT' as const;
+
+    constructor(message = 'This session already has a running task.') {
+        super(message);
+        this.name = 'SessionPromptConflictError';
+    }
 }
 
 interface PendingEventBatch {
@@ -39,6 +86,9 @@ const MAX_CACHED_DIFF_PATHS = MAX_CACHED_EVENTS * 2;
 const DEFAULT_HISTORY_PAGE_EVENTS = 180;
 const MAX_HISTORY_PAGE_EVENTS = 1000;
 const HISTORY_SCAN_BLOCK_BYTES = 64 * 1024;
+const INDEX_READ_RETRY_DELAYS_MS = [0, 1, 2, 4] as const;
+const INDEX_LOCK_RETRY_DELAYS_MS = [0, 1, 2, 4, 8, 16, 32, 64] as const;
+const ACTIVE_REPOSITORY_OWNERS = new Set<string>();
 
 interface HistoryCursor {
     v: 1;
@@ -84,15 +134,21 @@ export class AgentSessionRepository {
      * inode even on file systems whose mtime resolution is coarse.
      */
     protected indexCache: { signature: string; index: SessionIndex } | undefined;
+    /** Once true, a missing pathname is an error/race rather than an empty store. */
+    protected indexKnownToExist = false;
+    protected readonly ownerId = crypto.randomUUID();
 
     constructor(root = path.join(app.getPath('userData'), 'agent-sessions')) {
         this.root = root;
         this.indexPath = path.join(root, 'index.json');
         this.lockPath = path.join(root, '.index.lock');
+        ACTIVE_REPOSITORY_OWNERS.add(this.ownerId);
     }
 
     list(): SessionRecord[] {
-        return this.readIndex().sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+        return this.readIndex().sessions
+            .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+            .map(publicSessionRecord);
     }
 
     create(input: Omit<SessionRecord, 'appSessionId' | 'createdAt' | 'updatedAt' | 'status'>): SessionRecord {
@@ -117,9 +173,14 @@ export class AgentSessionRepository {
             const index = this.readIndex();
             const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
             if (position < 0) {
-                throw new Error('Unknown Xora Code session.');
+                throw new SessionNotFoundError(appSessionId);
             }
             const previous = index.sessions[position];
+            if (previous._promptClaim
+                && patch.status !== undefined
+                && patch.status !== 'running') {
+                throw new SessionPromptConflictError('Only the Agent task owner can finish this session.');
+            }
             const next: SessionRecord = {
                 ...previous,
                 ...patch,
@@ -129,7 +190,133 @@ export class AgentSessionRepository {
             };
             index.sessions.splice(position, 1, next);
             this.writeIndex(index);
-            return { ...next };
+            return publicSessionRecord(next);
+        });
+    }
+
+    /**
+     * Atomically admits a prompt against the authoritative on-disk index.
+     *
+     * The renderer and service may have cached an older SessionRecord while a
+     * second window deletes it. Prompt attachment persistence, the user event
+     * and the ACP request must all happen only after this transition succeeds.
+     * Persisting `running` also prevents another process from deleting the
+     * record while the turn owns it.
+     */
+    claimPrompt(
+        appSessionId: string,
+        validate?: (record: Readonly<SessionRecord>) => void
+    ): SessionPromptClaim {
+        return this.withIndexLock(() => {
+            const index = this.readIndex();
+            const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
+            if (position < 0) throw new SessionNotFoundError(appSessionId);
+            let previous = index.sessions[position];
+            if (previous._promptClaim && this.promptClaimIsStale(previous._promptClaim)) {
+                previous = {
+                    ...previous,
+                    status: previous._pendingReadOnly ? 'read-only' : 'failed',
+                    _promptClaim: undefined,
+                    _pendingReadOnly: undefined
+                };
+                index.sessions[position] = previous;
+            }
+            validate?.(publicSessionRecord(previous));
+            if (previous._promptClaim || previous.status === 'running') {
+                throw new SessionPromptConflictError();
+            }
+            const token = crypto.randomUUID();
+            const now = new Date().toISOString();
+            const next: StoredSessionRecord = {
+                ...previous,
+                status: 'running',
+                updatedAt: now,
+                _promptClaim: {
+                    ownerId: this.ownerId,
+                    token,
+                    processId: process.pid,
+                    acquiredAt: now
+                }
+            };
+            index.sessions.splice(position, 1, next);
+            this.writeIndex(index);
+            return { record: publicSessionRecord(next), token };
+        });
+    }
+
+    finishPrompt(
+        appSessionId: string,
+        token: string,
+        status: Extract<SessionRecord['status'], 'completed' | 'cancelled' | 'failed'>
+    ): SessionRecord {
+        const finished = this.withIndexLock(() => {
+            const index = this.readIndex();
+            const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
+            if (position < 0) throw new SessionNotFoundError(appSessionId);
+            const previous = index.sessions[position];
+            if (!previous._promptClaim
+                || previous._promptClaim.ownerId !== this.ownerId
+                || previous._promptClaim.token !== token) {
+                throw new SessionPromptConflictError('This process no longer owns the Agent task.');
+            }
+            const next: StoredSessionRecord = {
+                ...previous,
+                status: previous._pendingReadOnly ? 'read-only' : status,
+                updatedAt: new Date().toISOString(),
+                _promptClaim: undefined,
+                _pendingReadOnly: undefined
+            };
+            index.sessions[position] = next;
+            this.writeIndex(index);
+            return publicSessionRecord(next);
+        });
+        return finished;
+    }
+
+    reconcileStalePromptClaim(appSessionId: string): SessionRecord {
+        return this.withIndexLock(() => {
+            const index = this.readIndex();
+            const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
+            if (position < 0) throw new SessionNotFoundError(appSessionId);
+            const previous = index.sessions[position];
+            if (!previous._promptClaim || !this.promptClaimIsStale(previous._promptClaim)) {
+                return publicSessionRecord(previous);
+            }
+            const next: StoredSessionRecord = {
+                ...previous,
+                status: previous._pendingReadOnly ? 'read-only' : 'failed',
+                updatedAt: new Date().toISOString(),
+                _promptClaim: undefined,
+                _pendingReadOnly: undefined
+            };
+            index.sessions[position] = next;
+            this.writeIndex(index);
+            return publicSessionRecord(next);
+        });
+    }
+
+    promptClaimOwnership(appSessionId: string, token?: string): 'owned' | 'foreign' | 'none' {
+        return this.withIndexLock(() => {
+            const index = this.readIndex();
+            const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
+            if (position < 0) throw new SessionNotFoundError(appSessionId);
+            const record = index.sessions[position];
+            if (!record._promptClaim) return 'none';
+            if (this.promptClaimIsStale(record._promptClaim)) {
+                index.sessions[position] = {
+                    ...record,
+                    status: record._pendingReadOnly ? 'read-only' : 'failed',
+                    updatedAt: new Date().toISOString(),
+                    _promptClaim: undefined,
+                    _pendingReadOnly: undefined
+                };
+                this.writeIndex(index);
+                return 'none';
+            }
+            return record._promptClaim.ownerId === this.ownerId
+                && (token === undefined || record._promptClaim.token === token)
+                ? 'owned'
+                : 'foreign';
         });
     }
 
@@ -154,14 +341,16 @@ export class AgentSessionRepository {
             for (let position = 0; position < index.sessions.length; position += 1) {
                 const previous = index.sessions[position];
                 if (previous.providerId !== providerId) continue;
-                const next: SessionRecord = previous.status === 'read-only'
-                    ? previous
-                    : { ...previous, status: 'read-only' };
+                const next: StoredSessionRecord = previous._promptClaim
+                    ? (previous._pendingReadOnly ? previous : { ...previous, _pendingReadOnly: true })
+                    : previous.status === 'read-only'
+                        ? previous
+                        : { ...previous, status: 'read-only' };
                 if (next !== previous) {
                     index.sessions[position] = next;
                     changed = true;
                 }
-                matching.push({ ...next });
+                matching.push(publicSessionRecord(next));
             }
             // Avoid replacing index.json on a repeated invalidation. Besides
             // making the operation idempotent, this leaves the cache signature
@@ -173,7 +362,7 @@ export class AgentSessionRepository {
 
     get(appSessionId: string): SessionRecord | undefined {
         const record = this.readIndex().sessions.find(session => session.appSessionId === appSessionId);
-        return record ? { ...record } : undefined;
+        return record ? publicSessionRecord(record) : undefined;
     }
 
     /**
@@ -191,6 +380,21 @@ export class AgentSessionRepository {
             const index = this.readIndex();
             const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
             if (position < 0) return;
+            let record = index.sessions[position];
+            if (record._promptClaim && this.promptClaimIsStale(record._promptClaim)) {
+                record = {
+                    ...record,
+                    status: record._pendingReadOnly ? 'read-only' : 'failed',
+                    _promptClaim: undefined,
+                    _pendingReadOnly: undefined
+                };
+                index.sessions[position] = record;
+            }
+            if (record._promptClaim || record.status === 'running') {
+                throw new SessionPromptConflictError(
+                    'This session is running in another Xora Code window. Cancel it before deleting.'
+                );
+            }
             index.sessions.splice(position, 1);
             this.writeIndex(index);
             removed = true;
@@ -268,6 +472,7 @@ export class AgentSessionRepository {
 
     dispose(): void {
         this.flushEvents();
+        ACTIVE_REPOSITORY_OWNERS.delete(this.ownerId);
     }
 
     readEvents(appSessionId: string): AgentHostEvent[] {
@@ -586,24 +791,45 @@ export class AgentSessionRepository {
     }
 
     protected readIndex(): SessionIndex {
-        try {
-            const signature = this.indexSignature();
-            if (this.indexCache?.signature === signature) {
-                return cloneIndex(this.indexCache.index);
+        let lastError: unknown;
+        for (let attempt = 0; attempt < INDEX_READ_RETRY_DELAYS_MS.length; attempt += 1) {
+            try {
+                const signature = this.indexSignature();
+                if (this.indexCache?.signature === signature) {
+                    return cloneIndex(this.indexCache.index);
+                }
+                const parsed = JSON.parse(fs.readFileSync(this.indexPath, 'utf8')) as SessionIndex;
+                // The pathname may have been atomically replaced between stat
+                // and read. Cache only a snapshot whose identity still matches
+                // the bytes we parsed; otherwise retry against the new file.
+                const confirmedSignature = this.indexSignature();
+                if (confirmedSignature !== signature) {
+                    lastError = new Error('Agent session index changed while it was being read.');
+                    this.waitBeforeIndexReadRetry(attempt);
+                    continue;
+                }
+                if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.sessions)) {
+                    throw new Error('Invalid Agent session index.');
+                }
+                this.indexKnownToExist = true;
+                this.indexCache = { signature, index: cloneIndex(parsed) };
+                return cloneIndex(parsed);
+            } catch (error) {
+                lastError = error;
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                // Windows replacement can briefly surface ENOENT for an index
+                // which this process has already observed. Do not translate
+                // that window into an empty index and overwrite every session.
+                if (attempt + 1 < INDEX_READ_RETRY_DELAYS_MS.length) {
+                    this.waitBeforeIndexReadRetry(attempt);
+                    continue;
+                }
+                if (!this.indexKnownToExist && !this.indexReplacementInProgress()) {
+                    return { schemaVersion: 1, sessions: [] };
+                }
             }
-            const parsed = JSON.parse(fs.readFileSync(this.indexPath, 'utf8')) as SessionIndex;
-            if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.sessions)) {
-                throw new Error('Invalid Agent session index.');
-            }
-            this.indexCache = { signature, index: cloneIndex(parsed) };
-            return cloneIndex(parsed);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-                this.indexCache = undefined;
-                return { schemaVersion: 1, sessions: [] };
-            }
-            throw error;
         }
+        throw lastError;
     }
 
     protected writeIndex(index: SessionIndex): void {
@@ -620,6 +846,7 @@ export class AgentSessionRepository {
             fs.renameSync(temporary, this.indexPath);
             fs.chmodSync(this.indexPath, 0o600);
             fsyncDirectory(this.root);
+            this.indexKnownToExist = true;
             this.indexCache = {
                 signature: this.indexSignature(),
                 index: cloneIndex(index)
@@ -631,8 +858,67 @@ export class AgentSessionRepository {
     }
 
     protected indexSignature(): string {
-        const stat = fs.statSync(this.indexPath);
-        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+        const stat = fs.statSync(this.indexPath, { bigint: true });
+        return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs]
+            .map(value => value.toString(10))
+            .join(':');
+    }
+
+    protected waitBeforeIndexReadRetry(attempt: number): void {
+        const delay = INDEX_READ_RETRY_DELAYS_MS[Math.min(attempt + 1, INDEX_READ_RETRY_DELAYS_MS.length - 1)];
+        this.waitForFilesystem(delay);
+    }
+
+    protected waitForFilesystem(delay: number): void {
+        if (delay <= 0) return;
+        // Atomics.wait gives the competing process a short chance to finish an
+        // atomic replacement without a CPU spin or an asynchronous API leak
+        // into this deliberately synchronous repository.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    }
+
+    protected indexReplacementInProgress(): boolean {
+        try {
+            let active = false;
+            for (const name of fs.readdirSync(this.root)) {
+                if (!name.startsWith('index.json.') || !name.endsWith('.tmp')) continue;
+                const candidate = path.join(this.root, name);
+                try {
+                    const stat = fs.lstatSync(candidate);
+                    if (stat.isSymbolicLink() || !stat.isFile()) continue;
+                    if (Date.now() - stat.mtimeMs <= 30_000) {
+                        active = true;
+                    } else {
+                        // A crashed writer must not make a genuinely fresh
+                        // repository unusable forever.
+                        try { fs.unlinkSync(candidate); } catch { /* another process won cleanup */ }
+                    }
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                }
+            }
+            return active;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+            throw error;
+        }
+    }
+
+    protected promptClaimIsStale(claim: DurablePromptClaim): boolean {
+        if (claim.ownerId === this.ownerId) return false;
+        if (claim.processId === process.pid) {
+            return !ACTIVE_REPOSITORY_OWNERS.has(claim.ownerId);
+        }
+        let processAlive = true;
+        try {
+            process.kill(claim.processId, 0);
+        } catch (error) {
+            processAlive = (error as NodeJS.ErrnoException).code !== 'ESRCH';
+        }
+        // A live PID always fails closed. Long-running tools or a blocked UI
+        // thread must never let a peer reclaim and replay the same task. PID
+        // reuse can delay recovery, but that is safer than duplicate writes.
+        return !processAlive;
     }
 
     protected scheduleFlush(): void {
@@ -652,21 +938,39 @@ export class AgentSessionRepository {
 
     protected withIndexLock<T>(operation: () => T): T {
         fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
-        let descriptor: number;
-        try {
-            descriptor = fs.openSync(this.lockPath, 'wx', 0o600);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-            const stat = fs.statSync(this.lockPath);
-            if (Date.now() - stat.mtimeMs <= 30_000) {
-                throw new Error('Another Xora Code process is updating the session index. Please retry.');
+        let descriptor: number | undefined;
+        for (let attempt = 0; attempt < INDEX_LOCK_RETRY_DELAYS_MS.length; attempt += 1) {
+            try {
+                descriptor = fs.openSync(this.lockPath, 'wx', 0o600);
+                break;
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+                try {
+                    const stat = fs.statSync(this.lockPath);
+                    if (Date.now() - stat.mtimeMs > 30_000) {
+                        fs.unlinkSync(this.lockPath);
+                        continue;
+                    }
+                } catch (statError) {
+                    if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
+                    throw statError;
+                }
+                if (attempt + 1 < INDEX_LOCK_RETRY_DELAYS_MS.length) {
+                    this.waitForFilesystem(INDEX_LOCK_RETRY_DELAYS_MS[attempt + 1]);
+                    continue;
+                }
             }
-            fs.unlinkSync(this.lockPath);
-            descriptor = fs.openSync(this.lockPath, 'wx', 0o600);
+        }
+        if (descriptor === undefined) {
+            throw new Error('Another Xora Code process is updating the session index. Please retry.');
         }
         try {
             fs.writeFileSync(descriptor, `${process.pid}\n`, 'utf8');
             fs.fsyncSync(descriptor);
+            // Owning the cross-process lock is a transaction boundary. A
+            // matching cached signature is not authoritative here (notably on
+            // NTFS with 64-bit identities), so every writer must reread disk.
+            this.indexCache = undefined;
             return operation();
         } finally {
             fs.closeSync(descriptor);
@@ -678,8 +982,16 @@ export class AgentSessionRepository {
 function cloneIndex(index: SessionIndex): SessionIndex {
     return {
         schemaVersion: 1,
-        sessions: index.sessions.map(session => ({ ...session }))
+        sessions: index.sessions.map(session => ({
+            ...session,
+            ...(session._promptClaim ? { _promptClaim: { ...session._promptClaim } } : {})
+        }))
     };
+}
+
+function publicSessionRecord(record: StoredSessionRecord): SessionRecord {
+    const { _promptClaim: _claim, _pendingReadOnly: _pending, ...visible } = record;
+    return { ...visible };
 }
 
 export function deepRedact<T>(value: T, exactSecrets: readonly string[] = []): T {

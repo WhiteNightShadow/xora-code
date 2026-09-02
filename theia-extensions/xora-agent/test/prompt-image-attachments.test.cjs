@@ -16,6 +16,7 @@ const {
     persistPromptImagesToWorkspace,
     validatePromptImageAttachments
 } = require('../lib/electron-main/prompt-image-attachments');
+const { SessionNotFoundError } = require('../lib/electron-main/session-repository');
 const { FakeAgentHostService } = require('../lib/node/fake-agent-host-service');
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -154,6 +155,23 @@ test('image capability true emits exact ACP image blocks and persists metadata o
     assert.equal(completion.stopReason, 'end_turn');
     assert.equal(Number.isSafeInteger(completion.elapsedMs), true);
     assert.ok(completion.elapsedMs >= 0);
+});
+
+test('a cross-window session delete is rejected before attachments, user history or ACP prompt side effects', async () => {
+    const { host, events, requests } = hostHarness(true);
+    host.claimPromptRecord = sessionId => {
+        throw new SessionNotFoundError(sessionId);
+    };
+
+    await assert.rejects(
+        host.sendPrompt({ sessionId: APP_SESSION_ID, text: '不得半提交', attachments: [attachment()] }),
+        error => error.code === 'SESSION_NOT_FOUND' && error.message.startsWith('SESSION_NOT_FOUND:')
+    );
+
+    assert.deepEqual(requests, [], 'no ACP request may be issued for a deleted local session');
+    assert.deepEqual(events, [], 'no user or status event may be emitted before admission');
+    assert.equal(fs.existsSync(path.join(host.workspaceRoot, '.xora', 'attachments')), false,
+        'no workspace attachment may be persisted before admission');
 });
 
 test('guidance uses the ACP-encoded _x.ai/interject route without cancelling the running turn', async () => {

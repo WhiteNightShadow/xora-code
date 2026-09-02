@@ -65,7 +65,13 @@ import { persistPromptImagesToWorkspace, validatePromptImageAttachments } from '
 import { normalizeProviderBaseUrl, providerModelsEndpoint, requestProviderJson } from './provider-network';
 import { McpRuntimeProjection, mergeMcpManagementResults } from './mcp-management';
 import { RuntimeMcpIssue, RuntimeMcpRegistry, RuntimeMcpSnapshot } from './runtime-mcp-registry';
-import { AgentSessionRepository, deepRedact } from './session-repository';
+import {
+    AgentSessionRepository,
+    deepRedact,
+    SessionNotFoundError,
+    SessionPromptClaim,
+    SessionPromptConflictError
+} from './session-repository';
 import { buildSessionExportMarkdown } from './session-export';
 import { GrokSidecarSupervisor } from './sidecar-supervisor';
 import { SidecarUpdateCoordinator } from './sidecar-update-coordinator';
@@ -234,6 +240,8 @@ export class GrokAgentHostService implements AgentHostService {
     protected readonly sessions = new AgentSessionRepository();
     protected readonly pendingPermissions = new Map<string, PendingPermission>();
     protected readonly activePrompts = new Map<string, RequestHandle<Record<string, unknown>>>();
+    /** Durable repository claim token for each ACP prompt owned by this service. */
+    protected promptClaimTokens: Map<string, string> | undefined = new Map();
     /** Stable prompt-turn identity attached to every renderer/history event. */
     protected activeTurnIds: Map<string, string> | undefined = new Map();
     /** Per-turn lifecycle clocks keep running tools observable and prevent a
@@ -620,7 +628,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.5' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.6' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -628,7 +636,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.2.5'
+                    clientVersion: '0.2.6'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
@@ -1064,11 +1072,12 @@ export class GrokAgentHostService implements AgentHostService {
         if (incompatibleWithGlobalDefaults) {
             record = this.sessions.update(record.appSessionId, { status: 'read-only' });
             this.emit({ kind: 'session', session: record });
+            const authorityRevision = this.emitSnapshot();
             if (reconcileError) {
                 this.emitError('GLOBAL_MODEL_APPLY_FAILED', reconcileError, true, record.appSessionId);
             }
             this.notifyProviderDefaultsChanged();
-            return record;
+            return { ...record, authorityRevision };
         }
         this.loadedSessionIds.add(record.appSessionId);
         this.scheduleMcpStatusRefresh();
@@ -1076,10 +1085,11 @@ export class GrokAgentHostService implements AgentHostService {
             this.activeSessionId = record.appSessionId;
         }
         this.emit({ kind: 'session', session: record });
-        if (activationGeneration === this.sessionLoadGeneration) {
-            this.emitSnapshot();
-        }
-        return record;
+        // Emit even for a background lane. The returned revision is an exact
+        // ordering fence for renderer session/new races; it does not change
+        // which conversation is focused when activationGeneration moved on.
+        const authorityRevision = this.emitSnapshot();
+        return { ...record, authorityRevision };
     }
 
     async loadSession(appSessionId: string): Promise<SessionRecord> {
@@ -1091,7 +1101,7 @@ export class GrokAgentHostService implements AgentHostService {
         const selectedProvider = this.providers.selectedProviderId();
         const selectedProviderEpoch = this.providers.runtimeEpoch(selectedProvider);
         const storedSession = this.sessions.get(appSessionId);
-        if (!storedSession) throw new Error('Unknown Xora Code session.');
+        if (!storedSession) throw new SessionNotFoundError(appSessionId);
         const pendingLoads = this.pendingSessionLoadState();
         let entry = pendingLoads.get(appSessionId);
         // Background hydration, explicit tab activation and Send can converge
@@ -1143,9 +1153,17 @@ export class GrokAgentHostService implements AgentHostService {
         bindRuntimeGeneration: (generation: number) => void,
         mcpSnapshot: RuntimeMcpSnapshot
     ): Promise<SessionRecord> {
-        const record = this.sessions.get(appSessionId);
+        const record = this.reconcilePromptClaimRecord(appSessionId);
         if (!record) {
-            throw new Error('Unknown Xora Code session.');
+            throw new SessionNotFoundError(appSessionId);
+        }
+        if (record.status === 'running' && this.promptClaimOwnership(appSessionId) !== 'none') {
+            // Another service/process owns the durable turn. History remains
+            // readable, but this sidecar must not load, rebind or mutate the
+            // same ACP session while that turn is in flight.
+            throw new SessionPromptConflictError(
+                'This Agent task is still running in another Xora Code process.'
+            );
         }
         const globallySelectedProvider = this.providers.selectedProviderId();
         const selectedProviderEpoch = this.providers.runtimeEpoch(globallySelectedProvider);
@@ -1255,7 +1273,11 @@ export class GrokAgentHostService implements AgentHostService {
                 const restoredModel = latestGlobalModel ?? this.selectedModel;
                 if (restoredModel) this.selectedModel = restoredModel;
                 const currentRecord = this.sessions.get(appSessionId) ?? record;
-                const requiresDurableUpdate = currentRecord.status !== 'idle'
+                const claimOwnership = currentRecord.status === 'running'
+                    ? this.promptClaimOwnership(appSessionId)
+                    : 'none';
+                const claimedRunning = currentRecord.status === 'running' && claimOwnership !== 'none';
+                const requiresDurableUpdate = (!claimedRunning && currentRecord.status !== 'idle')
                     || currentRecord.sidecarVersion !== this.sidecarVersion
                     || (!!restoredModel && currentRecord.model !== restoredModel)
                     || currentRecord.reasoningEffort !== restoredReasoningEffort
@@ -1265,7 +1287,7 @@ export class GrokAgentHostService implements AgentHostService {
                 // when the already-restored index record is byte-equivalent.
                 let loaded = requiresDurableUpdate
                     ? this.sessions.update(appSessionId, {
-                        status: 'idle',
+                        ...(!claimedRunning ? { status: 'idle' as const } : {}),
                         sidecarVersion: this.sidecarVersion,
                         ...(restoredModel ? { model: restoredModel } : {}),
                         reasoningEffort: restoredReasoningEffort,
@@ -1275,6 +1297,10 @@ export class GrokAgentHostService implements AgentHostService {
                     : currentRecord;
                 this.acceptSessionModeCapability(record.acpSessionId!, appSessionId, sessionModes);
                 loaded = this.sessions.get(appSessionId) ?? loaded;
+                if (claimedRunning) {
+                    this.emit({ kind: 'session', session: loaded });
+                    return loaded;
+                }
                 await this.publishReplayedGoalState(appSessionId);
                 const resumedGoal = this.startRestoredApprovedPlanGoal(appSessionId);
                 if (resumedGoal) return resumedGoal;
@@ -1320,7 +1346,7 @@ export class GrokAgentHostService implements AgentHostService {
 
     async getSessionHistory(appSessionId: string): Promise<AgentHostEvent[]> {
         if (!this.knownSessionIds.has(appSessionId) && !this.sessions.get(appSessionId)) {
-            throw new Error('Unknown Xora Code session.');
+            throw new SessionNotFoundError(appSessionId);
         }
         this.knownSessionIds.add(appSessionId);
         this.flushAssistantTextDeltas(appSessionId);
@@ -1356,7 +1382,7 @@ export class GrokAgentHostService implements AgentHostService {
         request: SessionHistoryPageRequest = {}
     ): Promise<SessionHistoryPage> {
         if (!this.knownSessionIds.has(appSessionId) && !this.sessions.get(appSessionId)) {
-            throw new Error('Unknown Xora Code session.');
+            throw new SessionNotFoundError(appSessionId);
         }
         this.knownSessionIds.add(appSessionId);
         if (!request.before) {
@@ -1376,7 +1402,7 @@ export class GrokAgentHostService implements AgentHostService {
 
     async exportSession(appSessionId: string): Promise<ExportSessionResult> {
         const record = this.sessions.get(appSessionId);
-        if (!record) throw new Error('Unknown Xora Code session.');
+        if (!record) throw new SessionNotFoundError(appSessionId);
         if (record.status === 'running' || this.activePrompts.has(appSessionId)) {
             throw new Error('当前任务仍在运行，请在任务结束后导出完整会话。');
         }
@@ -1403,7 +1429,7 @@ export class GrokAgentHostService implements AgentHostService {
     async renameSession(appSessionId: string, title: string): Promise<SessionRecord> {
         const record = this.sessions.get(appSessionId);
         if (!record) {
-            throw new Error('Unknown Xora Code session.');
+            throw new SessionNotFoundError(appSessionId);
         }
         const nextTitle = title.trim().replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 120);
         if (!nextTitle) {
@@ -1420,10 +1446,40 @@ export class GrokAgentHostService implements AgentHostService {
     async deleteSession(appSessionId: string): Promise<void> {
         const record = this.sessions.get(appSessionId);
         if (!record) {
-            throw new Error('Unknown Xora Code session.');
+            throw new SessionNotFoundError(appSessionId);
+        }
+        const locallyOwnedPrompt = this.activePrompts.get(appSessionId);
+        if (record.status === 'running'
+            && !locallyOwnedPrompt
+            && this.promptClaimOwnership(appSessionId) === 'foreign') {
+            // Never cancel or rewrite another process's durable prompt claim.
+            // Its owner is the only process that can settle the turn without
+            // risking an ACP request whose local history has been removed.
+            throw new SessionPromptConflictError(
+                'This session is running in another Xora Code window. Cancel it there before deleting.'
+            );
         }
         if (record.status === 'running' || this.activePrompts.has(appSessionId)) {
             await this.cancel(appSessionId);
+            if (locallyOwnedPrompt) {
+                // Keep the repository's durable `running` claim until the
+                // sendPrompt continuation has observed cancellation, flushed
+                // its final events and released its ownership. A different
+                // process has no such handle and therefore cannot delete a
+                // turn it does not own.
+                try { await locallyOwnedPrompt.promise; } catch { /* expected cancellation */ }
+                await new Promise<void>(resolve => setImmediate(resolve));
+            }
+        }
+        this.flushAssistantTextDeltas(appSessionId);
+        this.completeActiveThought(appSessionId);
+        this.flushThoughtDeltas(appSessionId);
+        // Delete the authoritative record before clearing any in-memory
+        // projection. If another window owns its running claim this throws and
+        // the local conversation remains fully usable instead of becoming a
+        // half-deleted ghost.
+        if (!this.sessions.delete(appSessionId)) {
+            throw new SessionNotFoundError(appSessionId);
         }
         for (const [requestId, permission] of this.pendingPermissions) {
             if (permission.appSessionId === appSessionId) {
@@ -1431,10 +1487,7 @@ export class GrokAgentHostService implements AgentHostService {
                 this.pendingPermissions.delete(requestId);
             }
         }
-        this.flushAssistantTextDeltas(appSessionId);
         this.assistantStreamState().delete(appSessionId);
-        this.completeActiveThought(appSessionId);
-        this.flushThoughtDeltas(appSessionId);
         this.loadedSessionIds.delete(appSessionId);
         this.sessionMcpStateMap().delete(appSessionId);
         this.knownSessionIds.delete(appSessionId);
@@ -1457,9 +1510,6 @@ export class GrokAgentHostService implements AgentHostService {
             this.acpSessionLookup.delete(record.acpSessionId);
             this.acpGoalCapabilityState().delete(record.acpSessionId);
         }
-        if (!this.sessions.delete(appSessionId)) {
-            throw new Error('Unknown Xora Code session.');
-        }
         if (this.activeSessionId === appSessionId) {
             this.activeSessionId = undefined;
             this.emitSnapshot();
@@ -1468,7 +1518,7 @@ export class GrokAgentHostService implements AgentHostService {
 
     async setSessionMode(appSessionId: string, modeId: string): Promise<SessionRecord> {
         const acp = this.requireReady();
-        const record = this.sessions.get(appSessionId);
+        const record = this.assertSessionMutationAllowed(appSessionId);
         if (!record?.acpSessionId || record.status === 'read-only') {
             throw new Error('The selected session cannot change Agent mode.');
         }
@@ -1562,9 +1612,12 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async sendPrompt(request: PromptRequest): Promise<void> {
-        this.requireReady();
         const record = this.sessions.get(request.sessionId);
-        if (!record?.acpSessionId || record.status === 'read-only') {
+        if (!record) {
+            throw new SessionNotFoundError(request.sessionId);
+        }
+        this.requireReady();
+        if (!record.acpSessionId || record.status === 'read-only') {
             throw new Error('The selected session cannot accept prompts.');
         }
         if (record.workspaceRoot !== this.workspaceRoot || record.providerId !== this.providerId) {
@@ -1629,94 +1682,114 @@ export class GrokAgentHostService implements AgentHostService {
             // The shared read lease makes config writes and prompt admission
             // atomic without blocking another session's hydration.
             const acp = this.requireReady();
-            const refreshedRecord = this.sessions.get(request.sessionId) ?? record;
-            if (!refreshedRecord.acpSessionId || !this.loadedSessionIds.has(request.sessionId)) {
-                throw new Error('The selected conversation could not be restored after refreshing MCP.');
-            }
-            if (refreshedRecord.status === 'running' && !this.activePrompts.has(request.sessionId)) {
-                throw new Error('This session has an unowned running task. Cancel or restore it before sending.');
-            }
-            if (this.orphanedGoalSessionState().has(request.sessionId)) {
-                throw new Error('Cancel the orphaned restored Goal before sending another task.');
-            }
-            if (refreshedRecord.providerId !== this.providers.selectedProviderId()
-                || refreshedRecord.providerId !== this.providerId) {
-                this.notifyProviderDefaultsChanged();
-                throw new Error('The application-wide model service changed while MCP was refreshing.');
-            }
-            const refreshedEpoch = refreshedRecord.providerRuntimeEpoch ?? 'legacy-v1';
-            if (refreshedEpoch !== this.runtimeProviderEpoch
-                || refreshedEpoch !== this.providers.runtimeEpoch(refreshedRecord.providerId)) {
-                throw new Error('The Provider changed while MCP was refreshing. Start a new session.');
-            }
-            const refreshedModel = this.defaultModelId(refreshedRecord.providerId);
-            if (refreshedModel && (refreshedRecord.model !== refreshedModel || this.selectedModel !== refreshedModel)) {
-                this.notifyProviderDefaultsChanged();
-                throw new Error('The application-wide model changed while MCP was refreshing.');
-            }
+            // This is the final admission gate before any attachment is
+            // persisted, user history is appended, or JSON-RPC crosses ACP.
+            // It owns the index lock, discards the local cache and rereads the
+            // authoritative disk record, so an external delete can never fall
+            // through to the stale snapshot captured at method entry.
+            const promptClaim = this.claimPromptRecord(request.sessionId, candidate => {
+                if (!candidate.acpSessionId || candidate.status === 'read-only'
+                    || !this.loadedSessionIds.has(request.sessionId)) {
+                    throw new Error('The selected conversation could not be restored after refreshing MCP.');
+                }
+                if (candidate.workspaceRoot !== this.workspaceRoot || candidate.providerId !== this.providerId) {
+                    throw new Error('The active runtime does not match this session.');
+                }
+                if (candidate.providerId !== this.providers.selectedProviderId()) {
+                    this.notifyProviderDefaultsChanged();
+                    throw new Error('The application-wide model service changed while MCP was refreshing.');
+                }
+                const refreshedEpoch = candidate.providerRuntimeEpoch ?? 'legacy-v1';
+                if (refreshedEpoch !== this.runtimeProviderEpoch
+                    || refreshedEpoch !== this.providers.runtimeEpoch(candidate.providerId)) {
+                    throw new Error('The Provider changed while MCP was refreshing. Start a new session.');
+                }
+                const refreshedModel = this.defaultModelId(candidate.providerId);
+                if (refreshedModel && (candidate.model !== refreshedModel || this.selectedModel !== refreshedModel)) {
+                    this.notifyProviderDefaultsChanged();
+                    throw new Error('The application-wide model changed while MCP was refreshing.');
+                }
+                if (this.activePrompts.has(request.sessionId)) {
+                    throw new Error('This session already has a running task.');
+                }
+                if (candidate.status === 'running') {
+                    throw new Error('This session has an unowned running task. Cancel or restore it before sending.');
+                }
+                if (this.orphanedGoalSessionState().has(request.sessionId)) {
+                    throw new Error('Cancel the orphaned restored Goal before sending another task.');
+                }
+            });
+            const refreshedRecord = promptClaim.record;
+            // claimPrompt's validator above rejects an absent ACP binding.
+            const acpSessionId = refreshedRecord.acpSessionId!;
             // Any contract belongs only to the live Plan turn that obtained
             // its approval. A stale value may never alter a later user turn.
             this.pendingApprovedPlanState().delete(request.sessionId);
-            const persistedImages = persistPromptImagesToWorkspace(
-                refreshedRecord.workspaceRoot,
-                request.sessionId,
-                images
-            );
-            const nativeImagePrompt = this.capabilities?.prompt.image === true;
-            const formattedUserPrompt = continuous
-                ? formatContinuousGoalPrompt(request.text)
-                : formatAgentWirePrompt(request.text);
-            const wireText = nativeImagePrompt
-                ? formattedUserPrompt
-                : formatImageFileFallbackPrompt(formattedUserPrompt, persistedImages.workspacePaths);
-            const prompt = [
-                ...(wireText.length ? [{ type: 'text' as const, text: wireText }] : []),
-                ...(nativeImagePrompt ? images.blocks : [])
-            ];
             const turnId = crypto.randomUUID();
             const promptStartedAt = process.hrtime.bigint();
-            // Reset before the user event so this turn's first assistant
-            // fragment crosses Electron IPC and JSONL immediately.
-            this.clearToolActivityTimings(request.sessionId);
-            this.flushAssistantTextDeltas(request.sessionId);
-            this.assistantStreamState().delete(request.sessionId);
-            this.completeActiveThought(request.sessionId);
-            this.flushThoughtDeltas(request.sessionId);
-            this.activeTurnIdState().set(request.sessionId, turnId);
-            this.activePromptObjectiveState().set(request.sessionId, request.text);
-            const goalCompletion = continuous
-                ? this.beginGoalCompletionSignal(request.sessionId, turnId)
-                : undefined;
-            this.supervisionTurnSignalState().set(request.sessionId, {
-                sawPlan: false,
-                openPlanCount: 0,
-                failedToolIds: new Set(),
-                testEvidenceIds: new Set(),
-                excludeFromSuggestion: sessionUsesPlanMode(refreshedRecord)
-            });
-            this.emit({
-                kind: 'text-delta',
-                sessionId: request.sessionId,
-                role: 'user',
-                text: request.text,
-                ...(persistedImages.summaries.length ? { attachments: persistedImages.summaries } : {})
-            });
-            const running = this.sessions.update(request.sessionId, { status: 'running' });
-            this.emit({ kind: 'session', session: running });
-            let handle: RequestHandle<Record<string, unknown>>;
+            let goalCompletion: GoalCompletionSignal | undefined;
             try {
-                handle = acp.startRequest<Record<string, unknown>>('session/prompt', {
-                    sessionId: refreshedRecord.acpSessionId,
+                const persistedImages = persistPromptImagesToWorkspace(
+                    refreshedRecord.workspaceRoot,
+                    request.sessionId,
+                    images
+                );
+                const nativeImagePrompt = this.capabilities?.prompt.image === true;
+                const formattedUserPrompt = continuous
+                    ? formatContinuousGoalPrompt(request.text)
+                    : formatAgentWirePrompt(request.text);
+                const wireText = nativeImagePrompt
+                    ? formattedUserPrompt
+                    : formatImageFileFallbackPrompt(formattedUserPrompt, persistedImages.workspacePaths);
+                const prompt = [
+                    ...(wireText.length ? [{ type: 'text' as const, text: wireText }] : []),
+                    ...(nativeImagePrompt ? images.blocks : [])
+                ];
+                // Reset before the user event so this turn's first assistant
+                // fragment crosses Electron IPC and JSONL immediately.
+                this.clearToolActivityTimings(request.sessionId);
+                this.flushAssistantTextDeltas(request.sessionId);
+                this.assistantStreamState().delete(request.sessionId);
+                this.completeActiveThought(request.sessionId);
+                this.flushThoughtDeltas(request.sessionId);
+                this.activeTurnIdState().set(request.sessionId, turnId);
+                this.activePromptObjectiveState().set(request.sessionId, request.text);
+                goalCompletion = continuous
+                    ? this.beginGoalCompletionSignal(request.sessionId, turnId)
+                    : undefined;
+                this.supervisionTurnSignalState().set(request.sessionId, {
+                    sawPlan: false,
+                    openPlanCount: 0,
+                    failedToolIds: new Set(),
+                    testEvidenceIds: new Set(),
+                    excludeFromSuggestion: sessionUsesPlanMode(refreshedRecord)
+                });
+                this.emit({ kind: 'session', session: refreshedRecord });
+                this.emit({
+                    kind: 'text-delta',
+                    sessionId: request.sessionId,
+                    role: 'user',
+                    text: request.text,
+                    ...(persistedImages.summaries.length ? { attachments: persistedImages.summaries } : {})
+                });
+                const handle = acp.startRequest<Record<string, unknown>>('session/prompt', {
+                    sessionId: acpSessionId,
                     prompt
                 }, {
                     timeoutMs: 0,
-                    cancellation: { method: 'session/cancel', params: { sessionId: refreshedRecord.acpSessionId } }
+                    cancellation: { method: 'session/cancel', params: { sessionId: acpSessionId } }
                 });
                 this.activePrompts.set(request.sessionId, handle);
+                return {
+                    acpSessionId,
+                    handle,
+                    promptStartedAt,
+                    turnId,
+                    goalCompletion,
+                    promptClaimToken: promptClaim.token
+                };
             } catch (error) {
                 if (goalCompletion) this.clearGoalCompletionSignal(request.sessionId, turnId);
-                const failed = this.sessions.update(request.sessionId, { status: 'failed' });
-                this.emit({ kind: 'session', session: failed });
                 this.activeTurnIdState().delete(request.sessionId);
                 this.activePromptObjectiveState().delete(request.sessionId);
                 this.emit({
@@ -1725,11 +1798,15 @@ export class GrokAgentHostService implements AgentHostService {
                     stopReason: 'error',
                     elapsedMs: Number((process.hrtime.bigint() - promptStartedAt) / 1_000_000n)
                 });
+                this.flushAssistantTextDeltas(request.sessionId);
+                this.flushThoughtDeltas(request.sessionId);
+                this.sessions.flushEvents(request.sessionId);
+                const failed = this.finishPromptRecord(request.sessionId, promptClaim.token, 'failed');
+                this.emit({ kind: 'session', session: failed });
                 throw error;
             }
-            return { acpSessionId: refreshedRecord.acpSessionId, handle, promptStartedAt, turnId, goalCompletion };
         });
-        const { handle, promptStartedAt, turnId, goalCompletion } = admitted;
+        const { handle, promptStartedAt, turnId, goalCompletion, promptClaimToken } = admitted;
         // Measure only the actual ACP turn. Startup, authentication, Save All
         // and session hydration are Xora orchestration latency.
         const elapsedMs = (): number => Number((process.hrtime.bigint() - promptStartedAt) / 1_000_000n);
@@ -1775,8 +1852,6 @@ export class GrokAgentHostService implements AgentHostService {
                 stopReason = typeof result.stopReason === 'string' ? result.stopReason : undefined;
             }
             const status = stopReason === 'cancelled' ? 'cancelled' : 'completed';
-            const finished = this.sessions.update(request.sessionId, { status });
-            this.emit({ kind: 'session', session: finished });
             this.projectGoalTurnEnd(request.sessionId, stopReason === 'cancelled' ? 'cancelled' : 'end-turn');
             const goalState = this.sessionGoalStateMap().get(request.sessionId);
             const taskContract = this.sessionTaskContractState().get(request.sessionId);
@@ -1789,22 +1864,33 @@ export class GrokAgentHostService implements AgentHostService {
             }
             if (!continuous) this.emitSupervisionShadow(request.sessionId, turnId);
             this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason, elapsedMs: elapsedMs() });
+            this.flushAssistantTextDeltas(request.sessionId);
+            this.flushThoughtDeltas(request.sessionId);
+            this.sessions.flushEvents(request.sessionId);
+            const finished = this.finishPromptRecord(request.sessionId, promptClaimToken, status);
+            this.emit({ kind: 'session', session: finished });
         } catch (error) {
             this.pendingApprovedPlanState().delete(request.sessionId);
             if ((error instanceof AcpCancelledError || asRecord(error)?.kind === 'cancelled') && this.phase !== 'crashed') {
-                const cancelled = this.sessions.update(request.sessionId, { status: 'cancelled' });
-                this.emit({ kind: 'session', session: cancelled });
                 this.projectGoalTurnEnd(request.sessionId, 'cancelled');
                 this.updateTaskContractLifecycle(request.sessionId, 'interrupted');
                 this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'cancelled', elapsedMs: elapsedMs() });
+                this.flushAssistantTextDeltas(request.sessionId);
+                this.flushThoughtDeltas(request.sessionId);
+                this.sessions.flushEvents(request.sessionId);
+                const cancelled = this.finishPromptRecord(request.sessionId, promptClaimToken, 'cancelled');
+                this.emit({ kind: 'session', session: cancelled });
                 return;
             }
-            const failed = this.sessions.update(request.sessionId, { status: 'failed' });
-            this.emit({ kind: 'session', session: failed });
             this.projectGoalTurnEnd(request.sessionId, 'error');
             this.updateTaskContractLifecycle(request.sessionId, 'interrupted');
             this.emitError('PROMPT_FAILED', error, true, request.sessionId);
             this.emit({ kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'error', elapsedMs: elapsedMs() });
+            this.flushAssistantTextDeltas(request.sessionId);
+            this.flushThoughtDeltas(request.sessionId);
+            this.sessions.flushEvents(request.sessionId);
+            const failed = this.finishPromptRecord(request.sessionId, promptClaimToken, 'failed');
+            this.emit({ kind: 'session', session: failed });
             throw error;
         } finally {
             this.flushAssistantTextDeltas(request.sessionId);
@@ -1817,6 +1903,11 @@ export class GrokAgentHostService implements AgentHostService {
                 this.activeTurnIdState().delete(request.sessionId);
             }
             this.clearGoalCompletionSignal(request.sessionId, turnId);
+            if (this.promptClaimTokenState().get(request.sessionId) === promptClaimToken) {
+                try {
+                    this.finishPromptRecord(request.sessionId, promptClaimToken, 'failed');
+                } catch { /* fail closed; stale-owner recovery handles process loss */ }
+            }
             this.sessions.flushEvents(request.sessionId);
             if (this.providerDefaultsRefreshPending) {
                 this.scheduleProviderDefaultsRefresh();
@@ -1825,6 +1916,84 @@ export class GrokAgentHostService implements AgentHostService {
                 this.scheduleIntegrationRefresh();
             }
         }
+    }
+
+    protected claimPromptRecord(
+        appSessionId: string,
+        validate: (record: Readonly<SessionRecord>) => void
+    ): SessionPromptClaim {
+        const repository = this.sessions as AgentSessionRepository & {
+            claimPrompt?: AgentSessionRepository['claimPrompt'];
+        };
+        if (typeof repository.claimPrompt === 'function') {
+            const claim = repository.claimPrompt(appSessionId, validate);
+            this.promptClaimTokenState().set(appSessionId, claim.token);
+            return claim;
+        }
+        // Prototype-only unit harnesses predating the repository transaction
+        // API still exercise sendPrompt with a minimal in-memory store.
+        const record = repository.get(appSessionId);
+        if (!record) throw new SessionNotFoundError(appSessionId);
+        validate(record);
+        if (record.status === 'running') {
+            throw new Error('This session already has a running task.');
+        }
+        return { record: repository.update(appSessionId, { status: 'running' }), token: '' };
+    }
+
+    protected finishPromptRecord(
+        appSessionId: string,
+        token: string,
+        status: Extract<SessionRecord['status'], 'completed' | 'cancelled' | 'failed'>
+    ): SessionRecord {
+        const repository = this.sessions as AgentSessionRepository & {
+            finishPrompt?: AgentSessionRepository['finishPrompt'];
+        };
+        if (token && this.promptClaimTokenState().get(appSessionId) !== token) {
+            const alreadyFinished = repository.get(appSessionId);
+            if (alreadyFinished && alreadyFinished.status !== 'running') return alreadyFinished;
+        }
+        const finished = token && typeof repository.finishPrompt === 'function'
+            ? repository.finishPrompt(appSessionId, token, status)
+            : repository.update(appSessionId, { status });
+        if (this.promptClaimTokenState().get(appSessionId) === token) {
+            this.promptClaimTokenState().delete(appSessionId);
+        }
+        return finished;
+    }
+
+    protected promptClaimTokenState(): Map<string, string> {
+        return this.promptClaimTokens ?? (this.promptClaimTokens = new Map<string, string>());
+    }
+
+    protected reconcilePromptClaimRecord(appSessionId: string): SessionRecord | undefined {
+        const repository = this.sessions as AgentSessionRepository & {
+            reconcileStalePromptClaim?: AgentSessionRepository['reconcileStalePromptClaim'];
+        };
+        return typeof repository.reconcileStalePromptClaim === 'function'
+            ? repository.reconcileStalePromptClaim(appSessionId)
+            : repository.get(appSessionId);
+    }
+
+    protected assertSessionMutationAllowed(appSessionId: string): SessionRecord {
+        const record = this.reconcilePromptClaimRecord(appSessionId);
+        if (!record) throw new SessionNotFoundError(appSessionId);
+        if (record.status === 'running') {
+            throw new SessionPromptConflictError(
+                'Wait for the running Agent task to finish before changing this session.'
+            );
+        }
+        return record;
+    }
+
+    protected promptClaimOwnership(appSessionId: string): 'owned' | 'foreign' | 'none' {
+        const repository = this.sessions as AgentSessionRepository & {
+            promptClaimOwnership?: AgentSessionRepository['promptClaimOwnership'];
+        };
+        const token = this.promptClaimTokenState().get(appSessionId);
+        return typeof repository.promptClaimOwnership === 'function'
+            ? repository.promptClaimOwnership(appSessionId, token)
+            : token ? 'owned' : 'none';
     }
 
     async guidePrompt(request: GuidePromptRequest): Promise<GuidePromptResult> {
@@ -1932,11 +2101,19 @@ export class GrokAgentHostService implements AgentHostService {
             void handle.cancel('Cancelled by user.').catch(() => undefined);
             return;
         }
+        if (record.status === 'running' && this.promptClaimOwnership(appSessionId) === 'foreign') {
+            throw new SessionPromptConflictError(
+                'This Agent task is owned by another Xora Code window and must be cancelled there.'
+            );
+        }
         if (this.acp && record.status === 'running') {
             await this.acp.notify('session/cancel', { sessionId: record.acpSessionId });
         }
         if (record.status === 'running') {
-            const cancelled = this.sessions.update(appSessionId, { status: 'cancelled' });
+            const token = this.promptClaimTokenState().get(appSessionId);
+            const cancelled = token
+                ? this.finishPromptRecord(appSessionId, token, 'cancelled')
+                : this.sessions.update(appSessionId, { status: 'cancelled' });
             this.emit({ kind: 'session', session: cancelled });
         }
     }
@@ -2050,7 +2227,7 @@ export class GrokAgentHostService implements AgentHostService {
             if (this.activePrompts.size > 0) {
                 throw new Error('请等待当前任务结束后再修改模型。');
             }
-            const record = this.sessions.get(appSessionId);
+            const record = this.assertSessionMutationAllowed(appSessionId);
             if (!record?.acpSessionId || record.status === 'read-only') {
                 throw new Error('Select a live session before choosing a model.');
             }
@@ -2112,7 +2289,7 @@ export class GrokAgentHostService implements AgentHostService {
             if (this.activePrompts.size > 0) {
                 throw new Error('请等待当前任务结束后再修改思考等级。');
             }
-            const record = this.sessions.get(appSessionId);
+            const record = this.assertSessionMutationAllowed(appSessionId);
             if (!record?.acpSessionId || record.status === 'read-only') {
                 throw new Error('Select a live session before choosing a reasoning effort.');
             }
@@ -3366,6 +3543,11 @@ export class GrokAgentHostService implements AgentHostService {
 
         const targets = [...this.loadedSessionIds].flatMap(appSessionId => {
             const record = this.sessions.get(appSessionId);
+            if (record?.status === 'running' && this.promptClaimOwnership(appSessionId) !== 'none') {
+                this.loadedSessionIds.delete(appSessionId);
+                this.sessionMcpStateMap().delete(appSessionId);
+                return [];
+            }
             return record?.acpSessionId ? [{ appSessionId, acpSessionId: record.acpSessionId }] : [];
         });
         const results = await Promise.allSettled(targets.map(target =>
@@ -3422,6 +3604,11 @@ export class GrokAgentHostService implements AgentHostService {
             const record = this.sessions.get(appSessionId);
             const recordEpoch = record?.providerRuntimeEpoch ?? 'legacy-v1';
             if (!record) continue;
+            if (record.status === 'running' && this.promptClaimOwnership(appSessionId) !== 'none') {
+                this.loadedSessionIds.delete(appSessionId);
+                this.sessionMcpStateMap().delete(appSessionId);
+                continue;
+            }
             if (record.workspaceRoot !== root || record.providerId !== providerId
                 || recordEpoch !== runtimeEpoch || !this.providerAuthorityIsCurrent(providerId, runtimeEpoch)) {
                 failures.push({
@@ -4075,48 +4262,78 @@ export class GrokAgentHostService implements AgentHostService {
             );
             return undefined;
         }
-        this.pendingApprovedPlanState().delete(appSessionId);
+        let promptClaim: SessionPromptClaim;
+        try {
+            promptClaim = this.claimPromptRecord(appSessionId, candidate => {
+                if (candidate.acpSessionId !== record.acpSessionId
+                    || !this.loadedSessionIds.has(appSessionId)
+                    || !this.providerAuthorityIsCurrent(
+                        candidate.providerId,
+                        candidate.providerRuntimeEpoch ?? 'legacy-v1'
+                    )) {
+                    throw new SessionPromptConflictError('The restored Agent session changed before Goal start.');
+                }
+            });
+        } catch (error) {
+            this.pendingApprovedPlanState().delete(appSessionId);
+            this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            if (!(error instanceof SessionPromptConflictError)) {
+                this.emitError('PROMPT_FAILED', error, true, appSessionId);
+            }
+            return undefined;
+        }
+        const claimedRecord = promptClaim.record;
+        const acpSessionId = claimedRecord.acpSessionId!;
         // The restored Goal is the implementation phase of the same approved
         // user logical turn. Reusing the Plan turn id lets the renderer settle
         // that Plan when the matching Goal verifies instead of leaving it pending.
         const turnId = this.sessionTaskContractState().get(appSessionId)?.turnId ?? crypto.randomUUID();
         const startedAt = process.hrtime.bigint();
-        this.activeTurnIdState().set(appSessionId, turnId);
-        this.activePromptObjectiveState().set(appSessionId, contract.objective);
-        const goalCompletion = this.beginGoalCompletionSignal(appSessionId, turnId);
-        this.updateTaskContractLifecycle(appSessionId, 'goal-starting');
+        let goalCompletion: GoalCompletionSignal | undefined;
         let handle: RequestHandle<Record<string, unknown>>;
         try {
+            this.pendingApprovedPlanState().delete(appSessionId);
+            this.activeTurnIdState().set(appSessionId, turnId);
+            this.activePromptObjectiveState().set(appSessionId, contract.objective);
+            goalCompletion = this.beginGoalCompletionSignal(appSessionId, turnId);
+            this.updateTaskContractLifecycle(appSessionId, 'goal-starting');
             handle = this.requireReady().startRequest<Record<string, unknown>>('session/prompt', {
-                sessionId: record.acpSessionId,
+                sessionId: acpSessionId,
                 prompt: [{ type: 'text', text: formatContinuousGoalPrompt(contract.objective, contract) }]
             }, {
                 timeoutMs: 0,
-                cancellation: { method: 'session/cancel', params: { sessionId: record.acpSessionId } }
+                cancellation: { method: 'session/cancel', params: { sessionId: acpSessionId } }
             });
         } catch (error) {
-            this.clearGoalCompletionSignal(appSessionId, turnId);
-            this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+            if (goalCompletion) this.clearGoalCompletionSignal(appSessionId, turnId);
             this.activeTurnIdState().delete(appSessionId);
             this.activePromptObjectiveState().delete(appSessionId);
+            try {
+                this.updateTaskContractLifecycle(appSessionId, 'interrupted');
+                this.flushAssistantTextDeltas(appSessionId);
+                this.flushThoughtDeltas(appSessionId);
+                this.sessions.flushEvents(appSessionId);
+            } catch { /* claim release below remains authoritative */ }
+            const failed = this.finishPromptRecord(appSessionId, promptClaim.token, 'failed');
+            this.emit({ kind: 'session', session: failed });
             this.emitError('PROMPT_FAILED', error, true, appSessionId);
             return undefined;
         }
         this.activePrompts.set(appSessionId, handle);
-        const running = this.sessions.update(appSessionId, { status: 'running' });
-        this.emit({ kind: 'session', session: running });
+        this.emit({ kind: 'session', session: claimedRecord });
         void this.observeRestoredGoal(
             appSessionId,
-            record.acpSessionId,
-            record.providerRuntimeEpoch ?? 'legacy-v1',
+            acpSessionId,
+            claimedRecord.providerRuntimeEpoch ?? 'legacy-v1',
             this.runtimeGeneration,
             handle,
-            goalCompletion,
+            goalCompletion!,
             turnId,
-            startedAt
+            startedAt,
+            promptClaim.token
         )
             .catch(() => undefined);
-        return running;
+        return claimedRecord;
     }
 
     protected async observeRestoredGoal(
@@ -4127,7 +4344,8 @@ export class GrokAgentHostService implements AgentHostService {
         handle: RequestHandle<Record<string, unknown>>,
         goalCompletion: GoalCompletionSignal,
         turnId: string,
-        startedAt: bigint
+        startedAt: bigint,
+        promptClaimToken: string
     ): Promise<void> {
         const elapsedMs = (): number => Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
         try {
@@ -4139,8 +4357,6 @@ export class GrokAgentHostService implements AgentHostService {
             this.acceptPromptContextFallback(appSessionId, acpSessionId, result);
             const stopReason = asString(result.stopReason);
             const status = stopReason === 'cancelled' ? 'cancelled' : 'completed';
-            const finished = this.sessions.update(appSessionId, { status });
-            this.emit({ kind: 'session', session: finished });
             this.projectGoalTurnEnd(appSessionId, stopReason === 'cancelled' ? 'cancelled' : 'end-turn');
             const goal = this.sessionGoalStateMap().get(appSessionId);
             const contract = this.sessionTaskContractState().get(appSessionId);
@@ -4150,6 +4366,11 @@ export class GrokAgentHostService implements AgentHostService {
                 this.updateTaskContractLifecycle(appSessionId, 'interrupted');
             }
             this.emit({ kind: 'turn-completed', sessionId: appSessionId, stopReason, elapsedMs: elapsedMs() });
+            this.flushAssistantTextDeltas(appSessionId);
+            this.flushThoughtDeltas(appSessionId);
+            this.sessions.flushEvents(appSessionId);
+            const finished = this.finishPromptRecord(appSessionId, promptClaimToken, status);
+            this.emit({ kind: 'session', session: finished });
         } catch (error) {
             const current = this.sessions.get(appSessionId);
             if (runtimeGeneration !== this.runtimeGeneration
@@ -4157,8 +4378,6 @@ export class GrokAgentHostService implements AgentHostService {
                 || current.providerRuntimeEpoch !== providerRuntimeEpoch) return;
             const cancelled = error instanceof AcpCancelledError || asRecord(error)?.kind === 'cancelled';
             if (this.phase !== 'crashed' && this.sessions.get(appSessionId)) {
-                const failed = this.sessions.update(appSessionId, { status: cancelled ? 'cancelled' : 'failed' });
-                this.emit({ kind: 'session', session: failed });
                 this.projectGoalTurnEnd(appSessionId, cancelled ? 'cancelled' : 'error');
                 this.updateTaskContractLifecycle(appSessionId, 'interrupted');
                 if (!cancelled) this.emitError('PROMPT_FAILED', error, true, appSessionId);
@@ -4168,12 +4387,31 @@ export class GrokAgentHostService implements AgentHostService {
                     stopReason: cancelled ? 'cancelled' : 'error',
                     elapsedMs: elapsedMs()
                 });
+                this.flushAssistantTextDeltas(appSessionId);
+                this.flushThoughtDeltas(appSessionId);
+                this.sessions.flushEvents(appSessionId);
+                const failed = this.finishPromptRecord(
+                    appSessionId,
+                    promptClaimToken,
+                    cancelled ? 'cancelled' : 'failed'
+                );
+                this.emit({ kind: 'session', session: failed });
             }
         } finally {
             if (this.activePrompts.get(appSessionId) === handle) this.activePrompts.delete(appSessionId);
             if (this.activeTurnIdState().get(appSessionId) === turnId) this.activeTurnIdState().delete(appSessionId);
             this.clearGoalCompletionSignal(appSessionId, turnId);
             this.activePromptObjectiveState().delete(appSessionId);
+            if (this.promptClaimTokenState().get(appSessionId) === promptClaimToken) {
+                try {
+                    const interrupted = this.finishPromptRecord(
+                        appSessionId,
+                        promptClaimToken,
+                        this.intentionalStop ? 'cancelled' : 'failed'
+                    );
+                    this.emit({ kind: 'session', session: interrupted });
+                } catch { /* another terminal path already released ownership */ }
+            }
             this.sessions.flushEvents(appSessionId);
         }
     }
@@ -5014,6 +5252,7 @@ export class GrokAgentHostService implements AgentHostService {
         record: SessionRecord,
         globallySelectedModel: string | undefined
     ): Promise<SessionRecord> {
+        record = this.assertSessionMutationAllowed(record.appSessionId);
         if (!globallySelectedModel) return record;
         if (record.providerId !== this.providerId || !record.acpSessionId) {
             throw new Error('The active runtime does not match this session.');
@@ -5087,8 +5326,9 @@ export class GrokAgentHostService implements AgentHostService {
         this.selectedModel = this.defaultModelId(providerId);
     }
 
-    protected emitSnapshot(message?: string): void {
+    protected emitSnapshot(message?: string): number {
         this.emit({ kind: 'snapshot', snapshot: this.snapshot(message) }, false);
+        return this.snapshotRevision;
     }
 
     protected emit(event: AgentHostEvent, persist = true): void {
@@ -5438,7 +5678,11 @@ export class GrokAgentHostService implements AgentHostService {
         for (const [appSessionId, prompt] of this.activePrompts) {
             void prompt.cancel(error).catch(() => undefined);
             try {
-                const failed = this.sessions.update(appSessionId, { status: 'failed' });
+                this.sessions.flushEvents(appSessionId);
+                const token = this.promptClaimTokenState().get(appSessionId);
+                const failed = token
+                    ? this.finishPromptRecord(appSessionId, token, 'failed')
+                    : this.sessions.update(appSessionId, { status: 'failed' });
                 this.emit({ kind: 'session', session: failed });
             } catch { /* session may have been removed externally */ }
         }

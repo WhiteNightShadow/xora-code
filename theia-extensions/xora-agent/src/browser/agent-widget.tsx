@@ -45,6 +45,7 @@ import {
     ToolCallEvent
 } from '../common/agent-protocol';
 import { AgentHostClientImpl } from './agent-client';
+import { parseWindowsCfHtmlClipboard, replaceTextSelection } from './agent-clipboard';
 import {
     activityFiltersForTool,
     AgentActivityFilter,
@@ -58,7 +59,11 @@ import {
     toolMatchesActivityFilter
 } from './agent-display-helpers';
 import { OPEN_AGENT_SETTINGS_COMMAND } from './agent-entry-commands';
-import { friendlyAgentErrorMessage } from './agent-error-labels';
+import {
+    friendlyAgentErrorMessage,
+    isLegacyLocalSessionNotFoundError,
+    isTypedSessionNotFoundError
+} from './agent-error-labels';
 import { shouldCommitRenameOnEnter, shouldSubmitPromptOnEnter } from './agent-input-helpers';
 import { grokSubscriptionAuthStatus } from './agent-management-labels';
 import { AgentMarkdown } from './agent-markdown';
@@ -101,7 +106,7 @@ interface PromptSubmission {
     readonly executionMode: AgentExecutionMode;
     /** Renderer-local click-to-completion anchor used only for live UX. */
     readonly acceptedAt: number;
-    readonly sourceSessionId?: string;
+    sourceSessionId?: string;
     sessionId?: string;
     readonly attachments: PromptImageAttachment[];
     readonly draftAttachmentIds?: string[];
@@ -109,6 +114,12 @@ interface PromptSubmission {
      * turn. Until then the conversation renders a lightweight local bubble so
      * cold session creation never looks like a missed click. */
     userEventReceived?: boolean;
+    /** A missing local session may be rebound once, but only before Electron
+     * has published the user turn which proves ACP admission began. */
+    missingSessionRecoveryAttempts?: number;
+    /** True immediately before invoking Electron's prompt RPC. Legacy
+     * untyped "Unknown session" errors are unsafe to replay beyond this edge. */
+    promptRequestStarted?: boolean;
     cancelled?: boolean;
     state?: 'queued' | 'guiding' | 'preparing' | 'running';
     /** Blocks FIFO promotion while the same row is crossing x.ai/interject. */
@@ -814,7 +825,7 @@ export class XoraAgentWidget extends ReactWidget {
                         }}
                         onPaste={event => {
                             this.requestRuntimePrewarm(true);
-                            this.handleImagePaste(event);
+                            this.handleComposerPaste(event);
                         }}
                         onBlur={() => {
                             // Delay so mousedown on a menu item can run first.
@@ -1303,14 +1314,43 @@ export class XoraAgentWidget extends ReactWidget {
         });
     }
 
-    protected handleImagePaste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
+    protected handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
         const images = Array.from(event.clipboardData.items)
             .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
             .map(item => item.getAsFile())
             .filter((file): file is File => !!file);
-        // Do not preventDefault: a clipboard can legitimately contain both
-        // text and an image, and Chromium should still insert the text.
         if (images.length) void this.addImageFiles(images, '粘贴');
+
+        const cfHtml = parseWindowsCfHtmlClipboard(event.clipboardData.getData('text/plain'))
+            ?? parseWindowsCfHtmlClipboard(event.clipboardData.getData('text/html'));
+        // Ordinary text and HTML stay on Chromium's native paste path. Only a
+        // validated Windows CF_HTML envelope is replaced, so its transport
+        // header cannot leak into the prompt. Images above remain attached.
+        if (!cfHtml) return;
+        event.preventDefault();
+        this.insertCfHtmlText(event.currentTarget, cfHtml.text);
+    }
+
+    protected insertCfHtmlText(textarea: HTMLTextAreaElement, text: string): void {
+        const replacement = replaceTextSelection(
+            textarea.value,
+            text,
+            textarea.selectionStart,
+            textarea.selectionEnd
+        );
+        if (this.imeComposing) {
+            // The native value already contains the visible IME candidate. A
+            // late compositionend must not overwrite the sanitized paste.
+            this.imeComposing = false;
+            this.imeCompositionJustEnded = false;
+            this.imeCompositionLaneKey = undefined;
+            this.ignoreDetachedCompositionEnd = true;
+            if (this.imeCompositionGuardTimer !== undefined) {
+                window.clearTimeout(this.imeCompositionGuardTimer);
+                this.imeCompositionGuardTimer = undefined;
+            }
+        }
+        this.applyComposerText(replacement.text, replacement.cursor);
     }
 
     protected async addImageFiles(files: File[], source: '粘贴' | '选择'): Promise<void> {
@@ -4806,8 +4846,8 @@ export class XoraAgentWidget extends ReactWidget {
                 sessionId = session.appSessionId;
                 submission.sessionId = sessionId;
                 this.bindPromptLaneToSession(lane, session);
-                if (laneWasVisible && this.activeComposerLaneKey === lane.key) this.model.setSession(session);
-                else this.model.updateSession(session);
+                if (laneWasVisible && this.activeComposerLaneKey === lane.key) this.model.setSession(session, true);
+                else this.model.updateSession(session, true);
                 this.rememberOpenSessionTab(sessionId);
                 this.hydratedSessionKeyState().add(this.agentContextKey(hostRoot, submission.providerId, sessionId));
             } else {
@@ -4820,6 +4860,7 @@ export class XoraAgentWidget extends ReactWidget {
             submission.sessionId = sessionId;
             submission.state = 'running';
             this.syncPromptLaneIfVisible(lane);
+            submission.promptRequestStarted = true;
             await this.service.sendPrompt({
                 sessionId,
                 text: submission.text,
@@ -4830,6 +4871,12 @@ export class XoraAgentWidget extends ReactWidget {
             const cancelled = submission.cancelled
                 || (submission.sessionId ? this.cancelRequested.has(submission.sessionId) : false)
                 || this.isCancellationError(error);
+            if (!cancelled
+                && this.isSubmissionContextCurrent(submission)
+                && this.recoverMissingSessionBeforeAdmission(lane, submission, error)) {
+                await this.executePromptSubmission(lane, submission);
+                return;
+            }
             if (!cancelled && this.isSubmissionContextCurrent(submission)) {
                 const message = friendlyAgentErrorMessage(error);
                 lane.retryable = { ...submission, message };
@@ -4840,6 +4887,90 @@ export class XoraAgentWidget extends ReactWidget {
         } finally {
             if (submission.sessionId) this.cancelRequested.delete(submission.sessionId);
         }
+    }
+
+    /**
+     * A session deleted by another window must not poison its composer lane.
+     * The backend's typed error is emitted before it persists the user turn or
+     * starts ACP. That makes one transparent replacement safe. Once the user
+     * event has arrived, ownership has crossed the admission boundary and the
+     * task is never replayed automatically.
+     */
+    protected recoverMissingSessionBeforeAdmission(
+        lane: SessionPromptLane,
+        submission: PromptSubmission,
+        error: unknown
+    ): boolean {
+        const safeMissingSession = isTypedSessionNotFoundError(error)
+            || (!submission.promptRequestStarted && isLegacyLocalSessionNotFoundError(error));
+        if (!safeMissingSession
+            || submission.userEventReceived
+            || (submission.missingSessionRecoveryAttempts ?? 0) >= 1) {
+            return false;
+        }
+        const missingSessionId = submission.sessionId ?? lane.sessionId ?? submission.sourceSessionId;
+        if (!missingSessionId) return false;
+        submission.missingSessionRecoveryAttempts = (submission.missingSessionRecoveryAttempts ?? 0) + 1;
+
+        const oldKey = lane.key;
+        const laneWasVisible = this.activeComposerLaneKey === oldKey;
+        if (laneWasVisible) {
+            this.newSessionLaneSequence = Number.isSafeInteger(this.newSessionLaneSequence)
+                ? this.newSessionLaneSequence + 1
+                : 1;
+        }
+        // A background recovery must not advance or occupy the visible New
+        // conversation's draft lane. It becomes a regular session key as soon
+        // as session/new returns.
+        const nextKey = laneWasVisible
+            ? this.promptLaneKey(lane.workspaceRoot, lane.providerId, undefined)
+            : `${this.agentContextKey(lane.workspaceRoot, lane.providerId)}\u0000recovery-${submission.id}`;
+        this.promptLaneState().delete(oldKey);
+        lane.key = nextKey;
+        lane.sourceSessionId = undefined;
+        lane.sessionId = undefined;
+        submission.sourceSessionId = undefined;
+        submission.sessionId = undefined;
+        submission.promptRequestStarted = false;
+        submission.state = 'preparing';
+        lane.retryable = undefined;
+        for (const queued of lane.queue) {
+            queued.sourceSessionId = undefined;
+            queued.sessionId = undefined;
+        }
+        this.promptLaneState().set(nextKey, lane);
+
+        const draft = this.composerDraftState().get(oldKey);
+        if (draft) {
+            this.composerDraftState().delete(oldKey);
+            this.composerDraftState().set(nextKey, draft);
+        }
+        const taskMode = this.composerTaskModeState().get(oldKey);
+        if (taskMode) {
+            this.composerTaskModeState().delete(oldKey);
+            this.composerTaskModeState().set(nextKey, taskMode);
+        }
+        if (laneWasVisible) {
+            this.activeComposerLaneKey = nextKey;
+            this.observedAgentContextKey = nextKey;
+        }
+
+        this.sessionHistoryCacheState().delete(missingSessionId);
+        this.sessionHistoryPageState().delete(missingSessionId);
+        this.sessionHistoryCatchup?.delete(missingSessionId);
+        for (const key of [...this.hydratedSessionKeyState()]) {
+            if (key.endsWith(`\u0000${missingSessionId}`)) this.hydratedSessionKeyState().delete(key);
+        }
+        for (const key of [...this.sessionHydrationPromiseState().keys()]) {
+            if (key.endsWith(`\u0000${missingSessionId}`)) this.sessionHydrationPromiseState().delete(key);
+        }
+        if (this.activeSessionHydrationKey?.endsWith(`\u0000${missingSessionId}`)) {
+            this.activeSessionHydrationKey = undefined;
+            this.activeSessionHydrationPromise = undefined;
+        }
+        this.openSessionTabs = (this.openSessionTabs ?? []).filter(id => id !== missingSessionId);
+        this.model.forgetMissingSession(missingSessionId);
+        return true;
     }
 
     protected submissionCanContinue(lane: SessionPromptLane, submission: PromptSubmission): boolean {

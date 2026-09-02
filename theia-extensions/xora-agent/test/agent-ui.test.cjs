@@ -142,8 +142,12 @@ test('Agent composer and transcript include the interaction safeguards used by t
 test('Agent composer accepts pasted images without replacing the native IME textarea', () => {
     const source = fs.readFileSync(path.join(__dirname, '../src/browser/agent-widget.tsx'), 'utf8');
     const styles = fs.readFileSync(path.join(__dirname, '../src/browser/style/agent.css'), 'utf8');
-    assert.match(source, /onPaste=\{event => \{[\s\S]*?this\.handleImagePaste\(event\);[\s\S]*?\}\}/);
-    assert.match(source, /Do not preventDefault/);
+    assert.match(source, /onPaste=\{event => \{[\s\S]*?this\.handleComposerPaste\(event\);[\s\S]*?\}\}/);
+    assert.match(source, /parseWindowsCfHtmlClipboard\(event\.clipboardData\.getData\('text\/plain'\)\)/);
+    assert.match(source, /if \(!cfHtml\) return;\s*event\.preventDefault\(\);/,
+        'ordinary clipboard text must use native paste; validated CF_HTML is inserted without its transport header');
+    assert.match(source, /if \(images\.length\) void this\.addImageFiles\(images, '粘贴'\);[\s\S]*?const cfHtml/,
+        'image attachments must be retained when the same clipboard also contains CF_HTML');
     assert.match(source, /aria-label=\{this\.draftImages\.length \? `添加图片，当前已有 \$\{this\.draftImages\.length\} 张` : '添加图片'\}/);
     assert.doesNotMatch(source, /aria-label='选择工作区文件'/,
         'workspace files stay available through the slash menu without a duplicate file-shaped toolbar button');

@@ -4,7 +4,11 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { AgentSessionRepository } = require('../lib/electron-main/session-repository');
+const {
+    AgentSessionRepository,
+    SessionNotFoundError,
+    SessionPromptConflictError
+} = require('../lib/electron-main/session-repository');
 
 test('session index snapshots reuse the parsed cache and observe atomic external replacement', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-cache-'));
@@ -54,6 +58,290 @@ test('session index snapshots reuse the parsed cache and observe atomic external
     }
 });
 
+test('session index signatures preserve 64-bit NTFS identities without Number aliasing', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-ntfs-signature-'));
+    const indexPath = path.join(root, 'index.json');
+    const base = {
+        schemaVersion: 1,
+        sessions: [{
+            appSessionId: '00000000-0000-4000-8000-000000000021',
+            acpSessionId: 'acp-a',
+            title: 'A',
+            workspaceRoot: 'C:\\fixture',
+            providerId: 'grok-subscription',
+            createdAt: '2026-09-02T00:00:00.000Z',
+            updatedAt: '2026-09-02T00:00:00.000Z',
+            status: 'idle'
+        }]
+    };
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(indexPath, `${JSON.stringify(base)}\n`);
+    const nativeStatSync = fs.statSync;
+    let identity = 9223372036854775808n;
+    fs.statSync = (file, options) => {
+        const stat = nativeStatSync(file, options);
+        if (path.resolve(String(file)) !== path.resolve(indexPath) || !options || options.bigint !== true) return stat;
+        return {
+            ...stat,
+            dev: 18446744073709551615n,
+            ino: identity,
+            size: 4096n,
+            mtimeNs: 1000000000000000001n,
+            ctimeNs: 1000000000000000002n
+        };
+    };
+    const repository = new AgentSessionRepository(root);
+    try {
+        assert.equal(repository.list()[0].title, 'A');
+        fs.writeFileSync(indexPath, `${JSON.stringify({
+            ...base,
+            sessions: [{ ...base.sessions[0], title: 'B' }]
+        })}\n`);
+        identity += 1n;
+        assert.equal(repository.list()[0].title, 'B',
+            'adjacent NTFS file ids above 2^53 must not alias in the cache');
+    } finally {
+        fs.statSync = nativeStatSync;
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('an index writer invalidates a matching cache signature and merges the authoritative disk snapshot', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-authoritative-lock-'));
+    const indexPath = path.join(root, 'index.json');
+    const first = new AgentSessionRepository(root);
+    const second = new AgentSessionRepository(root);
+    const nativeStatSync = fs.statSync;
+    try {
+        const original = first.create({
+            acpSessionId: 'acp-a',
+            title: 'A',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        fs.statSync = (file, options) => {
+            const stat = nativeStatSync(file, options);
+            if (path.resolve(String(file)) !== path.resolve(indexPath) || !options || options.bigint !== true) return stat;
+            return {
+                ...stat,
+                dev: 1n,
+                ino: 2n,
+                size: 3n,
+                mtimeNs: 4n,
+                ctimeNs: 5n
+            };
+        };
+        second.list();
+        first.update(original.appSessionId, { title: 'B', model: 'grok-4.6' });
+        second.update(original.appSessionId, { status: 'completed' });
+
+        fs.statSync = nativeStatSync;
+        const merged = first.get(original.appSessionId);
+        assert.equal(merged.title, 'B');
+        assert.equal(merged.model, 'grok-4.6');
+        assert.equal(merged.status, 'completed');
+    } finally {
+        fs.statSync = nativeStatSync;
+        first.dispose();
+        second.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('a transient ENOENT after an observed index is retried instead of becoming an empty store', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-index-retry-'));
+    const indexPath = path.join(root, 'index.json');
+    const repository = new AgentSessionRepository(root);
+    const created = repository.create({
+        acpSessionId: 'acp-a',
+        title: 'A',
+        workspaceRoot: '/fixture',
+        providerId: 'grok-subscription'
+    });
+    const nativeStatSync = fs.statSync;
+    let missingReads = 2;
+    fs.statSync = (file, options) => {
+        if (path.resolve(String(file)) === path.resolve(indexPath) && missingReads-- > 0) {
+            const error = new Error('transient replacement gap');
+            error.code = 'ENOENT';
+            throw error;
+        }
+        return nativeStatSync(file, options);
+    };
+    try {
+        const updated = repository.update(created.appSessionId, { title: 'survived' });
+        assert.equal(updated.title, 'survived');
+        assert.equal(JSON.parse(fs.readFileSync(indexPath, 'utf8')).sessions.length, 1);
+    } finally {
+        fs.statSync = nativeStatSync;
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('prompt claim fails closed after cross-window deletion and protects a running owner', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-prompt-claim-'));
+    const owner = new AgentSessionRepository(root);
+    const peer = new AgentSessionRepository(root);
+    try {
+        const removed = owner.create({
+            acpSessionId: 'acp-removed',
+            title: 'removed',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        peer.list();
+        assert.equal(owner.delete(removed.appSessionId), true);
+        assert.throws(
+            () => peer.claimPrompt(removed.appSessionId),
+            error => error instanceof SessionNotFoundError
+                && error.code === 'SESSION_NOT_FOUND'
+                && error.message.startsWith('SESSION_NOT_FOUND:')
+        );
+
+        const live = owner.create({
+            acpSessionId: 'acp-live',
+            title: 'live',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        const claimed = peer.claimPrompt(live.appSessionId);
+        assert.equal(claimed.record.status, 'running');
+        assert.equal(JSON.stringify(peer.list()).includes('_promptClaim'), false,
+            'owner ids and CAS tokens remain Electron-main-only');
+        assert.equal(JSON.stringify(peer.list()).includes(claimed.token), false);
+        assert.throws(() => owner.delete(live.appSessionId), SessionPromptConflictError);
+        peer.finishPrompt(live.appSessionId, claimed.token, 'completed');
+        assert.equal(owner.delete(live.appSessionId), true);
+    } finally {
+        owner.dispose();
+        peer.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('Provider invalidation defers read-only state until the prompt owner releases its CAS token', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-claim-invalidation-'));
+    const owner = new AgentSessionRepository(root);
+    const peer = new AgentSessionRepository(root);
+    try {
+        const session = owner.create({
+            acpSessionId: 'acp-live',
+            title: 'live',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        const claim = owner.claimPrompt(session.appSessionId);
+        const invalidated = peer.markProviderSessionsReadOnly('grok-subscription');
+        assert.equal(invalidated[0].status, 'running', 'another process cannot release the active claim');
+        assert.throws(
+            () => peer.update(session.appSessionId, { status: 'read-only' }),
+            SessionPromptConflictError
+        );
+        const metadataOnly = peer.update(session.appSessionId, { sidecarVersion: '0.2.102' });
+        assert.equal(metadataOnly.status, 'running', 'session/load metadata cannot reset a foreign running claim');
+        assert.equal(peer.promptClaimOwnership(session.appSessionId), 'foreign');
+        assert.throws(
+            () => peer.update(session.appSessionId, { status: 'idle' }),
+            SessionPromptConflictError,
+            'session/load cannot unconditionally turn another window idle'
+        );
+        assert.throws(
+            () => peer.finishPrompt(session.appSessionId, claim.token, 'completed'),
+            SessionPromptConflictError,
+            'a token is also bound to its repository owner'
+        );
+        const finished = owner.finishPrompt(session.appSessionId, claim.token, 'completed');
+        assert.equal(finished.status, 'read-only', 'deferred invalidation wins when the owner finishes');
+    } finally {
+        owner.dispose();
+        peer.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('a disposed same-process owner leaves a recoverable failed claim without replaying its prompt', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-stale-owner-'));
+    const crashed = new AgentSessionRepository(root);
+    const session = crashed.create({
+        acpSessionId: 'acp-crashed',
+        title: 'crashed',
+        workspaceRoot: '/fixture',
+        providerId: 'grok-subscription'
+    });
+    crashed.claimPrompt(session.appSessionId);
+    crashed.dispose();
+    const recovered = new AgentSessionRepository(root);
+    try {
+        const record = recovered.reconcileStalePromptClaim(session.appSessionId);
+        assert.equal(record.status, 'failed');
+        assert.equal(recovered.promptClaimOwnership(session.appSessionId), 'none');
+        assert.equal(recovered.readEvents(session.appSessionId).length, 0,
+            'recovery changes only ownership state and never synthesizes/replays a prompt');
+    } finally {
+        recovered.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('an ancient claim owned by a still-live foreign PID remains fail-closed', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-live-foreign-owner-'));
+    const indexPath = path.join(root, 'index.json');
+    const appSessionId = '00000000-0000-4000-8000-000000000029';
+    fs.writeFileSync(indexPath, `${JSON.stringify({
+        schemaVersion: 1,
+        sessions: [{
+            appSessionId,
+            acpSessionId: 'acp-foreign',
+            title: 'foreign',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription',
+            createdAt: '2000-01-01T00:00:00.000Z',
+            updatedAt: '2000-01-01T00:00:00.000Z',
+            status: 'running',
+            _promptClaim: {
+                ownerId: 'foreign-owner',
+                token: 'foreign-token',
+                processId: process.ppid,
+                acquiredAt: '2000-01-01T00:00:00.000Z'
+            }
+        }]
+    })}\n`, { mode: 0o600 });
+    const repository = new AgentSessionRepository(root);
+    try {
+        assert.equal(repository.promptClaimOwnership(appSessionId), 'foreign');
+        assert.throws(() => repository.claimPrompt(appSessionId), SessionPromptConflictError);
+        assert.throws(() => repository.delete(appSessionId), SessionPromptConflictError);
+        assert.equal(repository.get(appSessionId)?.status, 'running');
+    } finally {
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('a stale writer tmp cannot permanently block a genuinely fresh session index', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-stale-tmp-'));
+    const stale = path.join(root, 'index.json.999.deadbeef.tmp');
+    fs.writeFileSync(stale, '{"partial":true}', { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(stale, old, old);
+    const repository = new AgentSessionRepository(root);
+    try {
+        const session = repository.create({
+            acpSessionId: 'acp-fresh',
+            title: 'fresh',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        assert.equal(repository.get(session.appSessionId)?.title, 'fresh');
+        assert.equal(fs.existsSync(stale), false);
+    } finally {
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('mutating a returned session snapshot cannot corrupt the repository cache', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-clone-'));
     try {
@@ -70,6 +358,52 @@ test('mutating a returned session snapshot cannot corrupt the repository cache',
         assert.equal(repository.get(created.appSessionId)?.title, 'Original');
         repository.dispose();
     } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('a prompt owner retries a short index-lock collision before publishing its terminal state', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-lock-retry-'));
+    const lockPath = path.join(root, '.index.lock');
+    const repository = new AgentSessionRepository(root);
+    const originalOpenSync = fs.openSync;
+    const originalStatSync = fs.statSync;
+    try {
+        const created = repository.create({
+            acpSessionId: 'acp-lock-retry',
+            title: 'Lock retry',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        const claim = repository.claimPrompt(created.appSessionId);
+        let collisions = 0;
+        fs.openSync = function (...args) {
+            if (path.resolve(String(args[0])) === path.resolve(lockPath)
+                && args[1] === 'wx'
+                && collisions < 3) {
+                collisions += 1;
+                const error = new Error('synthetic peer lock');
+                error.code = 'EEXIST';
+                throw error;
+            }
+            return originalOpenSync.apply(this, args);
+        };
+        fs.statSync = function (...args) {
+            if (path.resolve(String(args[0])) === path.resolve(lockPath) && collisions <= 3) {
+                return { mtimeMs: Date.now() };
+            }
+            return originalStatSync.apply(this, args);
+        };
+
+        const finished = repository.finishPrompt(created.appSessionId, claim.token, 'completed');
+
+        assert.equal(collisions, 3);
+        assert.equal(finished.status, 'completed');
+        assert.equal(repository.get(created.appSessionId).status, 'completed');
+    } finally {
+        fs.openSync = originalOpenSync;
+        fs.statSync = originalStatSync;
+        repository.dispose();
         fs.rmSync(root, { recursive: true, force: true });
     }
 });

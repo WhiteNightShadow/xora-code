@@ -98,6 +98,30 @@ export class AgentViewModel {
     protected selectedSessionOverride: string | null | undefined;
     /** Last Electron-host sequence applied across event and RPC channels. */
     protected appliedSnapshotRevision = -1;
+    /**
+     * A `session/new` RPC result can cross the event channel before the
+     * snapshot emitted by the same Electron transaction. Only those freshly
+     * created records may be carried across a snapshot which does not contain
+     * them yet. The protection ends as soon as one authoritative snapshot
+     * advertises the id.
+     */
+    protected readonly unconfirmedCreatedSessions = new Set<string>();
+    /**
+     * Exact Electron revision which already contained the locally-created
+     * record. Any missing snapshot at or below this fence predates creation;
+     * a higher missing revision is an authoritative deletion. Undefined is
+     * retained only for compatibility with pre-fence hosts.
+     */
+    protected readonly unconfirmedSessionAuthorityRevisions = new Map<string, number | undefined>();
+    /** Bounded fallback used only with an older host that cannot return the
+     * exact create authority revision. Packaged v0.2.6 never takes this path. */
+    protected readonly legacyUnconfirmedOmissionRevisions = new Map<string, number>();
+    /** Last authoritative snapshot revision which contained each session. */
+    protected readonly sessionAuthorityRevisions = new Map<string, number>();
+    /** Rejects late snapshots/RPC completions after Electron has explicitly
+     * reported that a local session no longer exists. Session ids are UUIDs
+     * and cannot be legitimately reused except by a new session/create result. */
+    protected readonly missingSessionTombstones = new Set<string>();
 
     @postConstruct()
     protected init(): void {
@@ -111,6 +135,11 @@ export class AgentViewModel {
     }
 
     protected accept(event: AgentHostEvent, notify = true): void {
+        if (event.kind === 'session' && this.missingSessionTombstones.has(event.session.appSessionId)) return;
+        if (event.kind !== 'snapshot'
+            && 'sessionId' in event
+            && typeof event.sessionId === 'string'
+            && this.missingSessionTombstones.has(event.sessionId)) return;
         let liveActivityStarted = false;
         if (event.kind === 'snapshot') {
             this.applySnapshot(event.snapshot);
@@ -694,7 +723,9 @@ export class AgentViewModel {
         this.notifyChangeImmediately();
     }
 
-    setSession(session: SessionRecord): void {
+    setSession(session: SessionRecord, locallyCreated = false): void {
+        if (this.missingSessionTombstones.has(session.appSessionId) && !locallyCreated) return;
+        if (locallyCreated) this.markCreatedSessionUnconfirmed(session);
         this.selectedSessionOverride = session.appSessionId;
         this.upsertSession(session);
         this.snapshot.activeSessionId = session.appSessionId;
@@ -705,12 +736,51 @@ export class AgentViewModel {
         this.notifyChangeImmediately();
     }
 
-    updateSession(session: SessionRecord): void {
+    updateSession(session: SessionRecord, locallyCreated = false): void {
+        if (this.missingSessionTombstones.has(session.appSessionId) && !locallyCreated) return;
+        if (locallyCreated) this.markCreatedSessionUnconfirmed(session);
         this.upsertSession(session);
         if (this.selectedSessionOverride === session.appSessionId) {
             this.snapshot.activeSessionId = session.appSessionId;
         }
         this.notifyChangeImmediately();
+    }
+
+    /**
+     * Drops renderer state for a session which Electron has explicitly
+     * rejected as missing. This never deletes durable history: the backend is
+     * already authoritative that the index record no longer exists.
+     */
+    forgetMissingSession(sessionId: string): void {
+        this.tombstoneMissingSession(sessionId);
+        this.notifyChangeImmediately();
+    }
+
+    /** Applies the session-scoped half of an authoritative deletion without
+     * publishing a nested notification while a snapshot is being reduced. */
+    protected tombstoneMissingSession(sessionId: string): void {
+        const wasVisible = this.snapshot.activeSessionId === sessionId
+            || this.selectedSessionOverride === sessionId;
+        this.missingSessionTombstones.add(sessionId);
+        this.snapshot.sessions = this.snapshot.sessions.filter(session => session.appSessionId !== sessionId);
+        if (this.snapshot.sessionContexts?.[sessionId]) {
+            const { [sessionId]: _removed, ...remaining } = this.snapshot.sessionContexts;
+            this.snapshot.sessionContexts = remaining;
+        }
+        this.unconfirmedCreatedSessions.delete(sessionId);
+        this.unconfirmedSessionAuthorityRevisions.delete(sessionId);
+        this.legacyUnconfirmedOmissionRevisions.delete(sessionId);
+        this.sessionAuthorityRevisions.delete(sessionId);
+        this.goalStates.delete(sessionId);
+        this.taskContracts.delete(sessionId);
+        this.cancelledPlanSignatures.delete(sessionId);
+        this.clearPendingPermissions(sessionId);
+        this.clearPendingPlanApprovals(sessionId);
+        if (wasVisible) {
+            this.selectedSessionOverride = null;
+            this.snapshot.activeSessionId = undefined;
+            this.clearTranscript();
+        }
     }
 
     startNewSession(): void {
@@ -740,6 +810,7 @@ export class AgentViewModel {
     }
 
     showSessionHistory(session: SessionRecord, events: AgentHostEvent[]): void {
+        if (this.missingSessionTombstones.has(session.appSessionId)) return;
         this.selectedSessionOverride = session.appSessionId;
         this.upsertSession(session);
         this.snapshot.activeSessionId = session.appSessionId;
@@ -791,38 +862,139 @@ export class AgentViewModel {
             return;
         }
         const previousSnapshot = this.snapshot;
+        const previousSessions = [...previousSnapshot.sessions];
         const previousWorkspaceRoot = this.snapshot.workspaceRoot;
         const previousProviderId = this.snapshot.providerId;
+        if (typeof this.selectedSessionOverride === 'string'
+            && this.unconfirmedCreatedSessions.has(this.selectedSessionOverride)) {
+            const pending = previousSnapshot.sessions.find(
+                session => session.appSessionId === this.selectedSessionOverride
+            );
+            const revisionCannotSupersede = !Number.isSafeInteger(incomingRevision)
+                || (incomingRevision as number) <= (
+                    this.unconfirmedSessionAuthorityRevisions.get(this.selectedSessionOverride)
+                    ?? this.appliedSnapshotRevision
+                );
+            if (pending
+                && pending.workspaceRoot === snapshot.workspaceRoot
+                && pending.providerId !== snapshot.providerId
+                && revisionCannotSupersede) {
+                return;
+            }
+        }
         // Electron events and RPC results travel over separate asynchronous
-        // paths. Immediately after setSession(created), an older runtime
-        // snapshot can arrive without that just-created record. There is no
-        // session-delete API, so preserve the locally selected record on the
-        // same workspace until an authoritative newer session/snapshot
-        // includes it. Otherwise the composer falls back to “new session” and
-        // silently abandons the prompt before sendPrompt is called.
-        let sessions = snapshot.sessions;
+        // paths. Immediately after session/new, a snapshot produced before
+        // that transaction can arrive without the new record. Preserve only
+        // a locally-created, not-yet-confirmed record. Once a snapshot has
+        // advertised it, a later revision which omits it is an authoritative
+        // deletion and must never be converted into a ghost conversation.
+        // Never retain the transport object's mutable array. Local upserts
+        // must not retroactively change a previously delivered snapshot and
+        // make a later race appear authoritative.
+        const advertisedSessionIds = new Set(snapshot.sessions
+            .filter(session => !this.missingSessionTombstones.has(session.appSessionId))
+            .map(session => session.appSessionId));
+        if (Number.isSafeInteger(incomingRevision)) {
+            for (const [sessionId, authorityRevision] of [...this.sessionAuthorityRevisions]) {
+                if (!advertisedSessionIds.has(sessionId)
+                    && (incomingRevision as number) > authorityRevision) {
+                    this.tombstoneMissingSession(sessionId);
+                }
+            }
+        }
+        const authoritativeSessions = snapshot.sessions.filter(
+            session => !this.missingSessionTombstones.has(session.appSessionId)
+        );
+        let sessions = [...authoritativeSessions];
+        for (const session of authoritativeSessions) {
+            this.unconfirmedCreatedSessions.delete(session.appSessionId);
+            this.unconfirmedSessionAuthorityRevisions.delete(session.appSessionId);
+            this.legacyUnconfirmedOmissionRevisions.delete(session.appSessionId);
+            if (Number.isSafeInteger(incomingRevision)) {
+                const previous = this.sessionAuthorityRevisions.get(session.appSessionId) ?? -1;
+                this.sessionAuthorityRevisions.set(
+                    session.appSessionId,
+                    Math.max(previous, incomingRevision as number)
+                );
+            }
+        }
+        for (const sessionId of [...this.unconfirmedCreatedSessions]) {
+            const local = previousSessions.find(session => session.appSessionId === sessionId);
+            if (!local
+                || local.workspaceRoot !== snapshot.workspaceRoot
+                || local.providerId !== snapshot.providerId) {
+                this.unconfirmedCreatedSessions.delete(sessionId);
+                this.unconfirmedSessionAuthorityRevisions.delete(sessionId);
+                this.legacyUnconfirmedOmissionRevisions.delete(sessionId);
+                continue;
+            }
+            if (!sessions.some(session => session.appSessionId === sessionId)) {
+                if (Number.isSafeInteger(incomingRevision)) {
+                    const authorityRevision = this.unconfirmedSessionAuthorityRevisions.get(sessionId);
+                    if (Number.isSafeInteger(authorityRevision)
+                        && (incomingRevision as number) > (authorityRevision as number)) {
+                        this.tombstoneMissingSession(sessionId);
+                        continue;
+                    }
+                    if (!Number.isSafeInteger(authorityRevision)) {
+                        const firstLegacyOmission = this.legacyUnconfirmedOmissionRevisions.get(sessionId);
+                        if (firstLegacyOmission === undefined) {
+                            this.legacyUnconfirmedOmissionRevisions.set(sessionId, incomingRevision as number);
+                        } else if ((incomingRevision as number) > firstLegacyOmission) {
+                            this.tombstoneMissingSession(sessionId);
+                            continue;
+                        }
+                    }
+                }
+                sessions = [...sessions, local];
+            }
+        }
+        if (Number.isSafeInteger(incomingRevision)) {
+            for (const local of previousSessions) {
+                const lastAuthorityRevision = this.sessionAuthorityRevisions.get(local.appSessionId);
+                if (lastAuthorityRevision === undefined
+                    || (incomingRevision as number) > lastAuthorityRevision
+                    || this.missingSessionTombstones.has(local.appSessionId)
+                    || sessions.some(session => session.appSessionId === local.appSessionId)) {
+                    continue;
+                }
+                sessions = [...sessions, local];
+            }
+        }
         if (typeof this.selectedSessionOverride === 'string'
             && !sessions.some(session => session.appSessionId === this.selectedSessionOverride)) {
-            const locallySelected = previousSnapshot.sessions.find(
+            const locallySelected = previousSessions.find(
                 session => session.appSessionId === this.selectedSessionOverride
             );
             if (locallySelected && locallySelected.workspaceRoot === snapshot.workspaceRoot) {
-                // A locally created B session cannot legitimately disappear
-                // inside a late A snapshot. This also protects compatibility
-                // clients that predate the snapshot revision field.
-                if (locallySelected.providerId !== snapshot.providerId) return;
-                sessions = [locallySelected, ...sessions];
+                const unconfirmed = this.unconfirmedCreatedSessions.has(locallySelected.appSessionId);
+                const lastAuthorityRevision = this.sessionAuthorityRevisions.get(locallySelected.appSessionId);
+                const sameOrOlderAuthority = Number.isSafeInteger(incomingRevision)
+                    && lastAuthorityRevision !== undefined
+                    && (incomingRevision as number) <= lastAuthorityRevision;
+                if (sameOrOlderAuthority && locallySelected.providerId !== snapshot.providerId) {
+                    return;
+                }
+                if ((unconfirmed || sameOrOlderAuthority)
+                    && locallySelected.providerId === snapshot.providerId) {
+                    sessions = [locallySelected, ...sessions];
+                }
             }
         }
         if (Number.isSafeInteger(incomingRevision)) {
             this.appliedSnapshotRevision = Math.max(this.appliedSnapshotRevision, incomingRevision as number);
         }
+        const sessionContexts = Object.fromEntries(Object.entries(snapshot.sessionContexts ?? {})
+            .filter(([sessionId]) => !this.missingSessionTombstones.has(sessionId)));
         this.snapshot = {
             ...snapshot,
             sessions,
+            ...(snapshot.activeSessionId && this.missingSessionTombstones.has(snapshot.activeSessionId)
+                ? { activeSessionId: undefined }
+                : {}),
             sessionContexts: {
                 ...(this.snapshot.sessionContexts ?? {}),
-                ...(snapshot.sessionContexts ?? {})
+                ...sessionContexts
             }
         };
         if (this.selectedSessionOverride === null) {
@@ -838,11 +1010,12 @@ export class AgentViewModel {
                 // history from another Provider remains visible while Electron
                 // rebinds it to the application-wide Provider; renderer state
                 // can never switch credentials or authorize the old ACP id.
+                const missingSelection = this.selectedSessionOverride;
                 this.selectedSessionOverride = null;
                 this.snapshot.activeSessionId = undefined;
                 this.clearTranscript();
-                this.pendingPermissions.clear();
-                this.pendingPlanApprovals.clear();
+                this.clearPendingPermissions(missingSelection);
+                this.clearPendingPlanApprovals(missingSelection);
             }
         } else {
             const contextChanged = (previousWorkspaceRoot !== undefined && previousWorkspaceRoot !== snapshot.workspaceRoot)
@@ -870,7 +1043,24 @@ export class AgentViewModel {
         }
     }
 
+    protected markCreatedSessionUnconfirmed(session: SessionRecord): void {
+        // A snapshot can win the race and be applied before session/new's RPC
+        // result. In that case the record is already confirmed and requires no
+        // temporary renderer protection.
+        const sessionId = session.appSessionId;
+        this.missingSessionTombstones.delete(sessionId);
+        this.legacyUnconfirmedOmissionRevisions.delete(sessionId);
+        if (!this.sessionAuthorityRevisions.has(sessionId)) {
+            this.unconfirmedCreatedSessions.add(sessionId);
+            this.unconfirmedSessionAuthorityRevisions.set(
+                sessionId,
+                Number.isSafeInteger(session.authorityRevision) ? session.authorityRevision : undefined
+            );
+        }
+    }
+
     protected upsertSession(session: SessionRecord): void {
+        if (this.missingSessionTombstones.has(session.appSessionId)) return;
         const existing = this.snapshot.sessions.findIndex(candidate => candidate.appSessionId === session.appSessionId);
         if (existing >= 0) {
             this.snapshot.sessions.splice(existing, 1, session);

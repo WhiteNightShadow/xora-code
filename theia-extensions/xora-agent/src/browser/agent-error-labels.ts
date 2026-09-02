@@ -4,11 +4,47 @@
  * log; renderer notifications should explain the recovery action instead of
  * exposing lifecycle vocabulary such as Provider epochs or runtime restarts.
  */
+export function isTypedSessionNotFoundError(error: unknown): boolean {
+    const candidate = error as { code?: unknown; message?: unknown } | undefined;
+    if (candidate?.code === 'SESSION_NOT_FOUND') return true;
+    const message = error instanceof Error
+        ? error.message
+        : typeof candidate?.message === 'string'
+            ? candidate.message
+            : String(error ?? '');
+    return /^SESSION_NOT_FOUND(?::|\b)/i.test(message.trim());
+}
+
+export function isLegacyLocalSessionNotFoundError(error: unknown): boolean {
+    const candidate = error as { message?: unknown } | undefined;
+    const message = error instanceof Error
+        ? error.message
+        : typeof candidate?.message === 'string'
+            ? candidate.message
+            : String(error ?? '');
+    return /^Unknown Xora Code session\.?$/i.test(message.trim());
+}
+
+export function isSessionNotFoundError(error: unknown): boolean {
+    if (isTypedSessionNotFoundError(error)) return true;
+    const candidate = error as { message?: unknown } | undefined;
+    const message = error instanceof Error
+        ? error.message
+        : typeof candidate?.message === 'string'
+            ? candidate.message
+            : String(error ?? '');
+    return isLegacyLocalSessionNotFoundError(error)
+        || /^Unknown session(?::[^\r\n]*)?\.?$/i.test(message.trim());
+}
+
 export function friendlyAgentErrorMessage(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error ?? '');
     const normalized = message.trim();
     if (!normalized) return '操作未完成，请稍后重试。';
 
+    if (isSessionNotFoundError(error)) {
+        return '原会话已失效。为避免重复执行，任务未自动重发；内容已保留，可在新会话中重试。';
+    }
     if (/Restart the runtime for the selected workspace and Provider first|active runtime has no coherent Provider epoch|Provider changed after (?:this runtime|the session) (?:was )?(?:started|created)|active runtime does not match this session/i.test(normalized)) {
         return '模型服务刚刚发生变化，Xora Code 正在重新连接，请稍后重新发送。';
     }

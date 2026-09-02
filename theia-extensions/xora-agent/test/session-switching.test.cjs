@@ -267,11 +267,12 @@ test('file navigation resolves exact multi-root paths, nested suffix paths and f
         'relative traversal must never escape a workspace root');
 });
 
-test('a stale runtime snapshot cannot clear a locally created session before its first prompt', () => {
+test('only an unconfirmed local create survives missing snapshots and a newer post-confirmation deletion clears it', () => {
     const model = new AgentViewModel();
     const created = session('created', 'idle', {
         providerId: 'xora-relay',
-        model: 'xora-relay'
+        model: 'xora-relay',
+        authorityRevision: 3
     });
     const initial = {
         ...runtimeSnapshot('/fixture', [], undefined),
@@ -280,8 +281,8 @@ test('a stale runtime snapshot cannot clear a locally created session before its
         models: [{ id: 'xora-relay', name: 'Relay' }],
         selectedModel: 'xora-relay'
     };
-    model.accept({ kind: 'snapshot', snapshot: initial });
-    model.setSession(created);
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, sessions: [] } });
+    model.setSession(created, true);
 
     // Event and RPC responses travel independently. An older Provider A
     // event must not overwrite the newer Provider B RPC result.
@@ -297,15 +298,15 @@ test('a stale runtime snapshot cannot clear a locally created session before its
 
     // This snapshot was emitted before session/new completed, but can arrive
     // after its RPC result and the renderer's setSession(created).
-    model.accept({ kind: 'snapshot', snapshot: initial });
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, sessions: [] } });
 
     assert.equal(model.snapshot.activeSessionId, created.appSessionId);
     assert.equal(model.snapshot.sessions[0].appSessionId, created.appSessionId);
     model.accept({ kind: 'text-delta', sessionId: created.appSessionId, role: 'user', text: 'hello' });
     assert.deepEqual(model.transcript.map(entry => entry.text), ['hello']);
 
-    // Compatibility snapshots without a revision still cannot erase a local
-    // session by crossing Provider identity.
+    // A revision-less compatibility event from the prior Provider cannot
+    // cross the locally-created Provider boundary.
     model.accept({
         kind: 'snapshot',
         snapshot: { ...runtimeSnapshot('/fixture', [], undefined), providerId: 'grok-subscription' }
@@ -313,12 +314,94 @@ test('a stale runtime snapshot cannot clear a locally created session before its
     assert.equal(model.snapshot.providerId, 'xora-relay');
     assert.equal(model.snapshot.activeSessionId, created.appSessionId);
 
+    // The first authoritative snapshot containing the id ends the temporary
+    // session/new race protection.
     model.accept({
         kind: 'snapshot',
-        snapshot: { ...initial, revision: 3, workspaceRoot: '/another-project', sessions: [] }
+        snapshot: { ...initial, revision: 3, sessions: [created], activeSessionId: created.appSessionId }
     });
-    assert.equal(model.snapshot.activeSessionId, undefined, 'a real workspace boundary still clears the local selection');
+    assert.equal(model.snapshot.activeSessionId, created.appSessionId);
+
+    // Equal-revision delivery can still be out of order and must not erase
+    // the confirmed selection. A newer missing snapshot is authoritative.
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 3, sessions: [] } });
+    assert.equal(model.snapshot.activeSessionId, created.appSessionId);
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 4, sessions: [] } });
+    assert.equal(model.snapshot.activeSessionId, undefined);
     assert.equal(model.transcript.length, 0);
+});
+
+test('a normal history selection is never granted unconfirmed-create protection', () => {
+    const model = new AgentViewModel();
+    const history = session('history', 'completed');
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...runtimeSnapshot('/fixture', [history], history.appSessionId), revision: 5 }
+    });
+    model.setSession(history);
+    model.loadHistory([{ kind: 'text-delta', sessionId: history.appSessionId, role: 'assistant', text: 'old' }]);
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...runtimeSnapshot('/fixture', [], undefined), revision: 6 }
+    });
+
+    assert.equal(model.snapshot.activeSessionId, undefined);
+    assert.equal(model.snapshot.sessions.some(item => item.appSessionId === history.appSessionId), false);
+    assert.equal(model.transcript.length, 0);
+});
+
+test('a create authority fence preserves any number of older snapshots and rejects a newer omission', () => {
+    const model = new AgentViewModel();
+    const created = session('created', 'idle', { authorityRevision: 7 });
+    const initial = { ...runtimeSnapshot('/fixture', [], undefined), revision: 2 };
+    model.accept({ kind: 'snapshot', snapshot: initial });
+    model.setSession(created, true);
+
+    // Multiple snapshots can be produced while session/new awaits ACP and
+    // cross its RPC result. Their exact revision fence, rather than an
+    // omission count, proves that all of them predate the created record.
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 4 } });
+    assert.equal(model.snapshot.activeSessionId, created.appSessionId);
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 6 } });
+    assert.equal(model.snapshot.activeSessionId, created.appSessionId);
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...initial, revision: 5, sessions: [created], activeSessionId: created.appSessionId }
+    });
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 7 } });
+    assert.equal(model.snapshot.activeSessionId, created.appSessionId);
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 8 } });
+
+    assert.equal(model.snapshot.activeSessionId, undefined);
+    assert.equal(model.snapshot.sessions.some(item => item.appSessionId === created.appSessionId), false);
+    model.accept({ kind: 'session', session: created });
+    assert.equal(model.snapshot.sessions.some(item => item.appSessionId === created.appSessionId), false);
+});
+
+test('equal-revision snapshots preserve global history across workspace and Provider boundaries', () => {
+    const model = new AgentViewModel();
+    const active = session('active', 'idle');
+    const background = session('background', 'completed', {
+        workspaceRoot: '/another-project',
+        providerId: 'xora-relay'
+    });
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...runtimeSnapshot('/fixture', [active, background], active.appSessionId), revision: 8 }
+    });
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...runtimeSnapshot('/fixture', [active], active.appSessionId), revision: 8 }
+    });
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['active', 'background']);
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...runtimeSnapshot('/fixture', [active], active.appSessionId), revision: 9 }
+    });
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['active']);
 });
 
 test('late events from an inactive session cannot contaminate the visible transcript', () => {
@@ -2482,6 +2565,278 @@ test('the first send reuses a ready prewarm and creates a session without redund
     assert.equal(snapshot.activeSessionId, 'created');
     assert.equal(snapshot.sessions.some(candidate => candidate.appSessionId === 'prior'), true);
     assert.equal(widget.sendPreparationPreview, undefined);
+});
+
+test('a typed missing session before ACP admission is rebound once to a fresh conversation', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const ghost = session('ghost', 'idle', { workspaceRoot: '/fixture' });
+    const replacement = session('replacement', 'idle', { workspaceRoot: '/fixture' });
+    const snapshot = runtimeSnapshot('/fixture', [ghost], ghost.appSessionId);
+    const prompts = [];
+    let creates = 0;
+
+    widget.prompt = '保留并发送这条任务';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.openSessionTabs = [ghost.appSessionId];
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.followTranscript = () => undefined;
+    widget.model = {
+        snapshot,
+        forgetMissingSession: id => {
+            snapshot.sessions = snapshot.sessions.filter(candidate => candidate.appSessionId !== id);
+            snapshot.activeSessionId = undefined;
+        },
+        startNewSession: () => { snapshot.activeSessionId = undefined; },
+        setSession: selected => {
+            snapshot.sessions.unshift(selected);
+            snapshot.activeSessionId = selected.appSessionId;
+        },
+        updateSession: selected => snapshot.sessions.unshift(selected)
+    };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.service = {
+        createSession: async () => {
+            creates += 1;
+            return replacement;
+        },
+        sendPrompt: async request => {
+            prompts.push(request.sessionId);
+            if (request.sessionId === ghost.appSessionId) {
+                const error = new Error('SESSION_NOT_FOUND: Unknown Xora Code session.');
+                error.code = 'SESSION_NOT_FOUND';
+                throw error;
+            }
+        }
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.update = () => undefined;
+    widget.hydratedSessionKeyState().add(widget.agentContextKey(
+        snapshot.workspaceRoot,
+        snapshot.providerId,
+        ghost.appSessionId
+    ));
+
+    await widget.send();
+
+    assert.deepEqual(prompts, [ghost.appSessionId, replacement.appSessionId]);
+    assert.equal(creates, 1);
+    assert.equal(snapshot.activeSessionId, replacement.appSessionId);
+    assert.equal(snapshot.sessions.some(candidate => candidate.appSessionId === ghost.appSessionId), false);
+    assert.equal(widget.openSessionTabs.includes(ghost.appSessionId), false);
+    assert.equal(widget.currentPromptLane(false).retryable, undefined);
+});
+
+test('a missing-session error after the user event never replays an admitted task', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const active = session('active', 'idle', { workspaceRoot: '/fixture' });
+    const snapshot = runtimeSnapshot('/fixture', [active], active.appSessionId);
+    const prompts = [];
+    let creates = 0;
+
+    widget.prompt = '只能发送一次';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.followTranscript = () => undefined;
+    widget.model = { snapshot };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.service = {
+        createSession: async () => {
+            creates += 1;
+            return session('must-not-create');
+        },
+        sendPrompt: async request => {
+            prompts.push(request.sessionId);
+            widget.acceptAgentEvent({
+                kind: 'text-delta',
+                sessionId: request.sessionId,
+                role: 'user',
+                text: request.text
+            });
+            const error = new Error('SESSION_NOT_FOUND: Unknown Xora Code session.');
+            error.code = 'SESSION_NOT_FOUND';
+            throw error;
+        }
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.showInlineNotice = () => undefined;
+    widget.update = () => undefined;
+    widget.hydratedSessionKeyState().add(widget.agentContextKey(
+        snapshot.workspaceRoot,
+        snapshot.providerId,
+        active.appSessionId
+    ));
+
+    await widget.send();
+
+    assert.deepEqual(prompts, [active.appSessionId]);
+    assert.equal(creates, 0);
+    assert.equal(widget.currentPromptLane(false).retryable.text, '只能发送一次');
+});
+
+test('an untyped legacy unknown-session rejection cannot replay after prompt RPC starts', async () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const active = session('active');
+    const snapshot = runtimeSnapshot('/fixture', [active], active.appSessionId);
+    let creates = 0;
+    let prompts = 0;
+    widget.prompt = '不得重复';
+    widget.draftImages = [];
+    widget.imageReadsInFlight = 0;
+    widget.imageReadGeneration = 0;
+    widget.sessionLoading = false;
+    widget.agentContextGeneration = 0;
+    widget.runtimePrewarmRequested = false;
+    widget.cancelRequested = new Set();
+    widget.roots = ['/fixture'];
+    widget.providers = [{ id: snapshot.providerId, name: 'Grok 订阅', kind: 'grok-subscription' }];
+    widget.textarea = null;
+    widget.followTranscript = () => undefined;
+    widget.model = { snapshot };
+    widget.commandService = { executeCommand: async () => undefined };
+    widget.workspaceRoot = async () => '/fixture';
+    widget.service = {
+        createSession: async () => {
+            creates += 1;
+            return session('must-not-create');
+        },
+        sendPrompt: async () => {
+            prompts += 1;
+            // Deliberately reject before the event channel publishes the user
+            // message, reproducing the dangerous cross-channel ordering.
+            throw new Error('Unknown session: remote-acp-id');
+        }
+    };
+    widget.messages = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    widget.showInlineNotice = () => undefined;
+    widget.update = () => undefined;
+    widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', snapshot.providerId, active.appSessionId));
+
+    await widget.send();
+
+    assert.equal(prompts, 1);
+    assert.equal(creates, 0);
+    assert.equal(widget.currentPromptLane(false).retryable.text, '不得重复');
+});
+
+test('a remote ACP unknown-session error before prompt admission never tombstones local history', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const active = session('active');
+    const snapshot = runtimeSnapshot('/fixture', [active], active.appSessionId);
+    let forgotten = 0;
+    widget.model = {
+        snapshot,
+        forgetMissingSession: () => { forgotten += 1; }
+    };
+    widget.roots = ['/fixture'];
+    const submission = {
+        id: 'remote-unknown',
+        text: '保留历史',
+        contextKey: 'active',
+        generation: 0,
+        workspaceRoot: '/fixture',
+        providerId: snapshot.providerId,
+        taskMode: 'standard',
+        executionMode: 'standard',
+        acceptedAt: Date.now(),
+        sourceSessionId: active.appSessionId,
+        sessionId: active.appSessionId,
+        attachments: [],
+        state: 'preparing',
+        promptRequestStarted: false
+    };
+    const lane = {
+        key: widget.promptLaneKey('/fixture', snapshot.providerId, active.appSessionId),
+        workspaceRoot: '/fixture',
+        providerId: snapshot.providerId,
+        sourceSessionId: active.appSessionId,
+        sessionId: active.appSessionId,
+        queue: [],
+        active: submission
+    };
+
+    assert.equal(widget.recoverMissingSessionBeforeAdmission(
+        lane,
+        submission,
+        new Error('Unknown session: remote-acp-id')
+    ), false);
+    assert.equal(forgotten, 0);
+    assert.equal(snapshot.sessions.some(candidate => candidate.appSessionId === active.appSessionId), true);
+});
+
+test('recovering a background ghost never steals the visible new-conversation draft lane', () => {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const ghost = session('ghost');
+    const snapshot = runtimeSnapshot('/fixture', [ghost], undefined);
+    widget.model = {
+        snapshot,
+        forgetMissingSession: id => {
+            snapshot.sessions = snapshot.sessions.filter(candidate => candidate.appSessionId !== id);
+        }
+    };
+    widget.roots = ['/fixture'];
+    widget.newSessionLaneSequence = 4;
+    widget.activeComposerLaneKey = widget.promptLaneKey('/fixture', snapshot.providerId, undefined);
+    widget.observedAgentContextKey = widget.activeComposerLaneKey;
+    const visibleKey = widget.activeComposerLaneKey;
+    const submission = {
+        id: 'background-prompt',
+        text: '后台任务',
+        contextKey: 'old',
+        generation: 0,
+        workspaceRoot: '/fixture',
+        providerId: snapshot.providerId,
+        taskMode: 'standard',
+        executionMode: 'standard',
+        acceptedAt: Date.now(),
+        sourceSessionId: ghost.appSessionId,
+        sessionId: ghost.appSessionId,
+        attachments: [],
+        state: 'preparing'
+    };
+    const lane = {
+        key: widget.promptLaneKey('/fixture', snapshot.providerId, ghost.appSessionId),
+        workspaceRoot: '/fixture',
+        providerId: snapshot.providerId,
+        sourceSessionId: ghost.appSessionId,
+        sessionId: ghost.appSessionId,
+        queue: [],
+        active: submission
+    };
+    widget.promptLaneState().set(lane.key, lane);
+
+    const recovered = widget.recoverMissingSessionBeforeAdmission(
+        lane,
+        submission,
+        new Error('SESSION_NOT_FOUND: Unknown Xora Code session.')
+    );
+
+    assert.equal(recovered, true);
+    assert.equal(widget.activeComposerLaneKey, visibleKey);
+    assert.equal(widget.newSessionLaneSequence, 4);
+    assert.match(lane.key, /recovery-background-prompt$/);
 });
 
 test('composer text and images are restored independently for each conversation', () => {

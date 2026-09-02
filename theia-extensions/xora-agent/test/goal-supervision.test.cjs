@@ -1109,6 +1109,63 @@ test('a Plan approval re-parked by session/load is actionable before hydration a
     assert.equal(harness.history.filter(event => event.kind === 'task-contract').at(-1).lifecycle, 'verified');
 });
 
+test('session/load performs zero ACP mutation while a foreign durable prompt claim is running', async () => {
+    const harness = restoreHarness({ record: { status: 'running' } });
+    harness.host.promptClaimOwnership = () => 'foreign';
+
+    await assert.rejects(
+        harness.host.loadSessionUncoalesced('app-a', () => undefined, { mcpServers: [] }),
+        /still running in another Xora Code process/
+    );
+    assert.deepEqual(harness.requests, [], 'foreign ownership must be checked before session/load or set_model');
+    assert.equal(harness.record().status, 'running');
+});
+
+test('a restored Goal claims before ACP and releases ownership when runtime authority changes', async () => {
+    const harness = restoreHarness({ record: { status: 'idle' } });
+    const timeline = [];
+    let liveToken;
+    harness.host.sessions.claimPrompt = (id, validate) => {
+        assert.equal(id, 'app-a');
+        validate(harness.record());
+        liveToken = 'restored-goal-token';
+        Object.assign(harness.record(), { status: 'running' });
+        timeline.push('claim');
+        return { record: harness.record(), token: liveToken };
+    };
+    harness.host.sessions.finishPrompt = (id, token, status) => {
+        assert.equal(id, 'app-a');
+        assert.equal(token, liveToken);
+        Object.assign(harness.record(), { status });
+        liveToken = undefined;
+        timeline.push(`finish:${status}`);
+        return harness.record();
+    };
+    const startRequest = harness.host.acp.startRequest.bind(harness.host.acp);
+    harness.host.acp.startRequest = (...args) => {
+        timeline.push('acp');
+        return startRequest(...args);
+    };
+    harness.host.loadedSessionIds.add('app-a');
+    const contract = approvalContract();
+    harness.host.pendingApprovedPlanState().set('app-a', contract);
+    harness.host.sessionTaskContractState().set('app-a', taskContract({
+        lifecycle: 'approved',
+        objective: contract.objective
+    }));
+
+    const running = harness.host.startRestoredApprovedPlanGoal('app-a');
+    assert.equal(running.status, 'running');
+    assert.deepEqual(timeline.slice(0, 2), ['claim', 'acp']);
+    harness.host.runtimeGeneration += 1;
+    harness.goalHandles[0].resolve({ stopReason: 'end_turn' });
+    await waitFor(() => !harness.host.activePrompts.has('app-a'), 'authority change should settle Goal observer');
+    assert.equal(liveToken, undefined);
+    assert.equal(harness.record().status, 'failed');
+    assert.equal(harness.host.promptClaimTokenState().has('app-a'), false);
+    assert.equal(timeline.filter(item => item.startsWith('finish:')).length, 1);
+});
+
 test('cancelled, failed and stale re-parked approvals never launch Goal or poison the next ordinary prompt', async t => {
     await t.test('cancelled by the user', async () => {
         let reverseOutcome;

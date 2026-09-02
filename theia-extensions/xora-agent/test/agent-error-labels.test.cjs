@@ -3,7 +3,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-const { friendlyAgentErrorMessage } = require('../lib/browser/agent-error-labels');
+const {
+    friendlyAgentErrorMessage,
+    isLegacyLocalSessionNotFoundError,
+    isSessionNotFoundError,
+    isTypedSessionNotFoundError
+} = require('../lib/browser/agent-error-labels');
 const { AgentViewModel } = require('../lib/browser/agent-view-model');
 
 test('known Provider lifecycle errors become actionable Chinese guidance', () => {
@@ -39,6 +44,24 @@ test('known Provider lifecycle errors become actionable Chinese guidance', () =>
 test('unknown errors keep their useful diagnostic text', () => {
     assert.equal(friendlyAgentErrorMessage('fixture-specific failure'), 'fixture-specific failure');
     assert.equal(friendlyAgentErrorMessage(''), '操作未完成，请稍后重试。');
+});
+
+test('missing-session detection accepts the typed contract and exact legacy messages only', () => {
+    const typed = new Error('session lookup failed');
+    typed.code = 'SESSION_NOT_FOUND';
+    assert.equal(isSessionNotFoundError(typed), true);
+    assert.equal(isSessionNotFoundError(new Error('SESSION_NOT_FOUND: Unknown Xora Code session.')), true);
+    assert.equal(isSessionNotFoundError(new Error('Unknown Xora Code session.')), true);
+    assert.equal(isSessionNotFoundError(new Error('Unknown session: fixture')), true);
+    assert.equal(isSessionNotFoundError(new Error('ACP returned an unknown session update')), false);
+    assert.equal(isSessionNotFoundError(new Error('The selected session cannot accept prompts.')), false);
+    assert.equal(isTypedSessionNotFoundError(typed), true);
+    assert.equal(isTypedSessionNotFoundError(new Error('SESSION_NOT_FOUND: serialized')), true);
+    assert.equal(isTypedSessionNotFoundError(new Error('Unknown Xora Code session.')), false);
+    assert.equal(isTypedSessionNotFoundError(new Error('Unknown session: ACP id')), false);
+    assert.equal(isLegacyLocalSessionNotFoundError(new Error('Unknown Xora Code session.')), true);
+    assert.equal(isLegacyLocalSessionNotFoundError(new Error('Unknown session: ACP id')), false);
+    assert.match(friendlyAgentErrorMessage(typed), /避免重复执行.*内容已保留/);
 });
 
 test('backend error events never expose known English lifecycle messages in chat', () => {

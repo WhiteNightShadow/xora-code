@@ -82,9 +82,10 @@ function baseHost() {
     host.acceptModelState = () => undefined;
     host.acceptPromptContextFallback = () => undefined;
     host.emit = () => undefined;
-    host.emitSnapshot = () => undefined;
     host.emitError = (_code, error) => { throw error; };
     host.notifyProviderDefaultsChanged = () => undefined;
+    host.snapshotRevision = 0;
+    host.emitSnapshot = () => ++host.snapshotRevision;
     return host;
 }
 
@@ -170,6 +171,8 @@ test('session/new finishing after M1 -> M2 reconciles to M2 and never activates 
     });
     assert.equal(created.model, 'model-2');
     assert.equal(created.status, 'idle');
+    assert.equal(created.authorityRevision, 1,
+        'session/create returns the exact snapshot fence which already contains the record');
     assert.equal(host.selectedModel, 'model-2');
     assert.equal(host.activeSessionId, created.appSessionId);
     assert.equal(records.get(created.appSessionId).model, 'model-2');

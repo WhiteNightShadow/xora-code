@@ -195,6 +195,13 @@ export interface AgentSessionContext {
 
 export interface SessionRecord {
     appSessionId: string;
+    /**
+     * Renderer ordering fence returned only by session/create. It is the
+     * Electron snapshot revision which already contains this record, allowing
+     * older event-channel snapshots to be ignored without guessing how many
+     * were in flight. Repository snapshots do not persist this field.
+     */
+    authorityRevision?: number;
     acpSessionId?: string;
     title: string;
     workspaceRoot: string;

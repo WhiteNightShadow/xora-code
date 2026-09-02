@@ -351,6 +351,154 @@ test('background permission requests survive session switches, new drafts and hi
     );
 });
 
+test('an explicitly missing session clears its active selection, transcript and session-scoped state', () => {
+    const model = new AgentViewModel();
+    const missing = session('missing', 'idle');
+    const remaining = session('remaining', 'idle');
+    model.snapshot.sessions = [missing, remaining];
+    model.snapshot.sessionContexts = {
+        missing: { totalTokens: 10, compactionStatus: 'idle', compactionCount: 0 },
+        remaining: { totalTokens: 20, compactionStatus: 'idle', compactionCount: 0 }
+    };
+    model.setSession(missing);
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: 'missing', role: 'assistant', text: 'ghost history' }
+    ]);
+    model.accept(permission('missing-permission', 'missing'));
+    model.accept(permission('remaining-permission', 'remaining'));
+
+    model.forgetMissingSession('missing');
+
+    assert.equal(model.snapshot.activeSessionId, undefined);
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['remaining']);
+    assert.equal(model.snapshot.sessionContexts.missing, undefined);
+    assert.equal(model.snapshot.sessionContexts.remaining.totalTokens, 20);
+    assert.equal(model.transcript.length, 0);
+    assert.deepEqual([...model.pendingPermissions.keys()], ['remaining-permission']);
+});
+
+test('a missing-session tombstone rejects delayed snapshots and session events', () => {
+    const model = new AgentViewModel();
+    const ghost = session('ghost', 'idle');
+    const authoritative = {
+        ...snapshot('ready'),
+        revision: 5,
+        workspaceRoot: '/fixture',
+        workspaceAttached: true,
+        sessions: [ghost],
+        activeSessionId: ghost.appSessionId
+    };
+    model.accept({ kind: 'snapshot', snapshot: authoritative });
+    model.setSession(ghost);
+    model.forgetMissingSession(ghost.appSessionId);
+
+    model.accept({ kind: 'snapshot', snapshot: { ...authoritative, sessions: [ghost] } });
+    assert.equal(model.snapshot.activeSessionId, undefined);
+    assert.deepEqual(model.snapshot.sessions, []);
+
+    model.accept({ kind: 'session', session: { ...ghost, status: 'completed' } });
+    assert.deepEqual(model.snapshot.sessions, []);
+
+    model.accept({
+        kind: 'context-usage',
+        sessionId: ghost.appSessionId,
+        context: { totalTokens: 99, compactionStatus: 'idle', compactionCount: 0 }
+    });
+    model.accept(permission('late-permission', ghost.appSessionId));
+    assert.equal(model.snapshot.sessionContexts?.[ghost.appSessionId], undefined);
+    assert.equal(model.pendingPermissions.has('late-permission'), false);
+});
+
+test('a newer authoritative omission tombstones all state for only the deleted session', () => {
+    const model = new AgentViewModel();
+    const removed = session('removed', 'running');
+    const background = session('background', 'running');
+    const initial = {
+        ...snapshot('ready'),
+        revision: 10,
+        workspaceRoot: '/fixture',
+        workspaceAttached: true,
+        sessions: [removed, background],
+        activeSessionId: removed.appSessionId,
+        sessionContexts: {
+            removed: { totalTokens: 10, compactionStatus: 'idle', compactionCount: 0 },
+            background: { totalTokens: 20, compactionStatus: 'idle', compactionCount: 0 }
+        }
+    };
+    model.accept({ kind: 'snapshot', snapshot: initial });
+    model.setSession(removed);
+    model.accept(permission('permission-removed', removed.appSessionId));
+    model.accept(permission('permission-background', background.appSessionId));
+    model.accept({
+        kind: 'plan-approval-request',
+        sessionId: removed.appSessionId,
+        requestId: 'plan-removed',
+        toolCallId: 'tool-removed',
+        suggestedContract: { objective: 'remove', planEntries: [], acceptanceCriteria: [] },
+        requestedAt: '2026-01-01T00:00:00.000Z'
+    });
+    model.accept({
+        kind: 'plan-approval-request',
+        sessionId: background.appSessionId,
+        requestId: 'plan-background',
+        toolCallId: 'tool-background',
+        suggestedContract: { objective: 'background', planEntries: [], acceptanceCriteria: [] },
+        requestedAt: '2026-01-01T00:00:00.000Z'
+    });
+    model.accept({
+        kind: 'goal-state',
+        sessionId: removed.appSessionId,
+        goalId: 'goal-removed',
+        status: 'active',
+        phase: 'executing',
+        agentTurnStatus: 'running',
+        verificationStatus: 'working',
+        tokensUsed: 1,
+        elapsedMs: 1,
+        workerRounds: 1,
+        verificationRounds: 0,
+        planning: false,
+        verifying: false
+    });
+    model.accept({
+        kind: 'task-contract',
+        sessionId: removed.appSessionId,
+        objective: 'remove',
+        planEntries: [],
+        acceptanceCriteria: [],
+        approvedAt: '2026-01-01T00:00:00.000Z',
+        lifecycle: 'approved',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+    });
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: {
+            ...initial,
+            revision: 11,
+            sessions: [background],
+            activeSessionId: background.appSessionId,
+            sessionContexts: {
+                background: { totalTokens: 21, compactionStatus: 'idle', compactionCount: 0 }
+            }
+        }
+    });
+
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['background']);
+    assert.equal(model.snapshot.activeSessionId, undefined);
+    assert.equal(model.snapshot.sessionContexts.removed, undefined);
+    assert.equal(model.snapshot.sessionContexts.background.totalTokens, 21);
+    assert.equal(model.goalState(removed.appSessionId), undefined);
+    assert.equal(model.taskContract(removed.appSessionId), undefined);
+    assert.deepEqual([...model.pendingPermissions.keys()], ['permission-background']);
+    assert.deepEqual([...model.pendingPlanApprovals.keys()], ['plan-background']);
+
+    model.accept({ kind: 'session', session: { ...removed, status: 'completed' } });
+    model.accept(permission('late-removed', removed.appSessionId));
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['background']);
+    assert.equal(model.pendingPermissions.has('late-removed'), false);
+});
+
 test('attachment text events stay isolated from adjacent messages with the same role', () => {
     const model = new AgentViewModel();
     const attachment = imageAttachment();
