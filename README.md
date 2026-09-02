@@ -396,9 +396,9 @@ Xora Code 不修改 Theia Platform 核心，也不引入第二套 Agent Loop。U
 
 ### 构建与发行准备
 
-- 仓库版本与各工作区统一为 `0.2.5`，依赖基线继续精确锁定。
+- `v0.2.5` 发布时，仓库版本与各工作区统一为 `0.2.5`，依赖基线继续精确锁定。
 - 原生构建器分别在 macOS arm64/x64、Windows x64 和 Linux x64 环境生成安装包，并校验同一份已提交源码、语言插件种子、固定 Grok Build sidecar、ACP smoke、测试、SBOM 和产物摘要。
-- `v0.2.5` 社区安装包作为不可覆盖的稳定 Release 发布并标记为 Latest；Preview 仍使用独立 Prerelease，不会覆盖稳定通道。
+- `v0.2.5` 社区安装包作为不可覆盖的稳定 Release 发布，并在发布时标记为 Latest；当前 Latest 已由 `v0.2.6` 接替。Preview 仍使用独立 Prerelease，不会覆盖稳定通道。
 - 正式 Release 工作流已包含平台签名、公证、SBOM、第三方 notices 和 Ed25519 更新清单门禁；缺少任一必需凭据时会拒绝发布。
 
 ### 已知限制
