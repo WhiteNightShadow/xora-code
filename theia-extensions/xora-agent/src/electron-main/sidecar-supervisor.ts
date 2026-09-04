@@ -18,6 +18,15 @@ export interface SidecarLaunch {
     version: string;
 }
 
+export class SidecarTerminationUnconfirmedError extends Error {
+    readonly code = 'SIDECAR_TERMINATION_UNCONFIRMED' as const;
+
+    constructor() {
+        super('Xora Code could not confirm that the Grok sidecar process tree exited.');
+        this.name = 'SidecarTerminationUnconfirmedError';
+    }
+}
+
 export class GrokSidecarSupervisor {
     protected child: ChildProcessWithoutNullStreams | undefined;
     protected stopping = false;
@@ -28,7 +37,10 @@ export class GrokSidecarSupervisor {
     protected stderrOpaqueRedactor = new StreamingOpaquePayloadRedactor();
 
     get running(): boolean {
-        return !!this.child && this.child.exitCode === null && !this.child.killed;
+        // `ChildProcess.killed` means a signal was sent, not that exit was
+        // observed. Keep the process authoritative until exitCode/exit proves
+        // it can no longer mutate the workspace.
+        return !!this.child && this.child.exitCode === null;
     }
 
     binaryPath(): string {
@@ -124,16 +136,26 @@ export class GrokSidecarSupervisor {
         ]);
         if (!exited && child.exitCode === null) {
             this.signalTree(child, 'SIGKILL');
-            await Promise.race([
-                new Promise<void>(resolve => child.once('exit', () => resolve())),
-                new Promise<void>(resolve => setTimeout(resolve, 1000))
+            const killed = await Promise.race([
+                new Promise<boolean>(resolve => child.once('exit', () => resolve(true))),
+                new Promise<boolean>(resolve => setTimeout(() => resolve(false), this.forcedExitConfirmationTimeoutMs()))
             ]);
+            if (!killed && child.exitCode === null) {
+                // Keep the child handle authoritative. Callers must retain
+                // durable prompt claims until a later real exit event proves
+                // that the process tree can no longer mutate the workspace.
+                throw new SidecarTerminationUnconfirmedError();
+            }
         }
         if (this.child === child) {
             this.child = undefined;
         }
         this.flushStderr();
         this.exactSecrets = [];
+    }
+
+    protected forcedExitConfirmationTimeoutMs(): number {
+        return 1_000;
     }
 
     /** Last-resort shutdown path used by Electron's synchronous onStop hook. */

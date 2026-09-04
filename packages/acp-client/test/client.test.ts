@@ -4,10 +4,12 @@ import test from "node:test";
 import {
   AcpCancelledError,
   AcpClient,
+  AcpConnectionClosedError,
   AcpLineTooLongError,
   AcpRemoteError,
   AcpTimeoutError,
   AcpUnknownResponseError,
+  AcpWriteError,
 } from "../src/index.js";
 
 function response(id: string | number, result: unknown): string {
@@ -83,6 +85,85 @@ test("times out and supports AbortSignal with an ACP cancellation notification",
   await client.drain();
   assert.deepEqual(writes.map((line) => JSON.parse(line).method), ["session/prompt", "session/cancel"]);
   client.close();
+});
+
+test("cancel rejects when its ACP notification is not delivered", async () => {
+  const errors: Error[] = [];
+  const client = new AcpClient({
+    write: async (line) => {
+      if (JSON.parse(line).method === "session/cancel") throw new Error("fixture transport failure");
+    },
+    defaultTimeoutMs: 0,
+  });
+  client.onError((error) => errors.push(error));
+  const call = client.startRequest("session/prompt", { sessionId: "s1" }, {
+    cancellation: { method: "session/cancel", params: { sessionId: "s1" } },
+  });
+  await client.drain();
+  const localCancellation = assert.rejects(call.promise, AcpCancelledError);
+  await assert.rejects(call.cancel("delete requested"), (error: unknown) => {
+    assert.ok(error instanceof AcpWriteError);
+    assert.match((error.cause as Error)?.message ?? "", /fixture transport failure/);
+    return true;
+  });
+  await localCancellation;
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0] instanceof AcpWriteError);
+  client.close();
+});
+
+test("cancel is single-flight, rejects after transport close, and no-ops only after success", async () => {
+  let releaseCancellation!: () => void;
+  const cancellationGate = new Promise<void>((resolve) => { releaseCancellation = resolve; });
+  const writes: string[] = [];
+  const client = new AcpClient({
+    write: async (line) => {
+      writes.push(line);
+      if (JSON.parse(line).method === "session/cancel") await cancellationGate;
+    },
+    defaultTimeoutMs: 0,
+  });
+  const active = client.startRequest("session/prompt", { sessionId: "s-flight" }, {
+    cancellation: { method: "session/cancel", params: { sessionId: "s-flight" } },
+  });
+  await client.drain();
+  const localCancellation = assert.rejects(active.promise, AcpCancelledError);
+  const first = active.cancel("first");
+  const second = active.cancel("second");
+  assert.equal(first, second, "concurrent cancel calls must share one delivery flight");
+  let delivered = false;
+  void first.then(() => { delivered = true; });
+  await tick();
+  assert.equal(delivered, false, "a second cancel must not resolve before transport delivery");
+  releaseCancellation();
+  await Promise.all([first, second, localCancellation]);
+  assert.equal(writes.filter((line) => JSON.parse(line).method === "session/cancel").length, 1);
+
+  const input = new PassThrough();
+  const closed = new AcpClient({ write: () => undefined, defaultTimeoutMs: 0 });
+  const consuming = closed.consume(input);
+  const interrupted = closed.startRequest("session/prompt", { sessionId: "s-closed" }, {
+    cancellation: { method: "session/cancel", params: { sessionId: "s-closed" } },
+  });
+  input.end();
+  await consuming;
+  await assert.rejects(interrupted.promise, AcpConnectionClosedError);
+  await assert.rejects(interrupted.cancel(), AcpConnectionClosedError);
+
+  const successInput = new PassThrough();
+  const successWrites: string[] = [];
+  const success = new AcpClient({ write: (line) => { successWrites.push(line); }, defaultTimeoutMs: 0 });
+  const successConsuming = success.consume(successInput);
+  const completed = success.startRequest("session/prompt", { sessionId: "s-done" }, {
+    cancellation: { method: "session/cancel", params: { sessionId: "s-done" } },
+  });
+  await success.drain();
+  successInput.write(response(completed.id, { stopReason: "end_turn" }));
+  assert.deepEqual(await completed.promise, { stopReason: "end_turn" });
+  await completed.cancel();
+  assert.equal(successWrites.length, 1, "completed response cancellation is the only allowed no-op");
+  successInput.end();
+  await successConsuming;
 });
 
 test("silently drops late responses for timed-out and cancelled requests", async () => {

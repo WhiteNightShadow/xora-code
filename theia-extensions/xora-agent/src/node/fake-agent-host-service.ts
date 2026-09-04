@@ -18,6 +18,7 @@ import {
     PermissionDecision,
     PlanApprovalDecision,
     PromptRequest,
+    PromptReceipt,
     ProviderProfile,
     RuntimeSnapshot,
     SessionHistoryPage,
@@ -230,6 +231,7 @@ export class FakeAgentHostService implements AgentHostService {
         if (this.snapshot.activeSessionId === appSessionId) {
             this.snapshot.activeSessionId = undefined;
         }
+        this.client?.onAgentEvent({ kind: 'session-deleted', sessionId: appSessionId });
         this.publishSnapshot();
     }
 
@@ -262,8 +264,9 @@ export class FakeAgentHostService implements AgentHostService {
         // full fake ACP process owns Plan approval contract tests.
     }
 
-    async sendPrompt(request: PromptRequest): Promise<void> {
+    async sendPrompt(request: PromptRequest): Promise<PromptReceipt> {
         const promptStartedAt = Date.now();
+        const turnId = `fixture-turn-${++this.sequence}`;
         const session = this.requireSession(request.sessionId);
         if (typeof request.text !== 'string') throw new Error('Prompt text must be a string.');
         if (request.attachments !== undefined && !Array.isArray(request.attachments)) {
@@ -463,7 +466,7 @@ export class FakeAgentHostService implements AgentHostService {
             this.client?.onAgentEvent({
                 kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'cancelled', elapsedMs: Date.now() - promptStartedAt
             });
-            return;
+            return { admitted: true, sessionId: request.sessionId, turnId, outcome: 'cancelled' };
         }
         this.client?.onAgentEvent({
             kind: 'plan',
@@ -481,6 +484,7 @@ export class FakeAgentHostService implements AgentHostService {
         this.client?.onAgentEvent({
             kind: 'turn-completed', sessionId: request.sessionId, stopReason: 'end_turn', elapsedMs: Date.now() - promptStartedAt
         });
+        return { admitted: true, sessionId: request.sessionId, turnId, outcome: 'completed' };
     }
 
     async guidePrompt(request: GuidePromptRequest): Promise<GuidePromptResult> {

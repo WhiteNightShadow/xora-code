@@ -4,7 +4,9 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
+    agentErrorSemanticKey,
     friendlyAgentErrorMessage,
+    friendlyAgentEventErrorMessage,
     isLegacyLocalSessionNotFoundError,
     isSessionNotFoundError,
     isTypedSessionNotFoundError
@@ -39,6 +41,39 @@ test('known Provider lifecycle errors become actionable Chinese guidance', () =>
         friendlyAgentErrorMessage('The requested Agent mode is not advertised by this session.'),
         '当前会话不支持该执行方式，请使用“常规”或“持续完成”。'
     );
+});
+
+test('runtime and workspace implementation errors become Chinese typed recovery messages', () => {
+    assert.equal(
+        agentErrorSemanticKey('PROMPT_FAILED', 'ACP stdout reached end of stream'),
+        'runtime-disconnected'
+    );
+    assert.equal(
+        agentErrorSemanticKey('SIDECAR_CRASHED', 'Grok sidecar exited (code 1).'),
+        'runtime-disconnected'
+    );
+    assert.equal(
+        agentErrorSemanticKey(
+            'PERMISSION_BOUNDARY_REJECTED',
+            'Agent changes must resolve to a file inside the trusted workspace.'
+        ),
+        'workspace-boundary'
+    );
+    const disconnected = friendlyAgentEventErrorMessage(
+        'SIDECAR_CRASHED',
+        'ACP stdout reached end of stream'
+    );
+    assert.match(disconnected, /安全恢复/);
+    assert.match(disconnected, /\[SIDECAR_CRASHED\]/);
+    assert.doesNotMatch(disconnected, /ACP stdout reached|Grok sidecar exited/i);
+
+    const boundary = friendlyAgentEventErrorMessage(
+        'PERMISSION_BOUNDARY_REJECTED',
+        'Agent changes must resolve to a file inside the trusted workspace.'
+    );
+    assert.match(boundary, /允许访问的范围/);
+    assert.match(boundary, /\[PERMISSION_BOUNDARY_REJECTED\]/);
+    assert.doesNotMatch(boundary, /trusted workspace/i);
 });
 
 test('unknown errors keep their useful diagnostic text', () => {
@@ -85,7 +120,10 @@ test('send, retry and Provider settings use the same friendly error boundary', (
     const management = fs.readFileSync(path.join(sourceRoot, 'agent-management-widget.tsx'), 'utf8');
 
     assert.match(agent, /const message = friendlyAgentErrorMessage\(error\)/);
-    assert.match(agent, /message: friendlyAgentErrorMessage\(event\.message\)/);
+    assert.match(agent, /event\.code === 'PROMPT_FAILED'/);
+    assert.match(agent, /failureOwner\.observedTerminalErrorSemanticKey = semanticKey/);
+    assert.match(agent, /errorSemanticKey: submission\.observedTerminalErrorSemanticKey/,
+        'only a terminal RPC\/receipt recovery card inherits the matching rendered error semantic');
     assert.match(management, /无法保存模型服务：\$\{friendlyAgentErrorMessage\(error\)\}/);
     assert.match(management, /无法切换模型服务：\$\{friendlyAgentErrorMessage\(error\)\}/);
     assert.match(management, /无法获取模型：\$\{friendlyAgentErrorMessage\(error\)\}/);

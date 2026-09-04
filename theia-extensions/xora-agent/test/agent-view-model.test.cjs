@@ -409,94 +409,266 @@ test('a missing-session tombstone rejects delayed snapshots and session events',
     assert.equal(model.pendingPermissions.has('late-permission'), false);
 });
 
-test('a newer authoritative omission tombstones all state for only the deleted session', () => {
+test('a transient crash omission preserves the selected history and a complete snapshot restores authority', () => {
     const model = new AgentViewModel();
-    const removed = session('removed', 'running');
+    const selected = session('selected', 'running');
     const background = session('background', 'running');
     const initial = {
         ...snapshot('ready'),
         revision: 10,
         workspaceRoot: '/fixture',
         workspaceAttached: true,
-        sessions: [removed, background],
-        activeSessionId: removed.appSessionId,
+        sessions: [selected, background],
+        activeSessionId: selected.appSessionId,
         sessionContexts: {
-            removed: { totalTokens: 10, compactionStatus: 'idle', compactionCount: 0 },
+            selected: { totalTokens: 10, compactionStatus: 'idle', compactionCount: 0 },
             background: { totalTokens: 20, compactionStatus: 'idle', compactionCount: 0 }
         }
     };
     model.accept({ kind: 'snapshot', snapshot: initial });
-    model.setSession(removed);
-    model.accept(permission('permission-removed', removed.appSessionId));
-    model.accept(permission('permission-background', background.appSessionId));
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: selected.appSessionId, role: 'user', text: '保留的问题' },
+        { kind: 'text-delta', sessionId: selected.appSessionId, role: 'assistant', text: '保留的历史' }
+    ]);
+
     model.accept({
-        kind: 'plan-approval-request',
-        sessionId: removed.appSessionId,
-        requestId: 'plan-removed',
-        toolCallId: 'tool-removed',
-        suggestedContract: { objective: 'remove', planEntries: [], acceptanceCriteria: [] },
-        requestedAt: '2026-01-01T00:00:00.000Z'
+        kind: 'snapshot',
+        snapshot: {
+            ...snapshot('crashed'),
+            revision: 11,
+            workspaceRoot: undefined,
+            workspaceAttached: true,
+            sessions: []
+        }
     });
-    model.accept({
-        kind: 'plan-approval-request',
-        sessionId: background.appSessionId,
-        requestId: 'plan-background',
-        toolCallId: 'tool-background',
-        suggestedContract: { objective: 'background', planEntries: [], acceptanceCriteria: [] },
-        requestedAt: '2026-01-01T00:00:00.000Z'
-    });
-    model.accept({
-        kind: 'goal-state',
-        sessionId: removed.appSessionId,
-        goalId: 'goal-removed',
-        status: 'active',
-        phase: 'executing',
-        agentTurnStatus: 'running',
-        verificationStatus: 'working',
-        tokensUsed: 1,
-        elapsedMs: 1,
-        workerRounds: 1,
-        verificationRounds: 0,
-        planning: false,
-        verifying: false
-    });
-    model.accept({
-        kind: 'task-contract',
-        sessionId: removed.appSessionId,
-        objective: 'remove',
-        planEntries: [],
-        acceptanceCriteria: [],
-        approvedAt: '2026-01-01T00:00:00.000Z',
-        lifecycle: 'approved',
-        updatedAt: '2026-01-01T00:00:00.000Z'
-    });
+
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['selected', 'background']);
+    assert.equal(model.snapshot.workspaceRoot, '/fixture');
+    assert.equal(model.snapshot.activeSessionId, 'selected');
+    assert.deepEqual(model.transcript.map(item => item.text), ['保留的问题', '保留的历史']);
 
     model.accept({
         kind: 'snapshot',
         snapshot: {
             ...initial,
-            revision: 11,
-            sessions: [background],
-            activeSessionId: background.appSessionId,
-            sessionContexts: {
-                background: { totalTokens: 21, compactionStatus: 'idle', compactionCount: 0 }
-            }
+            revision: 12,
+            sessions: [{ ...selected, status: 'completed' }, background]
+        }
+    });
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['selected', 'background']);
+    assert.equal(model.snapshot.sessions[0].status, 'completed');
+    assert.equal(model.snapshot.activeSessionId, 'selected');
+    assert.deepEqual(model.transcript.map(item => item.text), ['保留的问题', '保留的历史']);
+});
+
+test('a newer snapshot omission is reversible until typed missing explicitly tombstones it', () => {
+    const model = new AgentViewModel();
+    const selected = session('selected', 'idle');
+    const initial = {
+        ...snapshot('ready'),
+        revision: 20,
+        workspaceRoot: '/fixture',
+        workspaceAttached: true,
+        sessions: [selected],
+        activeSessionId: selected.appSessionId
+    };
+    model.accept({ kind: 'snapshot', snapshot: initial });
+    model.setSession(selected);
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: selected.appSessionId, role: 'assistant', text: '仍可恢复' }
+    ]);
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...initial, revision: 21, sessions: [], activeSessionId: undefined }
+    });
+    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['selected']);
+    assert.equal(model.snapshot.activeSessionId, 'selected');
+    assert.deepEqual(model.transcript.map(item => item.text), ['仍可恢复']);
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: { ...initial, revision: 22, sessions: [{ ...selected, status: 'completed' }] }
+    });
+    assert.equal(model.snapshot.sessions[0].status, 'completed');
+
+    model.forgetMissingSession(selected.appSessionId);
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 23, sessions: [selected] } });
+    model.accept({ kind: 'session', session: selected });
+    assert.deepEqual(model.snapshot.sessions, [], 'explicit missing evidence must reject delayed resurrection');
+    assert.equal(model.snapshot.activeSessionId, undefined);
+});
+
+test('Windows drive casing and slash variants do not clear the selected session or transcript', () => {
+    const model = new AgentViewModel();
+    const selected = {
+        ...session('windows-session', 'idle'),
+        workspaceRoot: 'C:\\Users\\Alice\\Project'
+    };
+    const initial = {
+        ...snapshot('ready'),
+        revision: 30,
+        workspaceRoot: 'C:\\Users\\Alice\\Project',
+        workspaceAttached: true,
+        sessions: [selected],
+        activeSessionId: selected.appSessionId
+    };
+    model.accept({ kind: 'snapshot', snapshot: initial });
+    model.setSession(selected);
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: selected.appSessionId, role: 'assistant', text: 'Windows 历史仍在' }
+    ]);
+
+    model.accept({
+        kind: 'snapshot',
+        snapshot: {
+            ...initial,
+            revision: 31,
+            workspaceRoot: 'c:/users/alice/project/',
+            sessions: [{ ...selected, workspaceRoot: 'c:/users/alice/project/' }]
         }
     });
 
-    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['background']);
-    assert.equal(model.snapshot.activeSessionId, undefined);
-    assert.equal(model.snapshot.sessionContexts.removed, undefined);
-    assert.equal(model.snapshot.sessionContexts.background.totalTokens, 21);
-    assert.equal(model.goalState(removed.appSessionId), undefined);
-    assert.equal(model.taskContract(removed.appSessionId), undefined);
-    assert.deepEqual([...model.pendingPermissions.keys()], ['permission-background']);
-    assert.deepEqual([...model.pendingPlanApprovals.keys()], ['plan-background']);
+    assert.equal(model.snapshot.activeSessionId, selected.appSessionId);
+    assert.deepEqual(model.transcript.map(item => item.text), ['Windows 历史仍在']);
+});
 
-    model.accept({ kind: 'session', session: { ...removed, status: 'completed' } });
-    model.accept(permission('late-removed', removed.appSessionId));
-    assert.deepEqual(model.snapshot.sessions.map(item => item.appSessionId), ['background']);
-    assert.equal(model.pendingPermissions.has('late-removed'), false);
+test('an explicit cross-window session deletion tombstones history while snapshot omission alone does not', () => {
+    const model = new AgentViewModel();
+    const selected = session('deleted-by-peer', 'idle');
+    const initial = {
+        ...snapshot('ready'),
+        revision: 40,
+        workspaceRoot: '/fixture',
+        sessions: [selected],
+        activeSessionId: selected.appSessionId
+    };
+    model.accept({ kind: 'snapshot', snapshot: initial });
+    model.setSession(selected);
+    model.loadHistory([
+        { kind: 'text-delta', sessionId: selected.appSessionId, role: 'assistant', text: '待删除历史' }
+    ]);
+
+    model.accept({ kind: 'session-deleted', sessionId: selected.appSessionId });
+    model.accept({ kind: 'snapshot', snapshot: { ...initial, revision: 41, sessions: [selected] } });
+    model.accept({ kind: 'session', session: selected });
+
+    assert.equal(model.snapshot.activeSessionId, undefined);
+    assert.deepEqual(model.snapshot.sessions, []);
+    assert.deepEqual(model.transcript, []);
+});
+
+test('one runtime disconnect and repeated boundary failures are coalesced in a short window', () => {
+    const model = new AgentViewModel();
+    let now = 1_000;
+    model.now = () => now;
+    const active = session('session-a', 'running');
+    model.snapshot.sessions = [active];
+    model.setSession(active);
+
+    model.accept({
+        kind: 'error',
+        sessionId: active.appSessionId,
+        code: 'PROMPT_FAILED',
+        message: 'ACP stdout reached end of stream',
+        recoverable: true
+    });
+    now += 50;
+    model.accept({
+        kind: 'error',
+        code: 'SIDECAR_CRASHED',
+        message: 'Grok sidecar exited (code 1).',
+        recoverable: true
+    });
+
+    assert.equal(model.transcript.length, 1, 'one crash must render one recovery card');
+    assert.match(model.transcript[0].text, /安全恢复/);
+    assert.match(model.transcript[0].text, /\[SIDECAR_CRASHED\]/);
+
+    const boundary = {
+        kind: 'error',
+        sessionId: active.appSessionId,
+        code: 'PERMISSION_BOUNDARY_REJECTED',
+        message: 'Agent changes must resolve to a file inside the trusted workspace.',
+        recoverable: true
+    };
+    model.accept(boundary);
+    now += 100;
+    model.accept(boundary);
+    assert.equal(model.transcript.length, 2, 'repeated path errors must share one card');
+    assert.match(model.transcript[1].text, /允许访问的范围/);
+
+    now += 10_001;
+    model.accept(boundary);
+    assert.equal(model.transcript.length, 3, 'a genuinely later failure remains visible');
+});
+
+test('non-runtime error coalescing is isolated by turn and exact legacy message', () => {
+    const model = new AgentViewModel();
+    let now = 2_000;
+    model.now = () => now;
+    const active = session('session-a', 'running');
+    model.snapshot.sessions = [active];
+    model.setSession(active);
+
+    const failure = turnId => ({
+        kind: 'error',
+        sessionId: active.appSessionId,
+        turnId,
+        code: 'PERMISSION_BOUNDARY_REJECTED',
+        message: 'Agent changes must resolve to a file inside the trusted workspace.',
+        recoverable: true
+    });
+    model.accept(failure('turn-a'));
+    now += 10;
+    model.accept(failure('turn-b'));
+    assert.equal(model.transcript.length, 2, 'identical failures from different turns remain independently visible');
+
+    now += 10;
+    model.accept({ ...failure(undefined), message: 'legacy exact message A' });
+    now += 10;
+    model.accept({ ...failure(undefined), message: 'legacy exact message B' });
+    assert.equal(model.transcript.length, 4, 'legacy errors without turn ids coalesce only by exact message');
+});
+
+test('history replay coalesces only persisted turn or runtime group authority', () => {
+    const model = new AgentViewModel();
+    const active = session('history-errors', 'completed');
+    model.snapshot.sessions = [active];
+    model.setSession(active);
+    const legacyBoundary = {
+        kind: 'error', sessionId: active.appSessionId,
+        code: 'PERMISSION_BOUNDARY_REJECTED',
+        message: 'Agent changes must resolve to a file inside the trusted workspace.', recoverable: true
+    };
+    const runtimeGroup = 'runtime-failure-group-1';
+    model.loadHistory([
+        legacyBoundary,
+        legacyBoundary,
+        {
+            kind: 'error', sessionId: active.appSessionId, turnId: 'turn-one',
+            code: 'DIFF_PATH_REJECTED', message: 'same turn diff path', recoverable: true
+        },
+        {
+            kind: 'error', sessionId: active.appSessionId, turnId: 'turn-one',
+            code: 'DIFF_PATH_REJECTED', message: 'same turn diff path', recoverable: true
+        },
+        {
+            kind: 'error', sessionId: active.appSessionId, turnId: 'turn-runtime', errorGroupId: runtimeGroup,
+            code: 'PROMPT_FAILED', message: 'ACP stdout reached end of stream', recoverable: true
+        },
+        {
+            kind: 'error', errorGroupId: runtimeGroup,
+            code: 'SIDECAR_CRASHED', message: 'Grok sidecar exited (1).', recoverable: true
+        }
+    ]);
+
+    assert.equal(model.transcript.length, 4,
+        'two legacy errors stay separate, while same-turn and explicit runtime groups each coalesce once');
+    assert.equal(model.transcript.filter(entry => entry.payload?.errorGroupId === runtimeGroup).length, 1);
+    model.accept(legacyBoundary);
+    assert.equal(model.transcript.length, 5,
+        'a live error after restore must not merge into a historical row timestamped at load time');
 });
 
 test('attachment text events stay isolated from adjacent messages with the same role', () => {

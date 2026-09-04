@@ -4,7 +4,10 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { AgentSessionRepository } = require('../lib/electron-main/session-repository');
+const {
+    AgentSessionRepository,
+    SessionIndexLockError
+} = require('../lib/electron-main/session-repository');
 
 const sessions = [
     {
@@ -127,7 +130,8 @@ test('Provider session retirement honors the cross-process index lock', () => {
 
         assert.throws(
             () => repository.markProviderSessionsReadOnly('xora-relay'),
-            /Another Xora Code process is updating the session index/
+            error => error instanceof SessionIndexLockError
+                && error.code === 'SESSION_INDEX_LOCKED'
         );
         assert.equal(fs.readFileSync(indexPath, 'utf8'), before);
     } finally {

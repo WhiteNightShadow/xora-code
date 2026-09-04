@@ -801,6 +801,7 @@ test('runtime start finishing after M1 -> M2 exposes the latest global model wit
     assert.equal(snapshot.phase, 'ready');
     assert.equal(snapshot.providerId, profile.id);
     assert.equal(snapshot.selectedModel, 'model-2');
+    host.intentionalStop = true;
     stdout.end();
     stdin.end();
 });
@@ -920,6 +921,7 @@ test('custom Provider routing ids survive renderer redaction while credentials r
         && event.snapshot.selectedModel === profile.id));
     assert.doesNotMatch(JSON.stringify(events), new RegExp(credential));
 
+    host.intentionalStop = true;
     stdout.end();
     stdin.end();
 });

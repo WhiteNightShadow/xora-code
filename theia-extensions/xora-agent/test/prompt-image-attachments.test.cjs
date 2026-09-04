@@ -124,7 +124,7 @@ test('image capability true emits exact ACP image blocks and persists metadata o
     const image = attachment('image/png', PNG_SIGNATURE, '截图.png');
     const { host, events, requests } = hostHarness(true);
 
-    await host.sendPrompt({ sessionId: APP_SESSION_ID, text: '解释这张图', attachments: [image] });
+    const receipt = await host.sendPrompt({ sessionId: APP_SESSION_ID, text: '解释这张图', attachments: [image] });
 
     assert.equal(requests.length, 1);
     assert.equal(requests[0].method, 'session/prompt');
@@ -139,6 +139,7 @@ test('image capability true emits exact ACP image blocks and persists metadata o
     assert.deepEqual(userEvent, {
         kind: 'text-delta',
         sessionId: APP_SESSION_ID,
+        turnId: receipt.turnId,
         role: 'user',
         text: '解释这张图',
         attachments: [{
@@ -152,6 +153,7 @@ test('image capability true emits exact ACP image blocks and persists metadata o
     });
     assert.equal(JSON.stringify(userEvent).includes(image.data), false);
     const completion = events.find(event => event.kind === 'turn-completed');
+    assert.equal(completion.turnId, receipt.turnId);
     assert.equal(completion.stopReason, 'end_turn');
     assert.equal(Number.isSafeInteger(completion.elapsedMs), true);
     assert.ok(completion.elapsedMs >= 0);

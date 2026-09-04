@@ -56,6 +56,16 @@ export class SessionPromptConflictError extends Error {
     }
 }
 
+/** The only repository write failure which is safe to retry automatically. */
+export class SessionIndexLockError extends Error {
+    readonly code = 'SESSION_INDEX_LOCKED' as const;
+
+    constructor() {
+        super('Another Xora Code process is updating the session index. Please retry.');
+        this.name = 'SessionIndexLockError';
+    }
+}
+
 interface PendingEventBatch {
     lines: string[];
     events: AgentHostEvent[];
@@ -271,6 +281,41 @@ export class AgentSessionRepository {
             return publicSessionRecord(next);
         });
         return finished;
+    }
+
+    /**
+     * Settles an orphaned prompt owned by this repository instance.
+     *
+     * The host may lose the in-memory RequestHandle when the ACP transport
+     * terminates while the durable index lock is contended.  In that case the
+     * claim is intentionally retained, but there is no remote request left to
+     * cancel or replay.  This owner-only transition lets a later retry or an
+     * explicit delete release that claim without weakening the foreign-owner
+     * fail-closed rule.
+     */
+    finishOwnedPrompt(
+        appSessionId: string,
+        status: Extract<SessionRecord['status'], 'completed' | 'cancelled' | 'failed'>
+    ): SessionRecord {
+        return this.withIndexLock(() => {
+            const index = this.readIndex();
+            const position = index.sessions.findIndex(session => session.appSessionId === appSessionId);
+            if (position < 0) throw new SessionNotFoundError(appSessionId);
+            const previous = index.sessions[position];
+            if (!previous._promptClaim || previous._promptClaim.ownerId !== this.ownerId) {
+                throw new SessionPromptConflictError('This process does not own the Agent task.');
+            }
+            const next: StoredSessionRecord = {
+                ...previous,
+                status: previous._pendingReadOnly ? 'read-only' : status,
+                updatedAt: new Date().toISOString(),
+                _promptClaim: undefined,
+                _pendingReadOnly: undefined
+            };
+            index.sessions[position] = next;
+            this.writeIndex(index);
+            return publicSessionRecord(next);
+        });
     }
 
     reconcileStalePromptClaim(appSessionId: string): SessionRecord {
@@ -962,7 +1007,7 @@ export class AgentSessionRepository {
             }
         }
         if (descriptor === undefined) {
-            throw new Error('Another Xora Code process is updating the session index. Please retry.');
+            throw new SessionIndexLockError();
         }
         try {
             fs.writeFileSync(descriptor, `${process.pid}\n`, 'utf8');

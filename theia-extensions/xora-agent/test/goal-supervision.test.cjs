@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { AcpWriteError } = require('@xora-code/acp-client');
 
 const { AgentViewModel } = require('../lib/browser/agent-view-model');
 const {
@@ -240,6 +241,26 @@ function restoreHarness(options = {}) {
     };
 
     return { host, history, delivered, requests, goalHandles, record: () => record };
+}
+
+function installDurablePromptClaims(harness) {
+    let token;
+    harness.host.promptClaimTokens = new Map();
+    harness.host.sessions.claimPrompt = (appSessionId, validate) => {
+        const current = harness.record();
+        validate(current);
+        assert.notEqual(current.status, 'running');
+        token = `claim-${appSessionId}`;
+        const running = harness.host.sessions.update(appSessionId, { status: 'running' });
+        return { record: running, token };
+    };
+    harness.host.sessions.finishPrompt = (appSessionId, candidate, status) => {
+        assert.equal(candidate, token);
+        token = undefined;
+        return harness.host.sessions.update(appSessionId, { status });
+    };
+    harness.host.sessions.promptClaimOwnership = () => token ? 'owned' : 'none';
+    return { token: () => token };
 }
 
 async function waitFor(predicate, message) {
@@ -804,6 +825,84 @@ test('an active-only Goal replay is projected as paused/interrupted without a ph
     await ordinary;
 });
 
+test('orphaned active Goal cancellation keeps a durable claim until delivery or real process exit', async t => {
+    for (const scenario of ['delivered', 'write-failure', 'timeout']) {
+        await t.test(scenario, async () => {
+            const delivery = deferred();
+            const stopped = deferred();
+            let running = true;
+            const harness = restoreHarness({
+                record: { status: 'idle' },
+                history: [taskContract({ lifecycle: 'interrupted' })],
+                onNotify: () => delivery.promise
+            });
+            const claims = installDurablePromptClaims(harness);
+            harness.host.deleteCancellationTimeoutMs = () => 50;
+            harness.host.supervisor = {
+                get running() { return running; },
+                stop: () => stopped.promise
+            };
+            harness.host.replayedGoalStateMap().set('app-a', goalState({
+                status: 'active',
+                phase: 'executing',
+                agentTurnStatus: 'running',
+                verificationStatus: 'working'
+            }));
+
+            const publishing = harness.host.publishReplayedGoalState('app-a');
+            await waitFor(
+                () => harness.requests.some(request => request.method === 'session/cancel'),
+                'orphan cancellation should reach its delivery fence'
+            );
+            assert.equal(harness.record().status, 'running');
+            assert.equal(claims.token(), 'claim-app-a');
+            assert.equal(harness.host.promptClaimOwnership('app-a'), 'owned');
+            assert.equal(harness.host.sidecarTerminationFenceState().has('app-a'), true);
+            await assert.rejects(harness.host.deleteSession('app-a'), /still confirming/);
+            await assert.rejects(harness.host.loadSession('app-a'), /still confirming/);
+            assert.throws(
+                () => harness.host.claimPromptRecord('app-a', () => undefined),
+                /still confirming/
+            );
+            assert.equal(
+                harness.requests.some(request => request.method === 'session/prompt'),
+                false,
+                'orphan recovery must never replay a prompt'
+            );
+
+            if (scenario === 'delivered') {
+                delivery.resolve();
+                await publishing;
+                assert.equal(harness.host.phase, 'ready');
+            } else {
+                if (scenario === 'write-failure') {
+                    delivery.reject(new AcpWriteError({ cause: new Error('stdin closed') }));
+                    await assert.rejects(publishing, /Failed to write/);
+                } else {
+                    await assert.rejects(publishing, /发送超时/);
+                }
+                assert.equal(harness.host.phase, 'crashed');
+                assert.equal(harness.record().status, 'running');
+                assert.equal(claims.token(), 'claim-app-a');
+                assert.equal(harness.host.uncertainPromptCancellationState().has('app-a'), true);
+                running = false;
+                stopped.resolve();
+                await new Promise(resolve => setImmediate(resolve));
+            }
+
+            assert.equal(harness.host.sidecarTerminationFenceState().has('app-a'), false);
+            assert.equal(harness.host.uncertainPromptCancellationState().has('app-a'), false);
+            assert.equal(harness.record().status, 'cancelled');
+            assert.equal(claims.token(), undefined);
+            assert.equal(harness.host.promptClaimOwnership('app-a'), 'none');
+            assert.equal(
+                harness.requests.some(request => request.method === 'session/prompt'),
+                false
+            );
+        });
+    }
+});
+
 test('unmarked session/load capability and mode notifications commit only after restore succeeds', async () => {
     let intermediateSessionEvents = -1;
     const harness = restoreHarness({
@@ -1323,7 +1422,9 @@ test('approved Plan cancellation and error never trigger an implicit Goal turn',
         await waitFor(() => harness.requests.length === 1, 'Plan turn should start');
         await approveCurrentPlan(harness);
         planTurn.reject(new Error('Plan failed'));
-        await assert.rejects(sending, /Plan failed/);
+        const receipt = await sending;
+        assert.equal(receipt.admitted, true);
+        assert.equal(receipt.outcome, 'failed');
         assert.equal(harness.requests.length, 1);
     });
 });

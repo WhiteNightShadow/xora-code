@@ -37,6 +37,8 @@ interface PendingRequest {
   readonly cancellation?: CancellationFactory;
   readonly abortSignal?: AbortSignal;
   readonly abortHandler?: () => void;
+  terminal?: { kind: "success" } | { kind: "error"; error: Error };
+  cancellationFlight?: Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -133,7 +135,7 @@ export class AcpClient {
     if (options.signal?.aborted) {
       const id = this.#createId();
       const error = new AcpCancelledError(id, method, options.signal.reason);
-      return { id, promise: Promise.reject(error), cancel: async () => undefined };
+      return { id, promise: Promise.reject(error), cancel: () => Promise.reject(error) };
     }
 
     const id = this.#createId();
@@ -154,26 +156,33 @@ export class AcpClient {
       rejectPromise = reject;
     });
 
-    const pending: PendingRequest = {
+    const pending = {} as PendingRequest;
+    Object.assign(pending, {
       id,
       method,
-      resolve: (value) => resolvePromise(value as T),
-      reject: rejectPromise,
+      resolve: (value: unknown) => {
+        pending.terminal = { kind: "success" };
+        resolvePromise(value as T);
+      },
+      reject: (error: Error) => {
+        pending.terminal ??= { kind: "error", error };
+        rejectPromise(error);
+      },
       ...(options.cancellation === undefined ? {} : { cancellation: options.cancellation }),
       ...(options.signal === undefined ? {} : { abortSignal: options.signal }),
-    };
+    } satisfies PendingRequest);
     this.#pending.set(id, pending);
 
     if (timeoutMs > 0) {
       pending.timer = setTimeout(() => {
-        void this.#cancelPending(pending, new AcpTimeoutError(id, method, timeoutMs));
+        void this.#cancelPending(pending, new AcpTimeoutError(id, method, timeoutMs)).catch(() => undefined);
       }, timeoutMs);
       pending.timer.unref?.();
     }
 
     if (options.signal) {
       const abortHandler = () => {
-        void this.#cancelPending(pending, new AcpCancelledError(id, method, options.signal?.reason));
+        void this.#cancelPending(pending, new AcpCancelledError(id, method, options.signal?.reason)).catch(() => undefined);
       };
       (pending as { abortHandler?: () => void }).abortHandler = abortHandler;
       options.signal.addEventListener("abort", abortHandler, { once: true });
@@ -369,17 +378,39 @@ export class AcpClient {
     this.#emitError(error);
   }
 
-  async #cancelPending(pending: PendingRequest, error: AcpCancelledError | AcpTimeoutError): Promise<void> {
-    if (this.#pending.get(pending.id) !== pending) return;
+  #cancelPending(pending: PendingRequest, error: AcpCancelledError | AcpTimeoutError): Promise<void> {
+    if (pending.cancellationFlight) return pending.cancellationFlight;
+    if (this.#pending.get(pending.id) !== pending) {
+      if (pending.terminal?.kind === "success") return Promise.resolve();
+      return Promise.reject(
+        this.#closedError
+        ?? (pending.terminal?.kind === "error" ? pending.terminal.error : undefined)
+        ?? new AcpConnectionClosedError(`ACP request ${pending.method} is no longer active`),
+      );
+    }
+    const flight = this.#cancelPendingOnce(pending, error);
+    pending.cancellationFlight = flight;
+    return flight;
+  }
+
+  async #cancelPendingOnce(pending: PendingRequest, error: AcpCancelledError | AcpTimeoutError): Promise<void> {
     this.#cleanupPending(pending);
     this.#rememberLateResponseTombstone(pending.id);
     pending.reject(error);
-    if (!pending.cancellation || this.#closedError) return;
+    if (!pending.cancellation) return;
+    if (this.#closedError) throw this.#closedError;
     const notification = resolveCancellation(pending.cancellation, pending.id);
     try {
       await this.notify(notification.method, notification.params);
     } catch (cause) {
-      this.#emitError(asError(cause, `Failed to send cancellation for ${pending.method}`));
+      const error = asError(cause, `Failed to send cancellation for ${pending.method}`);
+      // #send already publishes AcpWriteError while closing the transport.
+      // Only a non-write implementation error still needs an explicit event.
+      if (!(error instanceof AcpWriteError)) this.#emitError(error);
+      // RequestHandle.cancel is also the delivery acknowledgement used by
+      // destructive desktop actions. Do not report success when the local
+      // request was cancelled but its ACP notification never crossed stdin.
+      throw error;
     }
   }
 

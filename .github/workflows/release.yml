@@ -1,9 +1,11 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  # Formal signed releases are opt-in until every platform certificate and
+  # both Ed25519 update trust anchors are configured. Unsigned stable builds
+  # follow the native-host verification and manual publication boundary in
+  # build/release/README.md; the Preview workflow remains prerelease-only.
+  # Neither path should create a knowingly failed signed-release run.
   workflow_dispatch:
     inputs:
       tag:

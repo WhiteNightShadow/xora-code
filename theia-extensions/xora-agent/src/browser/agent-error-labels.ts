@@ -37,8 +37,54 @@ export function isSessionNotFoundError(error: unknown): boolean {
         || /^Unknown session(?::[^\r\n]*)?\.?$/i.test(message.trim());
 }
 
+function errorMessage(error: unknown): string {
+    const candidate = error as { message?: unknown } | undefined;
+    return error instanceof Error
+        ? error.message
+        : typeof candidate?.message === 'string'
+            ? candidate.message
+            : String(error ?? '');
+}
+
+function safeDiagnosticCode(code: unknown): string | undefined {
+    if (typeof code !== 'string') return undefined;
+    const normalized = code.trim().toUpperCase();
+    return /^[A-Z][A-Z0-9_]{1,63}$/.test(normalized) ? normalized : undefined;
+}
+
+const RUNTIME_DISCONNECT_PATTERN = /ACP stdout reached end of stream|Grok sidecar exited|sidecar (?:stopped|exited|crashed)|connection (?:closed|lost)|Failed to write to the ACP agent/i;
+const WORKSPACE_BOUNDARY_PATTERN = /Agent changes must resolve to a file inside the trusted workspace|outside the trusted workspace|No trusted workspace is active/i;
+
+/**
+ * Stable, deliberately coarse error family used only for short-window UI
+ * coalescing. One sidecar failure is often reported through several ACP
+ * layers (PROMPT_FAILED -> stdout EOF -> SIDECAR_CRASHED); showing each layer
+ * as a separate chat message makes a recoverable disconnect look like several
+ * independent failures.
+ */
+export function agentErrorSemanticKey(code: unknown, message: unknown): string {
+    const normalizedCode = safeDiagnosticCode(code) ?? 'UNKNOWN';
+    const normalizedMessage = errorMessage(message).trim();
+    if (normalizedCode === 'SIDECAR_CRASHED'
+        || RUNTIME_DISCONNECT_PATTERN.test(normalizedMessage)) {
+        return 'runtime-disconnected';
+    }
+    if (normalizedCode === 'PERMISSION_BOUNDARY_REJECTED'
+        || WORKSPACE_BOUNDARY_PATTERN.test(normalizedMessage)) {
+        return 'workspace-boundary';
+    }
+    if (isSessionNotFoundError({ code: normalizedCode, message: normalizedMessage })) {
+        return 'session-missing';
+    }
+    if (normalizedCode === 'PROMPT_FAILED') return 'prompt-failed';
+    if (normalizedCode === 'ACP_PROTOCOL_WARNING') return 'acp-protocol-warning';
+    // Exact unknown diagnostics still coalesce, without accidentally merging
+    // unrelated failures merely because they share a broad backend code.
+    return `${normalizedCode}:${normalizedMessage.replace(/\s+/g, ' ').slice(0, 240)}`;
+}
+
 export function friendlyAgentErrorMessage(error: unknown): string {
-    const message = error instanceof Error ? error.message : String(error ?? '');
+    const message = errorMessage(error);
     const normalized = message.trim();
     if (!normalized) return '操作未完成，请稍后重试。';
 
@@ -66,8 +112,34 @@ export function friendlyAgentErrorMessage(error: unknown): string {
     if (/ACP session could not be restored|History remains read-only|history.*read-only/i.test(normalized)) {
         return '该会话暂时无法恢复，历史内容仍已保留。';
     }
+    if (RUNTIME_DISCONNECT_PATTERN.test(normalized)) {
+        return 'Agent 连接已中断，Xora Code 正在安全恢复；未确认的任务不会自动重发。';
+    }
+    if (WORKSPACE_BOUNDARY_PATTERN.test(normalized)) {
+        return '目标文件不在当前允许访问的范围内，本次操作已被阻止。请打开对应目录或调整访问范围后重试。';
+    }
     if (/Unknown Provider profile|(?:selected|globally selected) Provider no longer exists/i.test(normalized)) {
         return '所选模型服务已不存在，请在“账户与模型设置”中重新选择。';
     }
     return normalized;
+}
+
+/** Friendly renderer text for a typed host error. The machine-readable code
+ * remains visible for support diagnostics, while known implementation details
+ * are translated into a short recovery instruction. */
+export function friendlyAgentEventErrorMessage(code: unknown, message: unknown): string {
+    const diagnosticCode = safeDiagnosticCode(code);
+    let friendly = friendlyAgentErrorMessage(message);
+    if (friendly === errorMessage(message).trim()) {
+        if (diagnosticCode === 'SIDECAR_CRASHED') {
+            friendly = 'Agent 连接已中断，Xora Code 正在安全恢复；未确认的任务不会自动重发。';
+        } else if (diagnosticCode === 'PROMPT_FAILED') {
+            friendly = '任务执行未完成，原消息已保留，可在连接恢复后重试。';
+        } else if (diagnosticCode === 'ACP_PROTOCOL_WARNING') {
+            friendly = 'Agent 通信出现异常，Xora Code 将继续尝试恢复。';
+        } else if (diagnosticCode === 'PERMISSION_BOUNDARY_REJECTED') {
+            friendly = '目标文件不在当前允许访问的范围内，本次操作已被阻止。请打开对应目录或调整访问范围后重试。';
+        }
+    }
+    return diagnosticCode ? `${friendly} [${diagnosticCode}]` : friendly;
 }

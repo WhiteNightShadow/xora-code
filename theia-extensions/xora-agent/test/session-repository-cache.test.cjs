@@ -9,6 +9,28 @@ const {
     SessionNotFoundError,
     SessionPromptConflictError
 } = require('../lib/electron-main/session-repository');
+const { GrokAgentHostService } = require('../lib/electron-main/grok-agent-host-service');
+
+function deletionHost(repository, promptTokens = new Map()) {
+    const host = Object.create(GrokAgentHostService.prototype);
+    host.sessions = repository;
+    host.activePrompts = new Map();
+    host.promptClaimTokens = promptTokens;
+    host.pendingPromptTerminals = new Map();
+    host.pendingPermissions = new Map();
+    host.loadedSessionIds = new Set();
+    host.knownSessionIds = new Set();
+    host.contextEventHighwaters = new Map();
+    host.restoringSessionCounts = new Map();
+    host.acpSessionLookup = new Map();
+    host.currentSecrets = [];
+    host.phase = 'stopped';
+    host.acp = undefined;
+    host.supervisor = { running: false };
+    host.emit = () => undefined;
+    host.emitSnapshot = () => undefined;
+    return host;
+}
 
 test('session index snapshots reuse the parsed cache and observe atomic external replacement', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-cache-'));
@@ -217,6 +239,201 @@ test('prompt claim fails closed after cross-window deletion and protects a runni
     } finally {
         owner.dispose();
         peer.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('an owner can settle and delete its orphan while a foreign live claim remains protected', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-owned-orphan-'));
+    const owner = new AgentSessionRepository(root);
+    const peer = new AgentSessionRepository(root);
+    try {
+        const owned = owner.create({
+            acpSessionId: 'acp-owned-orphan',
+            title: 'owned orphan',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        owner.claimPrompt(owned.appSessionId);
+        assert.throws(
+            () => peer.finishOwnedPrompt(owned.appSessionId, 'cancelled'),
+            SessionPromptConflictError,
+            'a peer must never settle another repository owner\'s live claim'
+        );
+        const settled = owner.finishOwnedPrompt(owned.appSessionId, 'cancelled');
+        assert.equal(settled.status, 'cancelled');
+        assert.equal(owner.promptClaimOwnership(owned.appSessionId), 'none');
+        assert.equal(owner.delete(owned.appSessionId), true);
+        assert.equal(owner.get(owned.appSessionId), undefined);
+    } finally {
+        owner.dispose();
+        peer.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('service deletion releases an owned crash orphan but refuses a foreign live claim', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-service-delete-'));
+    const owner = new AgentSessionRepository(root);
+    const peer = new AgentSessionRepository(root);
+    try {
+        const owned = owner.create({
+            acpSessionId: 'acp-service-owned',
+            title: 'service owned',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        const ownedClaim = owner.claimPrompt(owned.appSessionId);
+        const ownerHost = deletionHost(owner, new Map([[owned.appSessionId, ownedClaim.token]]));
+        await ownerHost.deleteSession(owned.appSessionId);
+        assert.equal(owner.get(owned.appSessionId), undefined);
+
+        const live = owner.create({
+            acpSessionId: 'acp-service-live',
+            title: 'service live',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        const liveClaim = owner.claimPrompt(live.appSessionId);
+        const liveHost = deletionHost(owner, new Map([[live.appSessionId, liveClaim.token]]));
+        let rejectLive;
+        const livePromise = new Promise((_resolve, reject) => { rejectLive = reject; });
+        const liveHandle = {
+            promise: livePromise,
+            cancel: async () => {
+                liveHost.activePrompts.delete(live.appSessionId);
+                rejectLive(new Error('cancelled'));
+            }
+        };
+        liveHost.activePrompts.set(live.appSessionId, liveHandle);
+        await liveHost.deleteSession(live.appSessionId);
+        assert.equal(owner.get(live.appSessionId), undefined,
+            'owned live deletion must settle after cancellation before removing history');
+
+        const foreign = owner.create({
+            acpSessionId: 'acp-service-foreign',
+            title: 'service foreign',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        owner.claimPrompt(foreign.appSessionId);
+        const peerHost = deletionHost(peer);
+        await assert.rejects(
+            peerHost.deleteSession(foreign.appSessionId),
+            SessionPromptConflictError
+        );
+        assert.equal(peer.get(foreign.appSessionId)?.status, 'running');
+    } finally {
+        owner.dispose();
+        peer.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('service deletion waits for cancellation delivery and retains history on failure or timeout', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-delete-delivery-'));
+    const repository = new AgentSessionRepository(root);
+    try {
+        const createRunning = suffix => {
+            const created = repository.create({
+                acpSessionId: `acp-${suffix}`,
+                title: suffix,
+                workspaceRoot: '/fixture',
+                providerId: 'grok-subscription'
+            });
+            const claim = repository.claimPrompt(created.appSessionId);
+            return { created, claim };
+        };
+        const attachHandle = (host, created, claim, transport) => {
+            let rejectPrompt;
+            const promise = new Promise((_resolve, reject) => { rejectPrompt = reject; });
+            promise.catch(() => {
+                if (repository.get(created.appSessionId)?.status === 'running') {
+                    repository.finishPrompt(created.appSessionId, claim.token, 'cancelled');
+                    host.promptClaimTokens.delete(created.appSessionId);
+                }
+                host.activePrompts.delete(created.appSessionId);
+            });
+            host.activePrompts.set(created.appSessionId, {
+                promise,
+                cancel: () => {
+                    rejectPrompt(new Error('cancelled'));
+                    return transport;
+                }
+            });
+        };
+
+        let resolveDelivery;
+        const delivered = new Promise(resolve => { resolveDelivery = resolve; });
+        const delayed = createRunning('delayed-delivery');
+        const delayedHost = deletionHost(repository, new Map([[delayed.created.appSessionId, delayed.claim.token]]));
+        delayedHost.phase = 'ready';
+        delayedHost.acp = {};
+        delayedHost.supervisor.running = true;
+        attachHandle(delayedHost, delayed.created, delayed.claim, delivered);
+        const deleting = delayedHost.deleteSession(delayed.created.appSessionId);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.ok(repository.get(delayed.created.appSessionId),
+            'history must remain while ACP cancellation delivery is pending');
+        resolveDelivery();
+        await deleting;
+        assert.equal(repository.get(delayed.created.appSessionId), undefined);
+
+        const failed = createRunning('failed-delivery');
+        const failedHost = deletionHost(repository, new Map([[failed.created.appSessionId, failed.claim.token]]));
+        failedHost.phase = 'ready';
+        failedHost.acp = {};
+        failedHost.supervisor.running = true;
+        attachHandle(failedHost, failed.created, failed.claim, Promise.reject(new Error('stdin closed')));
+        await assert.rejects(failedHost.deleteSession(failed.created.appSessionId), /stdin closed/);
+        assert.ok(repository.get(failed.created.appSessionId));
+        await assert.rejects(
+            failedHost.deleteSession(failed.created.appSessionId),
+            /still confirming|cancellation was not confirmed/
+        );
+
+        const timedOut = createRunning('timeout-delivery');
+        const timeoutHost = deletionHost(repository, new Map([[timedOut.created.appSessionId, timedOut.claim.token]]));
+        timeoutHost.phase = 'ready';
+        timeoutHost.acp = {};
+        timeoutHost.supervisor.running = true;
+        timeoutHost.deleteCancellationTimeoutMs = () => 10;
+        attachHandle(timeoutHost, timedOut.created, timedOut.claim, new Promise(() => undefined));
+        await assert.rejects(
+            timeoutHost.deleteSession(timedOut.created.appSessionId),
+            /发送超时/
+        );
+        assert.ok(repository.get(timedOut.created.appSessionId));
+    } finally {
+        repository.dispose();
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('draining runtime never reclassifies a self-owned live claim as an orphan', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-session-draining-delete-'));
+    const repository = new AgentSessionRepository(root);
+    try {
+        const created = repository.create({
+            acpSessionId: 'acp-draining',
+            title: 'draining',
+            workspaceRoot: '/fixture',
+            providerId: 'grok-subscription'
+        });
+        const claim = repository.claimPrompt(created.appSessionId);
+        const host = deletionHost(repository, new Map([[created.appSessionId, claim.token]]));
+        host.phase = 'draining';
+        host.acp = {};
+        host.supervisor.running = true;
+
+        await assert.rejects(
+            host.deleteSession(created.appSessionId),
+            /runtime may still be executing/
+        );
+        assert.equal(repository.get(created.appSessionId)?.status, 'running');
+        assert.equal(repository.promptClaimOwnership(created.appSessionId), 'owned');
+    } finally {
+        repository.dispose();
         fs.rmSync(root, { recursive: true, force: true });
     }
 });

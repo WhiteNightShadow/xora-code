@@ -1,10 +1,14 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 const { performance } = require('node:perf_hooks');
 const test = require('node:test');
 
-const { GrokSidecarSupervisor } = require('../lib/electron-main/sidecar-supervisor');
+const {
+    GrokSidecarSupervisor,
+    SidecarTerminationUnconfirmedError
+} = require('../lib/electron-main/sidecar-supervisor');
 const { resolveSharedGrokHome, sharedGrokHome } = require('../lib/electron-main/shared-grok-home');
 
 function widgetClass() {
@@ -253,6 +257,22 @@ test('every production sidecar environment disables telemetry and implicit compa
     assert.equal(environment.XORA_CODE, '1');
     assert.equal(environment.GROK_CURSOR_MCPS_ENABLED, 'false');
     assert.equal(environment.GROK_CLAUDE_MCPS_ENABLED, 'false');
+});
+
+test('forced stop keeps the child authoritative when no exit event is observed', async () => {
+    const supervisor = Object.create(GrokSidecarSupervisor.prototype);
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.stdin = { end: () => undefined };
+    supervisor.child = child;
+    const signals = [];
+    supervisor.signalTree = (_child, signal) => signals.push(signal);
+    supervisor.forcedExitConfirmationTimeoutMs = () => 5;
+
+    await assert.rejects(supervisor.stop(0), SidecarTerminationUnconfirmedError);
+    assert.equal(supervisor.child, child, 'an unconfirmed process handle must not be discarded');
+    assert.equal(supervisor.running, true, 'sending SIGKILL is not proof of process exit');
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
 });
 
 test('runtime MCP secrets can be registered dynamically before ACP writes them', () => {

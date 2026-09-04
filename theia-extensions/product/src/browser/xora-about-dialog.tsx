@@ -16,7 +16,7 @@ export class XoraAboutDialog extends AboutDialog {
             {super.renderHeader()}
             <h3>Agent 运行时</h3>
             <div className='about-details'>
-                <p>Xora Code 版本：{this.applicationInfo?.version ?? '0.2.2'}</p>
+                <p>Xora Code 版本：{this.applicationInfo?.version ?? '未知'}</p>
                 <p>Grok Build 基线：0.2.102</p>
                 <p>上游公开源码提交：<code>98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce</code></p>
                 <p>SOURCE_REV: <code>124d85bc5dc6e7805560215fcc6d5413944920e1</code></p>

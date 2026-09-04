@@ -118,7 +118,9 @@ test('Agent composer and transcript include the interaction safeguards used by t
     assert.match(source, /lane\.queue\.push\(submission\)/,
         'the optimistic user bubble must paint from the local conversation queue');
     assert.match(source, /任务已接收，\$\{stateLabel\}/);
-    assert.match(source, /submission\.userEventReceived = true/);
+    assert.match(source, /acknowledged\.userEventReceived = true/);
+    assert.match(source, /Agent 未确认收到这条任务/,
+        'a resolved prompt RPC without the durable user event must become a visible recovery card');
     assert.match(source, /event\.kind === 'text-delta' && event\.role === 'user'/);
     assert.match(source, /protected sendPreparationInFlight = false/);
     assert.match(source, /protected promptLanes = new Map<string, SessionPromptLane>\(\)/);
@@ -226,8 +228,12 @@ test('image submissions and session restores stay bound to their original Agent 
     assert.match(source, /this\.resetToNewSession\('项目已变化，草稿已按项目分别保留。'/);
     assert.match(source, /const targetContextKey = this\.agentContextKey\([\s\S]*session\.workspaceRoot,[\s\S]*this\.model\.snapshot\.providerId,[\s\S]*session\.appSessionId/);
     assert.doesNotMatch(source, /此历史仅供查看，请新建会话/);
-    assert.match(source, /generation !== this\.sessionLoadGeneration \|\| this\.imageDraftContextKey\(\) !== targetContextKey/);
-    assert.match(source, /this\.observedAgentContextKey = targetContextKey;\s*this\.activateComposerLane\(targetContextKey\);\s*this\.model\.showSessionHistory\(session, cachedHistory \?\? \[\]\)/);
+    assert.match(source, /const openingIsCurrent = \(\): boolean => generation === this\.sessionLoadGeneration/);
+    assert.match(source, /this\.activeComposerLaneKey \?\? this\.imageDraftContextKey\(\)/);
+    assert.match(source, /this\.observedAgentContextKey = targetContextKey;\s*this\.activateComposerLane\(targetContextKey\)/);
+    assert.match(source, /if \(cachedHistory\) this\.model\.showSessionHistory\(session, cachedHistory\)/);
+    assert.doesNotMatch(source, /this\.model\.showSessionHistory\(session, cachedHistory \?\? \[\]\)/,
+        'a first history read must not clear the current transcript before Electron responds');
     assert.match(source, /if \(!cachedHistory\) \{[\s\S]*?readSessionHistoryPage\(session\.appSessionId[\s\S]*?mergeHistoryCatchup\(page\.events, catchup\)[\s\S]*?showSessionHistory\(session, completeHistory\)/);
     assert.match(draftStoreSource, /this\.composerDraftState\(\)\.set\(key, \{[\s\S]*?text: this\.prompt \?\? ''[\s\S]*?images: \[\.\.\.\(this\.draftImages \?\? \[\]\)\]/,
         'switching away must save text and images under the old conversation lane');

@@ -325,6 +325,29 @@ verified independently.
 
 ## Publication boundary
 
-The output is intentionally unsigned preview material. These scripts never create a release, update a mutable tag, or claim production signing. Pull the bundle, `.sha256.txt`, and `.build.json` back to the trusted coordinator; verify the outer digest, safely extract it, run `build/sbom/verify-preview-assets.mjs` again, and only then upload the individual preview assets to an immutable GitHub prerelease.
+The native builders intentionally produce **unsigned** artifacts and never create a
+GitHub release, move a tag, generate signed update manifests, or claim platform code
+signing. Pull the bundle, `.sha256.txt`, and `.build.json` back to the trusted
+coordinator; verify the outer digest, safely extract it, and run
+`build/sbom/verify-preview-assets.mjs` again before any publication.
+
+There are two explicit publication channels:
+
+1. **Preview / prerelease (default)** — upload the individual verified assets to one
+   immutable GitHub prerelease whose tag includes the source commit. A preview never
+   replaces Latest.
+2. **Unsigned community stable** — only when the project owner has explicitly
+   designated that exact version as stable, all four native targets were built from
+   the same committed source, every returned bundle and SBOM passed verification,
+   the five public installers and one combined `SHA256SUMS.txt` are complete, and the
+   release notes prominently disclose the absence of Apple Developer ID/notarization,
+   Windows Authenticode and Linux GPG signing. Publish one immutable `vX.Y.Z` tag and
+   mark that GitHub Release Latest. “Stable” describes the tested application channel;
+   it does **not** claim platform signing or enable signed automatic updates.
+
+The formal signed workflow is a separate, manually invoked boundary. It must continue
+to fail closed until all platform certificates and both Ed25519 trust anchors are
+configured. Artifacts from these unsigned builders must never be inserted into that
+signed workflow or accompanied by formal update manifests.
 
 If a build fails, use a new `--work-root`. Verified download archives and language package caches are reused, while executable Node.js, DotSlash, and protoc trees are freshly extracted or built inside each work root. Mismatched cached archives are rejected instead of silently replaced.

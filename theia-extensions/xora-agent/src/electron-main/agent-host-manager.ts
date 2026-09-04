@@ -66,6 +66,7 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
             () => this.broadcastProviderDefaults(service),
             () => this.broadcastPermissionMode(service),
             status => this.broadcastSubscriptionAuthStatus(service, status),
+            appSessionId => this.broadcastSessionDeleted(service, appSessionId),
             operation => this.coordinateSubscriptionAuthentication(service, operation),
             this.updates,
             () => ![...this.services].some(candidate => candidate.runtimeActive)
@@ -264,6 +265,14 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
     protected broadcastPermissionMode(source: GrokAgentHostService): void {
         for (const service of this.services) {
             if (service !== source) service.notifyPermissionModeChanged();
+        }
+    }
+
+    protected broadcastSessionDeleted(source: GrokAgentHostService, appSessionId: string): void {
+        for (const service of this.services) {
+            if (service !== source) {
+                try { service.notifySessionDeleted(appSessionId); } catch { /* isolate peer notification failures */ }
+            }
         }
     }
 

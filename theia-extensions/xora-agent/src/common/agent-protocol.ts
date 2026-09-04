@@ -352,6 +352,17 @@ export interface PromptRequest {
     attachments?: PromptImageAttachment[];
 }
 
+/** Durable result of one prompt transaction. `admitted` proves Electron
+ * persisted the user turn before crossing ACP; a terminal outcome means the
+ * same transaction has already finished and must never be offered as an
+ * unconfirmed resend merely because renderer events were interrupted. */
+export interface PromptReceipt {
+    admitted: true;
+    sessionId: string;
+    turnId: string;
+    outcome: 'completed' | 'cancelled' | 'failed';
+}
+
 /** User-authored contract locked when Grok asks to leave read-only Plan mode. */
 export interface AgentTaskContract {
     objective: string;
@@ -611,6 +622,9 @@ export interface DiffEvent {
 export type AgentHostEvent =
     | { kind: 'snapshot'; snapshot: RuntimeSnapshot }
     | { kind: 'session'; session: SessionRecord }
+    /** Explicit cross-window deletion authority. Snapshot omission alone is
+     * intentionally not deletion proof because crash recovery can be partial. */
+    | { kind: 'session-deleted'; sessionId: string }
     | AgentTextEvent
     | AgentThoughtEvent
     | AgentPlanEvent
@@ -630,7 +644,18 @@ export type AgentHostEvent =
         /** Monotonic ACP prompt duration measured by Electron main. */
         elapsedMs?: number;
     }
-    | { kind: 'error'; sessionId?: string; turnId?: string; code: string; message: string; recoverable: boolean };
+    | {
+        kind: 'error';
+        sessionId?: string;
+        turnId?: string;
+        /** Stable non-secret identity for layered reports of one runtime
+         * failure. Persisted history may coalesce only an explicit group/turn,
+         * never unrelated errors merely replayed in the same wall-clock tick. */
+        errorGroupId?: string;
+        code: string;
+        message: string;
+        recoverable: boolean;
+    };
 
 export interface SessionHistoryPageRequest {
     /** Opaque stable cursor returned by the following page. Omit for the newest page. */
@@ -703,7 +728,7 @@ export interface AgentHostService extends RpcServer<AgentHostClient> {
     renameSession(appSessionId: string, title: string): Promise<SessionRecord>;
     /** Deletes a local session index entry and its redacted history files. */
     deleteSession(appSessionId: string): Promise<void>;
-    sendPrompt(request: PromptRequest): Promise<void>;
+    sendPrompt(request: PromptRequest): Promise<PromptReceipt>;
     /** Responds to Grok's in-flight Plan approval reverse request. */
     respondPlanApproval(decision: PlanApprovalDecision): Promise<void>;
     /** Guides a running turn without cancelling it. */

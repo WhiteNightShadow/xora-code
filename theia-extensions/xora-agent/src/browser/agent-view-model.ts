@@ -18,7 +18,14 @@ import {
 } from '../common/agent-protocol';
 import { AgentHostClientImpl } from './agent-client';
 import { isMachineToolTitle } from './agent-display-helpers';
-import { friendlyAgentErrorMessage } from './agent-error-labels';
+import { agentErrorSemanticKey, friendlyAgentEventErrorMessage } from './agent-error-labels';
+import { filesystemPathsEqual } from '../common/workspace-path';
+
+function workspaceRootsEqual(left: string | undefined, right: string | undefined): boolean {
+    const windowsPath = (value: string | undefined): boolean => !!value
+        && (/^[\\/]?[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}[^\\/]+[\\/]/.test(value));
+    return filesystemPathsEqual(left, right, windowsPath(left) || windowsPath(right) ? 'win32' : undefined);
+}
 
 export interface TranscriptEntry {
     id: string;
@@ -108,13 +115,13 @@ export class AgentViewModel {
     protected readonly unconfirmedCreatedSessions = new Set<string>();
     /**
      * Exact Electron revision which already contained the locally-created
-     * record. Any missing snapshot at or below this fence predates creation;
-     * a higher missing revision is an authoritative deletion. Undefined is
-     * retained only for compatibility with pre-fence hosts.
+     * record. Missing snapshots at or below this fence predate creation;
+     * newer omissions end only the creation-race bookkeeping and never act as
+     * deletion proof. Undefined is retained for pre-fence hosts.
      */
     protected readonly unconfirmedSessionAuthorityRevisions = new Map<string, number | undefined>();
     /** Bounded fallback used only with an older host that cannot return the
-     * exact create authority revision. Packaged v0.2.6 never takes this path. */
+     * exact create authority revision. */
     protected readonly legacyUnconfirmedOmissionRevisions = new Map<string, number>();
     /** Last authoritative snapshot revision which contained each session. */
     protected readonly sessionAuthorityRevisions = new Map<string, number>();
@@ -122,6 +129,13 @@ export class AgentViewModel {
      * reported that a local session no longer exists. Session ids are UUIDs
      * and cannot be legitimately reused except by a new session/create result. */
     protected readonly missingSessionTombstones = new Set<string>();
+    /** Error layers emitted by one runtime failure are coalesced briefly so a
+     * single disconnect never floods the conversation with ACP internals. */
+    protected readonly recentErrorEntries = new Map<string, { entry: TranscriptEntry; observedAt: number }>();
+    protected readonly errorCoalescingWindowMs = 10_000;
+    /** History replay runs in one JS tick regardless of the events' real age.
+     * Only persisted turn/group authority may coalesce during replay. */
+    protected replayingHistory = false;
 
     @postConstruct()
     protected init(): void {
@@ -136,12 +150,14 @@ export class AgentViewModel {
 
     protected accept(event: AgentHostEvent, notify = true): void {
         if (event.kind === 'session' && this.missingSessionTombstones.has(event.session.appSessionId)) return;
-        if (event.kind !== 'snapshot'
+        if (event.kind !== 'snapshot' && event.kind !== 'session-deleted'
             && 'sessionId' in event
             && typeof event.sessionId === 'string'
             && this.missingSessionTombstones.has(event.sessionId)) return;
         let liveActivityStarted = false;
-        if (event.kind === 'snapshot') {
+        if (event.kind === 'session-deleted') {
+            this.tombstoneMissingSession(event.sessionId);
+        } else if (event.kind === 'snapshot') {
             this.applySnapshot(event.snapshot);
             if (event.snapshot.phase === 'crashed') {
                 this.clearPendingPermissions();
@@ -302,16 +318,7 @@ export class AgentViewModel {
             this.clearPendingPlanApprovals(event.sessionId);
         } else if (event.kind === 'error') {
             if (event.sessionId && !this.isVisibleSession(event.sessionId)) return;
-            this.transcript.push({
-                id: this.id('error'),
-                kind: 'error',
-                text: friendlyAgentErrorMessage(event.message),
-                payload: event,
-                ...(event.sessionId ? { activityTurnId: this.activityTurnId({
-                    sessionId: event.sessionId,
-                    turnId: event.turnId
-                }) } : {})
-            });
+            this.upsertError(event);
             if (event.code === 'SIDECAR_CRASHED') {
                 this.clearPendingPermissions();
                 this.clearPendingPlanApprovals();
@@ -327,6 +334,53 @@ export class AgentViewModel {
                 this.scheduleChangeNotification();
             } else {
                 this.notifyChangeImmediately();
+            }
+        }
+    }
+
+    protected upsertError(event: Extract<AgentHostEvent, { kind: 'error' }>): void {
+        const semanticKey = agentErrorSemanticKey(event.code, event.message);
+        // Runtime disconnects are one failure even when PROMPT_FAILED is
+        // session-scoped and SIDECAR_CRASHED is not. Other families remain
+        // isolated per conversation so independent task errors stay visible.
+        const scope = semanticKey === 'runtime-disconnected'
+            ? 'runtime'
+            : event.sessionId ?? 'runtime';
+        const explicitGroup = event.errorGroupId ?? event.turnId;
+        const turnScope = explicitGroup
+            ? `group:${explicitGroup}`
+            : semanticKey === 'runtime-disconnected'
+                ? 'runtime-failure'
+                : `message:${event.message}`;
+        const key = `${scope}:${semanticKey}:${turnScope}`;
+        const observedAt = this.now();
+        const recent = this.recentErrorEntries.get(key);
+        const text = friendlyAgentEventErrorMessage(event.code, event.message);
+        if (recent
+            && (!this.replayingHistory || !!explicitGroup)
+            && observedAt - recent.observedAt <= this.errorCoalescingWindowMs
+            && this.transcript.includes(recent.entry)) {
+            recent.entry.text = text;
+            recent.entry.payload = event;
+            recent.observedAt = observedAt;
+            return;
+        }
+        const entry: TranscriptEntry = {
+            id: this.id('error'),
+            kind: 'error',
+            text,
+            payload: event,
+            ...(event.sessionId ? { activityTurnId: this.activityTurnId({
+                sessionId: event.sessionId,
+                turnId: event.turnId
+            }) } : {})
+        };
+        this.transcript.push(entry);
+        this.recentErrorEntries.set(key, { entry, observedAt });
+        // Avoid retaining arbitrary historic diagnostics on long sessions.
+        for (const [candidateKey, candidate] of this.recentErrorEntries) {
+            if (observedAt - candidate.observedAt > this.errorCoalescingWindowMs) {
+                this.recentErrorEntries.delete(candidateKey);
             }
         }
     }
@@ -796,14 +850,24 @@ export class AgentViewModel {
         this.clearTranscript();
         const livePermissionIds = new Set(this.pendingPermissions.keys());
         const livePlanApprovalIds = new Set(this.pendingPlanApprovals.keys());
-        for (const event of events) {
-            this.accept(event, false);
-            if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
-                this.pendingPermissions.delete(event.requestId);
+        this.replayingHistory = true;
+        try {
+            for (const event of events) {
+                this.accept(event, false);
+                if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
+                    this.pendingPermissions.delete(event.requestId);
+                }
+                if (event.kind === 'plan-approval-request' && !livePlanApprovalIds.has(event.requestId)) {
+                    this.pendingPlanApprovals.delete(event.requestId);
+                }
             }
-            if (event.kind === 'plan-approval-request' && !livePlanApprovalIds.has(event.requestId)) {
-                this.pendingPlanApprovals.delete(event.requestId);
-            }
+        } finally {
+            this.replayingHistory = false;
+            // Replayed events have no trustworthy relation to `now()`. Keep
+            // their rendered entries, but never let a subsequent live error
+            // merge into the final historical row merely because loading just
+            // happened in the same ten-second window.
+            this.recentErrorEntries.clear();
         }
         this.reconcileRestoredTaskContractPlans(events);
         this.notifyChangeImmediately();
@@ -817,14 +881,20 @@ export class AgentViewModel {
         this.clearTranscript();
         const livePermissionIds = new Set(this.pendingPermissions.keys());
         const livePlanApprovalIds = new Set(this.pendingPlanApprovals.keys());
-        for (const event of events) {
-            this.accept(event, false);
-            if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
-                this.pendingPermissions.delete(event.requestId);
+        this.replayingHistory = true;
+        try {
+            for (const event of events) {
+                this.accept(event, false);
+                if (event.kind === 'permission-request' && !livePermissionIds.has(event.requestId)) {
+                    this.pendingPermissions.delete(event.requestId);
+                }
+                if (event.kind === 'plan-approval-request' && !livePlanApprovalIds.has(event.requestId)) {
+                    this.pendingPlanApprovals.delete(event.requestId);
+                }
             }
-            if (event.kind === 'plan-approval-request' && !livePlanApprovalIds.has(event.requestId)) {
-                this.pendingPlanApprovals.delete(event.requestId);
-            }
+        } finally {
+            this.replayingHistory = false;
+            this.recentErrorEntries.clear();
         }
         this.reconcileRestoredTaskContractPlans(events);
         this.notifyChangeImmediately();
@@ -865,6 +935,12 @@ export class AgentViewModel {
         const previousSessions = [...previousSnapshot.sessions];
         const previousWorkspaceRoot = this.snapshot.workspaceRoot;
         const previousProviderId = this.snapshot.providerId;
+        // A failure snapshot can be produced while the host is tearing down
+        // runtime state and omit its otherwise unchanged root. Treat that as
+        // missing diagnostic metadata, not a project switch.
+        const incomingWorkspaceRoot = snapshot.phase === 'crashed' && snapshot.workspaceRoot === undefined
+            ? previousWorkspaceRoot
+            : snapshot.workspaceRoot;
         if (typeof this.selectedSessionOverride === 'string'
             && this.unconfirmedCreatedSessions.has(this.selectedSessionOverride)) {
             const pending = previousSnapshot.sessions.find(
@@ -876,7 +952,7 @@ export class AgentViewModel {
                     ?? this.appliedSnapshotRevision
                 );
             if (pending
-                && pending.workspaceRoot === snapshot.workspaceRoot
+                && workspaceRootsEqual(pending.workspaceRoot, incomingWorkspaceRoot)
                 && pending.providerId !== snapshot.providerId
                 && revisionCannotSupersede) {
                 return;
@@ -884,28 +960,32 @@ export class AgentViewModel {
         }
         // Electron events and RPC results travel over separate asynchronous
         // paths. Immediately after session/new, a snapshot produced before
-        // that transaction can arrive without the new record. Preserve only
-        // a locally-created, not-yet-confirmed record. Once a snapshot has
-        // advertised it, a later revision which omits it is an authoritative
-        // deletion and must never be converted into a ghost conversation.
+        // that transaction can arrive without the new record. Preserve a
+        // locally-created, not-yet-confirmed record across that race. Snapshot
+        // omission alone never establishes deletion: repository recovery and
+        // cross-window writes can briefly produce a partial projection.
         // Never retain the transport object's mutable array. Local upserts
         // must not retroactively change a previously delivered snapshot and
         // make a later race appear authoritative.
-        const advertisedSessionIds = new Set(snapshot.sessions
-            .filter(session => !this.missingSessionTombstones.has(session.appSessionId))
-            .map(session => session.appSessionId));
-        if (Number.isSafeInteger(incomingRevision)) {
-            for (const [sessionId, authorityRevision] of [...this.sessionAuthorityRevisions]) {
-                if (!advertisedSessionIds.has(sessionId)
-                    && (incomingRevision as number) > authorityRevision) {
-                    this.tombstoneMissingSession(sessionId);
-                }
-            }
-        }
         const authoritativeSessions = snapshot.sessions.filter(
             session => !this.missingSessionTombstones.has(session.appSessionId)
         );
         let sessions = [...authoritativeSessions];
+        // A crash snapshot may be emitted after the repository read failed or
+        // while its index lock is being recovered. Its empty/partial list is
+        // not evidence that durable conversations were deleted. Preserve the
+        // last renderer projection and let a later complete snapshot refresh
+        // it. Only forgetMissingSession creates an authoritative tombstone.
+        if (snapshot.phase === 'crashed'
+            && workspaceRootsEqual(previousSnapshot.workspaceRoot, incomingWorkspaceRoot)
+            && previousSnapshot.providerId === snapshot.providerId) {
+            for (const previous of previousSessions) {
+                if (!this.missingSessionTombstones.has(previous.appSessionId)
+                    && !sessions.some(session => session.appSessionId === previous.appSessionId)) {
+                    sessions.push(previous);
+                }
+            }
+        }
         for (const session of authoritativeSessions) {
             this.unconfirmedCreatedSessions.delete(session.appSessionId);
             this.unconfirmedSessionAuthorityRevisions.delete(session.appSessionId);
@@ -921,7 +1001,7 @@ export class AgentViewModel {
         for (const sessionId of [...this.unconfirmedCreatedSessions]) {
             const local = previousSessions.find(session => session.appSessionId === sessionId);
             if (!local
-                || local.workspaceRoot !== snapshot.workspaceRoot
+                || !workspaceRootsEqual(local.workspaceRoot, incomingWorkspaceRoot)
                 || local.providerId !== snapshot.providerId) {
                 this.unconfirmedCreatedSessions.delete(sessionId);
                 this.unconfirmedSessionAuthorityRevisions.delete(sessionId);
@@ -933,16 +1013,20 @@ export class AgentViewModel {
                     const authorityRevision = this.unconfirmedSessionAuthorityRevisions.get(sessionId);
                     if (Number.isSafeInteger(authorityRevision)
                         && (incomingRevision as number) > (authorityRevision as number)) {
-                        this.tombstoneMissingSession(sessionId);
-                        continue;
+                        // A missing snapshot is not a typed deletion. Stop the
+                        // creation-race bookkeeping but keep a selected local
+                        // record until Electron explicitly reports it missing.
+                        this.unconfirmedCreatedSessions.delete(sessionId);
+                        this.unconfirmedSessionAuthorityRevisions.delete(sessionId);
                     }
                     if (!Number.isSafeInteger(authorityRevision)) {
                         const firstLegacyOmission = this.legacyUnconfirmedOmissionRevisions.get(sessionId);
                         if (firstLegacyOmission === undefined) {
                             this.legacyUnconfirmedOmissionRevisions.set(sessionId, incomingRevision as number);
                         } else if ((incomingRevision as number) > firstLegacyOmission) {
-                            this.tombstoneMissingSession(sessionId);
-                            continue;
+                            this.unconfirmedCreatedSessions.delete(sessionId);
+                            this.unconfirmedSessionAuthorityRevisions.delete(sessionId);
+                            this.legacyUnconfirmedOmissionRevisions.delete(sessionId);
                         }
                     }
                 }
@@ -966,8 +1050,7 @@ export class AgentViewModel {
             const locallySelected = previousSessions.find(
                 session => session.appSessionId === this.selectedSessionOverride
             );
-            if (locallySelected && locallySelected.workspaceRoot === snapshot.workspaceRoot) {
-                const unconfirmed = this.unconfirmedCreatedSessions.has(locallySelected.appSessionId);
+            if (locallySelected && workspaceRootsEqual(locallySelected.workspaceRoot, incomingWorkspaceRoot)) {
                 const lastAuthorityRevision = this.sessionAuthorityRevisions.get(locallySelected.appSessionId);
                 const sameOrOlderAuthority = Number.isSafeInteger(incomingRevision)
                     && lastAuthorityRevision !== undefined
@@ -975,8 +1058,7 @@ export class AgentViewModel {
                 if (sameOrOlderAuthority && locallySelected.providerId !== snapshot.providerId) {
                     return;
                 }
-                if ((unconfirmed || sameOrOlderAuthority)
-                    && locallySelected.providerId === snapshot.providerId) {
+                if (locallySelected.providerId === snapshot.providerId) {
                     sessions = [locallySelected, ...sessions];
                 }
             }
@@ -986,12 +1068,19 @@ export class AgentViewModel {
         }
         const sessionContexts = Object.fromEntries(Object.entries(snapshot.sessionContexts ?? {})
             .filter(([sessionId]) => !this.missingSessionTombstones.has(sessionId)));
+        const crashPreservedActiveSessionId = snapshot.phase === 'crashed'
+            && !snapshot.activeSessionId
+            && previousSnapshot.activeSessionId
+            && sessions.some(session => session.appSessionId === previousSnapshot.activeSessionId)
+            ? previousSnapshot.activeSessionId
+            : undefined;
         this.snapshot = {
             ...snapshot,
+            ...(incomingWorkspaceRoot !== snapshot.workspaceRoot ? { workspaceRoot: incomingWorkspaceRoot } : {}),
             sessions,
             ...(snapshot.activeSessionId && this.missingSessionTombstones.has(snapshot.activeSessionId)
                 ? { activeSessionId: undefined }
-                : {}),
+                : crashPreservedActiveSessionId ? { activeSessionId: crashPreservedActiveSessionId } : {}),
             sessionContexts: {
                 ...(this.snapshot.sessionContexts ?? {}),
                 ...sessionContexts
@@ -1002,11 +1091,12 @@ export class AgentViewModel {
         } else if (this.selectedSessionOverride !== undefined) {
             const selected = sessions.find(session => session.appSessionId === this.selectedSessionOverride);
             if (selected
-                && selected.workspaceRoot === snapshot.workspaceRoot) {
+                && workspaceRootsEqual(selected.workspaceRoot, incomingWorkspaceRoot)) {
                 this.snapshot.activeSessionId = this.selectedSessionOverride;
             } else {
-                // A project-root change is always an isolation boundary. A
-                // missing/deleted record is also cleared. An explicitly chosen
+                // A project-root change is always an isolation boundary. An
+                // explicitly deleted/typed-missing record is already filtered
+                // by its tombstone. An explicitly chosen
                 // history from another Provider remains visible while Electron
                 // rebinds it to the application-wide Provider; renderer state
                 // can never switch credentials or authorize the old ACP id.
@@ -1018,7 +1108,7 @@ export class AgentViewModel {
                 this.clearPendingPlanApprovals(missingSelection);
             }
         } else {
-            const contextChanged = (previousWorkspaceRoot !== undefined && previousWorkspaceRoot !== snapshot.workspaceRoot)
+            const contextChanged = (previousWorkspaceRoot !== undefined && !workspaceRootsEqual(previousWorkspaceRoot, incomingWorkspaceRoot))
                 || previousProviderId !== snapshot.providerId;
             const activeSessionId = snapshot.activeSessionId;
             const containsAnotherSession = !!activeSessionId && this.transcript.some(entry => {
@@ -1137,6 +1227,7 @@ export class AgentViewModel {
         this.cancelledPlanSignatures.clear();
         this.legacyActivityTurnIds.clear();
         this.legacyActivityTurnOrdinals.clear();
+        this.recentErrorEntries.clear();
     }
 
     protected id(prefix: string): string {

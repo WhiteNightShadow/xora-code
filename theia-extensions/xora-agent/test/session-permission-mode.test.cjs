@@ -121,6 +121,18 @@ test('permission mode changes are broadcast to every other Agent window', () => 
     assert.equal(notifications, 1);
 });
 
+test('committed session deletion is broadcast explicitly to peer windows', () => {
+    const manager = Object.create(AgentHostManager.prototype);
+    const received = [];
+    const source = { notifySessionDeleted: () => received.push('source') };
+    const peer = { notifySessionDeleted: sessionId => received.push(sessionId) };
+    manager.services = new Set([source, peer]);
+
+    manager.broadcastSessionDeleted(source, 'session-deleted-by-peer');
+
+    assert.deepEqual(received, ['session-deleted-by-peer']);
+});
+
 test('Provider runtime invalidations preserve exact identity and exclude the source window', () => {
     const manager = Object.create(AgentHostManager.prototype);
     const received = [];
@@ -248,6 +260,40 @@ test('full access allows absolute paths and symlink targets anywhere on the curr
         assert.equal(emitted.some(event => event.kind === 'error' && event.code === 'PERMISSION_BOUNDARY_REJECTED'), false);
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+    }
+});
+
+test('request approval accepts every trusted workspace root and a legal ..hidden child', () => {
+    const primary = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-multi-root-primary-'));
+    const additional = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-multi-root-additional-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-multi-root-outside-'));
+    try {
+        const canonicalPrimary = fs.realpathSync.native(primary);
+        const canonicalAdditional = fs.realpathSync.native(additional);
+        const host = Object.create(GrokAgentHostService.prototype);
+        host.workspaceRoot = canonicalPrimary;
+        host.theiaTrustedRoots = new Set([canonicalPrimary, canonicalAdditional]);
+        host.security = {
+            agentPermissionMode: () => 'request-approval',
+            canonicalRoot: root => fs.existsSync(root) ? fs.realpathSync.native(root) : path.normalize(root),
+            isTrusted: root => root === canonicalPrimary || root === canonicalAdditional
+        };
+
+        const hidden = path.join(canonicalPrimary, '..hidden');
+        const secondaryFile = path.join(canonicalAdditional, 'nested', 'fixture.ts');
+        assert.equal(host.safeWorkspaceFile(hidden), hidden);
+        assert.equal(host.safeWorkspaceFile(secondaryFile), secondaryFile);
+        assert.equal(host.isPathInsideWorkspace(canonicalAdditional), true,
+            'an additional directory itself is a valid tool cwd');
+        assert.equal(host.isPathInsideWorkspace(secondaryFile), true);
+        assert.throws(
+            () => host.safeWorkspaceFile(path.join(outside, 'escape.ts')),
+            /inside the trusted workspace/
+        );
+    } finally {
+        fs.rmSync(primary, { recursive: true, force: true });
+        fs.rmSync(additional, { recursive: true, force: true });
         fs.rmSync(outside, { recursive: true, force: true });
     }
 });

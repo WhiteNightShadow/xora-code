@@ -36,6 +36,7 @@ import {
     PermissionRequestEvent,
     PromptImageAttachment,
     PromptImageMimeType,
+    PromptReceipt,
     ProviderProfile,
     RuntimePhase,
     RuntimeSnapshot,
@@ -60,6 +61,7 @@ import {
 } from './agent-display-helpers';
 import { OPEN_AGENT_SETTINGS_COMMAND } from './agent-entry-commands';
 import {
+    agentErrorSemanticKey,
     friendlyAgentErrorMessage,
     isLegacyLocalSessionNotFoundError,
     isTypedSessionNotFoundError
@@ -120,6 +122,10 @@ interface PromptSubmission {
     /** True immediately before invoking Electron's prompt RPC. Legacy
      * untyped "Unknown session" errors are unsafe to replay beyond this edge. */
     promptRequestStarted?: boolean;
+    /** Semantic key of a terminal host failure already rendered in chat.
+     * Retained until the matching RPC/receipt settles so its recovery card can
+     * replace only that error, never an unrelated warning. */
+    observedTerminalErrorSemanticKey?: string;
     cancelled?: boolean;
     state?: 'queued' | 'guiding' | 'preparing' | 'running';
     /** Blocks FIFO promotion while the same row is crossing x.ai/interject. */
@@ -131,6 +137,9 @@ interface PromptSubmission {
 
 interface RetryablePrompt extends PromptSubmission {
     message: string;
+    /** Present only when this card was created from a matching host event.
+     * It limits transcript suppression to that exact semantic failure. */
+    errorSemanticKey?: string;
 }
 
 interface SessionContextMenuState {
@@ -206,6 +215,12 @@ interface SessionPromptLane {
     active?: PromptSubmission;
     processing?: Promise<void>;
     retryable?: RetryablePrompt;
+}
+
+interface SessionHistoryRecovery {
+    sessionId: string;
+    message: string;
+    showingPreviousTranscript: boolean;
 }
 
 // Yield one browser task so root, Provider and backend workspace attachment
@@ -340,6 +355,10 @@ export class XoraAgentWidget extends ReactWidget {
     protected sessionLoadGeneration = 0;
     protected agentContextGeneration = 0;
     protected sessionLoading = false;
+    /** A failed first JSONL read must never masquerade as an empty new chat.
+     * Keep a compact, retryable recovery state while the previously rendered
+     * conversation (when any) remains untouched. */
+    protected sessionHistoryRecovery: SessionHistoryRecovery | undefined;
     protected openPopover: AgentPopover | undefined;
     protected agentPaneView: AgentPaneView = 'conversation';
     protected activityFilter: AgentActivityFilter = 'all';
@@ -348,6 +367,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected readonly thoughtDisclosure = new Map<string, boolean>();
     protected sessionContextMenu: SessionContextMenuState | undefined;
     protected exportingSessionId: string | undefined;
+    protected deletingSessionId: string | undefined;
     protected newSessionModel: string | undefined;
     /** Pending selection for a not-yet-created conversation. The value is the
      * canonical ACP token (for example `xhigh`), never a model-name guess. */
@@ -417,6 +437,10 @@ export class XoraAgentWidget extends ReactWidget {
     /** Live events received while a first JSONL read is in flight. */
     protected sessionHistoryCatchup = new Map<string, AgentHostEvent[]>();
     protected observedRuntimePhase: RuntimePhase | undefined;
+    /** A transport can fail while sendPrompt still owns a renderer lane. Wait
+     * for that lane to settle before restarting the shared runtime; the failed
+     * prompt itself is never replayed automatically. */
+    protected runtimeRecoveryPendingAfterPrompt = false;
     /** Open multi-session tabs for the current project (order is left-to-right). */
     protected openSessionTabs: string[] = [];
     protected renamingSessionId: string | undefined;
@@ -517,6 +541,7 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected render(): React.ReactNode {
         const snapshot = this.model.snapshot;
+        const runtimeCrashed = snapshot.phase === 'crashed';
         const recoveringRuntime = snapshot.phase === 'crashed'
             && this.runtimePrewarmRequested
             && this.runtimePrewarmAttempts < RUNTIME_PREWARM_MAX_ATTEMPTS;
@@ -525,6 +550,7 @@ export class XoraAgentWidget extends ReactWidget {
             && this.runtimePrewarmAttempts <= RUNTIME_PREWARM_MAX_ATTEMPTS
             && ['starting', 'initializing', 'crashed'].includes(snapshot.phase);
         const active = snapshot.sessions.find(session => session.appSessionId === snapshot.activeSessionId);
+        const activeRuntimeRecovery = active ? this.sessionAwaitingRuntimeRecovery(active) : false;
         const modelChoiceGroups = agentModelChoiceGroups(this.providers, snapshot, active);
         const modelChoiceCount = modelChoiceGroups.reduce((count, group) => count + group.choices.length, 0);
         const selectedModel = selectedAgentModelChoice(modelChoiceGroups, snapshot, active, this.newSessionModel);
@@ -570,6 +596,15 @@ export class XoraAgentWidget extends ReactWidget {
         const visibleTranscript = this.model.transcript.filter(entry => {
             if (entry.kind === 'permission') return !this.model.pendingPermissions.has(entry.id);
             if (entry.kind === 'plan-approval') return !this.model.pendingPlanApprovals.has(entry.id);
+            // The recovery card already owns the actionable error and exact
+            // user text. Do not duplicate the same recoverable failure as a
+            // second raw chat item while that card is visible.
+            if (this.retryablePrompt
+                && entry.kind === 'error'
+                && entry.payload?.kind === 'error'
+                && this.retryOwnsError(this.retryablePrompt, entry.payload)) {
+                return false;
+            }
             // A background cold-start failure is an implementation detail while
             // its one bounded recovery attempt is still in progress. If that
             // recovery also fails, the final actionable error remains visible.
@@ -609,19 +644,23 @@ export class XoraAgentWidget extends ReactWidget {
                         <strong title={active?.title}>{active?.title ?? '新会话'}</strong>
                         <span className='xora-agent-runtime-line' aria-live='polite'>
                             <span className={`xora-runtime-dot xora-runtime-${recoveringRuntime ? 'starting' : snapshot.phase}`} />
-                            <span className='xora-agent-runtime-label'>{this.sessionLoading
-                                    ? '正在恢复会话'
-                                    : sendInFlight && active?.status !== 'running'
-                                        ? ['starting', 'initializing', 'draining', 'updating'].includes(snapshot.phase)
-                                            ? '正在连接，随后发送'
-                                            : '正在准备任务'
-                                        : active?.status === 'running'
-                                            ? 'Agent 正在工作'
-                                            : recoveringRuntime
-                                                ? '正在重新连接'
-                                            : snapshot.phase === 'stopped' && (snapshot.workspaceRoot || this.roots.length)
-                                                ? '正在准备'
-                                                : runtimePhaseLabel(snapshot.phase)}</span>
+                            <span className='xora-agent-runtime-label'>{runtimeCrashed
+                                    ? 'Agent 连接已中断'
+                                    : activeRuntimeRecovery
+                                        ? '正在恢复 Agent 连接'
+                                    : this.sessionLoading
+                                        ? '正在恢复会话'
+                                        : sendInFlight && active?.status !== 'running'
+                                            ? ['starting', 'initializing', 'draining', 'updating'].includes(snapshot.phase)
+                                                ? '正在连接，随后发送'
+                                                : '正在准备任务'
+                                            : active?.status === 'running'
+                                                ? 'Agent 正在工作'
+                                                : recoveringRuntime
+                                                    ? '正在重新连接'
+                                                    : snapshot.phase === 'stopped' && (snapshot.workspaceRoot || this.roots.length)
+                                                        ? '正在准备'
+                                                        : runtimePhaseLabel(snapshot.phase)}</span>
                         </span>
                     </div>
                 </div>
@@ -672,9 +711,15 @@ export class XoraAgentWidget extends ReactWidget {
                 aria-busy={this.sessionLoading}
                 ref={node => this.bindTranscriptNode(node)}
                 onScroll={event => this.onTranscriptScroll(event.currentTarget)}>
-                {this.agentPaneView === 'conversation' && this.model.transcript.length === 0 && !pendingSubmissions.length
-                    ? this.workspaceRestorePending ? this.renderWorkspaceRestorePending() : this.renderEmpty()
-                    : renderedTranscript.length === 0 && !pendingSubmissions.length
+                {this.agentPaneView === 'conversation'
+                    && this.model.transcript.length === 0
+                    && !pendingSubmissions.length
+                    && !this.retryablePrompt
+                    && !this.sessionHistoryRecovery
+                    ? this.workspaceRestorePending || this.sessionLoading
+                            ? this.renderWorkspaceRestorePending()
+                            : this.renderEmpty()
+                    : renderedTranscript.length === 0 && !pendingSubmissions.length && !this.retryablePrompt
                         ? this.renderPaneEmpty()
                         : <>
                             {hasEarlierHistory ? <button
@@ -698,6 +743,9 @@ export class XoraAgentWidget extends ReactWidget {
                                 index
                             ))}
                     </>}
+                {this.agentPaneView === 'conversation' && this.sessionHistoryRecovery
+                    ? this.renderSessionHistoryRecovery(this.sessionHistoryRecovery)
+                    : undefined}
                 {this.agentPaneView === 'conversation'
                     ? this.renderTurnProgress(visibleTranscript, active, currentLane)
                     : undefined}
@@ -950,7 +998,7 @@ export class XoraAgentWidget extends ReactWidget {
                             </div>
                             <span className='xora-image-live' aria-live='polite'>{this.imageAnnouncement}</span>
                             <div className='xora-composer-submit-group' role='group' aria-label='任务操作'>
-                                {active?.status === 'running' ? <button
+                                {active?.status === 'running' && !activeRuntimeRecovery ? <button
                                     ref={node => { this.composerSubmitButton = node; }}
                                     className='xora-composer-submit xora-composer-stop'
                                     aria-label='停止当前任务'
@@ -1720,6 +1768,25 @@ export class XoraAgentWidget extends ReactWidget {
         return false;
     }
 
+    protected hasActivePromptSubmission(): boolean {
+        for (const lane of this.promptLaneState().values()) {
+            if (lane.active) return true;
+        }
+        return false;
+    }
+
+    protected sessionAwaitingRuntimeRecovery(session: SessionRecord): boolean {
+        if (session.status !== 'running') return false;
+        const snapshot = this.model.snapshot;
+        if (snapshot.phase !== 'ready' || !snapshot.workspaceRoot) return true;
+        const hydrationKey = this.agentContextKey(
+            snapshot.workspaceRoot,
+            snapshot.providerId,
+            session.appSessionId
+        );
+        return !this.hydratedSessionKeyState().has(hydrationKey);
+    }
+
     protected sessionHasPromptLaneWork(appSessionId: string): boolean {
         const lane = this.findPromptLaneBySession(appSessionId);
         return !!lane && (!!lane.active || lane.queue.some(item => !item.cancelled));
@@ -1741,15 +1808,20 @@ export class XoraAgentWidget extends ReactWidget {
 
     /** Releases every renderer-owned resource for an unreachable composer.
      * Running lanes are never disposed through this path. */
-    protected disposePromptLane(key: string): void {
+    protected disposePromptLane(key: string, force = false): void {
         const lane = this.promptLaneState().get(key);
-        if (lane?.active) return;
+        if (lane?.active && !force) return;
         const draft = this.composerDraftState().get(key);
         if (draft) {
             for (const image of draft.images) URL.revokeObjectURL(image.previewUrl);
             this.composerDraftState().delete(key);
         }
         if (lane) {
+            if (lane.active) {
+                lane.active.cancelled = true;
+                lane.active.resolveCompletion?.();
+                lane.active = undefined;
+            }
             for (const item of lane.queue) {
                 item.cancelled = true;
                 item.resolveCompletion?.();
@@ -1810,6 +1882,7 @@ export class XoraAgentWidget extends ReactWidget {
         this.agentContextGeneration += 1;
         this.sessionLoadGeneration += 1;
         this.sessionLoading = false;
+        this.sessionHistoryRecovery = undefined;
         this.runtimePrewarmRequested = true;
         this.runtimePrewarmAttemptKey = undefined;
         this.runtimePrewarmAttempts = 0;
@@ -1947,9 +2020,10 @@ export class XoraAgentWidget extends ReactWidget {
             {tabs.map(session => {
                 const active = session.appSessionId === snapshot.activeSessionId;
                 const renaming = this.renamingSessionId === session.appSessionId;
+                const runtimeInterrupted = this.sessionAwaitingRuntimeRecovery(session);
                 return <div
                     key={session.appSessionId}
-                    className={`xora-session-tab${active ? ' active' : ''}${session.status === 'running' ? ' running' : ''}`}
+                    className={`xora-session-tab${active ? ' active' : ''}${session.status === 'running' && !runtimeInterrupted ? ' running' : ''}`}
                     role='tab'
                     aria-selected={active}
                     onContextMenu={event => this.openSessionContextMenu(event, session)}
@@ -1976,7 +2050,7 @@ export class XoraAgentWidget extends ReactWidget {
                             event.preventDefault();
                             this.beginSessionRename(session);
                         }}>
-                        <span className={`xora-session-status-dot xora-session-status-${session.status}`} />
+                        <span className={`xora-session-status-dot xora-session-status-${runtimeInterrupted ? 'failed' : session.status}`} />
                         <span className='xora-session-tab-title'>{session.title || '未命名会话'}</span>
                     </button>}
                     <button
@@ -2030,13 +2104,14 @@ export class XoraAgentWidget extends ReactWidget {
                 {sessions.length ? sessions.map(session => {
                     const active = session.appSessionId === snapshot.activeSessionId;
                     const renaming = this.renamingSessionId === session.appSessionId;
+                    const runtimeInterrupted = this.sessionAwaitingRuntimeRecovery(session);
                     return <div
                         key={session.appSessionId}
                         className={`xora-session-item${active ? ' active' : ''}`}
                         role='listitem'
                         onContextMenu={event => this.openSessionContextMenu(event, session)}
                         aria-current={active ? 'true' : undefined}>
-                        <span className={`xora-session-status-dot xora-session-status-${session.status}`} />
+                        <span className={`xora-session-status-dot xora-session-status-${runtimeInterrupted ? 'failed' : session.status}`} />
                         {renaming ? <input
                             className='xora-session-rename-input'
                             defaultValue={this.renameDraft}
@@ -2060,7 +2135,7 @@ export class XoraAgentWidget extends ReactWidget {
                             <span className='xora-session-item-copy'>
                                 <strong title={session.title}>{session.title || '未命名会话'}</strong>
                                 <span>
-                                    {sessionStatusLabel(session.status)} · {sessionProviderLabel(session.providerId, snapshot.providerId)} · {sessionRelativeTime(session.updatedAt)}
+                                    {runtimeInterrupted ? snapshot.phase === 'crashed' ? '连接中断' : '正在恢复连接' : sessionStatusLabel(session.status)} · {sessionProviderLabel(session.providerId, snapshot.providerId)} · {sessionRelativeTime(session.updatedAt)}
                                 </span>
                             </span>
                         </button>}
@@ -2081,10 +2156,10 @@ export class XoraAgentWidget extends ReactWidget {
                                 type='button'
                                 className='xora-agent-icon-button'
                                 aria-label='删除会话'
-                                title='删除会话'
-                                disabled={session.status === 'running'
-                                    || this.sessionHasPromptLaneWork(session.appSessionId)
-                                    || this.sessionLoading}
+                                title={session.status === 'running' || this.sessionHasPromptLaneWork(session.appSessionId)
+                                    ? '取消当前任务并删除会话'
+                                    : '删除会话'}
+                                disabled={this.sessionLoading || this.deletingSessionId === session.appSessionId}
                                 onClick={event => {
                                     event.stopPropagation();
                                     void this.deleteSession(session);
@@ -2129,9 +2204,10 @@ export class XoraAgentWidget extends ReactWidget {
         if (!state) return undefined;
         const session = this.model.snapshot.sessions.find(candidate => candidate.appSessionId === state.sessionId);
         if (!session) return undefined;
-        const busy = session.status === 'running'
-            || this.sessionHasPromptLaneWork(session.appSessionId)
-            || this.sessionLoading;
+        const taskBusy = session.status === 'running'
+            || this.sessionHasPromptLaneWork(session.appSessionId);
+        const busy = taskBusy || this.sessionLoading;
+        const deleting = this.deletingSessionId === session.appSessionId;
         return <>
             <div
                 className='xora-session-context-scrim'
@@ -2172,13 +2248,13 @@ export class XoraAgentWidget extends ReactWidget {
                     type='button'
                     role='menuitem'
                     className='danger'
-                    disabled={busy}
+                    disabled={this.sessionLoading || deleting}
                     onClick={() => {
                         this.sessionContextMenu = undefined;
                         void this.deleteSession(session);
                     }}>
-                    <span className='codicon codicon-trash' />
-                    <span>删除会话</span>
+                    <span className={`codicon ${deleting ? 'codicon-loading codicon-modifier-spin' : 'codicon-trash'}`} />
+                    <span>{deleting ? '正在删除…' : taskBusy ? '取消并删除会话' : '删除会话'}</span>
                 </button>
             </section>
         </>;
@@ -2465,6 +2541,35 @@ export class XoraAgentWidget extends ReactWidget {
         </div>;
     }
 
+    protected renderSessionHistoryRecovery(recovery: SessionHistoryRecovery): React.ReactNode {
+        const session = this.model.snapshot.sessions.find(candidate => candidate.appSessionId === recovery.sessionId);
+        return <article className='xora-card xora-retry-card xora-history-recovery-card' role='alert'>
+            <div><strong>会话记录暂时无法读取</strong><span className='codicon codicon-warning' /></div>
+            <p>{recovery.message}</p>
+            <p>{recovery.showingPreviousTranscript
+                ? '当前仍显示上一个会话的内容；目标会话的本地记录没有被删除。'
+                : '本地记录没有被删除，可以重新加载。'}</p>
+            <div className='xora-card-actions'>
+                <button
+                    className='theia-button main'
+                    disabled={!session || this.sessionLoading}
+                    onClick={() => {
+                        if (session) void this.openSession(session);
+                    }}>
+                    重新加载
+                </button>
+                <button
+                    className='theia-button secondary'
+                    onClick={() => {
+                        this.sessionHistoryRecovery = undefined;
+                        this.update();
+                    }}>
+                    稍后处理
+                </button>
+            </div>
+        </article>;
+    }
+
     /** The composer belongs to the Agent surface, not Theia's executable
      * workspace trust gate. Only a missing project or an explicit history
      * restore prevents submission. */
@@ -2570,6 +2675,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected reconcileRuntimePrewarmState(): void {
         const phase = this.model.snapshot.phase;
         const previousPhase = this.observedRuntimePhase;
+        if (phase === 'ready') this.runtimeRecoveryPendingAfterPrompt = false;
         // A stopped/relaunching/auth-required process cannot prove that an ACP
         // session loaded by the previous ready runtime is still attached.
         // Clear only renderer acceleration state; Electron remains the final
@@ -2591,12 +2697,15 @@ export class XoraAgentWidget extends ReactWidget {
         // of its failure path, and its prompt is never replayed.
         if (phase === 'crashed'
             && this.observedRuntimePhase === 'ready'
-            && !this.runtimePrewarmRequested
-            && !this.submission) {
-            this.runtimePrewarmRequested = true;
-            this.runtimePrewarmAttempts = 0;
-            this.runtimePrewarmAttemptKey = undefined;
-            this.activeSessionHydrationKey = undefined;
+            && !this.runtimePrewarmRequested) {
+            if (this.hasActivePromptSubmission()) {
+                this.runtimeRecoveryPendingAfterPrompt = true;
+            } else {
+                this.runtimePrewarmRequested = true;
+                this.runtimePrewarmAttempts = 0;
+                this.runtimePrewarmAttemptKey = undefined;
+                this.activeSessionHydrationKey = undefined;
+            }
         }
         this.observedRuntimePhase = phase;
         // Authentication completes on the already-running sidecar, so the
@@ -2606,6 +2715,22 @@ export class XoraAgentWidget extends ReactWidget {
         if (previousPhase === 'auth-required' && phase === 'ready') {
             void this.hydrateActiveSessionInBackground();
         }
+    }
+
+    protected recoverRuntimeAfterPromptLanesSettle(): void {
+        if (!this.runtimeRecoveryPendingAfterPrompt) return;
+        if (this.hasActivePromptSubmission()) return;
+        const crashed = this.model.snapshot.phase === 'crashed';
+        this.runtimeRecoveryPendingAfterPrompt = false;
+        if (!crashed) return;
+        if (!this.runtimePrewarmRequested) {
+            this.runtimePrewarmRequested = true;
+            this.runtimePrewarmAttempts = 0;
+            this.runtimePrewarmAttemptKey = undefined;
+            this.activeSessionHydrationKey = undefined;
+            this.activeSessionHydrationPromise = undefined;
+        }
+        this.scheduleRuntimePrewarm();
     }
 
     protected async hydrateActiveSessionInBackground(): Promise<void> {
@@ -3192,6 +3317,7 @@ export class XoraAgentWidget extends ReactWidget {
         preserveWorkspaceRestore = false,
         runtimeBoundary = false
     ): void {
+        this.sessionHistoryRecovery = undefined;
         if (!preserveWorkspaceRestore) {
             ++this.workspaceRestoreGeneration;
             this.workspaceRestorePending = false;
@@ -4036,7 +4162,7 @@ export class XoraAgentWidget extends ReactWidget {
         session: SessionRecord | undefined,
         lane: SessionPromptLane | undefined
     ): React.ReactNode {
-        if (!session || session.status !== 'running') return undefined;
+        if (!session || session.status !== 'running' || this.sessionAwaitingRuntimeRecovery(session)) return undefined;
         const sessionId = session.appSessionId;
         let activeToolEntry: TranscriptEntry | undefined;
         let latestToolEntry: TranscriptEntry | undefined;
@@ -4603,7 +4729,7 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected renderRetry(retry: RetryablePrompt): React.ReactNode {
         return <article className='xora-card xora-retry-card' role='alert'>
-            <div><strong>任务执行失败</strong><span className='codicon codicon-warning' /></div>
+            <div><strong>任务需要恢复</strong><span className='codicon codicon-warning' /></div>
             <p>{retry.message}</p>
             {retry.text ? <div className='xora-retry-prompt'>{retry.text}</div> : undefined}
             {retry.attachments.length ? <div className='xora-retry-attachments'>
@@ -4614,11 +4740,21 @@ export class XoraAgentWidget extends ReactWidget {
                 <button
                     className='theia-button main'
                     onClick={() => this.retry(retry)}>
-                    {retry.attachments.length ? `重试（含 ${retry.attachments.length} 张图片）` : '重试'}
+                    {retry.attachments.length ? `重新发送（含 ${retry.attachments.length} 张图片）` : '重新发送'}
                 </button>
                 <button className='theia-button secondary' onClick={() => this.dismissRetry()}>忽略</button>
             </div>
         </article>;
+    }
+
+    protected retryOwnsError(
+        retry: RetryablePrompt,
+        event: Extract<AgentHostEvent, { kind: 'error' }>
+    ): boolean {
+        if (!retry.errorSemanticKey
+            || agentErrorSemanticKey(event.code, event.message) !== retry.errorSemanticKey) return false;
+        if (event.sessionId === retry.sessionId) return true;
+        return retry.errorSemanticKey === 'runtime-disconnected' && !event.sessionId;
     }
 
     protected renderPendingSubmission(submission: PromptSubmission, active: boolean, queueIndex: number): React.ReactNode {
@@ -4718,8 +4854,16 @@ export class XoraAgentWidget extends ReactWidget {
             resolveCompletion,
             ...(!retry && draftImages.length ? { draftAttachmentIds: draftImages.map(image => image.id) } : {})
         };
-        lane.retryable = undefined;
-        lane.queue.push(submission);
+        const waitsForRecoveryDecision = !retry && !!lane.retryable;
+        if (retry) {
+            lane.retryable = undefined;
+            lane.queue.unshift(submission);
+        } else {
+            // A fresh message does not implicitly dismiss an uncertain prior
+            // admission. Keep it visibly queued until the user explicitly
+            // retries or ignores the recovery card.
+            lane.queue.push(submission);
+        }
         // Accept locally first. The user can immediately write the next queued
         // message while this lane prepares Save All/runtime work in order.
         if (!retry) {
@@ -4737,23 +4881,26 @@ export class XoraAgentWidget extends ReactWidget {
             }
             this.storeActiveComposerDraft();
         }
-        this.runtimePrewarmRequested = false;
-        this.cancelRuntimePrewarmTimer();
+        if (!waitsForRecoveryDecision) {
+            this.runtimePrewarmRequested = false;
+            this.cancelRuntimePrewarmTimer();
+        }
         // Sending is an explicit navigation intent: paint the optimistic user
         // bubble at the bottom immediately, then keep following the reply.
         this.followTranscript(true, true);
         this.syncVisiblePromptLane();
         this.update();
         this.syncComposerSubmitButton();
-        this.startPromptLane(lane);
+        if (!waitsForRecoveryDecision) this.startPromptLane(lane);
         return completion;
     }
 
     protected startPromptLane(lane: SessionPromptLane): void {
-        if (lane.processing) return;
+        if (lane.processing || lane.retryable) return;
         const processing = this.processPromptLane(lane).finally(() => {
             if (lane.processing === processing) lane.processing = undefined;
-            if (lane.queue.some(item => !item.cancelled)) this.startPromptLane(lane);
+            if (!lane.retryable && lane.queue.some(item => !item.cancelled)) this.startPromptLane(lane);
+            else this.recoverRuntimeAfterPromptLanesSettle();
         });
         lane.processing = processing;
     }
@@ -4783,6 +4930,10 @@ export class XoraAgentWidget extends ReactWidget {
                 if (lane.active === submission) lane.active = undefined;
                 this.syncPromptLaneIfVisible(lane);
             }
+            // Admission is uncertain. Preserve every later row in FIFO order
+            // until the user explicitly retries or dismisses this recovery;
+            // sending the next task could otherwise overtake a lost user turn.
+            if (lane.retryable) break;
         }
     }
 
@@ -4861,12 +5012,46 @@ export class XoraAgentWidget extends ReactWidget {
             submission.state = 'running';
             this.syncPromptLaneIfVisible(lane);
             submission.promptRequestStarted = true;
-            await this.service.sendPrompt({
+            const receipt = await this.service.sendPrompt({
                 sessionId,
                 text: submission.text,
                 executionMode: submission.executionMode,
                 attachments: submission.attachments
             });
+            if (receipt?.admitted) {
+                const receivedThroughEvents = submission.userEventReceived === true;
+                const historyRecovered = receivedThroughEvents
+                    ? true
+                    : await this.recoverPromptHistoryFromReceipt(lane, submission, receipt);
+                // A durable receipt is authoritative even when renderer event
+                // delivery was interrupted. The optimistic row may now leave,
+                // but a completed/cancelled turn is never offered for resend.
+                submission.userEventReceived = true;
+                if (receipt.outcome === 'completed' || receipt.outcome === 'cancelled') {
+                    if (lane.retryable?.id === submission.id) lane.retryable = undefined;
+                } else if (!lane.retryable && historyRecovered) {
+                    lane.retryable = {
+                        ...submission,
+                        message: '任务已由 Agent 接收，但执行未完成。请检查已有结果后再决定是否重新发送。',
+                        ...(submission.observedTerminalErrorSemanticKey
+                            ? { errorSemanticKey: submission.observedTerminalErrorSemanticKey }
+                            : {})
+                    };
+                }
+                return;
+            }
+            // Electron publishes the durable user event at the admission
+            // boundary, before ACP execution. A resolved RPC without that
+            // event is therefore not proof that the task entered history
+            // (for example after a renderer/IPC recovery race). Preserve the
+            // exact task as one actionable card instead of silently dropping
+            // the optimistic bubble and falling back to the welcome screen.
+            if (!submission.userEventReceived && !submission.cancelled) {
+                lane.retryable = {
+                    ...submission,
+                    message: 'Agent 未确认收到这条任务。内容已保留，请在连接恢复后重试。'
+                };
+            }
         } catch (error) {
             const cancelled = submission.cancelled
                 || (submission.sessionId ? this.cancelRequested.has(submission.sessionId) : false)
@@ -4879,13 +5064,68 @@ export class XoraAgentWidget extends ReactWidget {
             }
             if (!cancelled && this.isSubmissionContextCurrent(submission)) {
                 const message = friendlyAgentErrorMessage(error);
-                lane.retryable = { ...submission, message };
-                if (this.activeComposerLaneKey === lane.key) {
-                    this.showInlineNotice(`任务发送失败：${message}`, 'error');
-                }
+                lane.retryable = {
+                    ...submission,
+                    message,
+                    ...(submission.observedTerminalErrorSemanticKey
+                        ? { errorSemanticKey: submission.observedTerminalErrorSemanticKey }
+                        : {})
+                };
             }
         } finally {
             if (submission.sessionId) this.cancelRequested.delete(submission.sessionId);
+        }
+    }
+
+    protected async recoverPromptHistoryFromReceipt(
+        lane: SessionPromptLane,
+        submission: PromptSubmission,
+        receipt: PromptReceipt
+    ): Promise<boolean> {
+        const laneIsVisible = (): boolean => this.activeComposerLaneKey === lane.key
+            && this.isSubmissionContextCurrent(submission);
+        try {
+            await this.model.refresh();
+            const session = this.model.snapshot.sessions.find(candidate => candidate.appSessionId === receipt.sessionId);
+            if (!session) throw new Error('已确认的会话暂时未出现在本地索引中。');
+            const catchup: AgentHostEvent[] = [];
+            this.sessionHistoryCatchup.set(receipt.sessionId, catchup);
+            try {
+                const page = await this.readSessionHistoryPage(receipt.sessionId, {
+                    limit: MAX_RENDERED_TRANSCRIPT_ENTRIES
+                });
+                const completeHistory = this.mergeHistoryCatchup(page.events, catchup);
+                this.sessionHistoryPageState().set(receipt.sessionId, {
+                    events: completeHistory,
+                    before: page.before,
+                    hasMore: page.hasMore
+                });
+                this.cacheSessionHistory(session, completeHistory);
+                // Every await is a navigation boundary. A may finish reading
+                // after the user switched to B: cache A in the background,
+                // but never steal B's active transcript or recovery surface.
+                if (laneIsVisible()) {
+                    this.model.showSessionHistory(session, completeHistory);
+                    this.sessionHistoryRecovery = undefined;
+                    this.stickToBottom = true;
+                    this.followTranscript(true, true);
+                }
+                return true;
+            } finally {
+                if (this.sessionHistoryCatchup.get(receipt.sessionId) === catchup) {
+                    this.sessionHistoryCatchup.delete(receipt.sessionId);
+                }
+            }
+        } catch (error) {
+            if (laneIsVisible()) {
+                this.sessionHistoryRecovery = {
+                    sessionId: receipt.sessionId,
+                    message: `任务已确认结束，但会话记录暂时未能刷新：${friendlyAgentErrorMessage(error)}`,
+                    showingPreviousTranscript: this.model.snapshot.activeSessionId !== receipt.sessionId
+                        && (this.model.transcript?.length ?? 0) > 0
+                };
+            }
+            return false;
         }
     }
 
@@ -5063,6 +5303,7 @@ export class XoraAgentWidget extends ReactWidget {
         lane.retryable = undefined;
         this.syncVisiblePromptLane();
         this.update();
+        if (lane.queue.some(item => !item.cancelled)) this.startPromptLane(lane);
     }
 
     protected async guidePromptItem(promptId: string): Promise<void> {
@@ -5174,10 +5415,18 @@ export class XoraAgentWidget extends ReactWidget {
             if (page) page.events = this.mergeHistoryCatchup(page.events, [event]);
         }
         if (changedSessionId) this.sessionHistoryCacheState().delete(changedSessionId);
+        if (event.kind === 'session-deleted') {
+            this.forgetSessionUiState(event.sessionId);
+            this.syncVisiblePromptLane();
+            this.update();
+            return;
+        }
         if (event.kind === 'turn-completed' && event.stopReason === 'cancelled') {
             const lane = this.findPromptLaneBySession(event.sessionId);
-            if (lane?.retryable?.sessionId === event.sessionId) lane.retryable = undefined;
+            const recovered = lane?.retryable?.sessionId === event.sessionId;
+            if (recovered && lane) lane.retryable = undefined;
             if (lane) this.syncPromptLaneIfVisible(lane);
+            if (recovered && lane?.queue.some(item => !item.cancelled)) this.startPromptLane(lane);
             this.update();
             return;
         }
@@ -5185,19 +5434,40 @@ export class XoraAgentWidget extends ReactWidget {
             ? this.findPromptLaneBySession(event.sessionId)
             : undefined;
         const submission = lane?.active;
-        if (event.kind === 'text-delta' && event.role === 'user' && submission
-            && submission.sessionId === event.sessionId) {
-            submission.userEventReceived = true;
+        if (event.kind === 'text-delta' && event.role === 'user' && lane) {
+            const acknowledged = submission?.sessionId === event.sessionId
+                ? submission
+                : lane.retryable?.sessionId === event.sessionId
+                    && lane.retryable.promptRequestStarted
+                    && lane.retryable.text === event.text
+                    ? lane.retryable
+                    : undefined;
+            if (!acknowledged) return;
+            acknowledged.userEventReceived = true;
+            const recoveredAdmission = lane.retryable?.id === acknowledged.id;
+            if (recoveredAdmission) lane.retryable = undefined;
             if (lane) this.syncPromptLaneIfVisible(lane);
+            if (recoveredAdmission && lane.queue.some(item => !item.cancelled)) this.startPromptLane(lane);
             return;
         }
-        if (event.kind !== 'error' || !event.recoverable || !submission) return;
-        if (!this.isSubmissionContextCurrent(submission)) return;
-        if (event.sessionId && submission.sessionId && event.sessionId !== submission.sessionId) return;
-        if ((submission.sessionId && this.cancelRequested.has(submission.sessionId))
+        if (event.kind !== 'error' || !event.recoverable || !lane) return;
+        const failureOwner = submission ?? (event.code === 'PROMPT_FAILED' ? lane.retryable : undefined);
+        if (!failureOwner || !this.isSubmissionContextCurrent(failureOwner)) return;
+        if (event.sessionId && failureOwner.sessionId && event.sessionId !== failureOwner.sessionId) return;
+        if ((failureOwner.sessionId && this.cancelRequested.has(failureOwner.sessionId))
             || this.isCancellationMessage(event.code, event.message)) return;
-        lane.retryable = { ...submission, message: friendlyAgentErrorMessage(event.message) };
-        this.syncPromptLaneIfVisible(lane);
+        // Permission/diff/path errors may be recoverable inside a turn and do
+        // not mean the prompt transaction failed. Only remember the terminal
+        // PROMPT_FAILED semantic; the authoritative failed receipt/RPC catch
+        // creates the manual resend card after execution has actually ended.
+        if (event.code === 'PROMPT_FAILED') {
+            const semanticKey = agentErrorSemanticKey(event.code, event.message);
+            failureOwner.observedTerminalErrorSemanticKey = semanticKey;
+            if (lane.retryable?.id === failureOwner.id) {
+                lane.retryable.errorSemanticKey = semanticKey;
+                this.syncPromptLaneIfVisible(lane);
+            }
+        }
     }
 
     protected findPromptLaneBySession(sessionId: string): SessionPromptLane | undefined {
@@ -5345,28 +5615,25 @@ export class XoraAgentWidget extends ReactWidget {
     }
 
     protected async deleteSession(session: SessionRecord): Promise<void> {
-        if (session.status === 'running' || this.sessionHasPromptLaneWork(session.appSessionId)) {
-            this.showInlineNotice('请先取消或等待该会话中的任务完成，再删除会话。', 'warning');
-            return;
-        }
+        if (this.deletingSessionId) return;
+        this.deletingSessionId = session.appSessionId;
+        this.update();
         try {
-            // Direct delete — no confirmation dialog; history is local-only and the
-            // action is already an explicit trash-button click in the session list.
-            await this.service.deleteSession(session.appSessionId);
-            this.sessionHistoryCacheState().delete(session.appSessionId);
-            this.sessionHistoryPageState().delete(session.appSessionId);
-            for (const key of this.hydratedSessionKeyState()) {
-                if (key.endsWith(`\u0000${session.appSessionId}`)) this.hydratedSessionKeyState().delete(key);
+            // Electron is authoritative for running ownership. It can cancel
+            // a task owned by this window and then delete atomically, while a
+            // genuinely foreign owner is returned as one actionable error.
+            try {
+                await this.service.deleteSession(session.appSessionId);
+            } catch (error) {
+                // Another window may have committed the same deletion before
+                // this click crossed IPC. Typed missing is idempotent success;
+                // all other failures keep the local conversation intact.
+                if (!isTypedSessionNotFoundError(error)) throw error;
             }
-            for (const [key, lane] of [...this.promptLaneState()]) {
-                if (lane.sessionId === session.appSessionId || lane.sourceSessionId === session.appSessionId) {
-                    this.disposePromptLane(key);
-                }
-            }
-            for (const key of [...this.composerDraftState().keys()]) {
-                if (key.endsWith(`\u0000${session.appSessionId}`)) this.disposePromptLane(key);
-            }
-            this.openSessionTabs = (this.openSessionTabs ?? []).filter(id => id !== session.appSessionId);
+            // Tombstone immediately after the authoritative delete response,
+            // before a refresh can race an older snapshot back into the list.
+            this.model.forgetMissingSession(session.appSessionId);
+            this.forgetSessionUiState(session.appSessionId);
             await this.model.refresh();
             if (this.model.snapshot.activeSessionId === session.appSessionId
                 || !this.model.snapshot.activeSessionId) {
@@ -5380,7 +5647,32 @@ export class XoraAgentWidget extends ReactWidget {
             }
         } catch (error) {
             this.showInlineNotice(`无法删除会话：${friendlyAgentErrorMessage(error)}`, 'error');
+        } finally {
+            if (this.deletingSessionId === session.appSessionId) this.deletingSessionId = undefined;
+            this.update();
         }
+    }
+
+    protected forgetSessionUiState(appSessionId: string): void {
+        this.sessionHistoryCacheState().delete(appSessionId);
+        this.sessionHistoryPageState().delete(appSessionId);
+        this.sessionHistoryCatchup?.delete(appSessionId);
+        if (this.sessionHistoryRecovery?.sessionId === appSessionId) this.sessionHistoryRecovery = undefined;
+        for (const key of [...this.hydratedSessionKeyState()]) {
+            if (key.endsWith(`\u0000${appSessionId}`)) this.hydratedSessionKeyState().delete(key);
+        }
+        for (const key of [...this.sessionHydrationPromiseState().keys()]) {
+            if (key.endsWith(`\u0000${appSessionId}`)) this.sessionHydrationPromiseState().delete(key);
+        }
+        for (const [key, lane] of [...this.promptLaneState()]) {
+            if (lane.sessionId === appSessionId || lane.sourceSessionId === appSessionId) {
+                this.disposePromptLane(key, true);
+            }
+        }
+        for (const key of [...this.composerDraftState().keys()]) {
+            if (key.endsWith(`\u0000${appSessionId}`)) this.disposePromptLane(key, true);
+        }
+        this.openSessionTabs = (this.openSessionTabs ?? []).filter(id => id !== appSessionId);
     }
 
     protected async openWorkspacePath(filePath: string, options?: { reveal?: boolean; line?: number }): Promise<void> {
@@ -5510,14 +5802,20 @@ export class XoraAgentWidget extends ReactWidget {
         const generation = ++this.sessionLoadGeneration;
         this.openPopover = undefined;
         this.sessionLoading = true;
+        this.sessionHistoryRecovery = undefined;
         this.resetTranscriptWindow();
+        const retainedPreviousTranscript = this.model.snapshot.activeSessionId !== session.appSessionId
+            && (this.model.transcript?.length ?? 0) > 0;
         const cachedHistory = this.cachedSessionHistory(session);
-        // Select the requested conversation synchronously. This immediately
-        // removes the previous transcript; cached local content can paint in
-        // the same browser frame and a first-time disk read fills it next.
+        // Cached local content can switch immediately. On a first read keep
+        // the currently rendered transcript until Electron returns durable
+        // history; a failed RPC must never turn a healthy conversation into
+        // an apparently empty new-chat page.
         this.observedAgentContextKey = targetContextKey;
         this.activateComposerLane(targetContextKey);
-        this.model.showSessionHistory(session, cachedHistory ?? []);
+        const openingIsCurrent = (): boolean => generation === this.sessionLoadGeneration
+            && (this.activeComposerLaneKey ?? this.imageDraftContextKey()) === targetContextKey;
+        if (cachedHistory) this.model.showSessionHistory(session, cachedHistory);
         if (cachedHistory && !this.sessionHistoryPageState().has(session.appSessionId)) {
             this.sessionHistoryPageState().set(session.appSessionId, {
                 events: cachedHistory,
@@ -5535,7 +5833,7 @@ export class XoraAgentWidget extends ReactWidget {
                     const page = await this.readSessionHistoryPage(session.appSessionId, {
                         limit: MAX_RENDERED_TRANSCRIPT_ENTRIES
                     });
-                    if (generation !== this.sessionLoadGeneration || this.imageDraftContextKey() !== targetContextKey) return;
+                    if (!openingIsCurrent()) return;
                     const completeHistory = this.mergeHistoryCatchup(page.events, catchup);
                     this.sessionHistoryPageState().set(session.appSessionId, {
                         events: completeHistory,
@@ -5544,6 +5842,7 @@ export class XoraAgentWidget extends ReactWidget {
                     });
                     this.cacheSessionHistory(session, completeHistory);
                     this.model.showSessionHistory(session, completeHistory);
+                    this.sessionHistoryRecovery = undefined;
                     this.stickToBottom = true;
                     this.followTranscript();
                 } finally {
@@ -5562,26 +5861,43 @@ export class XoraAgentWidget extends ReactWidget {
                 this.update();
             }
             await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-            if (generation !== this.sessionLoadGeneration || this.imageDraftContextKey() !== targetContextKey) return;
+            if (!openingIsCurrent()) return;
             let loaded: SessionRecord;
             try {
                 loaded = await this.ensureSessionHydrated(session.appSessionId, targetContextKey);
             } catch (error) {
                 if (!(error instanceof Error) || !error.message.includes('AUTHENTICATION_REQUIRED')) throw error;
                 const runtime = await this.service.getSnapshot();
-                if (generation !== this.sessionLoadGeneration || this.imageDraftContextKey() !== targetContextKey) return;
-                if (!await this.authenticateRuntime(runtime, () =>
-                    generation === this.sessionLoadGeneration && this.imageDraftContextKey() === targetContextKey)) return;
-                if (generation !== this.sessionLoadGeneration || this.imageDraftContextKey() !== targetContextKey) return;
+                if (!openingIsCurrent()) return;
+                if (!await this.authenticateRuntime(runtime, openingIsCurrent)) return;
+                if (!openingIsCurrent()) return;
                 loaded = await this.ensureSessionHydrated(session.appSessionId, targetContextKey);
             }
-            if (generation !== this.sessionLoadGeneration || this.imageDraftContextKey() !== targetContextKey) return;
+            if (!openingIsCurrent()) return;
             const history = this.sessionHistoryCacheState().get(session.appSessionId);
             if (history) this.cacheSessionHistory(loaded, history.events, loaded.updatedAt);
             this.model.updateSession(loaded);
         } catch (error) {
             if (generation !== this.sessionLoadGeneration) return;
-            this.showInlineNotice(`无法恢复会话：${friendlyAgentErrorMessage(error)}`, 'warning');
+            const message = friendlyAgentErrorMessage(error);
+            this.sessionHistoryRecovery = {
+                sessionId: session.appSessionId,
+                message,
+                showingPreviousTranscript: retainedPreviousTranscript
+            };
+            // If another conversation remained visible while the disk read
+            // failed, restore its composer ownership as well. No transcript is
+            // cleared and the requested tab can be retried from history.
+            const visibleSessionId = this.model.snapshot.activeSessionId;
+            if (visibleSessionId !== session.appSessionId) {
+                const fallbackKey = this.promptLaneKey(
+                    this.model.snapshot.workspaceRoot ?? this.roots[0] ?? '',
+                    this.model.snapshot.providerId,
+                    visibleSessionId
+                );
+                this.observedAgentContextKey = fallbackKey;
+                this.activateComposerLane(fallbackKey);
+            }
         } finally {
             if (generation === this.sessionLoadGeneration) {
                 this.sessionLoading = false;

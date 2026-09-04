@@ -67,6 +67,7 @@ export interface RequestOptions {
 export interface RequestHandle<T> {
   readonly id: JsonRpcId;
   readonly promise: Promise<T>;
+  /** Resolves after wire cancellation is delivered; rejects on transport failure. */
   cancel(reason?: unknown): Promise<void>;
 }
 
