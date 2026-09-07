@@ -4,11 +4,15 @@
 
 const { app, safeStorage } = require('electron');
 
+if (process.env.XORA_CREDENTIAL_SESSION_DATA) {
+    app.setPath('sessionData', process.env.XORA_CREDENTIAL_SESSION_DATA);
+}
+
 // This entry point runs only in a separate Electron main process with an
 // inherited IPC channel. It never loads Theia, a workspace or a browser window.
 app.disableHardwareAcceleration();
 if (app.dock) app.dock.hide();
-process.once('disconnect', () => app.exit());
+process.once('disconnect', () => app.quit());
 process.once('message', async request => {
     let response;
     try {
@@ -33,6 +37,8 @@ process.once('message', async request => {
         // parent receives only a fixed classification and never logs a key.
         response = { error: 'denied' };
     }
-    if (process.connected) process.send(response, () => app.exit());
-    else app.exit();
+    // Graceful Electron shutdown commits its pending Local State preference
+    // writes. The parent accepts a successful response only after normal close.
+    if (process.connected) process.send(response, () => app.quit());
+    else app.quit();
 });

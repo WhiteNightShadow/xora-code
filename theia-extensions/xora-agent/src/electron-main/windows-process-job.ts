@@ -32,8 +32,10 @@ export class WindowsProcessJob {
     protected authenticated = false;
     protected launchSent = false;
     protected stopRequested = false;
+    protected stopSent = false;
     protected terminationConfirmed = false;
     protected errorReported = false;
+    protected guardianTerminating = false;
     protected startupTimer: NodeJS.Timeout | undefined;
     protected stopTimer: NodeJS.Timeout | undefined;
 
@@ -50,7 +52,9 @@ export class WindowsProcessJob {
             this.process = spawn(powershell, [
                 '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', launch.guardianScript
             ], {
-                cwd: launch.cwd,
+                // Node's own synchronous CreateProcess must not resolve an
+                // offline workspace. Only the isolated guardian enters it.
+                cwd: path.dirname(powershell),
                 env: { ...launch.environment, XORA_WINDOWS_JOB_PIPE: pipe, XORA_WINDOWS_JOB_TOKEN: this.token },
                 shell: false,
                 windowsHide: true,
@@ -81,7 +85,7 @@ export class WindowsProcessJob {
 
     stop(): void {
         this.stopRequested = true;
-        if (this.authenticated) this.send({ type: 'stop' });
+        this.sendStop();
         if (!this.terminationConfirmed && !this.stopTimer
             && this.process.exitCode === null && this.process.signalCode == null) {
             // A native CreateProcess call can stall on a disconnected volume.
@@ -144,7 +148,7 @@ export class WindowsProcessJob {
                     if (message.type !== 'hello' || message.token !== this.token) { socket.destroy(); return; }
                     this.authenticated = true;
                     clearTimeout(authenticationTimer);
-                    if (this.stopRequested) this.send({ type: 'stop' });
+                    if (this.stopRequested) this.sendStop();
                     else {
                         this.launchSent = true;
                         this.send({ type: 'launch', binary: this.launch.binary, args: this.launch.args, cwd: this.launch.cwd });
@@ -164,6 +168,11 @@ export class WindowsProcessJob {
                     this.closeControl();
                     return;
                 } else if (message.type === 'error') {
+                    // The guardian already owns error cleanup. Writing stop
+                    // into its closing pipe can produce EPIPE and discard an
+                    // unread final acknowledgement. Keep reading for proof;
+                    // the existing bounded kill watchdog remains authoritative.
+                    this.guardianTerminating = true;
                     this.fail();
                 } else {
                     this.fail();
@@ -184,6 +193,13 @@ export class WindowsProcessJob {
     protected send(message: Record<string, unknown>): void {
         try { this.socket?.write(`${JSON.stringify(message)}\n`, error => { if (error) this.fail(); }); }
         catch { this.fail(); }
+    }
+
+    protected sendStop(): void {
+        if (this.authenticated && !this.guardianTerminating && !this.stopSent) {
+            this.stopSent = true;
+            this.send({ type: 'stop' });
+        }
     }
 
     protected fail(): void {

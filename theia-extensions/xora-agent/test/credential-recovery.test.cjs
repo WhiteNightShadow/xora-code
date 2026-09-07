@@ -11,14 +11,21 @@ const app = Object.assign(new EventEmitter(), {
     getPath: () => os.tmpdir()
 });
 const originalLoad = Module._load;
+let cachedWindowsAvailability;
+let cachedWindowsAvailabilityReads = 0;
 Module._load = function (request, parent, isMain) {
     if (request === 'electron') return { app, safeStorage: new Proxy({}, {
-        get() { throw new Error('safeStorage must never run in the application main process'); }
+        get(_target, property) {
+            if (property === 'isEncryptionAvailable' && cachedWindowsAvailability !== undefined) {
+                return () => { cachedWindowsAvailabilityReads++; return cachedWindowsAvailability; };
+            }
+            throw new Error('safeStorage encryption/decryption must never run in the application main process');
+        }
     }) };
     return originalLoad.call(this, request, parent, isMain);
 };
 const { SecretVault } = require('../lib/electron-main/secret-vault');
-const { CredentialAccessError, runCredentialHelper } = require('../lib/electron-main/credential-helper-client');
+const { CredentialAccessError, runCredentialHelper, waitForWindowsStorageKey } = require('../lib/electron-main/credential-helper-client');
 const { ProviderRegistry } = require('../lib/electron-main/provider-registry');
 Module._load = originalLoad;
 
@@ -176,4 +183,159 @@ test('helper errors expose only fixed classifications and never native diagnosti
         spawnHelper: () => child
     }), error => error.code === 'CREDENTIAL_ACCESS_DENIED'
         && !error.message.includes('sensitive-native-payload') && !error.message.includes('fixture-secret'));
+});
+
+test('successful helper output is accepted only after normal close and never sends SIGKILL', async () => {
+    const child = new EventEmitter();
+    let kills = 0;
+    let accepted = false;
+    child.send = () => undefined;
+    child.kill = () => { kills++; };
+    const operation = runCredentialHelper({ decrypt: [], encrypt: ['fixture-secret'] }, {
+        spawnHelper: () => child
+    }).then(result => { accepted = true; return result; });
+    child.emit('message', { decrypted: [], encrypted: [encrypted] });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(accepted, false);
+    child.emit('exit', 0, null);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(accepted, false);
+    child.emit('close', 0, null);
+    assert.deepEqual(await operation, { decrypted: [], encrypted: [encrypted] });
+    assert.equal(kills, 0);
+    assert.equal(app.listenerCount('will-quit'), 0);
+});
+
+test('an IPC success cannot commit ciphertext when helper shutdown hangs or crashes', async () => {
+    for (const abnormal of [false, true]) {
+        const child = new EventEmitter();
+        let kills = 0;
+        child.send = () => setImmediate(() => {
+            child.emit('message', { decrypted: [], encrypted: [encrypted] });
+            if (abnormal) child.emit('close', 1, null);
+        });
+        child.kill = () => { kills++; };
+        await assert.rejects(runCredentialHelper({ decrypt: [], encrypt: ['fixture-secret'] }, {
+            spawnHelper: () => child, timeoutMs: 30
+        }), { code: abnormal ? 'CREDENTIAL_ACCESS_DENIED' : 'CREDENTIAL_ACCESS_TIMEOUT' });
+        assert.equal(kills, 1);
+    }
+});
+
+test('Windows helper preparation observes the persisted profile key before proceeding', async t => {
+    const vault = fixture(t, {});
+    const localState = path.join(path.dirname(vault.filePath), 'Local State');
+    let ready = false;
+    const waiting = waitForWindowsStorageKey(localState, 1000).then(() => { ready = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(ready, false);
+    fs.writeFileSync(localState, JSON.stringify({ os_crypt: { encrypted_key: Buffer.from('DPAPIwrapped-fixture-key').toString('base64') } }));
+    await waiting;
+    assert.equal(ready, true);
+});
+
+test('missing or invalid persisted Windows profile keys time out without being replaced', async t => {
+    const vault = fixture(t, {});
+    const localState = path.join(path.dirname(vault.filePath), 'Local State');
+    const original = JSON.stringify({ os_crypt: { encrypted_key: Buffer.from('not-a-DPAPI-key').toString('base64') } });
+    fs.writeFileSync(localState, original);
+    await assert.rejects(waitForWindowsStorageKey(localState, 25), { code: 'CREDENTIAL_ACCESS_TIMEOUT' });
+    assert.equal(fs.readFileSync(localState, 'utf8'), original);
+    fs.unlinkSync(localState);
+    await assert.rejects(waitForWindowsStorageKey(localState, 25), { code: 'CREDENTIAL_ACCESS_TIMEOUT' });
+    assert.equal(fs.existsSync(localState), false);
+});
+
+test('cancelled Windows profile preparation cannot be revived by a late file write', async t => {
+    const vault = fixture(t, {});
+    const localState = path.join(path.dirname(vault.filePath), 'Local State');
+    const controller = new AbortController();
+    const operation = waitForWindowsStorageKey(localState, 1000, controller.signal);
+    controller.abort();
+    await assert.rejects(operation, { code: 'CREDENTIAL_UNLOCK_REQUIRED' });
+    fs.writeFileSync(localState, JSON.stringify({ os_crypt: { encrypted_key: Buffer.from('DPAPIlate-key').toString('base64') } }));
+    await new Promise(resolve => setImmediate(resolve));
+});
+
+test('quitting before Windows app-ready preparation resolves can never launch a late helper', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const childProcess = require('node:child_process');
+    const spawn = childProcess.spawn;
+    const whenReady = app.whenReady;
+    let ready;
+    let spawns = 0;
+    app.whenReady = () => new Promise(resolve => { ready = resolve; });
+    childProcess.spawn = () => { spawns++; throw new Error('unexpected late spawn'); };
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+        const operation = runCredentialHelper({ decrypt: [], encrypt: ['fixture-secret'] });
+        app.emit('will-quit');
+        await assert.rejects(operation, { code: 'CREDENTIAL_UNLOCK_REQUIRED' });
+        ready();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(spawns, 0);
+    } finally {
+        Object.defineProperty(process, 'platform', platform);
+        childProcess.spawn = spawn;
+        if (whenReady === undefined) delete app.whenReady;
+        else app.whenReady = whenReady;
+    }
+});
+
+test('the helper inherits the exact session profile and an application-local working directory', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const childProcess = require('node:child_process');
+    const spawn = childProcess.spawn;
+    const getPath = app.getPath;
+    const getName = app.getName;
+    const getAppPath = app.getAppPath;
+    const child = new EventEmitter();
+    let options;
+    child.send = () => setImmediate(() => {
+        child.emit('message', { decrypted: [], encrypted: [encrypted] });
+        child.emit('close', 0, null);
+    });
+    child.kill = () => assert.fail('successful helper must quit normally');
+    childProcess.spawn = (_executable, _arguments, value) => { options = value; return child; };
+    app.getPath = name => name === 'sessionData' ? '/fixture/overridden-session-data' : '/fixture/user-data';
+    app.getName = () => 'Fixture App';
+    app.getAppPath = () => '/fixture/application';
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    try {
+        await runCredentialHelper({ decrypt: [], encrypt: ['fixture-secret'] });
+        assert.equal(options.cwd, path.dirname(process.execPath));
+        assert.equal(options.env.XORA_CREDENTIAL_USER_DATA, '/fixture/user-data');
+        assert.equal(options.env.XORA_CREDENTIAL_SESSION_DATA, '/fixture/overridden-session-data');
+    } finally {
+        Object.defineProperty(process, 'platform', platform);
+        childProcess.spawn = spawn;
+        app.getPath = getPath;
+        if (getName === undefined) delete app.getName;
+        else app.getName = getName;
+        if (getAppPath === undefined) delete app.getAppPath;
+        else app.getAppPath = getAppPath;
+    }
+});
+
+test('cached Windows encryption unavailability is reported without waiting for a profile key or spawning', async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const whenReady = app.whenReady;
+    const getPath = app.getPath;
+    app.whenReady = async () => undefined;
+    app.getPath = () => assert.fail('unavailable encryption must not wait on Local State');
+    cachedWindowsAvailability = false;
+    cachedWindowsAvailabilityReads = 0;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+        await assert.rejects(runCredentialHelper({ decrypt: [], encrypt: ['fixture-secret'] }, { timeoutMs: 1000 }), {
+            code: 'CREDENTIAL_STORAGE_UNAVAILABLE'
+        });
+        assert.equal(cachedWindowsAvailabilityReads, 1);
+    } finally {
+        Object.defineProperty(process, 'platform', platform);
+        cachedWindowsAvailability = undefined;
+        app.getPath = getPath;
+        if (whenReady === undefined) delete app.whenReady;
+        else app.whenReady = whenReady;
+    }
 });
