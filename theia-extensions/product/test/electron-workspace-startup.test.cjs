@@ -36,16 +36,16 @@ test('CLI launch opens the requested window when realpath hangs on a mounted dri
     let complete;
     const f = fixture(() => new Promise(resolve => { complete = resolve; }));
     await f.application.handleMainCommand({ cwd: '/Volumes/offline', file: 'project', secondInstance: false });
-    assert.deepEqual(f.opened, ['/Volumes/offline/project']);
+    assert.deepEqual(f.opened, [path.resolve('/Volumes/offline', 'project')]);
     complete('/Volumes/reconnected/project');
     await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(f.opened, ['/Volumes/offline/project'], 'late realpath must not open a second window');
+    assert.deepEqual(f.opened, [path.resolve('/Volumes/offline', 'project')], 'late realpath must not open a second window');
 });
 
 test('explicit second-instance paths recover in a window when resolution fails', async () => {
     const f = fixture(async () => { throw new Error('ENOTCONN'); });
     await f.application.handleMainCommand({ cwd: '/Volumes/offline', file: 'project', secondInstance: true });
-    assert.deepEqual(f.opened, ['/Volumes/offline/project']);
+    assert.deepEqual(f.opened, [path.resolve('/Volumes/offline', 'project')]);
 });
 
 test('healthy CLI symlinks still use their canonical workspace location', async () => {

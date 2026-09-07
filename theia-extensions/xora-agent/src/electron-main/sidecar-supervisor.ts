@@ -7,6 +7,7 @@ import { StringDecoder } from 'string_decoder';
 import { deepRedact, StreamingOpaquePayloadRedactor } from './session-repository';
 import { sharedGrokHome } from './shared-grok-home';
 import { sidecarFilesystemError } from './sidecar-errors';
+import { WindowsProcessJob, windowsProcessJobScriptPath } from './windows-process-job';
 
 export const EMBEDDED_GROK_VERSION = '0.2.102';
 const MAX_EXACT_REDACTION_VALUES = 4_096;
@@ -32,6 +33,7 @@ export class GrokSidecarSupervisor {
     protected stopping = false;
     protected stopPromise: Promise<void> | undefined;
     protected failedSpawns = new WeakSet<ChildProcess>();
+    protected windowsJobs = new WeakMap<ChildProcess, WindowsProcessJob>();
     protected readonly logPath = path.join(app.getPath('userData'), 'logs', 'grok-sidecar.stderr.log');
     protected exactSecrets: string[] = [];
     protected stderrCarry = '';
@@ -95,14 +97,17 @@ export class GrokSidecarSupervisor {
         const args = ['--no-auto-update', '--cwd', root, 'agent', '--no-leader', 'stdio'];
         let child: ChildProcessWithoutNullStreams;
         try {
-            child = spawn(binary, args, {
-                cwd: root,
-                env: this.sanitizedEnvironment(providerEnvironment),
-                shell: false,
-                windowsHide: true,
-                detached: process.platform !== 'win32',
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
+            const environment = this.sanitizedEnvironment(providerEnvironment);
+            if (process.platform === 'win32') {
+                const job = new WindowsProcessJob({ binary, args, cwd: root, environment, guardianScript: this.windowsGuardianScript() });
+                child = job.process;
+                (this.windowsJobs ??= new WeakMap()).set(child, job);
+            } else {
+                child = spawn(binary, args, {
+                    cwd: root, env: environment, shell: false, windowsHide: true,
+                    detached: true, stdio: ['pipe', 'pipe', 'pipe']
+                });
+            }
         } catch (error) {
             this.exactSecrets = [];
             throw error;
@@ -184,6 +189,8 @@ export class GrokSidecarSupervisor {
     }
 
     protected processTreeRunning(child: ChildProcess): boolean {
+        const windowsJob = this.windowsJobs?.get(child);
+        if (windowsJob) return windowsJob.running;
         if (this.failedSpawns?.has(child)) return false;
         if (child.exitCode === null && child.signalCode == null) return true;
         if (process.platform === 'win32' || child.pid === undefined) return false;
@@ -215,20 +222,37 @@ export class GrokSidecarSupervisor {
     }
 
     protected closeStreams(child: ChildProcess): void {
+        this.windowsJobs?.get(child)?.disconnect();
         child.stdin?.destroy?.();
         child.stdout?.destroy?.();
         child.stderr?.destroy?.();
     }
 
     protected forcedExitConfirmationTimeoutMs(): number {
-        return 1_000;
+        return process.platform === 'win32' ? 6_000 : 1_000;
+    }
+
+    protected windowsGuardianScript(): string {
+        return windowsProcessJobScriptPath({
+            packaged: app?.isPackaged ?? false,
+            resourcesPath: process.resourcesPath,
+            applicationRoot: app?.getAppPath?.(),
+            entry: process.env.XORA_CREDENTIAL_HELPER_ENTRY
+        });
     }
 
     /** Last-resort shutdown path used by Electron's synchronous onStop hook. */
     stopSync(): void {
         const child = this.child;
         this.child = undefined;
-        if (child?.pid !== undefined && this.processTreeRunning(child)) {
+        const windowsJob = child && this.windowsJobs?.get(child);
+        if (windowsJob) {
+            // The logical Job can remain unconfirmed after its guardian died.
+            // Only an owned live handle may be killed; its old numeric PID can
+            // already belong to an unrelated process by application shutdown.
+            windowsJob.disconnect();
+            windowsJob.abort();
+        } else if (child?.pid !== undefined && this.processTreeRunning(child)) {
             if (process.platform === 'win32') {
                 const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
                 try {
@@ -354,6 +378,11 @@ export class GrokSidecarSupervisor {
     }
 
     protected signalTree(child: ChildProcess, signal: NodeJS.Signals): void {
+        const windowsJob = this.windowsJobs?.get(child);
+        if (windowsJob) {
+            windowsJob.stop();
+            return;
+        }
         if (child.pid === undefined) {
             return;
         }

@@ -13,11 +13,12 @@ const { Deferred } = require('@theia/core/lib/common/promise-util');
 
 // Run the real product subclass with a small browser/base-service boundary.
 // Theia's base imports DOM widgets, which are unrelated to restoration IO.
-function fixture({ hash = '#/Volumes/offline/project', storage = new Map(), resolve, read } = {}) {
+function fixture({ hash = '#/Volumes/offline/project', storage = new Map(), resolve, read, providerReady = true } = {}) {
     const notices = [];
     const writes = [];
     const watches = [];
     const changes = [];
+    const registrationListeners = new Set();
     const location = { hash, pathname: '/index.html', search: '' };
     const window = {
         location,
@@ -37,6 +38,17 @@ function fixture({ hash = '#/Volumes/offline/project', storage = new Map(), reso
             this.onWorkspaceChangeEmitter = { fire: roots => changes.push(roots) };
             this.onWorkspaceLocationChangedEmitter = { fire() {} };
             this.fileService = {
+                hasProvider: scheme => scheme === 'file' && providerReady,
+                activateProvider: async () => ({
+                    stat: async uri => {
+                        const file = await this.fileService.resolve(uri);
+                        return { type: file.isDirectory ? 2 : 1, ctime: 0, mtime: 0, size: 0 };
+                    }
+                }),
+                onDidChangeFileSystemProviderRegistrations: listener => {
+                    registrationListeners.add(listener);
+                    return { dispose: () => registrationListeners.delete(listener) };
+                },
                 resolve: resolve ?? (() => new Promise(() => {})),
                 read: read ?? (() => new Promise(() => {})),
                 watch: uri => { watches.push(uri.toString()); return { dispose() {} }; },
@@ -91,7 +103,13 @@ function fixture({ hash = '#/Volumes/offline/project', storage = new Map(), reso
     }, { filename });
     const service = new module.exports.XoraWorkspaceService();
     service.workspaceStartupTimeout = 15;
-    return { service, notices, writes, watches, changes, storage, location };
+    return {
+        service, notices, writes, watches, changes, storage, location, registrationListeners,
+        registerFileProvider() {
+            providerReady = true;
+            for (const listener of registrationListeners) listener({ added: true, scheme: 'file' });
+        }
+    };
 }
 
 function stat(uri, directory = true) {
@@ -160,6 +178,53 @@ test('a healthy folder is restored and removes its pending marker', async () => 
     assert.equal(f.storage.size, 0);
     assert.deepEqual(f.writes, [offlineUri]);
     assert.deepEqual(f.notices, []);
+});
+
+test('startup only requests folder metadata and leaves directory enumeration to Explorer', async () => {
+    const f = fixture({ resolve: async () => assert.fail('startup must not enumerate directory contents through resolve') });
+    f.service.fileService.activateProvider = async () => ({
+        stat: async () => ({ type: 2, ctime: 0, mtime: 0, size: 0 }),
+        readdir: async () => assert.fail('a slow network directory listing must not block readiness')
+    });
+    await f.service.doInit();
+    assert.equal(f.service._workspace.resource.toString(), offlineUri);
+    assert.equal((await f.service.roots).length, 1);
+    assert.deepEqual(f.notices, []);
+});
+
+test('startup waits for the built-in file provider without activating workspace-dependent extensions', async () => {
+    let prematurelyActivated = false;
+    const f = fixture({
+        providerReady: false,
+        resolve: async uri => {
+            if (!f.service.fileService.hasProvider('file')) {
+                prematurelyActivated = true;
+                // Theia's plugin activation waits on workspace.ready, which
+                // cannot resolve until this same read completes.
+                await f.service.ready;
+            }
+            return stat(uri.toString());
+        }
+    });
+    f.service.workspaceStartupTimeout = 100;
+    const initialization = f.service.doInit();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.registrationListeners.size, 1);
+    f.registerFileProvider();
+    await initialization;
+    assert.equal(prematurelyActivated, false);
+    assert.equal(f.service._workspace.resource.toString(), offlineUri);
+    assert.deepEqual(f.notices, []);
+    assert.equal(f.registrationListeners.size, 0);
+});
+
+test('an unavailable file provider still releases startup and disposes its registration listener', async () => {
+    const f = fixture({ providerReady: false, resolve: async () => assert.fail('do not activate an unavailable provider') });
+    await f.service.doInit();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.deepEqual(Array.from(await f.service.roots), []);
+    assert.equal(f.notices.length, 1);
+    assert.equal(f.registrationListeners.size, 0);
 });
 
 test('workspace-file reads and nested root resolution share the startup deadline', async () => {

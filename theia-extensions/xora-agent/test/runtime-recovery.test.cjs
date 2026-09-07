@@ -204,16 +204,18 @@ test('signal-terminated leaders close retained streams without waiting for an im
     assert.equal(supervisor.child, undefined);
 });
 
-test('spawn failure during concurrent shutdown releases a phantom process without an exit event', { timeout: 2_000 }, async () => {
+test('spawn failure releases a phantom process without an exit event', { timeout: process.platform === 'win32' ? 20_000 : 2_000 }, async () => {
     const supervisor = supervisorFor(undefined);
     supervisor.resolveBinary = () => '/xora-runtime-fixture/does-not-exist';
     supervisor.resolvedVersion = () => 'fixture';
     supervisor.sanitizedEnvironment = () => process.env;
     const { process: child } = supervisor.launch(process.cwd(), {});
     const error = once(child, 'error');
-    const stopping = supervisor.stop(500);
+    // Windows launches a Job guardian first. Let it report the target spawn
+    // error before stopping, otherwise prelaunch cancellation is successful.
+    const stopping = process.platform === 'win32' ? undefined : supervisor.stop(500);
     await error;
-    await stopping;
+    await (stopping ?? supervisor.stop(500));
     assert.equal(supervisor.running, false);
     assert.equal(supervisor.child, undefined);
     assert.equal(child.stdout.destroyed, true);

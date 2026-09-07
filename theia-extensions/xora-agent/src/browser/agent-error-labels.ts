@@ -61,6 +61,7 @@ const RECOVERY_MESSAGES: Readonly<Record<string, string>> = {
     CREDENTIAL_STORAGE_UNAVAILABLE: '系统安全凭据存储暂不可用。请解锁钥匙串或系统密钥环后重试。',
     CREDENTIAL_UNLOCK_REQUIRED: '凭据读取已暂停。请检查系统授权后点击“重新连接 Agent”，或在“账户与模型设置”中重新保存密钥。',
     CREDENTIAL_STORE_CHANGED: '读取期间凭据已更新，请重新连接 Agent 以使用最新密钥。',
+    WINDOWS_PROCESS_JOB_FAILED: 'Windows 未能启动或确认清理 Agent 进程。请确认系统 PowerShell 可以运行后重新连接；仍失败时请完全退出应用再打开。',
     SIDECAR_TERMINATION_UNCONFIRMED: '尚未确认旧 Agent 进程已退出，暂时无法重新连接。请稍后重试；仍失败时请完全退出应用再打开。'
 };
 

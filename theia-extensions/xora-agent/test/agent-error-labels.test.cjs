@@ -89,6 +89,7 @@ test('credential failures explain authorization recovery across typed and serial
         CREDENTIAL_STORAGE_UNAVAILABLE: /解锁钥匙串/,
         CREDENTIAL_UNLOCK_REQUIRED: /读取已暂停.*重新连接 Agent/,
         CREDENTIAL_STORE_CHANGED: /凭据已更新.*重新连接 Agent/,
+        WINDOWS_PROCESS_JOB_FAILED: /Windows.*PowerShell.*重新连接/,
         SIDECAR_TERMINATION_UNCONFIRMED: /旧 Agent 进程.*完全退出应用/
     };
     for (const [code, message] of Object.entries(expected)) {

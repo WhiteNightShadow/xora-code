@@ -84,7 +84,8 @@ export class XoraWorkspaceService extends WorkspaceService {
     }
 
     protected async prepareWorkspace(uri: URI): Promise<PreparedWorkspace> {
-        const stat = await this.fileService.resolve(uri);
+        await this.waitForLocalFileSystemProvider();
+        const stat = await this.workspaceStartupStat(uri);
         if (stat?.isFile && !this.isWorkspaceFile(stat)) {
             // Ordinary launcher scripts are not workspace documents.
             return { roots: [] };
@@ -97,11 +98,40 @@ export class XoraWorkspaceService extends WorkspaceService {
         if (errors.length || !WorkspaceData.is(data)) throw new Error('Invalid workspace document');
         const absolute = WorkspaceData.transformToAbsolute(data, stat);
         const roots = await Promise.all(absolute.folders.map(async folder => {
-            const root = await this.fileService.resolve(new URI(folder.path));
+            const root = await this.workspaceStartupStat(new URI(folder.path));
             if (!root.isDirectory) throw new Error('Workspace folder is unavailable');
             return root;
         }));
         return { stat, roots };
+    }
+
+    protected async workspaceStartupStat(uri: URI): Promise<FileStat> {
+        const provider = await this.fileService.activateProvider(uri.scheme);
+        // FileService.resolve also enumerates every immediate child of a
+        // directory. Workspace readiness only needs metadata; Explorer can
+        // load directory contents after the workbench becomes usable.
+        return FileStat.fromStat(uri, await provider.stat(uri));
+    }
+
+    protected async waitForLocalFileSystemProvider(): Promise<void> {
+        if (this.fileService.hasProvider('file')) return;
+        let dispose: () => void = () => undefined;
+        try {
+            // Resolving before the built-in provider registers triggers Theia's
+            // extension activation path. Plugin activation itself waits for
+            // workspace readiness, creating a cycle even for healthy folders.
+            // Registration is driven by the backend capability handshake and
+            // does not depend on extension or workspace initialization.
+            await workspaceDeadline(new Promise<void>(resolve => {
+                const registration = this.fileService.onDidChangeFileSystemProviderRegistrations(event => {
+                    if (event.added && event.scheme === 'file') resolve();
+                });
+                dispose = () => registration.dispose();
+                if (this.fileService.hasProvider('file')) resolve();
+            }), this.workspaceStartupTimeout);
+        } finally {
+            dispose();
+        }
     }
 
     protected applyPreparedWorkspace(prepared: PreparedWorkspace): void {
@@ -158,7 +188,10 @@ export class XoraWorkspaceService extends WorkspaceService {
     }
 
     protected override async toFileStat(uri: URI | string | undefined): Promise<FileStat | undefined> {
-        return workspaceDeadline(super.toFileStat(uri), this.workspaceStartupTimeout).catch(() => undefined);
+        return workspaceDeadline((async () => {
+            if (uri && new URI(uri.toString()).scheme === 'file') await this.waitForLocalFileSystemProvider();
+            return super.toFileStat(uri);
+        })(), this.workspaceStartupTimeout).catch(() => undefined);
     }
 
     protected override async doGetDefaultWorkspaceUri(): Promise<string | undefined> {

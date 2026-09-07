@@ -6,6 +6,7 @@ electronDist: ../../node_modules/electron/dist
 electronVersion: 39.8.7
 asar: true
 asarUnpack:
+  - "scripts/windows-process-job.ps1"
   - "**/lib/backend/native/**"
   - "**/lib/backend/shell-integrations/**"
   - "**/lib/prebuilds/**"
