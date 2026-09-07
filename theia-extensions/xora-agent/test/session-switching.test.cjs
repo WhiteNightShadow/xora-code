@@ -4350,3 +4350,74 @@ test('same-length tool progress updates still count as new transcript output', (
     assert.equal(widget.observeTranscriptOutput(), true);
     assert.equal(widget.observeTranscriptOutput(), false, 'the replacement payload is announced only once');
 });
+
+test('manual reconnect coalesces clicks and preserves drafts and failed prompt ownership', async () => {
+    const widget = Object.create(widgetClass().prototype);
+    const start = deferred();
+    const calls = [];
+    const retry = { text: 'failed task retained' };
+    widget.model = {
+        snapshot: { phase: 'crashed', workspaceRoot: '/fixture', workspaceAttached: true, providerId: 'relay' },
+        refresh: async () => { calls.push('refresh'); }
+    };
+    widget.service = { startRuntime: request => { calls.push(request); return start.promise; } };
+    widget.hasPromptLaneWork = () => false;
+    widget.cancelRuntimePrewarmTimer = () => { calls.push('cancel-prewarm'); };
+    widget.hydrateActiveSessionInBackground = async () => { calls.push('hydrate'); };
+    widget.update = () => undefined;
+    widget.prompt = 'unsent draft';
+    widget.retryablePrompt = retry;
+    const recovering = widget.reconnectRuntime();
+    await widget.reconnectRuntime();
+    assert.equal(widget.runtimeReconnectPending, true);
+    assert.deepEqual(calls, ['cancel-prewarm', { workspaceRoot: '/fixture', providerId: 'relay', retryCredentials: true }]);
+    start.resolve();
+    await recovering;
+    assert.equal(widget.runtimeReconnectPending, false);
+    assert.equal(widget.runtimePrewarmRequested, false);
+    assert.equal(widget.prompt, 'unsent draft');
+    assert.equal(widget.retryablePrompt, retry);
+    assert.deepEqual(calls.slice(-2), ['refresh', 'hydrate']);
+});
+
+test('manual reconnect neither interrupts active work nor hydrates a changed project', async () => {
+    const widget = Object.create(widgetClass().prototype);
+    const start = deferred();
+    let starts = 0;
+    let busy = true;
+    widget.model = {
+        snapshot: { phase: 'crashed', workspaceRoot: '/fixture', workspaceAttached: true, providerId: 'relay' },
+        refresh: async () => undefined
+    };
+    widget.service = { startRuntime: () => { starts += 1; return start.promise; } };
+    widget.hasPromptLaneWork = () => busy;
+    widget.cancelRuntimePrewarmTimer = () => undefined;
+    widget.hydrateActiveSessionInBackground = async () => assert.fail('old workspace must not hydrate');
+    widget.update = () => undefined;
+    await widget.reconnectRuntime();
+    assert.equal(starts, 0);
+    busy = false;
+    const recovering = widget.reconnectRuntime();
+    widget.model.snapshot.workspaceRoot = '/other-project';
+    start.resolve();
+    await recovering;
+    assert.equal(starts, 1);
+    assert.equal(widget.runtimeReconnectPending, false);
+});
+
+test('manual reconnect failure releases the button and explains credential recovery', async () => {
+    const widget = Object.create(widgetClass().prototype);
+    const notices = [];
+    widget.model = {
+        snapshot: { phase: 'crashed', workspaceRoot: '/fixture', workspaceAttached: true, providerId: 'relay' },
+        refresh: async () => undefined
+    };
+    widget.service = { startRuntime: async () => { throw new Error('CREDENTIAL_ACCESS_TIMEOUT: timed out'); } };
+    widget.hasPromptLaneWork = () => false;
+    widget.cancelRuntimePrewarmTimer = () => undefined;
+    widget.showInlineNotice = message => { notices.push(message); };
+    widget.update = () => undefined;
+    await widget.reconnectRuntime();
+    assert.equal(widget.runtimeReconnectPending, false);
+    assert.match(notices[0], /授权超时.*重新连接 Agent/);
+});

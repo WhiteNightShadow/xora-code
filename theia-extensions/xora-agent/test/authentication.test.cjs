@@ -805,6 +805,7 @@ test('a Grok TOML write failure cannot replace relay metadata or its credential'
         if (tomlWrites === 1) throw new Error('fixture Grok TOML write failure');
     };
     registry.vault = {
+        has: () => !!credential,
         get: () => credential,
         set: (_secretRef, value) => {
             credentialWrites += 1;

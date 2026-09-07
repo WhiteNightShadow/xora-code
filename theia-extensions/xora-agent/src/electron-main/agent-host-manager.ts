@@ -78,11 +78,10 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
 
     async disconnect(service: GrokAgentHostService): Promise<void> {
         if (!this.services.has(service)) return;
-        try {
-            await service.dispose();
-        } finally {
-            this.services.delete(service);
-        }
+        await service.dispose();
+        // A failed/unconfirmed teardown must remain registered so app shutdown
+        // can still kill the process and component updates see it as active.
+        this.services.delete(service);
     }
 
     onStop(_application: ElectronMainApplication): void {
@@ -100,8 +99,8 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
         this.grokHomeWatcher?.close();
         this.grokHomeWatcher = undefined;
         for (const service of [...this.services]) {
-            service.disposeSync();
-            this.services.delete(service);
+            try { service.disposeSync(); } catch { /* continue terminating every window */ }
+            finally { this.services.delete(service); }
         }
     }
 

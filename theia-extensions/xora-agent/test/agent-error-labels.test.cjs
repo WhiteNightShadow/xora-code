@@ -44,6 +44,7 @@ test('known Provider lifecycle errors become actionable Chinese guidance', () =>
 });
 
 test('runtime and workspace implementation errors become Chinese typed recovery messages', () => {
+    assert.match(friendlyAgentErrorMessage('initialize timed out after 45000ms'), /初始化超时.*检查网络连接.*重新连接 Agent/);
     assert.equal(
         agentErrorSemanticKey('PROMPT_FAILED', 'ACP stdout reached end of stream'),
         'runtime-disconnected'
@@ -79,6 +80,23 @@ test('runtime and workspace implementation errors become Chinese typed recovery 
 test('unknown errors keep their useful diagnostic text', () => {
     assert.equal(friendlyAgentErrorMessage('fixture-specific failure'), 'fixture-specific failure');
     assert.equal(friendlyAgentErrorMessage(''), '操作未完成，请稍后重试。');
+});
+
+test('credential failures explain authorization recovery across typed and serialized RPC errors', () => {
+    const expected = {
+        CREDENTIAL_ACCESS_TIMEOUT: /授权超时.*重新连接 Agent/,
+        CREDENTIAL_ACCESS_DENIED: /解密.*重新保存密钥/,
+        CREDENTIAL_STORAGE_UNAVAILABLE: /解锁钥匙串/,
+        CREDENTIAL_UNLOCK_REQUIRED: /读取已暂停.*重新连接 Agent/,
+        CREDENTIAL_STORE_CHANGED: /凭据已更新.*重新连接 Agent/,
+        SIDECAR_TERMINATION_UNCONFIRMED: /旧 Agent 进程.*完全退出应用/
+    };
+    for (const [code, message] of Object.entries(expected)) {
+        assert.match(friendlyAgentErrorMessage({ code, message: 'native failure' }), message);
+        assert.match(friendlyAgentErrorMessage(new Error(`${code}: native failure`)), message);
+        assert.match(friendlyAgentEventErrorMessage(code, 'native failure'), message);
+        assert.doesNotMatch(friendlyAgentEventErrorMessage(code, 'native failure'), /native failure/);
+    }
 });
 
 test('missing-session detection accepts the typed contract and exact legacy messages only', () => {

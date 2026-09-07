@@ -8,6 +8,19 @@ const { app } = require('electron');
 const { normalizeDevelopmentLaunchArgv } = require('./dev-launch-normalizer');
 const { migrateLegacyData } = require('./xora-data-migration');
 
+// Capture the actual development entry before argv normalization removes it.
+// Packaged helpers enter through the same signed executable and main file.
+process.env.XORA_CREDENTIAL_HELPER_ENTRY = __filename;
+if (process.argv.includes('--xora-credential-helper')) {
+    if (typeof process.send !== 'function' || !process.env.XORA_CREDENTIAL_USER_DATA) {
+        app.exit(1);
+    } else {
+        app.setName(process.env.XORA_CREDENTIAL_APP_NAME || 'Xora Code');
+        app.setPath('userData', process.env.XORA_CREDENTIAL_USER_DATA);
+        require('./credential-helper');
+    }
+} else {
+
 // Keep automated/local development launches product-shaped. Playwright's
 // Electron launcher omits process.defaultApp, which otherwise makes Theia
 // parse this wrapper as a workspace path. Naming the app before safeStorage is
@@ -40,3 +53,4 @@ if (!process.env.THEIA_DEFAULT_PLUGINS) {
 }
 
 require('../lib/backend/electron-main');
+}

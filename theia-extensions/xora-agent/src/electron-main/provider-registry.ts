@@ -407,6 +407,50 @@ export class ProviderRegistry {
         return saved;
     }
 
+    async prepareProviderSave(input: ProviderProfile, apiKey?: string): Promise<void> {
+        if (input.id === 'xai-api-key' && input.kind === 'xai-api-key') this.validateXaiSettings(input);
+        else {
+            if (input.id === 'grok-subscription' || input.managed || input.kind !== 'custom') {
+                throw new Error('Built-in providers cannot be changed.');
+            }
+            this.validate(input);
+        }
+        // New keys can replace an unreadable encrypted key: rollback keeps an
+        // opaque ciphertext snapshot and never needs to decrypt the old value.
+        if (apiKey !== undefined) await this.vault.prepareSet(this.validateCredential(apiKey));
+        else await this.prepareProviderCredential(input.id, { retry: true });
+    }
+
+    async prepareProviderCredential(providerId: string, options: { retry?: boolean } = {}): Promise<void> {
+        const profile = this.get(providerId);
+        if (!profile || profile.kind === 'grok-subscription') return;
+        await this.vault.prepare([profile.secretRef ?? `provider:${profile.id}`], options);
+    }
+
+    async prepareRuntimeCredentials(
+        providerId: string,
+        workspaceRoot: string,
+        options: { retry?: boolean } = {}
+    ): Promise<void> {
+        const profile = this.get(providerId);
+        const references = profile && profile.kind !== 'grok-subscription'
+            ? [profile.secretRef ?? `provider:${profile.id}`] : [];
+        for (const entry of this.readMcpCredentials().credentials) {
+            if (this.sameMcpWorkspace(entry.workspaceRoot, workspaceRoot)) references.push(entry.secretRef);
+        }
+        await this.vault.prepare(references, options);
+    }
+
+    async prepareMcpCredential(secret: string): Promise<void> {
+        await this.vault.prepareSet(secret);
+    }
+
+    async prepareMcpCredentials(workspaceRoot: string, options: { retry?: boolean } = {}): Promise<void> {
+        await this.vault.prepare(this.readMcpCredentials().credentials
+            .filter(entry => this.sameMcpWorkspace(entry.workspaceRoot, workspaceRoot))
+            .map(entry => entry.secretRef), options);
+    }
+
     protected saveUnlocked(input: ProviderProfile, apiKey?: string): ProviderProfile {
         const credential = apiKey === undefined ? undefined : this.validateCredential(apiKey);
         if (input.id === 'grok-subscription' || input.id === 'xai-api-key') {
@@ -419,7 +463,7 @@ export class ProviderRegistry {
             const settings = this.validateXaiSettings(input);
             const previousBaseUrl = previous?.baseUrl ?? XAI_OFFICIAL_BASE_URL;
             const nextBaseUrl = settings?.baseUrl ?? XAI_OFFICIAL_BASE_URL;
-            const currentCredential = this.vault.get('provider:xai-api-key');
+            const currentCredential = this.vault.has('provider:xai-api-key');
             if (nextBaseUrl !== previousBaseUrl && currentCredential && !credential) {
                 throw new Error('修改 Base URL 时需要重新输入 API 密钥。');
             }
@@ -465,7 +509,7 @@ export class ProviderRegistry {
         // (e.g. grok-4.5), so preferredModels never collides with subscription.
         file.preferredModels = file.preferredModels ?? {};
         file.preferredModels[profile.id] = profile.id;
-        if (!credential && !this.vault.get(profile.secretRef!)) {
+        if (!credential && !this.vault.has(profile.secretRef!)) {
             throw new Error('This provider needs an API key.');
         }
         if (credential || !sameProviderConfiguration(previous, profile)) {
@@ -490,7 +534,8 @@ export class ProviderRegistry {
         secretRef: string,
         credential?: string
     ): void {
-        const previousCredential = this.vault.get(secretRef);
+        const previousState = this.vault.capture?.(secretRef);
+        const previousCredential = previousState ? undefined : this.vault.get(secretRef);
         let markerAttempted = false;
         let managedBlockAttempted = false;
         let metadataAttempted = false;
@@ -518,7 +563,8 @@ export class ProviderRegistry {
             if (credentialAttempted) {
                 credentialSafe = false;
                 try {
-                    if (previousCredential === undefined) this.vault.delete(secretRef);
+                    if (previousState) this.vault.restore(secretRef, previousState);
+                    else if (previousCredential === undefined) this.vault.delete(secretRef);
                     else this.vault.set(secretRef, previousCredential);
                     credentialSafe = true;
                 } catch (rollbackError) {
@@ -1201,15 +1247,9 @@ export class ProviderRegistry {
     }
 
     redactionSecrets(): string[] {
-        const references = new Set<string>();
-        for (const profile of this.list()) {
-            if (profile.secretRef) references.add(profile.secretRef);
-        }
-        for (const entry of this.readMcpCredentials().credentials) references.add(entry.secretRef);
-        return [...references].flatMap(reference => {
-            const value = this.vault.get(reference);
-            return value ? [value] : [];
-        });
+        // Enumerating diagnostics must not open every other Provider's key or
+        // credentials for a different workspace during startup.
+        return this.vault.cachedSecrets();
     }
 
     saveMcpCredential(

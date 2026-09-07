@@ -274,6 +274,9 @@ export interface RuntimeSnapshot {
 export interface StartRuntimeRequest {
     workspaceRoot: string;
     providerId: string;
+    /** Explicit user recovery may retry OS credential access after a failure.
+     * Background prewarming must leave this unset to avoid authorization loops. */
+    retryCredentials?: boolean;
 }
 
 /**

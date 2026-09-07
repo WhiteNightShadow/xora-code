@@ -392,6 +392,8 @@ export class GrokAgentHostService implements AgentHostService {
     /** Canonical roots currently attached to this Theia window, independent of trust. */
     protected readonly attachedWorkspaceRoots = new Set<string>();
     protected lifecycleTail: Promise<void> = Promise.resolve();
+    protected pendingRuntimeStarts: Map<string, Promise<RuntimeSnapshot>> | undefined = new Map();
+    protected runtimeStartRequestGeneration = 0;
     /** Coalesces application-wide Provider/model changes from peer windows. */
     protected providerDefaultsRefreshPending = false;
     protected providerDefaultsRefreshScheduled = false;
@@ -564,7 +566,23 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async startRuntime(request: StartRuntimeRequest): Promise<RuntimeSnapshot> {
-        return this.withLifecycle(() => this.startRuntimeLocked(request));
+        const requestGeneration = this.runtimeStartRequestGeneration ?? 0;
+        const key = JSON.stringify([requestGeneration, request.workspaceRoot, request.providerId, request.retryCredentials === true]);
+        const pending = this.pendingRuntimeStarts ??= new Map();
+        const existing = pending.get(key);
+        if (existing) return existing;
+        const starting = this.withLifecycle(() => {
+            if (requestGeneration !== (this.runtimeStartRequestGeneration ?? 0)) {
+                throw new AcpCancelledError('initialize', 'initialize', 'Runtime start was cancelled.');
+            }
+            return this.startRuntimeLocked(request);
+        });
+        pending.set(key, starting);
+        try {
+            return await starting;
+        } finally {
+            if (pending.get(key) === starting) pending.delete(key);
+        }
     }
 
     protected async startRuntimeLocked(request: StartRuntimeRequest): Promise<RuntimeSnapshot> {
@@ -615,6 +633,14 @@ export class GrokAgentHostService implements AgentHostService {
         this.emitSnapshot();
 
         try {
+            await this.providers.prepareRuntimeCredentials?.(provider.id, root, { retry: request.retryCredentials === true });
+            if (generation !== this.runtimeGeneration || this.disposed) {
+                throw new AcpCancelledError('initialize', 'initialize', 'Runtime start was cancelled.');
+            }
+            if (provider.id !== this.providers.selectedProviderId()
+                || requestedProviderEpoch !== this.providers.runtimeEpoch(provider.id)) {
+                throw new Error('STALE_PROVIDER_SELECTION: The application-wide model service changed during credential preparation.');
+            }
             // Capture the Provider epoch under the same writer lock as the
             // credential/TOML snapshot and process spawn. The lock is released
             // immediately after spawn; ACP initialize may legitimately wait on
@@ -696,6 +722,9 @@ export class GrokAgentHostService implements AgentHostService {
             if (this.capabilities) {
                 this.capabilities.guidePrompt = await this.detectGuidePromptCapability(acp);
             }
+            if (generation !== this.runtimeGeneration || this.disposed) {
+                throw new AcpCancelledError('initialize', 'initialize', 'Runtime start was cancelled.');
+            }
             if (provider.id !== this.providers.selectedProviderId()
                 || this.runtimeProviderEpoch !== this.providers.runtimeEpoch(provider.id)) {
                 throw new Error('The application-wide Provider changed while the Agent runtime was initializing.');
@@ -762,20 +791,37 @@ export class GrokAgentHostService implements AgentHostService {
             this.intentionalStop = true;
             this.acp?.close(error);
             this.acp = undefined;
-            await this.supervisor.stop(0);
-            await this.consumeTask?.catch(() => undefined);
-            this.consumeTask = undefined;
+            let failure = error;
+            try {
+                await this.supervisor.stop(0);
+                await this.consumeTask?.catch(() => undefined);
+                this.consumeTask = undefined;
+            } catch (stopError) {
+                failure = stopError;
+            }
             this.phase = 'crashed';
             this.runtimeProviderEpoch = undefined;
-            this.emitError('RUNTIME_START_FAILED', error, true);
-            this.emitSnapshot(this.redactError(error));
-            this.currentSecrets = [];
-            throw error;
+            try {
+                this.emitError('RUNTIME_START_FAILED', failure, true);
+                this.emitSnapshot(this.redactError(failure));
+            } finally {
+                this.currentSecrets = [];
+            }
+            throw failure;
         }
     }
 
     async stopRuntime(): Promise<void> {
         ++this.sessionLoadGeneration;
+        this.runtimeStartRequestGeneration = (this.runtimeStartRequestGeneration ?? 0) + 1;
+        // Closing an initializing connection rejects its pending request now,
+        // allowing teardown to enter the lifecycle queue without waiting for
+        // the full network timeout. Active prompts retain normal fenced stop.
+        if (this.phase === 'starting' || this.phase === 'initializing') {
+            ++this.runtimeGeneration;
+            this.intentionalStop = true;
+            this.acp?.close(new AcpCancelledError('initialize', 'initialize', 'Runtime start was cancelled.'));
+        }
         return this.withLifecycle(() => this.stopRuntimeLocked());
     }
 
@@ -3002,6 +3048,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (providerId === 'grok-subscription') {
             throw new Error('此模型服务没有可查询的 API 地址。');
         }
+        await this.providers.prepareProviderCredential?.(providerId, { retry: true });
         const { profile: provider, credential } = this.providers.providerCredentialSnapshot(providerId);
         if (!provider.baseUrl) throw new Error('此模型服务没有可查询的 API 地址。');
         const protocol = provider.protocol ?? 'openai-responses';
@@ -3051,6 +3098,7 @@ export class GrokAgentHostService implements AgentHostService {
 
     async saveProvider(profile: ProviderProfile, apiKey?: string): Promise<ProviderProfile> {
         return this.withLifecycle(async () => {
+            await this.providers.prepareProviderSave?.(profile, apiKey);
             const previous = this.providers.get(profile.id);
             const runtimeConfigurationChanged = !!previous
                 && (previous.protocol !== profile.protocol
@@ -3397,6 +3445,7 @@ export class GrokAgentHostService implements AgentHostService {
                         this.providers.deleteMcpCredential(this.workspaceRoot, request.name);
                     }
                     if (request.action === 'add' && request.secretValue) {
+                        await this.providers.prepareMcpCredential?.(request.secretValue);
                         const remote = request.transport === 'http' || request.transport === 'sse';
                         const transport = remote ? request.transport! : 'stdio';
                         const environmentName = remote
@@ -3477,15 +3526,18 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     disposeSync(): void {
-        this.watchProjectGrokConfiguration(undefined);
-        this.flushAssistantTextDeltas();
+        // Storage errors during shutdown must not leave a workspace-mutating
+        // process behind after Electron exits.
+        try { this.watchProjectGrokConfiguration(undefined); } catch { /* shutdown continues */ }
+        try { this.flushAssistantTextDeltas(); } catch { /* preserve process teardown */ }
         this.assistantStreamState().clear();
-        this.completeActiveThought();
-        this.flushThoughtDeltas();
+        try { this.completeActiveThought(); } catch { /* preserve process teardown */ }
+        try { this.flushThoughtDeltas(); } catch { /* preserve process teardown */ }
         this.client = undefined;
         this.disposed = true;
         ++this.runtimeGeneration;
         ++this.sessionLoadGeneration;
+        this.runtimeStartRequestGeneration = (this.runtimeStartRequestGeneration ?? 0) + 1;
         this.loadedSessionIds.clear();
         this.intentionalStop = true;
         this.acp?.close(new Error('Xora Code is shutting down.'));
@@ -4092,7 +4144,12 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected async ensureRuntimeIntegrationsCurrent(): Promise<void> {
         if (!this.workspaceRoot || !this.runtimeMcpRegistry) return;
-        const snapshot = this.resolveRuntimeMcpSnapshot(this.workspaceRoot);
+        const root = this.workspaceRoot;
+        await this.providers.prepareMcpCredentials?.(root, { retry: false });
+        if (this.disposed || root !== this.workspaceRoot) {
+            throw new Error('The workspace changed while preparing MCP credentials.');
+        }
+        const snapshot = this.resolveRuntimeMcpSnapshot(root);
         if (snapshot.fingerprint === this.runtimeMcpFingerprint
             && !this.mcpConfigurationRefreshPending && !this.skillsRefreshPending) return;
         this.mcpConfigurationRefreshPending = snapshot.fingerprint !== this.runtimeMcpFingerprint;
@@ -4108,6 +4165,8 @@ export class GrokAgentHostService implements AgentHostService {
         if (this.activePrompts.size > 0) return;
         const root = this.workspaceRoot;
         if (!root) return;
+        await this.providers.prepareMcpCredentials?.(root, { retry: false });
+        if (this.disposed || root !== this.workspaceRoot || this.activePrompts.size > 0) return;
 
         if (this.skillsRefreshPending) {
             this.providers.refreshCustomProviderSkillViews();
@@ -6943,7 +7002,12 @@ export class GrokAgentHostService implements AgentHostService {
         let configurationWarning: string | undefined;
         try {
             if (this.workspaceRoot && this.supervisor && this.providers && this.security) {
-                resolved = this.resolveRuntimeMcpSnapshot(this.workspaceRoot);
+                const root = this.workspaceRoot;
+                await this.providers.prepareMcpCredentials?.(root, { retry: runDoctor });
+                if (this.disposed || root !== this.workspaceRoot || !this.isWorkspaceTrusted(root)) {
+                    return { ok: false, error: '项目已关闭或信任状态已变更，请重新打开并信任项目后重试。' };
+                }
+                resolved = this.resolveRuntimeMcpSnapshot(root);
                 if ((this.loadedSessionIds?.size ?? 0) > 0 && resolved.fingerprint !== this.runtimeMcpFingerprint) {
                     this.mcpConfigurationRefreshPending = true;
                     this.scheduleIntegrationRefresh();
@@ -6993,7 +7057,18 @@ export class GrokAgentHostService implements AgentHostService {
         return merged;
     }
 
-    protected runCli(args: string[], expectJson = true, options: GrokCommandOptions = {}): Promise<ManagementResult> {
+    protected async runCli(args: string[], expectJson = true, options: GrokCommandOptions = {}): Promise<ManagementResult> {
+        const root = options.cwd ?? this.workspaceRoot ?? process.cwd();
+        if (args[0] === 'mcp' && !options.injectedEnvironment) {
+            try {
+                await this.providers.prepareMcpCredentials?.(root, { retry: false });
+            } catch (error) {
+                return { ok: false, error: this.redactError(error) };
+            }
+            if (this.disposed || root !== (options.cwd ?? this.workspaceRoot ?? process.cwd()) || !this.isWorkspaceTrusted(root)) {
+                return { ok: false, error: '项目已关闭或信任状态已变更，请重新打开并信任项目后重试。' };
+            }
+        }
         if (this.supervisor.running && !options.allowWhileRuntime) {
             return Promise.resolve({
                 ok: false,
@@ -7003,7 +7078,6 @@ export class GrokAgentHostService implements AgentHostService {
         if (this.managementChild && this.managementChild.exitCode === null) {
             return Promise.resolve({ ok: false, error: '另一个 Agent 集成查询正在执行，请稍后重试。' });
         }
-        const root = options.cwd ?? this.workspaceRoot ?? process.cwd();
         const binary = this.supervisor.binaryPath();
         // Only MCP-native commands receive config-bound MCP credentials.
         // Skills/plugin/inspect commands must not inherit executable-service

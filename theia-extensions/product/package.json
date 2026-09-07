@@ -27,7 +27,8 @@
     "@theia/terminal": "1.73.1",
     "@theia/timeline": "1.73.1",
     "@theia/workspace": "1.73.1",
-    "@xora-code/agent": "0.2.7"
+    "@xora-code/agent": "0.2.7",
+    "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "18.19.39",

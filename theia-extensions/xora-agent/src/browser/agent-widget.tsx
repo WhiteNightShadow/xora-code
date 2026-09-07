@@ -411,6 +411,7 @@ export class XoraAgentWidget extends ReactWidget {
     protected runtimePrewarmTimer: number | undefined;
     protected runtimePrewarmAttemptKey: string | undefined;
     protected runtimePrewarmAttempts = 0;
+    protected runtimeReconnectPending = false;
     /** Last session for which a hydration request was started. Retained for
      * diagnostics after completion; the Promise below is the single-flight
      * authority. */
@@ -665,6 +666,14 @@ export class XoraAgentWidget extends ReactWidget {
                     </div>
                 </div>
                 <div className='xora-agent-header-actions'>
+                    {runtimeCrashed ? <button
+                        className='xora-agent-icon-button'
+                        aria-label='重新连接 Agent'
+                        title='重新连接 Agent'
+                        disabled={this.runtimeReconnectPending || recoveringRuntime || this.sessionLoading || this.hasPromptLaneWork()}
+                        onClick={() => { void this.reconnectRuntime(); }}>
+                        <span className={`codicon ${this.runtimeReconnectPending ? 'codicon-loading codicon-modifier-spin' : 'codicon-debug-restart'}`} />
+                    </button> : undefined}
                     <button
                         className='xora-agent-icon-button'
                         aria-label='打开会话历史'
@@ -3366,6 +3375,33 @@ export class XoraAgentWidget extends ReactWidget {
         }
     }
 
+    /** Recover the connection only; drafts and failed prompts keep their owner. */
+    protected async reconnectRuntime(): Promise<void> {
+        const snapshot = this.model.snapshot;
+        const root = snapshot.workspaceRoot;
+        if (this.runtimeReconnectPending || this.sessionLoading || this.hasPromptLaneWork()
+            || snapshot.phase !== 'crashed' || !root || !snapshot.workspaceAttached) return;
+        const providerId = snapshot.providerId;
+        this.runtimeReconnectPending = true;
+        this.runtimePrewarmRequested = false;
+        this.cancelRuntimePrewarmTimer();
+        this.update();
+        try {
+            await this.service.startRuntime({ workspaceRoot: root, providerId, retryCredentials: true });
+            await this.model.refresh();
+            if (this.sameWorkspaceRoot(this.model.snapshot.workspaceRoot, root)
+                && this.model.snapshot.providerId === providerId) {
+                await this.hydrateActiveSessionInBackground();
+            }
+        } catch (error) {
+            await this.model.refresh().catch(() => undefined);
+            this.showInlineNotice(`无法重新连接 Agent：${friendlyAgentErrorMessage(error)}`, 'error');
+        } finally {
+            this.runtimeReconnectPending = false;
+            this.update();
+        }
+    }
+
     protected async selectWorkspaceRoot(root: string): Promise<void> {
         if (this.sameWorkspaceRoot(root, this.model.snapshot.workspaceRoot)
             || this.sessionLoading
@@ -3586,7 +3622,7 @@ export class XoraAgentWidget extends ReactWidget {
             }
             let runtime = this.model.snapshot;
             if (runtime.phase === 'stopped' || runtime.phase === 'crashed') {
-                runtime = await this.service.startRuntime({ workspaceRoot: root, providerId });
+                runtime = await this.service.startRuntime({ workspaceRoot: root, providerId, retryCredentials: true });
             } else if (!['ready', 'auth-required'].includes(runtime.phase)) {
                 return;
             }
@@ -4968,7 +5004,7 @@ export class XoraAgentWidget extends ReactWidget {
                 && (runtime.phase === 'ready' || runtime.phase === 'auth-required');
             const runtimePromise = runtimeReusable
                 ? Promise.resolve(runtime)
-                : this.service.startRuntime({ workspaceRoot: hostRoot, providerId: submission.providerId });
+                : this.service.startRuntime({ workspaceRoot: hostRoot, providerId: submission.providerId, retryCredentials: true });
             const [saveAll, preparedRuntime] = await Promise.all([saveAllPromise, runtimePromise]);
             if (!saveAll.ok) throw saveAll.error;
             if (!this.submissionCanContinue(lane, submission)) return;

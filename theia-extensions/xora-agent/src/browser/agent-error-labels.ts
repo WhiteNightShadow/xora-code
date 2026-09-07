@@ -55,6 +55,27 @@ function safeDiagnosticCode(code: unknown): string | undefined {
 const RUNTIME_DISCONNECT_PATTERN = /ACP stdout reached end of stream|Grok sidecar exited|sidecar (?:stopped|exited|crashed)|connection (?:closed|lost)|Failed to write to the ACP agent/i;
 const WORKSPACE_BOUNDARY_PATTERN = /Agent changes must resolve to a file inside the trusted workspace|outside the trusted workspace|No trusted workspace is active/i;
 
+const RECOVERY_MESSAGES: Readonly<Record<string, string>> = {
+    CREDENTIAL_ACCESS_TIMEOUT: '等待系统凭据授权超时。请检查钥匙串或系统授权窗口，完成授权后点击“重新连接 Agent”。',
+    CREDENTIAL_ACCESS_DENIED: '系统未能解密已保存的凭据。请检查钥匙串授权；仍不可用时，在“账户与模型设置”中重新保存密钥。',
+    CREDENTIAL_STORAGE_UNAVAILABLE: '系统安全凭据存储暂不可用。请解锁钥匙串或系统密钥环后重试。',
+    CREDENTIAL_UNLOCK_REQUIRED: '凭据读取已暂停。请检查系统授权后点击“重新连接 Agent”，或在“账户与模型设置”中重新保存密钥。',
+    CREDENTIAL_STORE_CHANGED: '读取期间凭据已更新，请重新连接 Agent 以使用最新密钥。',
+    SIDECAR_TERMINATION_UNCONFIRMED: '尚未确认旧 Agent 进程已退出，暂时无法重新连接。请稍后重试；仍失败时请完全退出应用再打开。'
+};
+
+function recoveryMessage(error: unknown): string | undefined {
+    const code = safeDiagnosticCode((error as { code?: unknown } | undefined)?.code);
+    if (code && RECOVERY_MESSAGES[code]) return RECOVERY_MESSAGES[code];
+    // The RPC boundary may preserve only Error.message, including the stable prefix.
+    const prefix = errorMessage(error).trim().match(/^([A-Z][A-Z0-9_]+)(?::|\b)/)?.[1];
+    if (prefix && RECOVERY_MESSAGES[prefix]) return RECOVERY_MESSAGES[prefix];
+    if (/could not confirm that the Grok sidecar process tree exited/i.test(errorMessage(error))) {
+        return RECOVERY_MESSAGES.SIDECAR_TERMINATION_UNCONFIRMED;
+    }
+    return undefined;
+}
+
 /**
  * Stable, deliberately coarse error family used only for short-window UI
  * coalescing. One sidecar failure is often reported through several ACP
@@ -84,12 +105,17 @@ export function agentErrorSemanticKey(code: unknown, message: unknown): string {
 }
 
 export function friendlyAgentErrorMessage(error: unknown): string {
+    const recovery = recoveryMessage(error);
+    if (recovery) return recovery;
     const message = errorMessage(error);
     const normalized = message.trim();
     if (!normalized) return '操作未完成，请稍后重试。';
 
     if (isSessionNotFoundError(error)) {
         return '原会话已失效。为避免重复执行，任务未自动重发；内容已保留，可在新会话中重试。';
+    }
+    if (/^initialize timed out after \d+ms\.?$/i.test(normalized)) {
+        return 'Agent 初始化超时，请检查网络连接后点击“重新连接 Agent”。';
     }
     if (/Restart the runtime for the selected workspace and Provider first|active runtime has no coherent Provider epoch|Provider changed after (?:this runtime|the session) (?:was )?(?:started|created)|active runtime does not match this session/i.test(normalized)) {
         return '模型服务刚刚发生变化，Xora Code 正在重新连接，请稍后重新发送。';
@@ -129,7 +155,8 @@ export function friendlyAgentErrorMessage(error: unknown): string {
  * are translated into a short recovery instruction. */
 export function friendlyAgentEventErrorMessage(code: unknown, message: unknown): string {
     const diagnosticCode = safeDiagnosticCode(code);
-    let friendly = friendlyAgentErrorMessage(message);
+    let friendly = recoveryMessage({ code: diagnosticCode, message: errorMessage(message) })
+        ?? friendlyAgentErrorMessage(message);
     if (friendly === errorMessage(message).trim()) {
         if (diagnosticCode === 'SIDECAR_CRASHED') {
             friendly = 'Agent 连接已中断，Xora Code 正在安全恢复；未确认的任务不会自动重发。';

@@ -495,6 +495,8 @@ yarn start:browser
 
 ### 测试与打包
 
+连接失败时可在 Agent 面板点击“重新连接 Agent”。钥匙串读取通过独立进程限时处理，离线网络盘或异常工作区恢复失败后进入空窗口并保留历史记录；详见[启动与异常恢复](docs/startup-recovery.md)。
+
 ```bash
 yarn test
 

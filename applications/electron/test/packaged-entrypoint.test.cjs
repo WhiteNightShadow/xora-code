@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const applicationRoot = path.resolve(__dirname, '..');
 
@@ -71,16 +72,35 @@ test('development automation never treats the Electron entrypoint as a workspace
     assert.deepEqual(packaged, ['/Applications/Xora Code.app/Contents/MacOS/Xora Code', workspace]);
 });
 
-test('development wrapper uses the Xora identity and supports non-blocking isolated secret storage', () => {
+test('development wrapper uses the Xora identity', () => {
     const wrapper = fs.readFileSync(path.join(applicationRoot, 'scripts', 'theia-electron-main.js'), 'utf8');
-    const vault = fs.readFileSync(
-        path.resolve(applicationRoot, '..', '..', 'theia-extensions/xora-agent/src/electron-main/secret-vault.ts'),
-        'utf8'
-    );
-
     assert.match(wrapper, /app\.setName\(['"]Xora Code['"]\)/u);
-    assert.match(vault, /!app\.isPackaged && process\.env\.XORA_DISABLE_SAFE_STORAGE === ['"]1['"]/u);
-    assert.match(vault, /if \(!fs\.existsSync\(this\.filePath\)\) \{\s*return undefined;/u);
+});
+
+test('the isolated credential helper preserves app identity and bypasses Theia and migration', () => {
+    const entry = path.join(applicationRoot, 'scripts', 'theia-electron-main.js');
+    const calls = [];
+    vm.runInNewContext(fs.readFileSync(entry, 'utf8'), {
+        __filename: entry,
+        __dirname: path.dirname(entry),
+        process: {
+            argv: ['Xora Code', '--xora-credential-helper'],
+            env: { XORA_CREDENTIAL_USER_DATA: '/fixture/profile', XORA_CREDENTIAL_APP_NAME: 'Xora Code' },
+            send: () => undefined
+        },
+        require: name => {
+            if (name === 'node:path') return path;
+            if (name === 'electron') return { app: {
+                setName: name => calls.push(['name', name]),
+                setPath: (key, value) => calls.push(['path', key, value])
+            } };
+            if (name === './dev-launch-normalizer') return { normalizeDevelopmentLaunchArgv: () => assert.fail('normalized helper as workspace') };
+            if (name === './xora-data-migration') return { migrateLegacyData: () => assert.fail('migrated helper profile') };
+            if (name === './credential-helper') { calls.push(['helper']); return {}; }
+            assert.fail(`unexpected module: ${name}`);
+        }
+    });
+    assert.deepEqual(calls, [['name', 'Xora Code'], ['path', 'userData', '/fixture/profile'], ['helper']]);
 });
 
 test('packaging relies on Theia bundles instead of shipping the workspace node_modules tree', () => {

@@ -30,6 +30,8 @@ export class SidecarTerminationUnconfirmedError extends Error {
 export class GrokSidecarSupervisor {
     protected child: ChildProcessWithoutNullStreams | undefined;
     protected stopping = false;
+    protected stopPromise: Promise<void> | undefined;
+    protected failedSpawns = new WeakSet<ChildProcess>();
     protected readonly logPath = path.join(app.getPath('userData'), 'logs', 'grok-sidecar.stderr.log');
     protected exactSecrets: string[] = [];
     protected stderrCarry = '';
@@ -40,7 +42,7 @@ export class GrokSidecarSupervisor {
         // `ChildProcess.killed` means a signal was sent, not that exit was
         // observed. Keep the process authoritative until exitCode/exit proves
         // it can no longer mutate the workspace.
-        return !!this.child && this.child.exitCode === null;
+        return !!this.child && this.processTreeRunning(this.child);
     }
 
     binaryPath(): string {
@@ -81,7 +83,7 @@ export class GrokSidecarSupervisor {
     }
 
     launch(root: string, providerEnvironment: NodeJS.ProcessEnv): SidecarLaunch {
-        if (this.running) {
+        if (this.running || this.stopPromise) {
             throw new Error('This window already has a Grok sidecar.');
         }
         const binary = this.resolveBinary();
@@ -111,36 +113,62 @@ export class GrokSidecarSupervisor {
         this.stderrDecoder = new StringDecoder('utf8');
         this.stderrOpaqueRedactor = new StreamingOpaquePayloadRedactor();
         child.stderr.on('data', chunk => this.writeStderr(chunk));
+        child.once('error', () => {
+            // Failed spawn has no PID and may never emit exit. Do not keep a
+            // phantom process that prevents every subsequent recovery attempt.
+            if (child.pid === undefined) {
+                (this.failedSpawns ??= new WeakSet()).add(child);
+                if (this.child === child) {
+                    this.child = undefined;
+                    this.closeStreams(child);
+                    this.flushStderr();
+                    this.exactSecrets = [];
+                }
+            }
+        });
         child.once('exit', () => {
             if (this.child === child) {
-                this.flushStderr();
-                this.exactSecrets = [];
-                this.child = undefined;
+                // A crashed leader can leave MCP/terminal descendants holding
+                // stdout open. Its own exit is not proof that the group exited.
+                if (this.processTreeRunning(child)) this.signalTree(child, 'SIGKILL');
+                if (!this.processTreeRunning(child)) {
+                    this.child = undefined;
+                    this.closeStreams(child);
+                    this.flushStderr();
+                    this.exactSecrets = [];
+                }
             }
         });
         return { process: child, binary, version: this.resolvedVersion(binary) };
     }
 
-    async stop(graceMs = 3000): Promise<void> {
+    stop(graceMs = 3000): Promise<void> {
+        if (this.stopPromise) return this.stopPromise;
+        const stopping = this.stopProcess(graceMs);
+        this.stopPromise = stopping;
+        void stopping.then(
+            () => { if (this.stopPromise === stopping) this.stopPromise = undefined; },
+            () => { if (this.stopPromise === stopping) this.stopPromise = undefined; }
+        );
+        return stopping;
+    }
+
+    protected async stopProcess(graceMs: number): Promise<void> {
         const child = this.child;
-        if (!child || child.exitCode !== null) {
+        if (!child) return;
+        if (!this.processTreeRunning(child)) {
             this.child = undefined;
+            this.closeStreams(child);
             return;
         }
         this.stopping = true;
         try { child.stdin.end(); } catch { /* already closed */ }
         this.signalTree(child, 'SIGTERM');
-        const exited = await Promise.race([
-            new Promise<boolean>(resolve => child.once('exit', () => resolve(true))),
-            new Promise<boolean>(resolve => setTimeout(() => resolve(false), graceMs))
-        ]);
-        if (!exited && child.exitCode === null) {
+        const exited = await this.waitForProcessTreeExit(child, graceMs);
+        if (!exited && this.processTreeRunning(child)) {
             this.signalTree(child, 'SIGKILL');
-            const killed = await Promise.race([
-                new Promise<boolean>(resolve => child.once('exit', () => resolve(true))),
-                new Promise<boolean>(resolve => setTimeout(() => resolve(false), this.forcedExitConfirmationTimeoutMs()))
-            ]);
-            if (!killed && child.exitCode === null) {
+            const killed = await this.waitForProcessTreeExit(child, this.forcedExitConfirmationTimeoutMs());
+            if (!killed && this.processTreeRunning(child)) {
                 // Keep the child handle authoritative. Callers must retain
                 // durable prompt claims until a later real exit event proves
                 // that the process tree can no longer mutate the workspace.
@@ -150,8 +178,46 @@ export class GrokSidecarSupervisor {
         if (this.child === child) {
             this.child = undefined;
         }
+        this.closeStreams(child);
         this.flushStderr();
         this.exactSecrets = [];
+    }
+
+    protected processTreeRunning(child: ChildProcess): boolean {
+        if (this.failedSpawns?.has(child)) return false;
+        if (child.exitCode === null && child.signalCode == null) return true;
+        if (process.platform === 'win32' || child.pid === undefined) return false;
+        try {
+            process.kill(-child.pid, 0);
+            return true;
+        } catch (error) {
+            return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+        }
+    }
+
+    protected waitForProcessTreeExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+        if (!this.processTreeRunning(child)) return Promise.resolve(true);
+        return new Promise(resolve => {
+            const finish = (exited: boolean): void => {
+                clearTimeout(timeout);
+                clearInterval(poll);
+                child.removeListener('exit', check);
+                child.removeListener('error', check);
+                resolve(exited);
+            };
+            const check = (): void => { if (!this.processTreeRunning(child)) finish(true); };
+            const timeout = setTimeout(() => finish(!this.processTreeRunning(child)), Math.max(0, timeoutMs));
+            const poll = setInterval(check, 25);
+            child.on('exit', check);
+            child.on('error', check);
+            check();
+        });
+    }
+
+    protected closeStreams(child: ChildProcess): void {
+        child.stdin?.destroy?.();
+        child.stdout?.destroy?.();
+        child.stderr?.destroy?.();
     }
 
     protected forcedExitConfirmationTimeoutMs(): number {
@@ -162,7 +228,7 @@ export class GrokSidecarSupervisor {
     stopSync(): void {
         const child = this.child;
         this.child = undefined;
-        if (child?.pid !== undefined && child.exitCode === null) {
+        if (child?.pid !== undefined && this.processTreeRunning(child)) {
             if (process.platform === 'win32') {
                 const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
                 try {
@@ -174,6 +240,7 @@ export class GrokSidecarSupervisor {
                 try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
             }
         }
+        if (child) this.closeStreams(child);
         this.flushStderr();
         this.exactSecrets = [];
     }
@@ -299,7 +366,10 @@ export class GrokSidecarSupervisor {
         if (signal === 'SIGKILL') {
             args.push('/F');
         }
-        try { spawn(taskkill, args, { shell: false, windowsHide: true, stdio: 'ignore' }); } catch { try { child.kill(); } catch { /* gone */ } }
+        const fallback = (): void => { try { child.kill(signal); } catch { /* gone */ } };
+        try {
+            spawn(taskkill, args, { shell: false, windowsHide: true, stdio: 'ignore' }).once('error', fallback);
+        } catch { fallback(); }
     }
 
     protected writeStderr(chunk: Buffer | string): void {
