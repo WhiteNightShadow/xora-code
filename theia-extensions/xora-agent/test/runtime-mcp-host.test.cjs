@@ -196,6 +196,77 @@ test('session/new and Provider rebind inject the same canonical non-empty MCP sn
         'a Provider change must not select a Provider-local MCP source');
 });
 
+test('custom Provider switches keep real shared/project MCP config and workspace-bound credentials', async t => {
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-shared-mcp-switch-'));
+    t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+    const workspace = path.join(temporary, '项目 V3');
+    const sharedHome = path.join(temporary, 'shared-grok');
+    const providerHomes = { 'provider-a': path.join(temporary, 'api-a'), 'provider-b': path.join(temporary, 'api-b') };
+    fs.mkdirSync(path.join(workspace, '.grok'), { recursive: true });
+    fs.mkdirSync(sharedHome);
+    for (const home of Object.values(providerHomes)) {
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(home, 'config.toml'), '[mcp_servers.provider_local_only]\ncommand = "must-not-load"\n');
+    }
+    fs.writeFileSync(path.join(sharedHome, 'auth.json'), '{"testOnly":"subscription-auth-must-stay-shared"}\n');
+    fs.writeFileSync(path.join(sharedHome, 'config.toml'), [
+        '[mcp_servers.global_browser]',
+        'command = "node"',
+        'args = ["global-browser.js"]',
+        '[mcp_servers.global_browser.env]',
+        'GLOBAL_MCP_TOKEN = "${GLOBAL_MCP_TOKEN}"',
+        '[mcp_servers.disabled_global]',
+        'command = "node"',
+        'enabled = false',
+        ''
+    ].join('\n'));
+    fs.writeFileSync(path.join(workspace, '.grok', 'config.toml'), [
+        '[mcp_servers.project_reader]',
+        'command = "node"',
+        'args = ["project-reader.js"]',
+        ''
+    ].join('\n'));
+    const root = fs.realpathSync(workspace);
+    const registry = new RuntimeMcpRegistry({ grokHome: sharedHome });
+    const identity = registry.credentialConfigurationIdentity(root, 'global_browser', 'GLOBAL_MCP_TOKEN');
+    const fixture = createHost();
+    const { host } = fixture;
+    host.workspaceRoot = root;
+    host.attachedWorkspaceRoots = new Set([root]);
+    host.theiaTrustedRoots = new Set([root]);
+    host.security = { canonicalRoot: value => fs.realpathSync(value), isTrusted: () => true, agentPermissionMode: () => 'request-approval' };
+    host.runtimeMcpRegistry = registry;
+    host.resolveRuntimeMcpSnapshot = GrokAgentHostService.prototype.resolveRuntimeMcpSnapshot;
+    let credentialReads = 0;
+    host.providers.mcpCredentialBindings = selectedRoot => {
+        assert.equal(selectedRoot, root);
+        credentialReads++;
+        return [{ workspaceRoot: root, server: 'global_browser', environmentName: 'GLOBAL_MCP_TOKEN', configIdentity: identity, value: 'fixture-shared-mcp-token' }];
+    };
+    host.supervisor = {
+        commandEnvironment: () => ({ GROK_HOME: providerHomes[host.providerId] }),
+        registerRedactionSecrets: values => assert.deepEqual(values, ['fixture-shared-mcp-token'])
+    };
+
+    const created = await host.createSession({ workspaceRoot: root, providerId: 'provider-a', title: 'Shared integrations' });
+    const first = fixture.requests.find(request => request.method === 'session/new').params.mcpServers;
+    fixture.switchProvider('provider-b', 'epoch-b');
+    fixture.requests.length = 0;
+    await host.loadSession(created.appSessionId);
+    const second = fixture.requests.find(request => request.method === 'session/new').params.mcpServers;
+    assert.deepEqual(second, first);
+    assert.deepEqual(second.map(server => server.name), ['global_browser', 'project_reader']);
+    assert.deepEqual(second[0].env, [{ name: 'GLOBAL_MCP_TOKEN', value: 'fixture-shared-mcp-token' }]);
+    assert.deepEqual(second[1].env, [], 'project MCP must not inherit another server credential');
+    assert.ok(!JSON.stringify(second).includes('provider_local_only'));
+    for (const home of Object.values(providerHomes)) assert.equal(fs.existsSync(path.join(home, 'auth.json')), false);
+
+    const beforeRevocation = credentialReads;
+    host.theiaTrustedRoots.clear();
+    assert.deepEqual(host.resolveRuntimeMcpSnapshot(root).mcpServers, []);
+    assert.equal(credentialReads, beforeRevocation, 'revoked workspace trust must stop credential resolution');
+});
+
 test('session/load injects the canonical non-empty MCP snapshot', async () => {
     const existing = session('history');
     const fixture = createHost([existing]);
@@ -455,6 +526,69 @@ test('MCP runtime list is reduced to name, status and toolCount before renderer 
     assert.doesNotMatch(JSON.stringify(projection), /secret|Bearer|schema-detail|private|launch_browser|navigate/);
 });
 
+test('Grok 0.2.102 nested MCP extension result reports the native ready server and tool count', async () => {
+    const existing = session('native-mcp-envelope');
+    const fixture = createHost([existing]);
+    fixture.host.loadedSessionIds.add(existing.appSessionId);
+    fixture.host.activeSessionId = existing.appSessionId;
+    fixture.host.runtimeMcpConfiguredNames = ['xora_fixture_mcp'];
+    // Exact extension result captured from packaged Grok 0.2.102. AcpClient
+    // already removes JSON-RPC's outer result; this inner result remains.
+    fixture.host.acp.request = async () => ({
+        result: {
+            servers: [{
+                name: 'xora_fixture_mcp',
+                source: 'local',
+                type: 'stdio',
+                command: '',
+                session: {
+                    enabled: true,
+                    status: 'ready',
+                    tools: [{ name: 'fixture_echo', description: 'Owned fixture only', enabled: true }]
+                }
+            }]
+        }
+    });
+
+    await fixture.host.refreshMcpRuntimeStatus();
+    const projection = fixture.host.currentMcpRuntimeProjection();
+    assert.deepEqual(projection.servers, [{
+        name: 'xora_fixture_mcp', status: 'ready', enabled: true, toolCount: 1
+    }]);
+    assert.deepEqual(Object.keys(projection.servers[0]).sort(), ['enabled', 'name', 'status', 'toolCount']);
+    assert.doesNotMatch(JSON.stringify(projection), /fixture_echo|Owned fixture|command|stdio/);
+});
+
+test('invalid nested MCP payloads clear prior ready state without bypassing server validation', async () => {
+    const existing = session('invalid-mcp-envelope');
+    const fixture = createHost([existing]);
+    fixture.host.loadedSessionIds.add(existing.appSessionId);
+    fixture.host.activeSessionId = existing.appSessionId;
+    fixture.host.runtimeMcpConfiguredNames = ['xora_fixture_mcp'];
+    const invalidPayloads = [
+        { result: null },
+        { result: 'private diagnostic' },
+        { result: [{ servers: [] }] },
+        { result: { servers: 'Bearer secret-value' } },
+        { result: { result: { servers: [] } } },
+        { result: { servers: [
+            null,
+            { name: 'xora_fixture_mcp', session: { enabled: 'true', status: 'ready', tools: [] } },
+            { name: 'xora_fixture_mcp', session: { enabled: true, status: 'connected', tools: [] } },
+            { name: 'bad.name', session: { enabled: true, status: 'ready', tools: [] } }
+        ], error: 'private diagnostic' } }
+    ];
+    for (const payload of invalidPayloads) {
+        fixture.host.sessionMcpStateMap().set(existing.appSessionId, [{
+            name: 'xora_fixture_mcp', status: 'ready', enabled: true, toolCount: 1
+        }]);
+        fixture.host.acp.request = async () => payload;
+        await fixture.host.refreshMcpRuntimeStatus();
+        assert.deepEqual(fixture.host.sessionMcpStateMap().get(existing.appSessionId), []);
+        assert.doesNotMatch(JSON.stringify(fixture.host.currentMcpRuntimeProjection()), /private diagnostic|Bearer|secret-value/);
+    }
+});
+
 test('duplicate MCP lifecycle notifications are semantic no-ops instead of list polling loops', () => {
     const existing = session('loaded');
     const fixture = createHost([existing]);
@@ -541,6 +675,36 @@ test('shared Grok state changes refresh silently because no user action is requi
     assert.equal(fixture.host.skillsRefreshPending, true);
     assert.equal(refreshes, 1);
     assert.deepEqual(messages, [undefined]);
+});
+
+test('shared Skills changes reload the selected custom Provider only after running work becomes idle', async () => {
+    const existing = session('active');
+    const fixture = createHost([existing]);
+    const events = [];
+    fixture.switchProvider('provider-b', 'epoch-b');
+    fixture.host.loadedSessionIds.add(existing.appSessionId);
+    fixture.host.runtimeMcpFingerprint = MCP_SNAPSHOT.fingerprint;
+    fixture.host.skillsRefreshPending = true;
+    fixture.host.mcpConfigurationRefreshPending = true;
+    fixture.host.providers.refreshCustomProviderSkillViews = () => events.push('refresh-shared-skill-views');
+    fixture.host.acp.request = async (method, params, options) => {
+        events.push(method);
+        assert.deepEqual(params, {});
+        assert.equal(options.timeoutMs, 15_000);
+        return {};
+    };
+    fixture.host.activePrompts.set('busy', {});
+    await fixture.host.refreshIntegrationsLocked();
+    assert.deepEqual(events, []);
+    assert.equal(fixture.host.skillsRefreshPending, true);
+
+    fixture.host.activePrompts.clear();
+    await fixture.host.refreshIntegrationsLocked();
+    assert.deepEqual(events, ['refresh-shared-skill-views', '_x.ai/internal/reload_skills']);
+    assert.equal(fixture.host.skillsRefreshPending, false);
+    assert.equal(fixture.host.mcpConfigurationRefreshPending, false);
+    assert.equal(fixture.host.runtimeMcpFingerprint, MCP_SNAPSHOT.fingerprint);
+    assert.deepEqual(fixture.host.runtimeMcpEnabledNames, ['camoufox-reverse']);
 });
 
 test('host resolves one config-bound stdio credential into ACP without adding it to the sidecar environment', t => {

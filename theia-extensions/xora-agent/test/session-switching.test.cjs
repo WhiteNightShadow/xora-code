@@ -1987,9 +1987,11 @@ test('a new session can load ACP models before its first prompt', async () => {
     widget.update = () => undefined;
 
     await widget.loadModelOptions();
+    assert.deepEqual(timeline, ['start', 'refresh'], 'catalogue loading must refresh the draft before any selection');
+    assert.deepEqual(widget.model.snapshot.models, [{ id: 'grok-fixture', name: 'Grok Fixture' }]);
     await widget.selectModel(undefined, 'grok-fixture');
 
-    assert.deepEqual(timeline, ['start', 'refresh']);
+    assert.deepEqual(timeline, ['start', 'refresh', 'refresh']);
     assert.equal(widget.modelOptionsLoading, false);
     assert.equal(widget.newSessionModel, 'grok-fixture');
 });
@@ -4420,4 +4422,206 @@ test('manual reconnect failure releases the button and explains credential recov
     await widget.reconnectRuntime();
     assert.equal(widget.runtimeReconnectPending, false);
     assert.match(notices[0], /授权超时.*重新连接 Agent/);
+});
+function reasoningProviderFixture() {
+    const Widget = widgetClass();
+    const widget = Object.create(Widget.prototype);
+    const model = new AgentViewModel();
+    const providers = ['relay-a', 'relay-b'].map(id => ({
+        id, name: id, kind: 'custom', protocol: 'openai-responses', model: 'grok-4.6', credentialConfigured: true
+    }));
+    let revision = 0;
+    let authority;
+    const calls = [];
+    const notices = [];
+    const providerSnapshot = (id, phase = 'ready', effort = 'high') => ({
+        revision: ++revision, providerId: id, phase, workspaceRoot: '/fixture', workspaceAttached: true,
+        workspaceTrusted: true, selectedModel: id, preferredReasoningEffort: effort,
+        models: phase === 'ready' ? [{ id, name: id, reasoningOptions: [
+            { id: 'low', value: 'low', name: 'Low' },
+            { id: 'high', value: 'high', name: 'High', default: true },
+            { id: 'deep', value: 'xhigh', name: 'Deep' }
+        ] }] : [], sessions: [], permissionMode: 'request-approval'
+    });
+    authority = providerSnapshot('relay-a');
+    model.snapshot = authority;
+    const service = {
+        getSnapshot: async () => authority,
+        selectDefaultModel: async (providerId, modelId, effort) => {
+            assert.equal(providerId, authority.providerId);
+            calls.push({ providerId, modelId, effort });
+            authority = providerSnapshot(providerId, 'ready', effort);
+            return authority;
+        }
+    };
+    model.service = service;
+    Object.assign(widget, {
+        model, service, providers, roots: ['/fixture'], agentContextGeneration: 0, sessionLoadGeneration: 0,
+        observedProviderId: 'relay-a', sessionLoading: false, modelSelectionLoading: false, modelOptionsLoading: false,
+        agentPaneView: 'conversation',
+        update: () => undefined, storeActiveComposerDraft: () => undefined, activateComposerLane: () => undefined,
+        cancelRuntimePrewarmTimer: () => undefined, scheduleRuntimePrewarm: () => undefined,
+        hasPromptLaneWork: () => false, showInlineNotice: (...notice) => notices.push(notice),
+        workspaceRoot: async () => '/fixture', refreshProviders: async () => undefined,
+        selectAgentPane: () => assert.fail('reasoning controls must not need a pane workaround')
+    });
+    widget.observedAgentContextKey = widget.imageDraftContextKey();
+    model.onDidChange(() => widget.reconcileAgentContext(true));
+    return {
+        widget, model, service, calls, notices, providerSnapshot,
+        publish: async (id, phase = 'ready', effort = 'high') => {
+            authority = providerSnapshot(id, phase, effort);
+            await model.refresh();
+        },
+        setAuthority: snapshot => { authority = snapshot; },
+        choose: effort => {
+            const groups = agentModelChoiceGroups(providers, model.snapshot);
+            const entries = widget.renderModelConfigurationOptions(groups, model.snapshot)
+                .flatMap(element => element.type === 'optgroup' ? element.props.children : [element]);
+            const entry = entries.find(element => element.props.value === encodeAgentModelConfiguration(
+                encodeAgentModelChoice(model.snapshot.providerId, model.snapshot.providerId), effort
+            ));
+            assert.ok(entry, `current Provider must advertise ${effort}`);
+            return widget.selectModelConfiguration(undefined, entry.props.value);
+        }
+    };
+}
+
+test('the first reasoning choice after A to B and back keeps native selector focus without visiting Activity', async () => {
+    const f = reasoningProviderFixture();
+    const previousRaf = global.requestAnimationFrame;
+    const frames = [];
+    const selector = { kind: 'select' };
+    const settingsInput = { kind: 'settings-input' };
+    const textarea = { focus: () => { global.document.activeElement = textarea; } };
+    f.widget.node = { contains: target => target === selector || target === textarea };
+    f.widget.textarea = textarea;
+    global.requestAnimationFrame = callback => { frames.push(callback); return frames.length; };
+    try {
+        for (const [providerId, effort] of [['relay-b', 'xhigh'], ['relay-a', 'low']]) {
+            await f.publish(providerId, 'stopped');
+            await f.publish(providerId);
+            assert.equal(f.widget.modelSelectionLoading, false);
+            // ApplicationShell activation runs before the select's native
+            // default focus action; both precede the queued animation frame.
+            global.document.activeElement = settingsInput;
+            f.widget.onActivateRequest({ type: 'activate-request' });
+            global.document.activeElement = selector;
+            while (frames.length) frames.shift()(performance.now());
+            assert.equal(global.document.activeElement, selector, 'activation must not dismiss the native reasoning menu');
+            await f.choose(effort);
+            assert.equal(f.model.snapshot.preferredReasoningEffort, effort);
+            assert.equal(f.widget.newSessionReasoningEffort, effort);
+        }
+        assert.deepEqual(f.calls, [
+            { providerId: 'relay-b', modelId: 'relay-b', effort: 'xhigh' },
+            { providerId: 'relay-a', modelId: 'relay-a', effort: 'low' }
+        ]);
+        assert.equal(f.widget.agentPaneView, 'conversation');
+        assert.deepEqual(f.notices, []);
+        // Keyboard/command activation with focus outside the pane still
+        // places the caret in the task composer.
+        global.document.activeElement = settingsInput;
+        f.widget.onActivateRequest({ type: 'activate-request' });
+        while (frames.length) frames.shift()(performance.now());
+        assert.equal(global.document.activeElement, textarea);
+    } finally { global.requestAnimationFrame = previousRaf; }
+});
+
+test('a pending A reasoning save cannot disable B or roll B back when A fails late', async () => {
+    const f = reasoningProviderFixture();
+    const old = deferred();
+    const current = deferred();
+    f.service.selectDefaultModel = (providerId, modelId, effort) => {
+        f.calls.push({ providerId, modelId, effort });
+        return providerId === 'relay-a' ? old.promise : current.promise;
+    };
+    const savingA = f.choose('xhigh');
+    assert.equal(f.widget.modelSelectionLoading, true);
+    await f.publish('relay-b');
+    assert.equal(f.widget.modelSelectionLoading, false, 'B must not inherit A\'s pending selector lock');
+    const savingB = f.choose('low');
+    assert.equal(f.widget.modelSelectionLoading, true);
+    old.reject(new Error('old Provider request failed'));
+    await savingA;
+    assert.equal(f.widget.modelSelectionLoading, true, 'A completion must not release B\'s operation');
+    assert.equal(f.widget.newSessionModel, 'relay-b');
+    assert.equal(f.widget.newSessionReasoningEffort, 'low');
+    assert.deepEqual(f.notices, []);
+    const saved = f.providerSnapshot('relay-b', 'ready', 'low');
+    f.setAuthority(saved); current.resolve(saved);
+    await savingB;
+    assert.equal(f.widget.modelSelectionLoading, false);
+    assert.equal(f.model.snapshot.preferredReasoningEffort, 'low');
+});
+
+test('A to B to A keeps the newest reasoning operation authoritative despite late old results', async () => {
+    const f = reasoningProviderFixture();
+    const pending = [];
+    f.service.selectDefaultModel = (providerId, modelId, effort) => {
+        const result = deferred(); pending.push({ providerId, modelId, effort, ...result }); return result.promise;
+    };
+    const firstA = f.choose('xhigh');
+    await f.publish('relay-b');
+    const savingB = f.choose('low');
+    await f.publish('relay-a');
+    const finalA = f.choose('low');
+    assert.equal(pending.length, 3, 'every current-Provider menu is usable immediately');
+    pending[0].resolve(f.providerSnapshot('relay-a', 'ready', 'xhigh'));
+    pending[1].reject(new Error('B is no longer current'));
+    await Promise.all([firstA, savingB]);
+    assert.equal(f.widget.modelSelectionLoading, true);
+    assert.equal(f.widget.newSessionReasoningEffort, 'low');
+    assert.deepEqual(f.notices, []);
+    const saved = f.providerSnapshot('relay-a', 'ready', 'low');
+    f.setAuthority(saved); pending[2].resolve(saved);
+    await finalA;
+    assert.equal(f.widget.modelSelectionLoading, false);
+    assert.equal(f.model.snapshot.preferredReasoningEffort, 'low');
+    assert.equal(f.widget.agentPaneView, 'conversation');
+});
+
+test('a model catalogue read releases its old context without unlocking a newer Provider read', async () => {
+    const f = reasoningProviderFixture();
+    const pending = [];
+    f.widget.authenticateRuntime = async () => true;
+    f.service.startRuntime = request => {
+        const result = deferred(); pending.push({ ...request, ...result }); return result.promise;
+    };
+    await f.publish('relay-a', 'stopped');
+    const loadA = f.widget.loadModelOptions();
+    const duplicateA = f.widget.loadModelOptions();
+    await Promise.resolve();
+    assert.equal(pending.length, 1, 'pointer and keyboard activation share the catalogue request');
+    await f.publish('relay-b', 'stopped');
+    assert.equal(f.widget.modelOptionsLoading, false);
+    const loadB = f.widget.loadModelOptions();
+    await Promise.resolve();
+    assert.equal(pending.length, 2);
+    pending[0].resolve(f.providerSnapshot('relay-a'));
+    await Promise.all([loadA, duplicateA]);
+    assert.equal(f.widget.modelOptionsLoading, true);
+    await f.publish('relay-b');
+    pending[1].resolve(f.model.snapshot);
+    await loadB;
+    assert.equal(f.widget.modelOptionsLoading, false);
+    await f.choose('xhigh');
+    assert.equal(f.model.snapshot.preferredReasoningEffort, 'xhigh');
+});
+
+test('A to B to A cannot apply stale model-control hydration metadata to the current history', async () => {
+    const f = reasoningProviderFixture();
+    const record = session('model-control-history', 'idle', { providerId: 'relay-a', model: 'relay-a', reasoningEffort: 'low' });
+    const hydration = deferred();
+    f.model.setSession(record);
+    f.widget.ensureSessionHydrated = async () => hydration.promise;
+    const pending = assert.rejects(f.widget.hydrateSessionForModelControl(record), /model service changed/);
+    for (const providerId of ['relay-b', 'relay-a']) {
+        const rebound = { ...record, providerId, model: providerId };
+        f.setAuthority({ ...f.providerSnapshot(providerId), activeSessionId: record.appSessionId, sessions: [rebound] });
+        await f.model.refresh();
+    }
+    hydration.resolve({ ...record, reasoningEffort: 'xhigh' });
+    await pending;
+    assert.equal(f.model.snapshot.sessions[0].reasoningEffort, 'low');
 });

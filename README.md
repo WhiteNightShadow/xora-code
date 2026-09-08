@@ -9,7 +9,7 @@
   </p>
 
   <p>
-    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.7%20Stable-2ea44f?style=flat-square" alt="v0.2.7 Stable" /></a>
+    <a href="#当前状态"><img src="https://img.shields.io/badge/status-v0.2.8%20Preview-d29922?style=flat-square" alt="v0.2.8 Preview" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/build%20targets-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="Build targets: macOS Windows Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
@@ -50,6 +50,8 @@ Xora Code 是一款基于 [Grok Build](https://github.com/xai-org/grok-build) �
 </p>
 
 <p align="center"><sub>项目树、代码编辑器与 Grok Agent 固定在同一桌面工作区。截图使用公开示例项目，不包含本地路径、账号或密钥。</sub></p>
+
+> 当前开发版本为 **v0.2.8**，包含自定义 API 切换、思考等级选择和共享 Skills/MCP 修复，先进行 macOS 验证。已发布稳定版下载入口继续指向 v0.2.7。
 
 ## 产品界面
 

@@ -373,11 +373,13 @@ export class XoraAgentWidget extends ReactWidget {
      * canonical ACP token (for example `xhigh`), never a model-name guess. */
     protected newSessionReasoningEffort: string | undefined;
     protected modelOptionsLoading = false;
+    protected modelOptionsFlight: object | undefined;
     /** Model and reasoning changes may have to wait for a visible historical
      * conversation to finish rebinding to the current Provider. Keep that
      * wait local to the two selectors: drafting and reading history remain
      * fully interactive. */
     protected modelSelectionLoading = false;
+    protected modelSelectionFlight: object | undefined;
     /**
      * Provider metadata lives outside ACP modelState. Serialize refreshes so
      * a slow response that started before Settings saved a newer profile can
@@ -537,7 +539,15 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected override onActivateRequest(message: Message): void {
         super.onActivateRequest(message);
-        requestAnimationFrame(() => this.textarea?.focus());
+        requestAnimationFrame(() => {
+            if (this.isDisposed) return;
+            const focused = document.activeElement;
+            // Clicking a selector also activates the Agent dock. Its native
+            // focus arrives after the activation request; taking it back on
+            // the next frame dismisses the menu before a choice can be made.
+            if (focused && focused !== this.node && this.node.contains(focused)) return;
+            this.textarea?.focus();
+        });
     }
 
     protected render(): React.ReactNode {
@@ -919,6 +929,7 @@ export class XoraAgentWidget extends ReactWidget {
                         <div className='xora-composer-selectors'>
                             <label className='xora-model-control' title={active ? '当前模型与思考等级' : '新会话使用的模型与思考等级'}>
                                 <select
+                                    key={`${this.agentContextGeneration}:${snapshot.providerId}`}
                                     aria-label='Agent 模型与思考等级'
                                     title={modelChoiceCount === 0
                                         ? '点击加载当前服务提供的模型'
@@ -1890,6 +1901,10 @@ export class XoraAgentWidget extends ReactWidget {
         this.storeActiveComposerDraft();
         this.agentContextGeneration += 1;
         this.sessionLoadGeneration += 1;
+        this.modelOptionsFlight = undefined;
+        this.modelSelectionFlight = undefined;
+        this.modelOptionsLoading = false;
+        this.modelSelectionLoading = false;
         this.sessionLoading = false;
         this.sessionHistoryRecovery = undefined;
         this.runtimePrewarmRequested = true;
@@ -3424,6 +3439,7 @@ export class XoraAgentWidget extends ReactWidget {
      */
     protected async hydrateSessionForModelControl(session: SessionRecord): Promise<SessionRecord> {
         const snapshot = this.model.snapshot;
+        const generation = this.agentContextGeneration;
         const root = snapshot.workspaceRoot;
         const providerId = snapshot.providerId;
         if (!root || snapshot.activeSessionId !== session.appSessionId) {
@@ -3432,7 +3448,8 @@ export class XoraAgentWidget extends ReactWidget {
         const key = this.agentContextKey(root, providerId, session.appSessionId);
         const hydrated = await this.ensureSessionHydrated(session.appSessionId, key);
         const current = this.model.snapshot;
-        if (current.phase !== 'ready'
+        if (generation !== this.agentContextGeneration
+            || current.phase !== 'ready'
             || current.activeSessionId !== session.appSessionId
             || current.providerId !== providerId
             || !this.sameWorkspaceRoot(current.workspaceRoot, root)
@@ -3444,6 +3461,26 @@ export class XoraAgentWidget extends ReactWidget {
         // gap for a model choice made in the same frame.
         this.model.updateSession(hydrated);
         return hydrated;
+    }
+
+    protected beginModelSelection(): () => boolean {
+        const generation = this.agentContextGeneration;
+        const contextKey = this.imageDraftContextKey();
+        const current = (): boolean => this.modelSelectionFlight === current
+            && generation === this.agentContextGeneration
+            && contextKey === this.imageDraftContextKey();
+        this.modelSelectionFlight = current;
+        this.modelSelectionLoading = true;
+        this.update();
+        return current;
+    }
+
+    protected finishModelSelection(current: () => boolean): void {
+        // A late A request must not unlock or roll back a newer B (or A again).
+        if (this.modelSelectionFlight !== current) return;
+        this.modelSelectionFlight = undefined;
+        this.modelSelectionLoading = false;
+        this.update();
     }
 
     protected async selectModel(
@@ -3478,34 +3515,35 @@ export class XoraAgentWidget extends ReactWidget {
             const previousReasoningEffort = this.newSessionReasoningEffort;
             this.newSessionModel = modelId;
             this.newSessionReasoningEffort = reasoningEffort ?? this.preferredReasoningEffortForModel(modelId);
-            this.modelSelectionLoading = true;
-            this.update();
+            const contextIsCurrent = this.beginModelSelection();
             try {
                 await this.service.selectDefaultModel(this.model.snapshot.providerId, modelId, this.newSessionReasoningEffort);
+                if (!contextIsCurrent()) return;
                 await this.model.refresh();
             } catch (error) {
+                if (!contextIsCurrent()) return;
                 this.newSessionModel = previousModel;
                 this.newSessionReasoningEffort = previousReasoningEffort;
                 this.showInlineNotice(`无法保存默认模型：${friendlyAgentErrorMessage(error)}`, 'error');
                 await this.model.refresh().catch(() => undefined);
             } finally {
-                this.modelSelectionLoading = false;
-                this.update();
+                this.finishModelSelection(contextIsCurrent);
             }
             return;
         }
-        this.modelSelectionLoading = true;
-        this.update();
+        const contextIsCurrent = this.beginModelSelection();
         try {
             const hydrated = await this.hydrateSessionForModelControl(session);
+            if (!contextIsCurrent()) return;
             await this.service.selectModel(hydrated.appSessionId, modelId, reasoningEffort);
+            if (!contextIsCurrent()) return;
             await this.model.refresh();
         } catch (error) {
+            if (!contextIsCurrent()) return;
             this.showInlineNotice(`${reasoningEffort === undefined ? '无法切换模型' : '无法切换模型或思考等级'}：${friendlyAgentErrorMessage(error)}`, 'error');
             await this.model.refresh().catch(() => undefined);
         } finally {
-            this.modelSelectionLoading = false;
-            this.update();
+            this.finishModelSelection(contextIsCurrent);
         }
     }
 
@@ -3556,69 +3594,78 @@ export class XoraAgentWidget extends ReactWidget {
             return;
         }
         if (!session) {
+            const previousReasoningEffort = this.newSessionReasoningEffort;
             this.newSessionReasoningEffort = resolved;
-            this.modelSelectionLoading = true;
-            this.update();
+            const contextIsCurrent = this.beginModelSelection();
             try {
                 const modelId = this.newSessionModel ?? this.model.snapshot.selectedModel;
                 if (modelId) {
                     await this.service.selectDefaultModel(this.model.snapshot.providerId, modelId, resolved);
+                    if (!contextIsCurrent()) return;
                     await this.model.refresh();
                 }
             } catch (error) {
+                if (!contextIsCurrent()) return;
+                this.newSessionReasoningEffort = previousReasoningEffort;
                 this.showInlineNotice(`无法保存默认思考等级：${friendlyAgentErrorMessage(error)}`, 'error');
                 await this.model.refresh().catch(() => undefined);
             } finally {
-                this.modelSelectionLoading = false;
-                this.update();
+                this.finishModelSelection(contextIsCurrent);
             }
             return;
         }
-        this.modelSelectionLoading = true;
-        this.update();
+        const contextIsCurrent = this.beginModelSelection();
         try {
             const hydrated = await this.hydrateSessionForModelControl(session);
+            if (!contextIsCurrent()) return;
             await this.service.selectReasoningEffort(hydrated.appSessionId, resolved);
+            if (!contextIsCurrent()) return;
             await this.model.refresh();
         } catch (error) {
+            if (!contextIsCurrent()) return;
             this.showInlineNotice(`无法切换思考等级：${friendlyAgentErrorMessage(error)}`, 'error');
             await this.model.refresh().catch(() => undefined);
         } finally {
-            this.modelSelectionLoading = false;
-            this.update();
+            this.finishModelSelection(contextIsCurrent);
         }
     }
 
     protected async loadModelOptions(): Promise<void> {
         let snapshot = this.model.snapshot;
         if (snapshot.models.length > 0 || this.modelOptionsLoading || this.submission || this.sessionLoading) return;
-        // Runtime initialize may report Grok's process default before a
-        // session exists. Keep the user's cross-project default pinned while
-        // loading the authoritative model catalogue.
-        if (!snapshot.activeSessionId && !this.newSessionModel && snapshot.selectedModel) {
-            this.newSessionModel = snapshot.selectedModel;
-        }
-        const root = await this.workspaceRoot();
-        if (!root) {
-            this.showInlineNotice('请先打开一个文件夹或工作区。', 'warning');
-            return;
-        }
-        if (!snapshot.workspaceAttached) {
-            await this.workspaceTrustGuard.selectWorkspaceRoot(root);
-            await this.model.refresh();
-            snapshot = this.model.snapshot;
-        }
-        const providerId = snapshot.providerId;
-        const contextKey = this.agentContextKey(root, providerId, snapshot.activeSessionId);
+        const flight = {};
         const generation = this.agentContextGeneration;
-        const contextIsCurrent = (): boolean => generation === this.agentContextGeneration
+        const providerId = snapshot.providerId;
+        const contextKey = this.imageDraftContextKey();
+        const contextIsCurrent = (): boolean => this.modelOptionsFlight === flight
+            && generation === this.agentContextGeneration
             && this.imageDraftContextKey() === contextKey
             && this.model.snapshot.providerId === providerId;
+        // Own the request before even looking up roots. Pointer and keyboard
+        // activation can otherwise start overlapping reads in the same frame.
+        this.modelOptionsFlight = flight;
         this.modelOptionsLoading = true;
         this.update();
         try {
+            if (!snapshot.activeSessionId && !this.newSessionModel && snapshot.selectedModel) {
+                this.newSessionModel = snapshot.selectedModel;
+            }
+            const root = await this.workspaceRoot();
+            if (!contextIsCurrent()) return;
+            if (!root) {
+                this.showInlineNotice('请先打开一个文件夹或工作区。', 'warning');
+                return;
+            }
+            if (!snapshot.workspaceAttached) {
+                await this.workspaceTrustGuard.selectWorkspaceRoot(root);
+                if (!contextIsCurrent()) return;
+                await this.model.refresh();
+                if (!contextIsCurrent()) return;
+                snapshot = this.model.snapshot;
+            }
             if (!this.providers.some(provider => provider.id === providerId)) {
                 await this.refreshProviders();
+                if (!contextIsCurrent()) return;
             }
             let runtime = this.model.snapshot;
             if (runtime.phase === 'stopped' || runtime.phase === 'crashed') {
@@ -3639,8 +3686,12 @@ export class XoraAgentWidget extends ReactWidget {
                 this.showInlineNotice(`无法加载模型：${friendlyAgentErrorMessage(error)}`, 'error');
             }
         } finally {
-            this.modelOptionsLoading = false;
-            this.update();
+            if (this.modelOptionsFlight === flight) {
+                this.modelOptionsFlight = undefined;
+                this.modelOptionsLoading = false;
+                this.scheduleRuntimePrewarm();
+                this.update();
+            }
         }
     }
 

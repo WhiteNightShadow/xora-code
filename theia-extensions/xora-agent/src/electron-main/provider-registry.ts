@@ -15,12 +15,15 @@ import {
 } from '../common/agent-protocol';
 import { normalizeProviderBaseUrl } from './provider-network';
 import {
-    LEGACY_MANAGED_BLOCK_END as LEGACY_BLOCK_END,
-    LEGACY_MANAGED_BLOCK_START as LEGACY_BLOCK_START,
     MANAGED_BLOCK_END as BLOCK_END,
     MANAGED_BLOCK_START as BLOCK_START,
+    assertManagedProviderMarkers,
+    assertUnmanagedTomlPreserved,
+    markedManagedModelIds,
     removeMarkedManagedBlocksFromToml,
-    removeModelTablesFromToml
+    removeModelTablesFromToml,
+    setTomlValue,
+    tomlValueAt
 } from './provider-toml';
 import { SecretVault } from './secret-vault';
 import { sharedGrokHome } from './shared-grok-home';
@@ -1037,10 +1040,20 @@ export class ProviderRegistry {
         for (const name of ['auth.json', 'auth.json.lock']) {
             const candidate = path.join(root, name);
             try {
-                if (fs.existsSync(candidate)) fs.rmSync(candidate, { force: true });
-            } catch { /* best effort */ }
+                // lstat also detects dangling links, whose targets could later
+                // become a valid shared OIDC credential. Never start against
+                // an API endpoint after an incomplete auth cleanup.
+                if (lstatOrUndefined(candidate)) {
+                    try { fs.unlinkSync(candidate); } catch (error) {
+                        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                    }
+                }
+                if (lstatOrUndefined(candidate)) throw new Error('Authentication state remained.');
+            } catch {
+                throw new Error('API_PROVIDER_AUTH_ISOLATION_FAILED: 无法清理模型服务目录中的旧登录状态，已阻止启动。请关闭占用该目录的 Grok 进程后重试。');
+            }
         }
-        const sharedSkillConfiguration = this.sharedSkillConfigurationToml(root);
+        const sharedSkillConfiguration = this.sharedSkillConfigurationToml();
         const config = [
             '# Managed by Xora Code for an isolated API-provider sidecar.',
             '# Do not place auth.json here — OIDC would override env_key.',
@@ -1070,11 +1083,9 @@ export class ProviderRegistry {
             this.atomicWrite(configPath, config, 0o600);
         }
 
-        // Reuse user-owned extension directories without copying executable
-        // content into app-owned homes. Grok Build and older Xora releases may
-        // already have created a real directory here. Preserve that directory
-        // instead of making Provider startup fail; shared Skills are exposed
-        // through the allowlisted [skills].paths fallback generated above.
+        // Reuse user-owned directories without copying executable content.
+        // Existing local Skills remain available alongside the explicit shared
+        // paths; empty command placeholders can join the shared directory.
         // Links to an unexpected external target remain a hard failure.
         this.synchronizeSharedProviderDirectory(root, 'skills');
         this.synchronizeSharedProviderDirectory(root, 'commands');
@@ -1090,33 +1101,22 @@ export class ProviderRegistry {
      * Authentication, hooks, permissions, MCP, plugins, model tables and every
      * unknown field are deliberately omitted from isolated Provider homes.
      */
-    protected sharedSkillConfigurationToml(providerRoot?: string): string {
+    protected sharedSkillConfigurationToml(): string {
         const configPath = this.grokConfigPath
             ?? path.join(this.grokHomePath ?? sharedGrokHome(), 'config.toml');
         const source = readTextOrEmpty(configPath);
         const sharedRoot = this.grokHomePath ?? sharedGrokHome();
         const sharedSkillsPath = path.join(sharedRoot, 'skills');
-        // A real directory inside an isolated Provider home is valid legacy
-        // state: Grok itself creates it on some installations before Xora has
-        // a shared Skills directory to link. Do not delete or replace it. Add
-        // the canonical shared directory as an explicit scan path so both the
-        // preserved local contents and the user's current Skills remain
-        // available to the Agent.
-        const providerSkillsInfo = providerRoot
-            ? lstatOrUndefined(path.join(providerRoot, 'skills'))
-            : undefined;
-        const needsSharedSkillsPath = !!providerSkillsInfo
-            && providerSkillsInfo.isDirectory()
-            && !providerSkillsInfo.isSymbolicLink()
-            && statOrUndefined(sharedSkillsPath)?.isDirectory() === true;
+        // Shared discovery is independent of whether an old Provider home
+        // contains a symlink, a Grok-created empty directory, or no directory.
+        // Keep the canonical source explicit for every API Provider.
+        const needsSharedSkillsPath = statOrUndefined(sharedSkillsPath)?.isDirectory() === true;
         if (!source.trim() && !needsSharedSkillsPath) return '';
         let parsed: unknown;
         try {
             parsed = source.trim() ? parseToml(source) : {};
         } catch {
-            // A malformed external configuration must not cause Xora to copy a
-            // partially interpreted or over-broad configuration subset.
-            return '';
+            throw new Error('共享 Grok config.toml 无法解析，已保留原配置；请修复后重新连接。');
         }
         const root = tomlObject(parsed);
         if (!root) return '';
@@ -1124,6 +1124,11 @@ export class ProviderRegistry {
         const skills = tomlObject(root.skills);
         if (skills || needsSharedSkillsPath) {
             const assignments: string[] = [];
+            for (const key of ['paths', 'ignore', 'disabled']) {
+                if (skills?.[key] !== undefined && !tomlStringArray(skills[key])) {
+                    throw new Error('共享 Skills 配置必须使用字符串数组，已保留原配置。');
+                }
+            }
             const configuredPaths = tomlStringArray(skills?.paths) ?? [];
             const paths = needsSharedSkillsPath && !configuredPaths.some(candidate => sameFilesystemPath(candidate, sharedSkillsPath))
                 ? [...configuredPaths, sharedSkillsPath]
@@ -1136,6 +1141,12 @@ export class ProviderRegistry {
                 if (value) assignments.push(`${key} = ${JSON.stringify(value)}`);
             }
             if (assignments.length) sections.push(['[skills]', ...assignments].join('\n'));
+        }
+        const extraSkillDirectories = tomlObject(root.paths)?.extra_skill_dirs;
+        if (extraSkillDirectories !== undefined) {
+            const directories = tomlStringArray(extraSkillDirectories);
+            if (!directories) throw new Error('共享 Skills 搜索目录必须使用字符串数组，已保留原配置。');
+            sections.push(`[paths]\nextra_skill_dirs = ${JSON.stringify(directories)}`);
         }
         const compat = tomlObject(root.compat);
         for (const vendor of ['cursor', 'claude'] as const) {
@@ -1152,39 +1163,48 @@ export class ProviderRegistry {
         const source = path.join(sharedRoot, name);
         const target = path.join(providerRoot, name);
         const targetInfo = lstatOrUndefined(target);
+        let replacedEmptyDirectory = false;
         if (targetInfo) {
-            if (!targetInfo.isSymbolicLink()) {
-                if (targetInfo.isDirectory()) {
-                    // Preserve a directory created by Grok Build, an older
-                    // Xora version, or the user. Replacing it would risk data
-                    // loss; rejecting it would unnecessarily take down the
-                    // entire Agent. Skills receive a shared-path fallback in
-                    // sharedSkillConfigurationToml().
-                    return;
+            if (targetInfo.isSymbolicLink()) {
+                if (!sameLinkTarget(source, target)) {
+                    throw new Error(`Xora Code refused to replace an isolated Provider ${name} link that points outside the shared Grok home.`);
                 }
+                return;
+            }
+            if (!targetInfo.isDirectory()) {
                 throw new Error(`Xora Code refused to replace the existing ${name} entry in an isolated Provider home.`);
             }
-            if (!sameLinkTarget(source, target)) {
-                throw new Error(`Xora Code refused to replace an isolated Provider ${name} link that points outside the shared Grok home.`);
+            // A legacy directory containing user files remains untouched.
+            // Skills have an explicit canonical paths fallback. Flat command
+            // files need their native directory, so join an empty Grok-created
+            // placeholder to the shared directory without copying any code.
+            if (name !== 'commands' || statOrUndefined(source)?.isDirectory() !== true
+                || fs.readdirSync(target).length > 0) return;
+            try {
+                fs.rmdirSync(target); // Atomic empty-directory check, never recursive.
+                replacedEmptyDirectory = true;
+            } catch (error) {
+                if (['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
+                throw error;
             }
-            return;
         }
 
         const sourceInfo = statOrUndefined(source);
-        if (!sourceInfo) return;
+        if (!sourceInfo) {
+            if (replacedEmptyDirectory) fs.mkdirSync(target, { mode: 0o700 });
+            return;
+        }
         if (!sourceInfo.isDirectory()) {
+            if (replacedEmptyDirectory) fs.mkdirSync(target, { mode: 0o700 });
             throw new Error(`The shared Grok ${name} path is not a directory.`);
         }
         try {
             fs.symlinkSync(source, target, process.platform === 'win32' ? 'junction' : 'dir');
         } catch (error) {
-            // Another Xora window may have created the same link after our
-            // lstat. Accept only the exact expected target in that race.
             if ((error as NodeJS.ErrnoException).code === 'EEXIST'
                 && lstatOrUndefined(target)?.isSymbolicLink()
-                && sameLinkTarget(source, target)) {
-                return;
-            }
+                && sameLinkTarget(source, target)) return;
+            if (replacedEmptyDirectory && !lstatOrUndefined(target)) fs.mkdirSync(target, { mode: 0o700 });
             throw error;
         }
     }
@@ -1565,13 +1585,16 @@ export class ProviderRegistry {
                 catalogIds.push(XAI_MANAGED_MODEL_ID);
             }
 
-            // 1) Drop previous managed marker blocks (current + legacy).
+            // 1) Remove actual marker comments and owned model statements only;
+            //    unrelated tables inside a marker pair remain user-owned.
             // 2) Drop any orphan [model.id] / [model."id"] tables for those
             //    catalog ids. Grok sometimes rewrites quoted keys to bare keys
             //    and strips our markers; appending without cleanup then fails
             //    assertToml with "redefine an already defined table".
+            const ownedModelIds = [...new Set([...catalogIds, ...markedManagedModelIds(before)])];
             let working = removeMarkedManagedBlocksFromToml(before);
             working = removeModelTablesFromToml(working, catalogIds);
+            working = working.trimEnd();
 
             const block = [
                 BLOCK_START,
@@ -1592,6 +1615,7 @@ export class ProviderRegistry {
                 return;
             }
             this.assertToml(after);
+            assertUnmanagedTomlPreserved(before, after, ownedModelIds);
             if (before) {
                 this.backupGrokConfig(before);
             }
@@ -1600,16 +1624,7 @@ export class ProviderRegistry {
     }
 
     protected assertManagedMarkersWellFormed(source: string): void {
-        const currentStart = source.indexOf(BLOCK_START);
-        const currentEnd = source.indexOf(BLOCK_END);
-        const legacyStart = source.indexOf(LEGACY_BLOCK_START);
-        const legacyEnd = source.indexOf(LEGACY_BLOCK_END);
-        if ((currentStart >= 0) !== (currentEnd >= 0) || (legacyStart >= 0) !== (legacyEnd >= 0)) {
-            throw new Error('Grok config contains an incomplete managed provider block. Xora Code left it unchanged.');
-        }
-        if (currentStart >= 0 && legacyStart >= 0) {
-            throw new Error('Grok config contains both current and legacy managed provider blocks. Xora Code left it unchanged.');
-        }
+        assertManagedProviderMarkers(source);
     }
 
     protected withLock<T>(operation: () => T): T {
@@ -1718,75 +1733,29 @@ export class ProviderRegistry {
     }
 
     protected readTomlStringArray(source: string, table: string, key: string): string[] {
-        const section = this.tomlSection(source, table);
-        if (!section) return [];
-        const body = source.slice(section.bodyStart, section.end);
-        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*(\\[[^\\n]*\\])[ \\t]*(?:#.*)?$`, 'm');
-        const match = expression.exec(body);
-        if (!match) {
-            const keyStart = new RegExp(`^[ \\t]*${key}[ \\t]*=`, 'm').exec(body);
-            if (keyStart) {
-                throw new Error(`Xora Code cannot safely edit a multi-line [${table}].${key} array. Keep it on one line or edit it manually.`);
-            }
-            return [];
-        }
-        try {
-            const parsed = JSON.parse(match[1]) as unknown;
-            if (!Array.isArray(parsed) || !parsed.every(item => typeof item === 'string')) throw new Error();
-            return parsed;
-        } catch {
-            throw new Error(`Xora Code cannot safely edit [${table}].${key}; use a one-line array of double-quoted strings.`);
-        }
+        const value = tomlValueAt(source, [...table.split('.'), key]);
+        const values = tomlStringArray(value);
+        if (value !== undefined && !values) throw new Error(`Xora Code 无法安全修改 [${table}].${key}；它必须是字符串数组。`);
+        return values ?? [];
     }
 
     protected writeTomlStringArray(source: string, table: string, key: string, values: string[]): string {
-        const assignment = `${key} = ${JSON.stringify(values)}`;
-        const section = this.tomlSection(source, table);
-        if (!section) {
-            const separator = source && !source.endsWith('\n') ? '\n\n' : source ? '\n' : '';
-            return `${source}${separator}[${table}]\n${assignment}\n`;
-        }
-        const body = source.slice(section.bodyStart, section.end);
-        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[[^\\n]*\\][ \\t]*(?:#.*)?$`, 'm');
-        if (expression.test(body)) {
-            const replaced = body.replace(expression, assignment);
-            return `${source.slice(0, section.bodyStart)}${replaced}${source.slice(section.end)}`;
-        }
-        const insertion = body.endsWith('\n') || body.length === 0 ? `${assignment}\n` : `\n${assignment}\n`;
-        return `${source.slice(0, section.end)}${insertion}${source.slice(section.end)}`;
+        return setTomlValue(source, [...table.split('.'), key], values);
     }
 
     protected readTopLevelTomlStringArray(source: string, key: string): string[] {
-        if (!source.trim()) return [];
-        const root = tomlObject(parseToml(source));
-        const values = tomlStringArray(root?.[key]);
-        if (root?.[key] !== undefined && !values) {
-            throw new Error(`Xora Code 无法安全修改 ${key}；它必须是字符串数组。`);
-        }
+        const value = tomlValueAt(source, [key]);
+        const values = tomlStringArray(value);
+        if (value !== undefined && !values) throw new Error(`Xora Code 无法安全修改 ${key}；它必须是字符串数组。`);
         return values ?? [];
     }
 
     protected writeTopLevelTomlStringArray(source: string, key: string, values: string[]): string {
-        const assignment = `${key} = ${JSON.stringify(values)}`;
-        const firstTable = /^[ \t]*\[[^\]]+\][ \t]*(?:#.*)?$/m.exec(source);
-        const headEnd = firstTable?.index ?? source.length;
-        const head = source.slice(0, headEnd);
-        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[[^\\n]*\\][ \\t]*(?:#.*)?$`, 'm');
-        if (expression.test(head)) {
-            return `${head.replace(expression, assignment)}${source.slice(headEnd)}`;
-        }
-        if (new RegExp(`^[ \\t]*${key}[ \\t]*=`, 'm').test(head)) {
-            throw new Error(`Xora Code 无法安全修改多行 ${key}，请改为单行数组后重试。`);
-        }
-        if (!source) return `${assignment}\n`;
-        const separator = source.startsWith('\n') ? '' : '\n';
-        return `${assignment}${separator}${source}`;
+        return setTomlValue(source, [key], values);
     }
 
     protected mcpServerFlags(source: string, server: string): { enabled?: boolean; disabled?: boolean } | undefined {
-        const root = tomlObject(parseToml(source));
-        const servers = tomlObject(root?.mcp_servers);
-        const value = tomlObject(servers?.[server]);
+        const value = tomlObject(tomlValueAt(source, ['mcp_servers', server]));
         if (!value) return undefined;
         return {
             ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}),
@@ -1795,63 +1764,18 @@ export class ProviderRegistry {
     }
 
     protected writeTomlBoolean(source: string, table: string, key: string, value: boolean): string {
-        const assignment = `${key} = ${value ? 'true' : 'false'}`;
-        const section = this.tomlSection(source, table);
-        if (!section) {
-            throw new Error(`Xora Code 无法安全修改 [${table}]；请将该服务改为独立 TOML 表后重试。`);
-        }
-        const body = source.slice(section.bodyStart, section.end);
-        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=.*$`, 'm');
-        const replaced = expression.test(body)
-            ? body.replace(expression, assignment)
-            : `${body}${body.endsWith('\n') || !body ? '' : '\n'}${assignment}\n`;
-        return `${source.slice(0, section.bodyStart)}${replaced}${source.slice(section.end)}`;
+        if (!tomlObject(tomlValueAt(source, table.split('.')))) throw new Error(`Grok did not create the expected [${table}] MCP table.`);
+        return setTomlValue(source, [...table.split('.'), key], value);
     }
 
     protected writeTomlString(source: string, table: string, key: string, value: string): string {
-        const assignment = `${key} = ${JSON.stringify(value)}`;
-        const section = this.tomlSection(source, table);
-        if (!section) throw new Error(`Grok did not create the expected [${table}] MCP table.`);
-        const body = source.slice(section.bodyStart, section.end);
-        const expression = new RegExp(`^[ \\t]*${key}[ \\t]*=.*$`, 'm');
-        const replaced = expression.test(body)
-            ? body.replace(expression, assignment)
-            : `${body}${body.endsWith('\n') || !body ? '' : '\n'}${assignment}\n`;
-        return `${source.slice(0, section.bodyStart)}${replaced}${source.slice(section.end)}`;
+        if (!tomlObject(tomlValueAt(source, table.split('.')))) throw new Error(`Grok did not create the expected [${table}] MCP table.`);
+        return setTomlValue(source, [...table.split('.'), key], value);
     }
 
     protected writeMcpStdioEnvironmentReference(source: string, server: string, environmentName: string): string {
-        const serverTable = `mcp_servers.${server}`;
-        if (!this.tomlSection(source, serverTable)) {
-            throw new Error(`Grok did not create the expected [${serverTable}] MCP table.`);
-        }
-        const environmentTable = `${serverTable}.env`;
-        const placeholder = `\${${environmentName}}`;
-        if (this.tomlSection(source, environmentTable)) {
-            return this.writeTomlString(source, environmentTable, environmentName, placeholder);
-        }
-        const serverSection = this.tomlSection(source, serverTable)!;
-        const body = source.slice(serverSection.bodyStart, serverSection.end);
-        if (/^\s*env\s*=/m.test(body)) {
-            throw new Error(`Xora Code cannot safely extend the inline env table for MCP server ${server}. Edit it manually or remove it first.`);
-        }
-        const prefix = source.slice(0, serverSection.end);
-        const separator = prefix.endsWith('\n') ? '\n' : '\n\n';
-        return `${prefix}${separator}[${environmentTable}]\n${environmentName} = ${JSON.stringify(placeholder)}\n${source.slice(serverSection.end)}`;
-    }
-
-    protected tomlSection(source: string, table: string): { bodyStart: number; end: number } | undefined {
-        const escapedTable = table.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Keep section boundaries on the table header's own line. `\\s` also
-        // matches newlines, which could make the next-table match consume the
-        // separator newline and concatenate a rewritten assignment with the
-        // following table header (invalid TOML).
-        const header = new RegExp(`^[ \\t]*\\[${escapedTable}\\][ \\t]*(?:#.*)?$`, 'm').exec(source);
-        if (!header || header.index === undefined) return undefined;
-        const bodyStart = header.index + header[0].length + (source[header.index + header[0].length] === '\n' ? 1 : 0);
-        const rest = source.slice(bodyStart);
-        const next = /^[ \t]*\[[^\]]+\][ \t]*(?:#.*)?$/m.exec(rest);
-        return { bodyStart, end: next?.index === undefined ? source.length : bodyStart + next.index };
+        if (!tomlObject(tomlValueAt(source, ['mcp_servers', server]))) throw new Error('Grok did not create the expected MCP server table.');
+        return setTomlValue(source, ['mcp_servers', server, 'env', environmentName], `\${${environmentName}}`);
     }
 
     protected readMetadata(): ProviderFile {

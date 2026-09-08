@@ -84,6 +84,7 @@ test('unknown errors keep their useful diagnostic text', () => {
 
 test('credential failures explain authorization recovery across typed and serialized RPC errors', () => {
     const expected = {
+        API_PROVIDER_AUTH_ISOLATION_FAILED: /旧登录状态.*暂停启动.*目录权限/,
         CREDENTIAL_ACCESS_TIMEOUT: /授权超时.*重新连接 Agent/,
         CREDENTIAL_ACCESS_DENIED: /解密.*重新保存密钥/,
         CREDENTIAL_STORAGE_UNAVAILABLE: /解锁钥匙串/,

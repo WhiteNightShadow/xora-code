@@ -76,7 +76,7 @@ test('isolated API Provider homes copy only allowlisted skill configuration and 
     const generated = fs.readFileSync(path.join(home, 'config.toml'), 'utf8');
     const parsed = parseToml(generated);
 
-    assert.deepEqual(parsed.skills.paths, ['/opt/team-skills', '~/personal-skills']);
+    assert.deepEqual(parsed.skills.paths, ['/opt/team-skills', '~/personal-skills', path.join(sharedHome, 'skills')]);
     assert.deepEqual(parsed.skills.ignore, ['draft-skill']);
     assert.deepEqual(parsed.skills.disabled, ['unsafe-skill']);
     assert.deepEqual(Object.keys(parsed.skills).sort(), ['disabled', 'ignore', 'paths']);
@@ -244,4 +244,103 @@ test('public refresh and management environment APIs target custom and selected 
     assert.deepEqual(registry.managementEnvironment('xora-one'), { GROK_HOME: '/fixture/xora-one' });
     assert.deepEqual(registry.managementEnvironment('grok-subscription'), {});
     assert.deepEqual(refreshed, ['xora-one', 'xora-two', 'xora-two', 'xora-one']);
+});
+
+test('two API Providers share native/config Skills and imported extra directories while retaining auth isolation', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-shared-provider-catalog-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const { registry, sharedHome, providerHomes } = isolatedRegistry(directory);
+    fs.mkdirSync(path.join(sharedHome, 'skills'), { recursive: true });
+    fs.mkdirSync(path.join(sharedHome, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(sharedHome, 'commands', 'review.md'), '# Shared review command');
+    fs.writeFileSync(registry.grokConfigPath, [
+        '[skills]',
+        String.raw`paths = ['C:\Users\tester\.codex\skills',`,
+        String.raw`  'D:\团队\skills']`,
+        'disabled = ["draft"]',
+        '[paths]',
+        'extra_skill_dirs = ["~/imported-skills"]',
+        'auth_dir = "/must-not-copy"',
+        '[mcp_servers.camoufox-reverse]',
+        'command = "node"',
+        '[auth]',
+        'token = "subscription-fixture-token"',
+        ''
+    ].join('\n'));
+    const first = customProvider('xora-first');
+    const second = customProvider('xora-second');
+    fs.mkdirSync(path.join(providerHomes, first.id, 'commands'), { recursive: true });
+    fs.mkdirSync(path.join(providerHomes, second.id, 'skills'), { recursive: true });
+    fs.writeFileSync(path.join(providerHomes, first.id, 'auth.json'), '{"token":"obsolete"}');
+
+    const firstHome = registry.ensureApiProviderGrokHome(first);
+    const secondHome = registry.ensureApiProviderGrokHome(second);
+    const configs = [firstHome, secondHome].map(home => parseToml(fs.readFileSync(path.join(home, 'config.toml'), 'utf8')));
+    assert.deepEqual(configs[0].skills, configs[1].skills);
+    assert.deepEqual(configs[0].paths, { extra_skill_dirs: ['~/imported-skills'] });
+    assert.deepEqual(configs[0].paths, configs[1].paths);
+    for (const home of [firstHome, secondHome]) {
+        assert.equal(fs.readFileSync(path.join(home, 'commands', 'review.md'), 'utf8'), '# Shared review command');
+        assert.equal(fs.existsSync(path.join(home, 'auth.json')), false);
+    }
+    for (const config of configs) {
+        assert.equal(config.auth, undefined);
+        assert.equal(config.mcp_servers, undefined, 'MCP remains supplied by the shared canonical runtime resolver');
+        assert.equal(config.paths.auth_dir, undefined);
+    }
+    assert.deepEqual(Object.keys(configs[0].model), [first.id]);
+    assert.deepEqual(Object.keys(configs[1].model), [second.id]);
+});
+
+test('invalid shared Skills configuration cannot replace the previously working API view with an empty catalog', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-invalid-shared-skills-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const { registry } = isolatedRegistry(directory);
+    const profile = customProvider();
+    fs.writeFileSync(registry.grokConfigPath, '[skills]\npaths = ["/keep"]\n');
+    const home = registry.ensureApiProviderGrokHome(profile);
+    const generated = fs.readFileSync(path.join(home, 'config.toml'), 'utf8');
+    for (const malformed of ['[skills]\npaths = [\n', '[skills]\npaths = 123\n']) {
+        fs.writeFileSync(registry.grokConfigPath, malformed);
+        assert.throws(() => registry.ensureApiProviderGrokHome(profile), /共享/);
+        assert.equal(fs.readFileSync(path.join(home, 'config.toml'), 'utf8'), generated);
+        assert.equal(fs.readFileSync(registry.grokConfigPath, 'utf8'), malformed);
+    }
+});
+
+test('a locked provider-local OAuth file blocks API startup instead of leaking subscription authentication', t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-auth-isolation-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const { registry, providerHomes } = isolatedRegistry(directory);
+    const profile = customProvider();
+    const home = path.join(providerHomes, profile.id);
+    fs.mkdirSync(home, { recursive: true });
+    const authPath = path.join(home, 'auth.json');
+    fs.writeFileSync(authPath, '{"token":"fixture-subscription-token"}');
+    const remove = fs.unlinkSync;
+    fs.unlinkSync = target => {
+        if (target === authPath) throw Object.assign(new Error('fixture locked file'), { code: 'EPERM' });
+        return remove(target);
+    };
+    try {
+        assert.throws(() => registry.ensureApiProviderGrokHome(profile), /API_PROVIDER_AUTH_ISOLATION_FAILED/);
+        assert.equal(fs.existsSync(authPath), true);
+        assert.equal(fs.existsSync(path.join(home, 'config.toml')), false);
+    } finally { fs.unlinkSync = remove; }
+    assert.equal(registry.ensureApiProviderGrokHome(profile), home);
+    assert.equal(fs.existsSync(authPath), false);
+});
+
+test('dangling OAuth links are removed before an isolated Provider home can launch', {
+    skip: process.platform === 'win32'
+}, t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-provider-auth-link-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const { registry, providerHomes } = isolatedRegistry(directory);
+    const profile = customProvider();
+    const home = path.join(providerHomes, profile.id);
+    fs.mkdirSync(home, { recursive: true });
+    fs.symlinkSync(path.join(directory, 'not-yet-created-auth.json'), path.join(home, 'auth.json'));
+    registry.ensureApiProviderGrokHome(profile);
+    assert.throws(() => fs.lstatSync(path.join(home, 'auth.json')), { code: 'ENOENT' });
 });

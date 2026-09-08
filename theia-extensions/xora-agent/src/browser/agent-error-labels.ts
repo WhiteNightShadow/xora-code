@@ -56,6 +56,7 @@ const RUNTIME_DISCONNECT_PATTERN = /ACP stdout reached end of stream|Grok sideca
 const WORKSPACE_BOUNDARY_PATTERN = /Agent changes must resolve to a file inside the trusted workspace|outside the trusted workspace|No trusted workspace is active/i;
 
 const RECOVERY_MESSAGES: Readonly<Record<string, string>> = {
+    API_PROVIDER_AUTH_ISOLATION_FAILED: '无法清理模型服务目录中的旧登录状态，已暂停启动。请关闭占用该目录的 Grok 进程，检查目录权限后重试。',
     CREDENTIAL_ACCESS_TIMEOUT: '等待系统凭据授权超时。请检查钥匙串或系统授权窗口，完成授权后点击“重新连接 Agent”。',
     CREDENTIAL_ACCESS_DENIED: '系统未能解密已保存的凭据。请检查钥匙串授权；仍不可用时，在“账户与模型设置”中重新保存密钥。',
     CREDENTIAL_STORAGE_UNAVAILABLE: '系统安全凭据存储暂不可用。请解锁钥匙串或系统密钥环后重试。',

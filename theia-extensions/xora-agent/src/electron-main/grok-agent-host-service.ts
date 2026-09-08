@@ -695,7 +695,7 @@ export class GrokAgentHostService implements AgentHostService {
                     fs: { readTextFile: false, writeTextFile: false },
                     terminal: false
                 },
-                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.7' },
+                clientInfo: { name: 'Xora Code', title: 'Xora Code', version: '0.2.8' },
                 _meta: {
                     startupHints: {
                         nonInteractive: true,
@@ -703,7 +703,7 @@ export class GrokAgentHostService implements AgentHostService {
                         skipProjectLayout: true
                     },
                     clientType: 'xora-code-desktop',
-                    clientVersion: '0.2.7'
+                    clientVersion: '0.2.8'
                 }
             }, { timeoutMs: ACP_INITIALIZE_TIMEOUT_MS });
             if (generation !== this.runtimeGeneration) {
@@ -3327,32 +3327,34 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async inspect(): Promise<ManagementResult> {
-        if (!this.workspaceRoot || !this.isWorkspaceTrusted(this.workspaceRoot)) {
+        const root = this.workspaceRoot;
+        if (!root || !this.isWorkspaceTrusted(root)) {
             return { ok: false, error: '请先打开并信任当前项目，再读取 Agent 集成配置。' };
         }
         const result = await this.runCli(['inspect', '--json'], true, {
             allowWhileRuntime: true,
+            cwd: root,
             // Skills must be inspected through the same Provider view that the
             // ACP runtime uses. This environment contains only GROK_HOME.
             // While a turn is running, read the already materialized view
             // without rewriting the watched isolated config.
             injectedEnvironment: this.providers.managementEnvironment(this.providerId, this.activePrompts.size === 0)
         });
+        if (this.disposed || root !== this.workspaceRoot || !this.isWorkspaceTrusted(root)) {
+            return { ok: false, error: '项目已关闭或信任状态已变更，请重新打开并信任项目后重试。' };
+        }
         if (!result.ok) return result;
         const data = asRecord(result.data);
         if (!data || !Array.isArray(data.skills)) return result;
         const disabled = this.providers.disabledSkills();
         const disabledNames = new Set(disabled);
-        // The settings surface is an inventory of Skills explicitly installed
-        // through the canonical Grok/Xora configuration. Grok bundled skills
-        // and Cursor/Claude compatibility discoveries remain usable by Grok,
-        // but do not appear as misleading "disabled" Xora installations.
-        const installedSkills = data.skills.filter(value => {
-            const record = asRecord(value);
-            const source = asRecord(record?.source);
-            return asString(source?.type) === 'configToml';
-        });
-        const activeNames = new Set(installedSkills.flatMap(value => {
+        // Grok can discover the same shared/project Skill as a native user or
+        // project source in one home and as a configToml path in another. Keep
+        // its inventory and provenance intact instead of hiding usable Skills
+        // merely because a Provider's authentication home changed. Discovery
+        // remains subject to Grok's configured compatibility/disabled settings.
+        const discoveredSkills = data.skills;
+        const activeNames = new Set(discoveredSkills.flatMap(value => {
             const name = asString(asRecord(value)?.name);
             return name ? [name] : [];
         }));
@@ -3361,10 +3363,13 @@ export class GrokAgentHostService implements AgentHostService {
             data: {
                 ...data,
                 skills: [
-                    ...installedSkills.map(value => {
+                    ...discoveredSkills.map(value => {
                         const record = asRecord(value);
                         const name = asString(record?.name);
-                        return record ? { ...record, enabled: !name || !disabledNames.has(name) } : value;
+                        return record ? {
+                            ...record,
+                            enabled: record.enabled !== false && (!name || !disabledNames.has(name))
+                        } : value;
                     }),
                     ...disabled.filter(name => !activeNames.has(name)).map(name => ({
                         name,
@@ -4020,7 +4025,13 @@ export class GrokAgentHostService implements AgentHostService {
                 }, { timeoutMs: 12_000 });
                 if (generation !== this.runtimeGeneration || acp !== this.acp
                     || !this.loadedSessionIds.has(record.appSessionId)) return;
-                const servers = Array.isArray(result.servers) ? result.servers : [];
+                // Grok 0.2.102 wraps this extension payload in another result
+                // object after JSON-RPC decoding. Older agents return servers
+                // directly; an explicit direct field retains its precedence.
+                const response = asRecord(result);
+                const payload = response && Object.prototype.hasOwnProperty.call(response, 'servers')
+                    ? response : asRecord(response?.result);
+                const servers = Array.isArray(payload?.servers) ? payload.servers : [];
                 const safeStates: RuntimeMcpServerState[] = [];
                 for (const candidate of servers.slice(0, 512)) {
                     const server = asRecord(candidate);
