@@ -226,7 +226,8 @@ test('custom Provider switches keep real shared/project MCP config and workspace
         'args = ["project-reader.js"]',
         ''
     ].join('\n'));
-    const root = fs.realpathSync(workspace);
+    // Match production canonicalization: Windows TEMP may contain an 8.3 alias.
+    const root = fs.realpathSync.native(workspace);
     const registry = new RuntimeMcpRegistry({ grokHome: sharedHome });
     const identity = registry.credentialConfigurationIdentity(root, 'global_browser', 'GLOBAL_MCP_TOKEN');
     const fixture = createHost();
@@ -234,7 +235,7 @@ test('custom Provider switches keep real shared/project MCP config and workspace
     host.workspaceRoot = root;
     host.attachedWorkspaceRoots = new Set([root]);
     host.theiaTrustedRoots = new Set([root]);
-    host.security = { canonicalRoot: value => fs.realpathSync(value), isTrusted: () => true, agentPermissionMode: () => 'request-approval' };
+    host.security = { canonicalRoot: value => fs.realpathSync.native(value), isTrusted: () => true, agentPermissionMode: () => 'request-approval' };
     host.runtimeMcpRegistry = registry;
     host.resolveRuntimeMcpSnapshot = GrokAgentHostService.prototype.resolveRuntimeMcpSnapshot;
     let credentialReads = 0;
@@ -726,7 +727,7 @@ test('host resolves one config-bound stdio credential into ACP without adding it
 
     const registry = new RuntimeMcpRegistry({ grokHome });
     const identity = registry.credentialConfigurationIdentity(workspace, 'alpha', 'ALPHA_TOKEN');
-    const canonicalWorkspace = fs.realpathSync(workspace);
+    const canonicalWorkspace = fs.realpathSync.native(workspace);
     const host = Object.create(GrokAgentHostService.prototype);
     host.runtimeMcpRegistry = registry;
     host.currentSecrets = [];

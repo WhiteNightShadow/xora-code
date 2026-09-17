@@ -2,10 +2,26 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 const test = require('node:test');
 const { FileUri } = require('@theia/core/lib/node');
 
 const { XoraWorkspaceServer } = require('../lib/node/xora-workspace-server');
+
+test('backend workspace deadlines retain wall-clock timeout behavior after a delayed callback', async () => {
+    const module = { exports: {} };
+    let expire;
+    const filename = path.resolve(__dirname, '../lib/common/workspace-startup.js');
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+        module, exports: module.exports,
+        setTimeout(callback) { expire = callback; return 1; },
+        clearTimeout() {}, performance: { now: () => 100000 }
+    }, { filename });
+    const result = module.exports.workspaceDeadline(new Promise(() => {}), 8000);
+    const rejection = assert.rejects(result, /Workspace restoration timed out/);
+    expire(); // Backend timeout does not grant the renderer's starvation grace.
+    await rejection;
+});
 
 test('the product Explorer omits Theia Timeline without removing provider support', () => {
     const sourceRoot = path.join(__dirname, '..', 'src', 'browser');

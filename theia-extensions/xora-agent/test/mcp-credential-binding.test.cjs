@@ -60,7 +60,8 @@ test('stdio MCP credentials are bound to canonical config, enter only their ACP 
     const metadataSource = fs.readFileSync(files.providers.mcpCredentialPath, 'utf8');
     const metadata = JSON.parse(metadataSource);
     assert.equal(metadata.schemaVersion, 2);
-    assert.equal(metadata.credentials[0].workspaceRoot, fs.realpathSync(files.workspace));
+    // Native realpath expands Windows TEMP's 8.3 alias, as credential storage does.
+    assert.equal(metadata.credentials[0].workspaceRoot, fs.realpathSync.native(files.workspace));
     assert.equal(metadata.credentials[0].configIdentity, identity);
     assert.doesNotMatch(metadataSource, /alpha-secret-value/);
 
