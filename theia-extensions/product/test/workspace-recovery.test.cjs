@@ -11,7 +11,7 @@ const test = require('node:test');
 const URI = require('@theia/core/lib/common/uri').default;
 const { Deferred } = require('@theia/core/lib/common/promise-util');
 
-function rendererClock() {
+function rendererClock(timerClamp = 0) {
     let now = 0;
     let next = 0;
     const timers = new Map();
@@ -19,7 +19,12 @@ function rendererClock() {
     const module = { exports: {} };
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
         module, exports: module.exports, performance: { now: () => now },
-        setTimeout(callback, delay) { const id = ++next; timers.set(id, { callback, due: now + delay }); return id; },
+        setTimeout(callback, delay) {
+            const id = ++next;
+            const scheduled = timerClamp ? Math.max(timerClamp, Math.floor(delay)) : delay;
+            timers.set(id, { callback, due: now + scheduled });
+            return id;
+        },
         clearTimeout(id) { timers.delete(id); }
     }, { filename });
     return {
@@ -160,6 +165,22 @@ test('a reply queued ahead of an overdue timer cannot bypass the frontend hard c
     clock.elapseWithoutCallbacks(120);
     complete('too late');
     await rejection;
+    assert.equal(clock.pendingTimers, 0);
+});
+
+test('a browser-clamped fractional final tick still exhausts the responsive IO budget', async () => {
+    const clock = rendererClock(4);
+    // performance.now produces fractional remaining budgets, even when the
+    // configured deadline is an integer. Model that final fraction directly.
+    const deadline = clock.deadlines.workspaceFrontendDeadline(new Promise(() => {}), 8000.5, 120000);
+    let expired = false;
+    const completed = deadline.catch(error => {
+        assert.match(error.message, /Workspace restoration timed out/);
+        expired = true;
+    });
+    await clock.advance(8004);
+    assert.equal(expired, true, '4ms browser clamping must not defer IO recovery to the120s starvation ceiling');
+    await completed;
     assert.equal(clock.pendingTimers, 0);
 });
 

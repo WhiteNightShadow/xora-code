@@ -47,7 +47,9 @@ export function workspaceFrontendDeadline<T>(operation: Promise<T>, milliseconds
                 previous = now;
                 // Give a queued reply a chance to settle after a blocked turn,
                 // even if this would otherwise have been the final sample.
-                if (elapsed <= delay * 2) remaining -= elapsed;
+                // Browsers clamp a fractional final delay to about 4ms. Judge
+                // starvation against the full sample, not that shrinking tail.
+                if (elapsed <= sample * 2) remaining -= elapsed;
                 if (remaining <= 0 || now - started >= maximumMilliseconds) {
                     settled = true;
                     reject(now - started >= maximumMilliseconds
