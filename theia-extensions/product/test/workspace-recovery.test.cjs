@@ -119,7 +119,7 @@ function fixture({ hash = '#/Volumes/offline/project', storage = new Map(), reso
     const actualRequire = createRequire(filename);
     const module = { exports: {} };
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
-        module, exports: module.exports, window, document: { title: 'Grok' }, setTimeout, clearTimeout,
+        module, exports: module.exports, window, document: { title: 'Grok' }, setTimeout, clearTimeout, AbortController,
         require(id) {
             if (clock && id === '../common/workspace-startup') return clock.deadlines;
             if (id === '@theia/workspace/lib/browser/workspace-service') {
@@ -393,6 +393,45 @@ test('provider bootstrap failure preserves the remembered workspace for a health
     await next.service.doInit();
     assert.equal(next.service._workspace.resource.toString(), offlineUri);
     assert.deepEqual(next.notices, []);
+});
+
+test('overall bootstrap expiry cancels a later provider wait and disposes its listener immediately', async () => {
+    const clock = rendererClock();
+    const f = fixture({ clock, hash: '', providerReady: false });
+    let completeHistory;
+    f.service.server.getMostRecentlyUsedWorkspace = () => new Promise(resolve => { completeHistory = resolve; });
+    const initialization = f.service.doInit();
+    await clock.advance(10);
+    completeHistory(offlineUri);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.registrationListeners.size, 1);
+    await clock.advance(5);
+    await initialization;
+    assert.equal(f.registrationListeners.size, 0);
+    assert.equal(clock.pendingTimers, 0);
+    assert.equal(f.storage.size, 0);
+    assert.deepEqual(f.writes, []);
+    f.registerFileProvider();
+    assert.equal(f.service._workspace, undefined);
+});
+
+test('manual opening owns provider-wait cleanup when delayed timers expire in a different order', async () => {
+    const clock = rendererClock();
+    const f = fixture({ clock, providerReady: false, resolve: async () => assert.fail('expired manual opening must not start IO') });
+    const waitForProvider = f.service.waitForLocalFileSystemProvider.bind(f.service);
+    f.service.waitForLocalFileSystemProvider = signal => {
+        const pending = waitForProvider(signal);
+        clock.elapseWithoutCallbacks(10);
+        return pending;
+    };
+    const opening = f.service.toFileStat(new URI(offlineUri));
+    await clock.advance(21, true);
+    assert.equal(await opening, undefined);
+    assert.equal(f.registrationListeners.size, 0);
+    assert.equal(clock.pendingTimers, 0);
+    f.registerFileProvider();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.storage.size, 0);
 });
 
 test('a manual selection made while registration is pending prevents stale filesystem calls', async () => {

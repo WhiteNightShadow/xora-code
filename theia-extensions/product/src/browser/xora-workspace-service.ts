@@ -34,6 +34,7 @@ export class XoraWorkspaceService extends WorkspaceService {
         let quarantined = false;
         let rendererUnresponsive = false;
         let prepared: PreparedWorkspace = { roots: [] };
+        const bootstrap = new AbortController();
         const current = (): boolean => !expired && epoch === this.startupEpoch;
         try {
             await workspaceFrontendDeadline((async () => {
@@ -47,7 +48,7 @@ export class XoraWorkspaceService extends WorkspaceService {
                 }
                 quarantined = !!this.recoveryState(candidate);
                 if (quarantined) throw new Error('Previous workspace restoration did not complete');
-                await this.waitForLocalFileSystemProvider();
+                await this.waitForLocalFileSystemProvider(bootstrap.signal);
             })(), this.workspaceStartupTimeout, this.workspaceStartupMaximumWait);
             if (current() && candidate && !prepared.remote) {
                 // A slow provider/bootstrap handshake is not evidence of a bad
@@ -66,6 +67,10 @@ export class XoraWorkspaceService extends WorkspaceService {
             expired = true;
             recovery = true;
             rendererUnresponsive = error instanceof WorkspaceFrontendUnresponsiveTimeout;
+        } finally {
+            // The overall bootstrap budget may expire before the provider's
+            // own wait (for example after a slow history lookup).
+            bootstrap.abort();
         }
         if (epoch !== this.startupEpoch) {
             this.finishStartup();
@@ -144,24 +149,33 @@ export class XoraWorkspaceService extends WorkspaceService {
         return FileStat.fromStat(uri, await provider.stat(uri));
     }
 
-    protected async waitForLocalFileSystemProvider(): Promise<void> {
+    protected async waitForLocalFileSystemProvider(signal?: AbortSignal): Promise<void> {
         if (this.fileService.hasProvider('file')) return;
         let dispose: () => void = () => undefined;
+        let removeAbortListener: () => void = () => undefined;
         try {
             // Resolving before the built-in provider registers triggers Theia's
             // extension activation path. Plugin activation itself waits for
             // workspace readiness, creating a cycle even for healthy folders.
             // Registration is driven by the backend capability handshake and
             // does not depend on extension or workspace initialization.
-            await workspaceFrontendDeadline(new Promise<void>(resolve => {
+            await workspaceFrontendDeadline(new Promise<void>((resolve, reject) => {
                 const registration = this.fileService.onDidChangeFileSystemProviderRegistrations(event => {
                     if (event.added && event.scheme === 'file') resolve();
                 });
                 dispose = () => registration.dispose();
-                if (this.fileService.hasProvider('file')) resolve();
+                const abort = (): void => {
+                    dispose();
+                    reject(new Error('Workspace bootstrap superseded'));
+                };
+                signal?.addEventListener('abort', abort, { once: true });
+                removeAbortListener = () => signal?.removeEventListener('abort', abort);
+                if (signal?.aborted) abort();
+                else if (this.fileService.hasProvider('file')) resolve();
             }), this.workspaceStartupTimeout, this.workspaceStartupMaximumWait);
         } finally {
             dispose();
+            removeAbortListener();
         }
     }
 
@@ -218,10 +232,16 @@ export class XoraWorkspaceService extends WorkspaceService {
     }
 
     protected override async toFileStat(uri: URI | string | undefined): Promise<FileStat | undefined> {
-        return workspaceFrontendDeadline((async () => {
-            if (uri && new URI(uri.toString()).scheme === 'file') await this.waitForLocalFileSystemProvider();
-            return super.toFileStat(uri);
-        })(), this.workspaceStartupTimeout, this.workspaceStartupMaximumWait).catch(() => undefined);
+        const bootstrap = new AbortController();
+        try {
+            return await workspaceFrontendDeadline((async () => {
+                if (uri && new URI(uri.toString()).scheme === 'file') await this.waitForLocalFileSystemProvider(bootstrap.signal);
+                if (bootstrap.signal.aborted) return undefined;
+                return super.toFileStat(uri);
+            })(), this.workspaceStartupTimeout, this.workspaceStartupMaximumWait).catch(() => undefined);
+        } finally {
+            bootstrap.abort();
+        }
     }
 
     protected override async doGetDefaultWorkspaceUri(): Promise<string | undefined> {
