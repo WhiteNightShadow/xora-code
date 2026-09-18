@@ -26,12 +26,16 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function childFixture() {
     const child = Object.assign(new EventEmitter(), {
         connected: true, exitCode: null, signalCode: null,
-        requests: [], callbacks: [], kills: [], disconnects: 0
+        requests: [], callbacks: [], controls: [], kills: [], disconnects: 0
     });
     const lease = Object.assign(new EventEmitter(), { destroyed: false });
     lease.destroy = () => { lease.destroyed = true; };
     child.stdio = [null, null, null, null, lease];
-    child.send = (request, callback) => { child.requests.push(request); child.callbacks.push(callback); return true; };
+    child.send = (request, callback) => {
+        if (request.type === 'shutdown') child.controls.push(request);
+        else { child.requests.push(request); child.callbacks.push(callback); }
+        return true;
+    };
     child.kill = signal => { child.kills.push(signal); return true; };
     child.disconnect = () => { child.disconnects++; child.connected = false; child.emit('disconnect'); };
     child.close = (code = 0, signal = null) => {
@@ -165,7 +169,8 @@ test('quitting aborts active and queued operations without releasing the lease e
     const result = await completion;
     assert.deepEqual(result.map(value => value.reason.code), ['CREDENTIAL_UNLOCK_REQUIRED', 'CREDENTIAL_UNLOCK_REQUIRED']);
     assert.equal(children.length, 1);
-    assert.equal(children[0].disconnects, 1);
+    assert.equal(children[0].disconnects, 0);
+    assert.deepEqual(children[0].controls, [{ type: 'shutdown' }]);
     assert.deepEqual(children[0].kills, []);
     assert.equal(children[0].stdio[4].destroyed, false);
     children[0].reply({ decrypted: ['late-after-quit'], encrypted: [] });
@@ -174,14 +179,15 @@ test('quitting aborts active and queued operations without releasing the lease e
     assert.equal(children[0].stdio[4].destroyed, true);
 });
 
-test('quitting also gracefully disconnects an idle successful session', async t => {
+test('quitting also requests normal shutdown of an idle successful session', async t => {
     const { session, children } = fixture(t);
     const waiting = session.run({ decrypt: [ciphertext], encrypt: [] });
     await flush();
     children[0].reply({ decrypted: ['idle-cache-value'], encrypted: [] });
     await waiting;
     session.dispose();
-    assert.equal(children[0].disconnects, 1);
+    assert.equal(children[0].disconnects, 0);
+    assert.deepEqual(children[0].controls, [{ type: 'shutdown' }]);
     assert.equal(children[0].stdio[4].destroyed, false);
     children[0].close();
     assert.equal(children[0].stdio[4].destroyed, true);
@@ -213,7 +219,8 @@ test('actual quit force-cleans a helper which has not closed after graceful disp
     await flush();
     session.dispose();
     await rejected;
-    assert.equal(children[0].disconnects, 1);
+    assert.equal(children[0].disconnects, 0);
+    assert.deepEqual(children[0].controls, [{ type: 'shutdown' }]);
     assert.deepEqual(children[0].kills, []);
     app.emit('quit');
     assert.deepEqual(children[0].kills, ['SIGKILL']);
@@ -263,6 +270,38 @@ test('a stale completed request deadline cannot cancel the next request on the s
     }
 });
 
+test('helper-owned shutdown reaches real Node IPC and lease close without parent disconnect', async t => {
+    const { spawn } = require('node:child_process');
+    let child;
+    const session = new MacCredentialSession(() => {
+        child = spawn(process.execPath, ['-e', `
+            process.on('message', request => {
+                if (request.type === 'shutdown') process.exit(0);
+                else process.send({ requestId: request.requestId, decrypted: ['owned-fixture-value'], encrypted: [] });
+            });
+        `], { stdio: ['ignore', 'ignore', 'ignore', 'ipc', 'pipe'] });
+        return child;
+    });
+    t.after(() => {
+        session.dispose();
+        if (child?.exitCode === null && child?.signalCode === null) child.kill('SIGKILL');
+    });
+    await session.run({ decrypt: [ciphertext], encrypt: [] }, 3000);
+    let closeTimer;
+    const closed = new Promise((resolve, reject) => {
+        closeTimer = setTimeout(() => reject(new Error('Owned helper IPC close was not confirmed')), 3000);
+        child.once('close', (code, signal) => { clearTimeout(closeTimer); resolve({ code, signal }); });
+    });
+    try {
+        session.dispose();
+        assert.deepEqual(await closed, { code: 0, signal: null });
+        assert.equal(child.stdio[4].destroyed, true);
+        assert.equal(app.listenerCount('quit'), 0);
+    } finally {
+        clearTimeout(closeTimer);
+    }
+});
+
 test('the default macOS client shares its helper and adds only a non-secret ownership pipe', async () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
     const childProcess = require('node:child_process');
@@ -272,6 +311,7 @@ test('the default macOS client shares its helper and adds only a non-secret owne
     childProcess.spawn = (executable, args, options) => {
         const child = childFixture();
         child.send = request => {
+            if (request.type === 'shutdown') { child.controls.push(request); return true; }
             child.requests.push(request);
             setImmediate(() => child.reply({ decrypted: [], encrypted: [ciphertext] }));
             return true;
@@ -291,7 +331,8 @@ test('the default macOS client shares its helper and adds only a non-secret owne
         assert.ok(!JSON.stringify(launched).includes('first-default-key'));
         assert.ok(!JSON.stringify(launched).includes('second-default-key'));
         disposeMacCredentialSession();
-        assert.equal(children[0].disconnects, 1);
+        assert.equal(children[0].disconnects, 0);
+        assert.deepEqual(children[0].controls, [{ type: 'shutdown' }]);
         children[0].close();
     } finally {
         disposeMacCredentialSession();

@@ -32,6 +32,13 @@ app.disableHardwareAcceleration();
 if (app.dock) app.dock.hide();
 process.once('disconnect', () => { stopping = true; app.quit(); });
 async function handleRequest(request) {
+    if (session && request?.type === 'shutdown' && Object.keys(request).length === 1) {
+        // Let this child close IPC naturally. A parent-side disconnect can
+        // prevent Node's ChildProcess 'close' accounting from completing.
+        stopping = true;
+        app.quit();
+        return;
+    }
     let response;
     let keepAlive = false;
     try {

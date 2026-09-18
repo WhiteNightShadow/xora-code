@@ -152,3 +152,16 @@ test('normal watchdog stop permits lease closure and a normal helper exit withou
     assert.equal(result.signal, null);
     assert.equal(f.messages.some(message => message.event === 'monitor-failed'), false);
 });
+
+test('child-initiated exit confirms close while the parent holds both IPC and the lease', {
+    skip: process.platform === 'win32', timeout: 8000
+}, async t => {
+    const f = await fixture(t);
+    // The parent must not disconnect IPC or destroy the lease to initiate
+    // shutdown: natural EOF must account for both channels before close.
+    f.parent.send('quit');
+    const result = await f.message('helper-closed');
+    assert.equal(result.code, 0);
+    assert.equal(result.signal, null);
+    assert.equal(await untilStopped(f.helperPid), true);
+});

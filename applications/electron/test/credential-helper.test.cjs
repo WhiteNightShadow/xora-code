@@ -118,6 +118,14 @@ test('session errors retain their request identity and retire the native key cac
     assert.deepEqual(f.calls, ['quit', 'watchdog-stop']);
 });
 
+test('Mac shutdown control quits without a credential operation or response', async () => {
+    const f = sessionFixture();
+    f.child.emit('message', { type: 'shutdown' });
+    await turn();
+    assert.deepEqual(f.calls, ['quit', 'watchdog-stop']);
+    assert.deepEqual(f.responses, []);
+});
+
 test('a repeated session request ID cannot reuse the helper or enter the OS again', async () => {
     const f = sessionFixture();
     f.child.emit('message', { requestId: 1, decrypt: [], encrypt: ['first'] });

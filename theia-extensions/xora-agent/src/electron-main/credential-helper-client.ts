@@ -96,7 +96,13 @@ export class MacCredentialSession {
             }
         }, 1000);
         try {
-            if (state.child.connected) state.child.disconnect();
+            // Let the child close IPC. Parent-initiated disconnect does not
+            // advance Node's IPC close counter and can strand the close fence.
+            if (state.child.connected) state.child.send({ type: 'shutdown' }, failure => {
+                if (failure && this.childState === state) {
+                    try { state.child.kill('SIGKILL'); } catch { /* close still required */ }
+                }
+            });
             else state.child.kill('SIGTERM');
         } catch { /* the bounded shutdown timer will still clean up */ }
     }
