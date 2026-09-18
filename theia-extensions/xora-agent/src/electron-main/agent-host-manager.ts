@@ -5,6 +5,7 @@ import { AgentHostClient } from '../common/agent-protocol';
 import { GrokAgentHostService, ProviderRuntimeInvalidation } from './grok-agent-host-service';
 import { ProviderRegistry } from './provider-registry';
 import { SecretVault } from './secret-vault';
+import { disposeMacCredentialSession } from './credential-helper-client';
 import { sharedGrokHome } from './shared-grok-home';
 import { WorkspaceSecurityStore } from './workspace-security';
 import { SidecarUpdateCoordinator } from './sidecar-update-coordinator';
@@ -85,6 +86,9 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
     }
 
     onStop(_application: ElectronMainApplication): void {
+        // A cancelled window/quit request must not retire the shared Mac
+        // credential session. Stop it only once lifecycle cleanup has begun.
+        disposeMacCredentialSession();
         if (this.grokHomeNotification) {
             clearTimeout(this.grokHomeNotification);
             this.grokHomeNotification = undefined;

@@ -1,6 +1,7 @@
 import * as React from '@theia/core/shared/react';
 import { ReactWidget } from '@theia/core/lib/browser';
 import { MessageService } from '@theia/core/lib/common';
+import { isOSX } from '@theia/core/lib/common/os';
 import { Message } from '@theia/core/shared/@lumino/messaging';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import {
@@ -542,6 +543,7 @@ export class AgentManagementWidget extends ReactWidget {
                     </label>
                     <ProviderReasoningFields />
                     <label>API 密钥<input required name='apiKey' type='password' autoComplete='off' /></label>
+                    {isOSX && <p className='xora-provider-edit-hint'>macOS 首次访问可能需要钥匙串授权，选择“始终允许”可减少后续确认。本次运行会复用已授权的访问。</p>}
                     <button className='theia-button main' type='submit'>保存并使用</button>
                 </form>
             </details>
@@ -634,6 +636,7 @@ export class AgentManagementWidget extends ReactWidget {
                     <input name='apiKey' type='password' autoComplete='off' placeholder='留空则保持当前密钥' />
                 </label>
                 <p className='xora-provider-edit-hint'>修改 Base URL 时必须重新输入 API 密钥；密钥只会发送给 Electron 凭据保险库且不会回显。</p>
+                {isOSX && <p className='xora-provider-edit-hint'>macOS 首次访问可能需要钥匙串授权，选择“始终允许”可减少后续确认。本次运行会复用已授权的访问。</p>}
                 <div className='xora-provider-card-actions xora-provider-edit-actions'>
                     <button className='theia-button main' disabled={this.loading} type='submit'>保存并使用</button>
                     <button

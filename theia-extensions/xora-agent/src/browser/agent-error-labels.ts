@@ -57,10 +57,10 @@ const WORKSPACE_BOUNDARY_PATTERN = /Agent changes must resolve to a file inside 
 
 const RECOVERY_MESSAGES: Readonly<Record<string, string>> = {
     API_PROVIDER_AUTH_ISOLATION_FAILED: '无法清理模型服务目录中的旧登录状态，已暂停启动。请关闭占用该目录的 Grok 进程，检查目录权限后重试。',
-    CREDENTIAL_ACCESS_TIMEOUT: '等待系统凭据授权超时。请检查钥匙串或系统授权窗口，完成授权后点击“重新连接 Agent”。',
+    CREDENTIAL_ACCESS_TIMEOUT: '等待系统凭据授权超时。请点击“重新连接 Agent”，再完成钥匙串或系统授权。',
     CREDENTIAL_ACCESS_DENIED: '系统未能解密已保存的凭据。请检查钥匙串授权；仍不可用时，在“账户与模型设置”中重新保存密钥。',
     CREDENTIAL_STORAGE_UNAVAILABLE: '系统安全凭据存储暂不可用。请解锁钥匙串或系统密钥环后重试。',
-    CREDENTIAL_UNLOCK_REQUIRED: '凭据读取已暂停。请检查系统授权后点击“重新连接 Agent”，或在“账户与模型设置”中重新保存密钥。',
+    CREDENTIAL_UNLOCK_REQUIRED: '凭据读取已暂停。请点击“重新连接 Agent”后完成系统授权，或在“账户与模型设置”中重新保存密钥。',
     CREDENTIAL_STORE_CHANGED: '读取期间凭据已更新，请重新连接 Agent 以使用最新密钥。',
     WINDOWS_PROCESS_JOB_FAILED: 'Windows 未能启动或确认清理 Agent 进程。请确认系统 PowerShell 可以运行后重新连接；仍失败时请完全退出应用再打开。',
     SIDECAR_TERMINATION_UNCONFIRMED: '尚未确认旧 Agent 进程已退出，暂时无法重新连接。请稍后重试；仍失败时请完全退出应用再打开。'

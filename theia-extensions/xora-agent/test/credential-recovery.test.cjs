@@ -300,7 +300,7 @@ test('the helper inherits the exact session profile and an application-local wor
     app.getPath = name => name === 'sessionData' ? '/fixture/overridden-session-data' : '/fixture/user-data';
     app.getName = () => 'Fixture App';
     app.getAppPath = () => '/fixture/application';
-    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    Object.defineProperty(process, 'platform', { value: 'linux' });
     try {
         await runCredentialHelper({ decrypt: [], encrypt: ['fixture-secret'] });
         assert.equal(options.cwd, path.dirname(process.execPath));

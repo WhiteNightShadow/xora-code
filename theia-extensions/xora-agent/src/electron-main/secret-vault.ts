@@ -19,6 +19,7 @@ export class SecretVault {
     protected readonly unlockedValues = new Map<string, { encrypted: string; value: string }>();
     protected readonly preparedEncryptions = new Map<string, string | undefined>();
     protected credentialQueue: Promise<void> = Promise.resolve();
+    protected credentialPreparationGeneration = 0;
     protected persistentAvailable = false;
     protected readonly filePath = path.join(app.getPath('userData'), 'security', 'secrets.json');
     protected readonly lockPath = path.join(app.getPath('userData'), 'security', '.secrets.lock');
@@ -48,7 +49,22 @@ export class SecretVault {
     }
 
     protected enqueuePreparation(operation: () => Promise<void>): Promise<void> {
-        const result = this.credentialQueue.then(operation);
+        const generation = this.credentialPreparationGeneration;
+        const result = this.credentialQueue.then(() => {
+            // Several windows can request credentials while the first OS
+            // authorization is pending. A failure must not replay that queue
+            // as a series of fresh password prompts.
+            if (generation !== this.credentialPreparationGeneration) {
+                throw new CredentialAccessError('CREDENTIAL_UNLOCK_REQUIRED');
+            }
+            return operation();
+        }).catch(error => {
+            if (generation === this.credentialPreparationGeneration && error instanceof CredentialAccessError
+                && ['CREDENTIAL_ACCESS_TIMEOUT', 'CREDENTIAL_ACCESS_DENIED', 'CREDENTIAL_STORAGE_UNAVAILABLE'].includes(error.code)) {
+                this.credentialPreparationGeneration++;
+            }
+            throw error;
+        });
         this.credentialQueue = result.catch(() => undefined);
         return result;
     }
@@ -79,6 +95,10 @@ export class SecretVault {
             const result = await this.runHelper({
                 decrypt: encrypted.map(entry => entry.ciphertext),
                 encrypt: plain
+            }, {
+                // Automatic startup stays bounded. A deliberate macOS retry
+                // or save gives the user time to complete the system prompt.
+                timeoutMs: process.platform === 'darwin' && retry ? 90_000 : 15_000
             });
             const current = this.readFile();
             if (encrypted.some(entry => current.values[entry.reference] !== entry.ciphertext)) {
@@ -95,6 +115,10 @@ export class SecretVault {
             if (error instanceof CredentialAccessError && error.code === 'CREDENTIAL_STORAGE_UNAVAILABLE' && !encrypted.length) {
                 // Preserve the existing session-only mode when no secure OS
                 // backend exists. Never persist a plaintext or basic_text key.
+                // macOS can report unavailable after a denied Keychain access.
+                // Accept this operation's memory-only result without replaying
+                // the already queued saves as fresh authorization prompts.
+                if (process.platform === 'darwin') this.credentialPreparationGeneration++;
                 this.persistentAvailable = false;
                 for (const value of plain) this.stageEncryption(value, undefined);
                 return;

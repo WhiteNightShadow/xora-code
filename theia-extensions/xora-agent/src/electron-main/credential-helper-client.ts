@@ -23,11 +23,224 @@ export interface CredentialHelperResult {
     encrypted: string[];
 }
 
+interface SessionOperation {
+    requestId: number;
+    request: CredentialHelperRequest;
+    resolve: (value: CredentialHelperResult) => void;
+    reject: (error: CredentialAccessError) => void;
+    timer: NodeJS.Timeout;
+}
+
+interface SessionChild {
+    child: ChildProcess;
+    retiring: boolean;
+    operation?: SessionOperation;
+    shutdownTimer?: NodeJS.Timeout;
+}
+
+/**
+ * macOS OSCrypt caches its derived key for one process lifetime. Keep that
+ * process isolated from Electron main, and retain it after successful requests.
+ * A failed process cannot be reused: Chromium also caches keychain failure.
+ */
+export class MacCredentialSession {
+    protected childState: SessionChild | undefined;
+    protected queue: Promise<void> = Promise.resolve();
+    protected requestId = 0;
+    protected failureEpoch = 0;
+    protected lastFailure = new CredentialAccessError('CREDENTIAL_UNLOCK_REQUIRED');
+    protected disposed = false;
+    protected readonly shutdown = (): void => {
+        this.dispose();
+        const state = this.childState;
+        if (state) {
+            if (state.shutdownTimer) clearTimeout(state.shutdownTimer);
+            try { state.child.kill('SIGKILL'); } catch { /* the process is quitting */ }
+        }
+    };
+
+    constructor(protected readonly createChild: () => ChildProcess = () => spawnHelper(true)) {
+        app?.once?.('quit', this.shutdown);
+    }
+
+    run(request: CredentialHelperRequest, timeoutMs = 15_000): Promise<CredentialHelperResult> {
+        const epoch = this.failureEpoch;
+        const snapshot = { decrypt: [...request.decrypt], encrypt: [...request.encrypt] };
+        const operation = this.queue.then(() => {
+            if (this.disposed) throw new CredentialAccessError('CREDENTIAL_UNLOCK_REQUIRED');
+            // Requests which were already queued when authorization failed must
+            // not turn into a sequence of fresh OS authorization prompts.
+            if (epoch !== this.failureEpoch) throw this.lastFailure;
+            return this.execute(snapshot, timeoutMs);
+        });
+        this.queue = operation.then(() => undefined, () => undefined);
+        return operation;
+    }
+
+    dispose(): void {
+        if (this.disposed) return;
+        this.disposed = true;
+        const state = this.childState;
+        if (!state) {
+            app?.removeListener?.('quit', this.shutdown);
+            return;
+        }
+        if (state.retiring) return;
+        state.retiring = true;
+        const error = new CredentialAccessError('CREDENTIAL_UNLOCK_REQUIRED');
+        this.failed(error);
+        this.complete(state, error);
+        state.shutdownTimer = setTimeout(() => {
+            if (this.childState === state) {
+                try { state.child.kill('SIGKILL'); } catch { /* close still required */ }
+            }
+        }, 1000);
+        try {
+            if (state.child.connected) state.child.disconnect();
+            else state.child.kill('SIGTERM');
+        } catch { /* the bounded shutdown timer will still clean up */ }
+    }
+
+    protected execute(request: CredentialHelperRequest, timeoutMs: number): Promise<CredentialHelperResult> {
+        if (this.childState?.retiring) {
+            // SIGKILL or 'exit' alone does not confirm that the old inherited
+            // IPC channel is gone. Keep the fence until this exact child's
+            // 'close' event; never overlap it with a replacement helper.
+            return Promise.reject(new CredentialAccessError('CREDENTIAL_UNLOCK_REQUIRED'));
+        }
+        let state = this.childState;
+        if (!state) {
+            try {
+                state = { child: this.createChild(), retiring: false };
+                this.childState = state;
+                this.observe(state);
+            } catch {
+                const error = new CredentialAccessError('CREDENTIAL_ACCESS_DENIED');
+                this.failed(error);
+                return Promise.reject(error);
+            }
+        }
+        if (!Number.isSafeInteger(this.requestId + 1)) {
+            this.retire(state, new CredentialAccessError('CREDENTIAL_ACCESS_DENIED'));
+            return Promise.reject(this.lastFailure);
+        }
+        const active = state;
+        return new Promise((resolve, reject) => {
+            const requestId = ++this.requestId;
+            const timer = setTimeout(() => {
+                if (active.operation?.requestId === requestId) {
+                    this.retire(active, new CredentialAccessError('CREDENTIAL_ACCESS_TIMEOUT'));
+                }
+            }, timeoutMs);
+            active.operation = { requestId, request, resolve, reject, timer };
+            try {
+                active.child.send({ ...request, requestId }, error => {
+                    if (error && active.operation?.requestId === requestId) {
+                        this.retire(active, new CredentialAccessError('CREDENTIAL_ACCESS_DENIED'));
+                    }
+                });
+            } catch {
+                if (active.operation?.requestId === requestId) {
+                    this.retire(active, new CredentialAccessError('CREDENTIAL_ACCESS_DENIED'));
+                }
+            }
+        });
+    }
+
+    protected observe(state: SessionChild): void {
+        const message = (value: unknown): void => this.receive(state, value);
+        const error = (): void => this.retire(state, new CredentialAccessError('CREDENTIAL_ACCESS_DENIED'));
+        const disconnect = (): void => this.retire(state, new CredentialAccessError('CREDENTIAL_ACCESS_DENIED'));
+        const lease = state.child.stdio?.[4];
+        lease?.on('error', error);
+        state.child.on('message', message);
+        state.child.on('error', error);
+        state.child.once('disconnect', disconnect);
+        state.child.once('close', () => {
+            if (state.shutdownTimer) clearTimeout(state.shutdownTimer);
+            // The extra pipe is an ownership lease, never a credential stream.
+            // Keep its parent end alive until this exact process has closed.
+            lease?.removeListener('error', error);
+            lease?.destroy();
+            state.child.removeListener('message', message);
+            state.child.removeListener('error', error);
+            state.child.removeListener('disconnect', disconnect);
+            if (this.childState !== state) return;
+            if (!state.retiring) {
+                const failure = new CredentialAccessError('CREDENTIAL_ACCESS_DENIED');
+                this.failed(failure);
+                this.complete(state, failure);
+            }
+            this.childState = undefined;
+            if (this.disposed) app?.removeListener?.('quit', this.shutdown);
+        });
+    }
+
+    protected receive(state: SessionChild, value: unknown): void {
+        if (this.childState !== state || state.retiring || !state.operation) return;
+        const response = value as Partial<CredentialHelperResult> & { requestId?: unknown; error?: string };
+        if (!response || !Number.isSafeInteger(response.requestId) || (response.requestId as number) < 1) {
+            this.retire(state, new CredentialAccessError('CREDENTIAL_ACCESS_DENIED'));
+            return;
+        }
+        // A delayed/duplicate response, including one from an older request,
+        // must never satisfy the current operation. Do not buffer future IDs.
+        if (response.requestId !== state.operation.requestId) return;
+        if (response.error) {
+            this.retire(state, new CredentialAccessError(response.error === 'unavailable'
+                ? 'CREDENTIAL_STORAGE_UNAVAILABLE' : 'CREDENTIAL_ACCESS_DENIED'));
+            return;
+        }
+        const request = state.operation.request;
+        if (!Array.isArray(response.decrypted) || !Array.isArray(response.encrypted)
+            || response.decrypted.length !== request.decrypt.length
+            || response.encrypted.length !== request.encrypt.length
+            || !response.decrypted.every(entry => typeof entry === 'string' && Buffer.byteLength(entry, 'utf8') <= 16 * 1024)
+            || !response.encrypted.every(entry => typeof entry === 'string' && /^[A-Za-z0-9+/]+={0,2}$/.test(entry) && entry.length <= 64 * 1024)) {
+            this.retire(state, new CredentialAccessError('CREDENTIAL_ACCESS_DENIED'));
+            return;
+        }
+        this.complete(state, undefined, { decrypted: response.decrypted, encrypted: response.encrypted });
+    }
+
+    protected failed(error: CredentialAccessError): void {
+        this.failureEpoch++;
+        this.lastFailure = error;
+    }
+
+    protected retire(state: SessionChild, error: CredentialAccessError): void {
+        if (this.childState !== state || state.retiring) return;
+        state.retiring = true;
+        this.failed(error);
+        this.complete(state, error);
+        try { state.child.kill('SIGKILL'); } catch { /* close confirmation still required */ }
+    }
+
+    protected complete(state: SessionChild, error?: CredentialAccessError, result?: CredentialHelperResult): void {
+        const operation = state.operation;
+        if (!operation) return;
+        state.operation = undefined;
+        clearTimeout(operation.timer);
+        if (error) operation.reject(error);
+        else operation.resolve(result!);
+    }
+}
+
+let macCredentialSession: MacCredentialSession | undefined;
+
+/** Called by AgentHostManager only once real contribution shutdown begins. */
+export function disposeMacCredentialSession(): void {
+    macCredentialSession?.dispose();
+}
+
 /** No credentials are placed in arguments, environment variables or log streams. */
 export function runCredentialHelper(
     request: CredentialHelperRequest,
     options: { timeoutMs?: number; spawnHelper?: () => ChildProcess } = {}
 ): Promise<CredentialHelperResult> {
+    if (process.platform === 'darwin' && !options.spawnHelper) {
+        return (macCredentialSession ??= new MacCredentialSession()).run(request, options.timeoutMs);
+    }
     return new Promise((resolve, reject) => {
         let child: ChildProcess | undefined;
         let settled = false;
@@ -151,10 +364,11 @@ export function waitForWindowsStorageKey(localStatePath: string, timeoutMs: numb
     });
 }
 
-function spawnHelper(): ChildProcess {
+function spawnHelper(session = false): ChildProcess {
     const entry = process.env.XORA_CREDENTIAL_HELPER_ENTRY
         ?? path.join(app.getAppPath(), 'scripts', 'theia-electron-main.js');
     const args = [...(app.isPackaged ? [] : [entry]), '--xora-credential-helper'];
+    if (session) args.push('--xora-credential-session');
     const environment: NodeJS.ProcessEnv = {
         ...process.env,
         XORA_CREDENTIAL_USER_DATA: app.getPath('userData'),
@@ -168,7 +382,7 @@ function spawnHelper(): ChildProcess {
         // Credential access is independent of a restored/offline workspace.
         cwd: path.dirname(process.execPath),
         env: environment,
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        stdio: session ? ['ignore', 'ignore', 'ignore', 'ipc', 'pipe'] : ['ignore', 'ignore', 'ignore', 'ipc'],
         windowsHide: true
     });
 }
