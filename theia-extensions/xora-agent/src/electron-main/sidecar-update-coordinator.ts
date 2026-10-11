@@ -179,11 +179,16 @@ export class SidecarUpdateCoordinator {
         fs.mkdirSync(embeddedDirectory, { recursive: true, mode: 0o700 });
         if (!fs.existsSync(target)) {
             const temporary = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
-            fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
-            if (process.platform !== 'win32') fs.chmodSync(temporary, 0o755);
-            const descriptor = fs.openSync(temporary, 'r');
-            try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
-            fs.renameSync(temporary, target);
+            try {
+                fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
+                if (process.platform !== 'win32') fs.chmodSync(temporary, 0o755);
+                // Windows FlushFileBuffers requires a writable file handle.
+                const descriptor = fs.openSync(temporary, 'r+');
+                try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+                fs.renameSync(temporary, target);
+            } finally {
+                fs.rmSync(temporary, { force: true });
+            }
         }
         const fixtureSha256 = sha256File(this.updateContractPath('acp-initialize-fixture.json'));
         return {
