@@ -143,11 +143,22 @@ test('a dead updater lease and a legacy dead PID file can be recovered without t
   try {
     const lock = join(f.root, '.update.lock');
     await mkdir(lock); await writeFile(join(lock, `2147483647-${randomUUID()}.owner`), '{}');
-    await f.installer.withUpdateLock(async () => { assert.ok((await readdir(lock))[0]!.startsWith(`${process.pid}-`)); });
+    await f.installer.withUpdateLock(async () => { assert.equal((await readFile(lock)).toString(), `${process.pid}\n`); });
     await writeFile(lock, '2147483647\n');
     await f.installer.withUpdateLock(async () => { await assert.rejects(f.installer.withUpdateLock(async () => undefined), /already running/); });
     await writeFile(lock, `${process.pid}\n`);
     await assert.rejects(f.installer.withUpdateLock(async () => undefined), /already running/);
     assert.equal((await readFile(lock)).toString(), `${process.pid}\n`);
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+
+test('a live directory lease protects the interval before the compatibility PID file is written', async () => {
+  const f = await fixture();
+  try {
+    const lease = join(f.root, '.update.lease'); await mkdir(lease);
+    const marker = `${process.pid}-${randomUUID()}.owner`; await writeFile(join(lease, marker), '{}');
+    await assert.rejects(f.installer.withUpdateLock(async () => undefined), /already running/);
+    assert.equal((await readFile(join(lease, marker))).toString(), '{}');
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });

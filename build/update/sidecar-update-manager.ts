@@ -275,6 +275,7 @@ export class SidecarInstaller {
   readonly statePath: string;
   readonly #stagingRoot: string;
   readonly #lockPath: string;
+  readonly #leasePath: string;
   readonly #activationHook: SidecarInstallerOptions["activationHook"] | undefined;
 
   constructor(root: string, options: SidecarInstallerOptions = {}) {
@@ -286,45 +287,68 @@ export class SidecarInstaller {
     this.statePath = join(this.root, "update-state.json");
     this.#stagingRoot = join(this.root, ".staging");
     this.#lockPath = join(this.root, ".update.lock");
+    this.#leasePath = join(this.root, ".update.lease");
     this.#activationHook = options.activationHook;
   }
 
   async withUpdateLock<T>(operation: () => Promise<T>): Promise<T> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
-    // Publish a non-empty lease directory atomically. A stale lease can be
-    // reaped by unlinking only its unique marker; a new owner's marker can
-    // never be mistaken for the dead process's lock (including concurrent reapers).
+    // The new directory lease serializes recovery. Keep an exclusive PID-file
+    // lock as well so older clients remain excluded. In particular, Windows
+    // rename can replace a file with a directory: never publish over that file.
     const lease = await mkdtemp(join(this.root, '.update-lease-'));
     const marker = `${process.pid}-${randomUUID()}.owner`;
     let acquired = false;
+    let compatibilityLock: Awaited<ReturnType<typeof open>> | undefined;
     try {
       await writeJsonAtomic(join(lease, marker), { pid: process.pid });
       for (let attempt = 0; attempt < 3; attempt++) {
+        if (await pathExists(this.#leasePath)) {
+          if (!(await this.reapDeadUpdateLock(this.#leasePath))) {
+            throw new SidecarUpdateError('busy', 'Another sidecar update is already running.');
+          }
+        }
         try {
-          await rename(lease, this.#lockPath);
+          await rename(lease, this.#leasePath);
           acquired = true;
           break;
         } catch (error) {
-          if (!(await this.reapDeadUpdateLock())) {
+          if (!(await this.reapDeadUpdateLock(this.#leasePath))) {
             throw new SidecarUpdateError('busy', 'Another sidecar update is already running.', error);
           }
         }
       }
       if (!acquired) throw new SidecarUpdateError('busy', 'Another sidecar update is already running.');
+      if (await pathExists(this.#lockPath)) {
+        if (!(await this.reapDeadUpdateLock(this.#lockPath))) {
+          throw new SidecarUpdateError('busy', 'Another sidecar update is already running.');
+        }
+      }
+      try { compatibilityLock = await open(this.#lockPath, 'wx', 0o600); }
+      catch (error) { throw new SidecarUpdateError('busy', 'Another sidecar update is already running.', error); }
+      await compatibilityLock.writeFile(`${process.pid}\n`);
+      await compatibilityLock.sync();
       return await operation();
     } finally {
+      if (compatibilityLock) {
+        const owned = await compatibilityLock.stat();
+        await compatibilityLock.close();
+        const current = await lstat(this.#lockPath).catch(() => undefined);
+        if (current?.isFile() && current.ino === owned.ino && current.dev === owned.dev) {
+          await unlink(this.#lockPath).catch(() => undefined);
+        }
+      }
       if (acquired) {
-        await unlink(join(this.#lockPath, marker)).catch(() => undefined);
-        // Empty-only removal cannot delete a competing owner's lease.
-        await rmdir(this.#lockPath).catch(() => undefined);
+        await unlink(join(this.#leasePath, marker)).catch(() => undefined);
+        await rmdir(this.#leasePath).catch(() => undefined);
       } else {
         await rm(lease, { recursive: true, force: true }).catch(() => undefined);
       }
     }
   }
 
-  private async reapDeadUpdateLock(): Promise<boolean> {
-    const info = await lstat(this.#lockPath).catch(() => undefined);
+  private async reapDeadUpdateLock(lockPath: string): Promise<boolean> {
+    const info = await lstat(lockPath).catch(() => undefined);
     if (!info) return true;
     if (info.isSymbolicLink()) return false;
     const dead = (pid: number): boolean => {
@@ -333,30 +357,30 @@ export class SidecarInstaller {
       catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
     };
     if (info.isDirectory()) {
-      const markers = await readdir(this.#lockPath).catch(() => []);
+      const markers = await readdir(lockPath).catch(() => []);
       if (markers.length === 0) {
-        try { await rmdir(this.#lockPath); return true; } catch { return false; }
+        try { await rmdir(lockPath); return true; } catch { return false; }
       }
       if (markers.length !== 1) return false;
       const match = /^(\d+)-[0-9a-f-]{36}\.owner$/u.exec(markers[0]!);
       if (!match || !dead(Number(match[1]))) return false;
-      const owner = join(this.#lockPath, markers[0]!);
+      const owner = join(lockPath, markers[0]!);
       const ownerInfo = await lstat(owner).catch(() => undefined);
       if (!ownerInfo?.isFile() || ownerInfo.isSymbolicLink()) return false;
       try {
         await unlink(owner);
-        await rmdir(this.#lockPath).catch(() => undefined);
+        await rmdir(lockPath).catch(() => undefined);
         return true;
       } catch { return false; }
     }
-    // Migrate a dead legacy PID-file lock. New leases are directories, so
-    // unlink cannot remove a newly acquired directory at the same path.
+    // A directory lease serializes all new-client recovery of this legacy
+    // PID file. Older clients use exclusive creation and cannot replace it.
     if (!info.isFile() || info.size > 64) return false;
-    const contents = await readFile(this.#lockPath, 'utf8').catch(() => '');
+    const contents = await readFile(lockPath, 'utf8').catch(() => '');
     if (!/^\d+\n?$/u.test(contents) || !dead(Number(contents.trim()))) return false;
-    const again = await lstat(this.#lockPath).catch(() => undefined);
+    const again = await lstat(lockPath).catch(() => undefined);
     if (!again?.isFile() || again.ino !== info.ino || again.dev !== info.dev) return false;
-    try { await unlink(this.#lockPath); return true; } catch { return false; }
+    try { await unlink(lockPath); return true; } catch { return false; }
   }
 
   async createStage(): Promise<string> {
