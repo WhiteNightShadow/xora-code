@@ -345,6 +345,12 @@ There are two explicit publication channels:
    mark that GitHub Release Latest. “Stable” describes the tested application channel;
    it does **not** claim platform signing or enable signed automatic updates.
 
+For the owner-requested v0.2.9 publication, the advertised matrix is macOS arm64,
+Windows x64 and Linux x64 (four installers). All three targets must pass the same
+native and returned-artifact verification. Upload only installers; place the combined
+SHA-256 values in the Release body and retain SBOM/provenance reports locally. Do not
+label an older Intel build as v0.2.9. Other stable releases retain the default matrix above.
+
 The formal signed workflow is a separate, manually invoked boundary. It must continue
 to fail closed until all platform certificates and both Ed25519 trust anchors are
 configured. Artifacts from these unsigned builders must never be inserted into that
