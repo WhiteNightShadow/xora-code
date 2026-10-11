@@ -84,7 +84,7 @@ export class GrokSidecarSupervisor {
         this.signalTree(child, force ? 'SIGKILL' : 'SIGTERM');
     }
 
-    launch(root: string, providerEnvironment: NodeJS.ProcessEnv): SidecarLaunch {
+    launch(root: string, providerEnvironment: NodeJS.ProcessEnv, trustCurrentFolder = false): SidecarLaunch {
         if (this.running || this.stopPromise) {
             throw new Error('This window already has a Grok sidecar.');
         }
@@ -94,7 +94,7 @@ export class GrokSidecarSupervisor {
             Object.values(providerEnvironment).filter((value): value is string =>
                 typeof value === 'string' && value.length > 0)
         );
-        const args = ['--no-auto-update', '--cwd', root, 'agent', '--no-leader', 'stdio'];
+        const args = [...(trustCurrentFolder ? ['--trust'] : []), '--no-auto-update', '--cwd', root, 'agent', '--no-leader', 'stdio'];
         let child: ChildProcessWithoutNullStreams;
         try {
             const environment = this.sanitizedEnvironment(providerEnvironment);
@@ -285,7 +285,9 @@ export class GrokSidecarSupervisor {
             return binary;
         }
 
-        const resourceRoot = path.join(process.resourcesPath, 'sidecars', 'grok');
+        const resourceRoot = app.isPackaged
+            ? path.join(process.resourcesPath, 'sidecars', 'grok')
+            : path.resolve(app.getAppPath(), '..', '..', 'resources', 'sidecars', 'grok');
         return this.assertBinary(path.join(resourceRoot, process.platform === 'win32' ? 'grok.exe' : 'grok'), resourceRoot);
     }
 

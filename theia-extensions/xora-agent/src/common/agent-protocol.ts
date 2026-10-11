@@ -681,6 +681,10 @@ export interface ManagementResult {
 }
 
 export interface ComponentUpdateStatus {
+    source?: 'official-npm' | 'xora-signed';
+    currentVersion?: string;
+    availableVersion?: string;
+    canRollback?: boolean;
     enabled: boolean;
     configured: boolean;
     channel: 'stable' | 'beta' | 'nightly';
@@ -767,6 +771,7 @@ export interface AgentHostService extends RpcServer<AgentHostClient> {
     loginGrokSubscription(): Promise<ManagementResult>;
     logoutGrokSubscription(): Promise<ManagementResult>;
     getSidecarUpdateStatus(): Promise<ComponentUpdateStatus>;
+    checkSidecarUpdate(): Promise<ComponentUpdateStatus>;
     applySidecarUpdate(): Promise<ComponentUpdateResult>;
     rollbackSidecarUpdate(): Promise<ComponentUpdateResult>;
     inspect(): Promise<ManagementResult>;

@@ -16,7 +16,10 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
     protected readonly vault = new SecretVault();
     protected readonly providers = new ProviderRegistry(this.vault);
     protected readonly security = new WorkspaceSecurityStore();
-    protected readonly updates = new SidecarUpdateCoordinator();
+    protected readonly updates = new SidecarUpdateCoordinator(
+        () => this.prepareSidecarActivation(),
+        () => { for (const service of this.services) service.sidecarActivationSettled(); }
+    );
     protected grokHomeWatcher: FSWatcher | undefined;
     protected grokHomeNotification: NodeJS.Timeout | undefined;
     protected grokAuthenticationNotificationPending = false;
@@ -70,7 +73,7 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
             appSessionId => this.broadcastSessionDeleted(service, appSessionId),
             operation => this.coordinateSubscriptionAuthentication(service, operation),
             this.updates,
-            () => ![...this.services].some(candidate => candidate.runtimeActive)
+            () => !this.updates.busy && ![...this.services].some(candidate => candidate.componentUpdateBlocked)
         );
         service.setClient(client);
         this.services.add(service);
@@ -83,6 +86,15 @@ export class AgentHostManager implements ElectronMainApplicationContribution {
         // A failed/unconfirmed teardown must remain registered so app shutdown
         // can still kill the process and component updates see it as active.
         this.services.delete(service);
+    }
+
+    protected async prepareSidecarActivation(): Promise<void> {
+        // Validate every window before stopping any idle runtime. New starts,
+        // prompts and CLI operations are fenced by the shared coordinator.
+        if ([...this.services].some(service => service.componentUpdateBlocked)) {
+            throw new Error('请先完成或停止所有窗口中的 Agent 任务，再安装或回滚 Grok。');
+        }
+        for (const service of this.services) await service.prepareSidecarActivation();
     }
 
     onStop(_application: ElectronMainApplication): void {

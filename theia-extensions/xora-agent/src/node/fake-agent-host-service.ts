@@ -708,6 +708,10 @@ export class FakeAgentHostService implements AgentHostService {
         return { enabled: true, configured: true, channel: 'stable', message: 'Fixture component updater is ready.' };
     }
 
+    async checkSidecarUpdate(): Promise<ComponentUpdateStatus> {
+        return this.getSidecarUpdateStatus();
+    }
+
     async applySidecarUpdate(): Promise<ComponentUpdateResult> {
         return { status: 'up-to-date', version: 'fake-0.1.0' };
     }

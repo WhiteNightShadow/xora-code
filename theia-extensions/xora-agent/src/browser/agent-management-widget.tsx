@@ -552,18 +552,26 @@ export class AgentManagementWidget extends ReactWidget {
                     运行时与更新 · Grok Build <code>{componentChannelLabel(this.componentUpdate.channel)}</code>
                 </summary>
                 <p>{this.componentUpdate.message}</p>
+                {this.componentUpdate.availableVersion && <p>{this.componentUpdate.source === 'official-npm' ? '官方最新稳定版' : 'Xora 签名通道最新版本'}：<code>{this.componentUpdate.availableVersion}</code> · 当前版本：<code>{this.componentUpdate.currentVersion}</code></p>}
                 <div className='xora-provider-card-actions'>
                     <button
                         type='button'
                         className='theia-button secondary'
                         disabled={!this.componentUpdate.enabled || !this.componentUpdate.configured || this.loading}
-                        onClick={() => this.applySidecarUpdate()}>
-                        检查签名更新
+                        onClick={() => this.checkSidecarUpdate()}>
+                        检查最新版本
                     </button>
                     <button
                         type='button'
                         className='theia-button secondary'
-                        disabled={!this.componentUpdate.configured || this.loading}
+                        disabled={!this.componentUpdate.enabled || !this.componentUpdate.configured || this.loading}
+                        onClick={() => this.applySidecarUpdate()}>
+                        安装最新版本
+                    </button>
+                    <button
+                        type='button'
+                        className='theia-button secondary'
+                        disabled={!this.componentUpdate.canRollback || this.loading}
                         onClick={() => this.rollbackSidecarUpdate()}>
                         回滚到上一版本
                     </button>
@@ -1284,6 +1292,18 @@ export class AgentManagementWidget extends ReactWidget {
             this.loading = false;
             this.update();
         }
+    }
+
+    protected async checkSidecarUpdate(): Promise<void> {
+        this.loading = true;
+        this.update();
+        try {
+            this.componentUpdate = await this.service.checkSidecarUpdate();
+            const version = this.componentUpdate.availableVersion;
+            this.messages.info(version ? `最新 Grok CLI ${version}，当前 ${this.componentUpdate.currentVersion}。` : this.componentUpdate.message);
+        } catch (error) {
+            this.messages.error(`无法检查 Grok CLI 更新：${error instanceof Error ? error.message : String(error)}`);
+        } finally { this.loading = false; this.update(); }
     }
 
     protected async applySidecarUpdate(): Promise<void> {

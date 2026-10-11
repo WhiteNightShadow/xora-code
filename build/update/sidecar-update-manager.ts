@@ -7,9 +7,12 @@ import {
   mkdtemp,
   open,
   readFile,
+  readdir,
   realpath,
   rename,
+  rmdir,
   rm,
+  unlink,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import {
@@ -51,6 +54,8 @@ export class SidecarUpdateError extends Error {
 }
 
 export interface InstalledSidecarRelease {
+  source?: 'official-npm' | 'xora-signed';
+  distributionIntegrity?: string;
   version: string;
   sequence: number;
   channel: SidecarManifestPayload["channel"];
@@ -70,6 +75,7 @@ export interface SidecarUpdateState {
   homeCompatEpoch: number;
   active?: InstalledSidecarRelease;
   previous?: InstalledSidecarRelease;
+  officialHighWater?: { version: string; integrity: string };
 }
 
 export interface StagingDownloadRequest {
@@ -210,6 +216,13 @@ function validateRelease(value: unknown, path: string): InstalledSidecarRelease 
   if (!Number.isFinite(Date.parse(release.installedAt as string))) {
     throw new SidecarUpdateError("state", `${path}.installedAt must be an ISO timestamp.`);
   }
+  if (release.source !== undefined && release.source !== 'official-npm' && release.source !== 'xora-signed') {
+    throw new SidecarUpdateError('state', `${path}.source is invalid.`);
+  }
+  if (release.distributionIntegrity !== undefined &&
+      (typeof release.distributionIntegrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(release.distributionIntegrity))) {
+    throw new SidecarUpdateError('state', `${path}.distributionIntegrity is invalid.`);
+  }
   return release as unknown as InstalledSidecarRelease;
 }
 
@@ -278,23 +291,72 @@ export class SidecarInstaller {
 
   async withUpdateLock<T>(operation: () => Promise<T>): Promise<T> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
-    let handle: Awaited<ReturnType<typeof open>>;
+    // Publish a non-empty lease directory atomically. A stale lease can be
+    // reaped by unlinking only its unique marker; a new owner's marker can
+    // never be mistaken for the dead process's lock (including concurrent reapers).
+    const lease = await mkdtemp(join(this.root, '.update-lease-'));
+    const marker = `${process.pid}-${randomUUID()}.owner`;
+    let acquired = false;
     try {
-      handle = await open(this.#lockPath, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new SidecarUpdateError("busy", "Another sidecar update is already running.");
+      await writeJsonAtomic(join(lease, marker), { pid: process.pid });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await rename(lease, this.#lockPath);
+          acquired = true;
+          break;
+        } catch (error) {
+          if (!(await this.reapDeadUpdateLock())) {
+            throw new SidecarUpdateError('busy', 'Another sidecar update is already running.', error);
+          }
+        }
       }
-      throw error;
-    }
-    try {
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-      await handle.sync();
+      if (!acquired) throw new SidecarUpdateError('busy', 'Another sidecar update is already running.');
       return await operation();
     } finally {
-      await handle.close().catch(() => undefined);
-      await rm(this.#lockPath, { force: true }).catch(() => undefined);
+      if (acquired) {
+        await unlink(join(this.#lockPath, marker)).catch(() => undefined);
+        // Empty-only removal cannot delete a competing owner's lease.
+        await rmdir(this.#lockPath).catch(() => undefined);
+      } else {
+        await rm(lease, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
+  }
+
+  private async reapDeadUpdateLock(): Promise<boolean> {
+    const info = await lstat(this.#lockPath).catch(() => undefined);
+    if (!info) return true;
+    if (info.isSymbolicLink()) return false;
+    const dead = (pid: number): boolean => {
+      if (!Number.isSafeInteger(pid) || pid < 1) return false;
+      try { process.kill(pid, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+    };
+    if (info.isDirectory()) {
+      const markers = await readdir(this.#lockPath).catch(() => []);
+      if (markers.length === 0) {
+        try { await rmdir(this.#lockPath); return true; } catch { return false; }
+      }
+      if (markers.length !== 1) return false;
+      const match = /^(\d+)-[0-9a-f-]{36}\.owner$/u.exec(markers[0]!);
+      if (!match || !dead(Number(match[1]))) return false;
+      const owner = join(this.#lockPath, markers[0]!);
+      const ownerInfo = await lstat(owner).catch(() => undefined);
+      if (!ownerInfo?.isFile() || ownerInfo.isSymbolicLink()) return false;
+      try {
+        await unlink(owner);
+        await rmdir(this.#lockPath).catch(() => undefined);
+        return true;
+      } catch { return false; }
+    }
+    // Migrate a dead legacy PID-file lock. New leases are directories, so
+    // unlink cannot remove a newly acquired directory at the same path.
+    if (!info.isFile() || info.size > 64) return false;
+    const contents = await readFile(this.#lockPath, 'utf8').catch(() => '');
+    if (!/^\d+\n?$/u.test(contents) || !dead(Number(contents.trim()))) return false;
+    const again = await lstat(this.#lockPath).catch(() => undefined);
+    if (!again?.isFile() || again.ino !== info.ino || again.dev !== info.dev) return false;
+    try { await unlink(this.#lockPath); return true; } catch { return false; }
   }
 
   async createStage(): Promise<string> {
@@ -340,6 +402,15 @@ export class SidecarInstaller {
     const active = value.active === undefined ? undefined : validateRelease(value.active, "state.active");
     const previous = value.previous === undefined ? undefined : validateRelease(value.previous, "state.previous");
     const highestSequence = Number(value.highestSequence);
+    let officialHighWater: SidecarUpdateState['officialHighWater'];
+    if (value.officialHighWater !== undefined) {
+      const water = value.officialHighWater as Record<string, unknown>;
+      if (!water || typeof water !== 'object' || typeof water.version !== 'string' || !/^\d+\.\d+\.\d+$/u.test(water.version) ||
+          typeof water.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(water.integrity)) {
+        throw new SidecarUpdateError('state', 'Invalid official Grok version floor.');
+      }
+      officialHighWater = { version: water.version, integrity: water.integrity };
+    }
     if ((active && active.sequence > highestSequence) || (previous && previous.sequence > highestSequence)) {
       throw new SidecarUpdateError("state", "Release sequence exceeds the persisted anti-rollback floor.");
     }
@@ -349,6 +420,7 @@ export class SidecarInstaller {
       homeCompatEpoch: Number(value.homeCompatEpoch),
       ...(active ? { active } : {}),
       ...(previous ? { previous } : {}),
+      ...(officialHighWater ? { officialHighWater } : {}),
     };
   }
 
@@ -502,11 +574,13 @@ export class SidecarInstaller {
           activeMoved = false;
           parkedAsPrevious = true;
           const nextState: SidecarUpdateState = {
+            ...state,
             schemaVersion: 1,
             highestSequence: state.highestSequence,
             homeCompatEpoch: state.homeCompatEpoch,
             previous: state.active,
           };
+          delete nextState.active;
           await writeJsonAtomic(this.statePath, nextState);
           await this.discardStage(stagePath).catch(() => undefined);
           return embeddedRelease;
@@ -569,6 +643,7 @@ export class SidecarInstaller {
 }
 
 export interface SidecarUpdateManagerOptions {
+  beforeActivate?: () => Promise<void>;
   installer: SidecarInstaller;
   downloader: StagingDownloader;
   artifactStager: SidecarArtifactStager;
@@ -822,8 +897,10 @@ export class SidecarUpdateManager {
           homeCompatEpoch: payload.homeCompatEpoch,
           active: release,
           ...(state.active ? { previous: state.active } : {}),
+          ...(state.officialHighWater ? { officialHighWater: state.officialHighWater } : {}),
         };
         try {
+          await this.#options.beforeActivate?.();
           await this.#options.installer.activate(stagePath, candidateDirectory, state, nextState);
         } catch (error) {
           if (error instanceof SidecarActivationError && !error.rollbackComplete) preserveStage = true;

@@ -3,5 +3,6 @@
   "enabled": true,
   "channel": "stable",
   "manifestUrl": "https://github.com/WhiteNightShadow/xora-code/releases/latest/download/grok-sidecar-update.json",
-  "homeCompatEpoch": 1
+  "homeCompatEpoch": 1,
+  "source": "official-npm"
 }

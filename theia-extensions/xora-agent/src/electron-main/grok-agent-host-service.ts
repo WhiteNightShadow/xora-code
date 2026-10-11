@@ -440,7 +440,34 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     get runtimeActive(): boolean {
-        return this.supervisor.running || !!this.acp || (!!this.managementChild && this.managementChild.exitCode === null);
+        return this.supervisor.running || !!this.acp || !!this.pendingRuntimeStarts?.size || this.phase === 'updating'
+            || (!!this.managementChild && this.managementChild.exitCode === null);
+    }
+
+    get componentUpdateBlocked(): boolean {
+        return !!this.activePrompts?.size || !!this.promptClaimTokens?.size || !!this.pendingPermissions?.size
+            || !!this.pendingPromptTerminals?.size || !!this.orphanedGoalSessions?.size
+            || this.phase === 'draining'
+            || (!!this.managementChild && this.managementChild.exitCode === null);
+    }
+
+    async prepareSidecarActivation(): Promise<void> {
+        if (this.componentUpdateBlocked) throw new Error('请先完成或停止 Agent 任务，再更新 Grok。');
+        // Cancel only idle prewarming. Public stop closes an initializing ACP
+        // request before entering the lifecycle queue, avoiding its full timeout.
+        if (this.supervisor.running || this.acp || this.pendingRuntimeStarts?.size) await this.stopRuntime();
+        await this.withLifecycle(async () => {
+            if (this.componentUpdateBlocked) throw new Error('请先完成或停止 Agent 任务，再更新 Grok。');
+            this.phase = 'updating';
+            this.emitSnapshot('正在切换已验证的 Grok CLI 组件…');
+        });
+    }
+
+    sidecarActivationSettled(): void {
+        if (this.phase === 'updating') {
+            this.phase = 'stopped';
+            this.emitSnapshot('Grok 更新操作完成，可重新连接 Agent。');
+        }
     }
 
     /**
@@ -586,6 +613,7 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected async startRuntimeLocked(request: StartRuntimeRequest): Promise<RuntimeSnapshot> {
+        if (this.updates?.busy) throw new Error('Grok 组件正在更新，请完成后再启动 Agent。');
         if (this.disposed) throw new Error('This Agent host window has been disposed.');
         const root = this.security.canonicalRoot(request.workspaceRoot);
         if (root !== this.workspaceRoot) {
@@ -660,7 +688,11 @@ export class GrokAgentHostService implements AgentHostService {
                 // can see the custom profile and its fetched model catalogue.
                 this.currentSecrets = this.providers.redactionSecrets();
                 this.runtimeProviderEpoch = runtimeEpoch;
-                return this.supervisor.launch(root, environment);
+                if (this.updates?.busy) throw new Error('Grok 组件正在更新，请完成后再启动 Agent。');
+                // Theia's explicit, scoped workspace grant also authorizes
+                // Grok 1.x project Skills/MCP through its native folder trust store.
+                const trustCurrentFolder = !!this.theiaTrustedRoots?.has(root) && this.security.isTrusted(root);
+                return this.supervisor.launch(root, environment, trustCurrentFolder);
             });
             this.sidecarVersion = launch.version;
             const acp = new AcpClient({
@@ -1805,6 +1837,7 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     async sendPrompt(request: PromptRequest): Promise<PromptReceipt> {
+        if (this.updates?.busy) throw new Error('Grok 正在更新，请完成后再发送任务。');
         const record = this.sessions.get(request.sessionId);
         if (!record) {
             throw new SessionNotFoundError(request.sessionId);
@@ -1868,6 +1901,7 @@ export class GrokAgentHostService implements AgentHostService {
         const images = validatePromptImageAttachments(request.attachments);
         if (!request.text.length && !images.blocks.length) throw new Error('A prompt cannot be empty.');
         const admitted = await this.withCurrentIntegrationRead(record.workspaceRoot, async () => {
+            if (this.updates?.busy) throw new Error('Grok 正在更新，请完成后再发送任务。');
             if (this.activePrompts.has(request.sessionId)) {
                 throw new Error('This session already has a running task.');
             }
@@ -3296,10 +3330,24 @@ export class GrokAgentHostService implements AgentHostService {
         return this.updates.status();
     }
 
+    async checkSidecarUpdate(): Promise<ComponentUpdateStatus> {
+        return this.updates.checkLatest();
+    }
+
+    protected async waitForComponentUpdateIdle(): Promise<void> {
+        // A completed prompt can briefly leave a queued prewarm or passive
+        // settings query. Let it settle without cancelling any actual work.
+        for (let attempt = 0; attempt < 20; attempt++) {
+            if (this.updates.busy) throw new Error('另一个窗口正在更新 Grok，请等待完成。');
+            if (this.canApplyUpdate()) return;
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (!this.canApplyUpdate()) throw new Error('请先完成或停止所有窗口中的 Agent 任务，再更新或回滚 Grok。');
+    }
+
     async applySidecarUpdate(): Promise<ComponentUpdateResult> {
-        if (!this.canApplyUpdate()) throw new Error('Finish or stop Agent runtimes in every window before activating a sidecar update.');
-        this.phase = 'updating';
-        this.emitSnapshot('Verifying and staging a signed Grok component update…');
+        await this.waitForComponentUpdateIdle();
+        this.emitSnapshot('正在下载、校验并测试 Grok CLI 更新…');
         try {
             const result = await this.updates.applyLatest();
             return {
@@ -3308,21 +3356,18 @@ export class GrokAgentHostService implements AgentHostService {
                 ...(result.status === 'installed' && result.previous ? { previousVersion: result.previous.version } : {})
             };
         } finally {
-            this.phase = 'stopped';
-            this.emitSnapshot('A newly activated sidecar is used only by new runtimes.');
+            this.emitSnapshot('Grok 更新操作完成，新连接将使用当前版本。');
         }
     }
 
     async rollbackSidecarUpdate(): Promise<ComponentUpdateResult> {
-        if (!this.canApplyUpdate()) throw new Error('Finish or stop Agent runtimes in every window before rolling back the sidecar.');
-        this.phase = 'updating';
-        this.emitSnapshot('Rolling back to the previously verified Grok component…');
+        await this.waitForComponentUpdateIdle();
+        this.emitSnapshot('正在回滚到已验证的 Grok CLI…');
         try {
             const release = await this.updates.rollback();
             return { status: 'installed', version: release.version };
         } finally {
-            this.phase = 'stopped';
-            this.emitSnapshot('Rollback activation completed; new runtimes use the selected component.');
+            this.emitSnapshot('Grok 回滚操作完成，新连接将使用当前版本。');
         }
     }
 
@@ -7069,6 +7114,7 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected async runCli(args: string[], expectJson = true, options: GrokCommandOptions = {}): Promise<ManagementResult> {
+        if (this.updates?.busy) return { ok: false, error: 'Grok 组件正在更新，请稍后重试。' };
         const root = options.cwd ?? this.workspaceRoot ?? process.cwd();
         if (args[0] === 'mcp' && !options.injectedEnvironment) {
             try {
@@ -7089,6 +7135,7 @@ export class GrokAgentHostService implements AgentHostService {
         if (this.managementChild && this.managementChild.exitCode === null) {
             return Promise.resolve({ ok: false, error: '另一个 Agent 集成查询正在执行，请稍后重试。' });
         }
+        if (this.updates?.busy) return { ok: false, error: 'Grok 组件正在更新，请稍后重试。' };
         const binary = this.supervisor.binaryPath();
         // Only MCP-native commands receive config-bound MCP credentials.
         // Skills/plugin/inspect commands must not inherit executable-service
@@ -7099,7 +7146,8 @@ export class GrokAgentHostService implements AgentHostService {
             .filter((value): value is string => typeof value === 'string' && value.length > 0);
         const exactSecrets = [...new Set([...(this.currentSecrets ?? []), ...commandSecrets])];
         return new Promise(resolve => {
-            const child = spawn(binary, ['--no-auto-update', '--cwd', root, ...args], {
+            const trustArgs = ['inspect', 'mcp', 'plugin'].includes(args[0]) && this.isWorkspaceTrusted(root) ? ['--trust'] : [];
+            const child = spawn(binary, [...trustArgs, '--no-auto-update', '--cwd', root, ...args], {
                 cwd: root,
                 env: this.supervisor.commandEnvironment(injectedEnvironment),
                 shell: false,

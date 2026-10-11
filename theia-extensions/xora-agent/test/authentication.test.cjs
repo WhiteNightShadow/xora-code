@@ -178,7 +178,7 @@ test('configured xAI relays use a secret-free managed Grok model and profile-sco
     assert.match(host, /providerCredentialSnapshot\(providerId\)/);
     assert.match(host, /probeProviderModels/);
     assert.match(host, /requestProviderModelCatalog/);
-    assert.match(host, /withProviderEnvironment\(provider\.id, \(providerEnvironment, currentProvider, runtimeEpoch\)[\s\S]*this\.runtimeProviderEpoch = runtimeEpoch[\s\S]*supervisor\.launch\(root, environment\)/);
+    assert.match(host, /withProviderEnvironment\(provider\.id, \(providerEnvironment, currentProvider, runtimeEpoch\)[\s\S]*this\.runtimeProviderEpoch = runtimeEpoch[\s\S]*supervisor\.launch\(root, environment, trustCurrentFolder\)/);
 });
 
 test('isolated API-provider homes disable remote fetch in the Grok features table', t => {

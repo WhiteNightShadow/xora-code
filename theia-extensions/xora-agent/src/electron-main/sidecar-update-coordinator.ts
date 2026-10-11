@@ -3,13 +3,17 @@ import {
     AcpInitializeSmokeRequest,
     ArtifactStagingRequest,
     InstalledSidecarRelease,
+    OfficialGrokSource,
+    OfficialGrokUpdater,
+    OfficialGrokRelease,
     PlatformSignatureRequest,
     SidecarInstaller,
     SidecarUpdateManager,
     SidecarUpdateResult,
     StagingDownloadRequest,
     TrustedManifestKey,
-    VersionSmokeRequest
+    VersionSmokeRequest,
+    verifySignedSidecarManifest
 } from '@xora-code/update-build-tools';
 import { app } from 'electron';
 import { spawn, spawnSync } from 'child_process';
@@ -17,6 +21,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { ComponentUpdateStatus } from '../common/agent-protocol';
 import { GrokSidecarSupervisor } from './sidecar-supervisor';
 
 const EMPTY_PATCH_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -24,6 +29,7 @@ const EMPTY_PATCH_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 interface UpdateConfig {
     schemaVersion: 1;
     enabled: boolean;
+    source?: 'official-npm' | 'xora-signed';
     channel: 'stable' | 'beta' | 'nightly';
     manifestUrl: string;
     homeCompatEpoch: number;
@@ -34,45 +40,75 @@ interface TrustedKeysFile {
     keys: TrustedManifestKey[];
 }
 
-export interface ComponentUpdateStatus {
-    enabled: boolean;
-    configured: boolean;
-    channel: 'stable' | 'beta' | 'nightly';
-    manifestUrl?: string;
-    message: string;
-}
-
 /** Electron-main-only coordinator for independently signed Grok components. */
 export class SidecarUpdateCoordinator {
+    constructor(
+        protected readonly prepareActivation: () => Promise<void> = async () => undefined,
+        protected readonly activationSettled: () => void = () => undefined
+    ) {}
     protected readonly supervisor = new GrokSidecarSupervisor();
     protected readonly componentRoot = path.join(app.getPath('userData'), 'components', 'grok');
+
+    protected readonly officialSource = new OfficialGrokSource();
+    protected latestOfficial: OfficialGrokRelease | undefined;
+    protected latestSignedVersion: string | undefined;
+    protected updateBusy = false;
+    get busy(): boolean { return this.updateBusy; }
 
     status(): ComponentUpdateStatus {
         try {
             const config = this.readConfig();
-            const keys = this.readKeys();
+            const official = config.source === 'official-npm';
+            const keys = official ? [] : this.readKeys();
             const binary = this.embeddedBinaryPath();
-            const configured = keys.length > 0 && fs.existsSync(binary);
+            const installed = this.installedVersion();
+            const configured = fs.existsSync(binary) && (official || keys.length > 0);
+            const statePath = path.join(this.componentRoot, 'update-state.json');
+            const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : undefined;
             return {
-                enabled: config.enabled,
-                configured,
-                channel: config.channel,
-                manifestUrl: config.manifestUrl,
-                message: !fs.existsSync(binary)
-                    ? '当前构建未安装 Grok Build 0.2.102 基线，登录和 Agent 暂不可用。请使用包含该组件的完整构建。'
-                    : !config.enabled
-                    ? '产品配置已关闭组件更新。'
-                    : keys.length === 0
-                        ? '已安装 Grok Build 0.2.102，可正常登录和使用 Agent。签名更新公钥尚未配置，因此暂不提供组件在线更新。'
-                        : 'Grok 组件签名更新已就绪。'
+                enabled: config.enabled, configured, channel: config.channel,
+                source: official ? 'official-npm' : 'xora-signed',
+                currentVersion: installed,
+                availableVersion: official ? this.latestOfficial?.version : this.latestSignedVersion,
+                canRollback: !!state?.active,
+                manifestUrl: official ? 'https://registry.npmjs.org/@xai-official/grok/latest' : config.manifestUrl,
+                message: !fs.existsSync(binary) ? '当前构建缺少内置 Grok 组件，请使用完整安装包。'
+                    : !config.enabled ? '产品配置已关闭组件更新。'
+                    : official ? `当前 Grok CLI ${installed}。从 xAI 官方 npm 分发源检查稳定版，校验 SHA-512 和 ACP 后安装；安装时自动切换空闲 Agent，正在执行任务时请先结束任务。`
+                    : keys.length === 0 ? `当前 Grok CLI ${installed}。Xora 签名更新公钥尚未配置。`
+                    : 'Grok 组件签名更新已就绪。'
             };
         } catch (error) {
             return { enabled: false, configured: false, channel: 'stable', message: errorMessage(error) };
         }
     }
 
-    async applyLatest(): Promise<SidecarUpdateResult> {
+    async checkLatest(): Promise<ComponentUpdateStatus> {
         const config = this.readConfig();
+        if (!config.enabled) throw new Error('Grok 组件更新已关闭。');
+        if (config.source === 'official-npm') {
+            this.latestOfficial = await this.officialSource.latest(platformTarget());
+        } else {
+            const keys = this.readKeys();
+            if (!keys.length) throw new Error('Xora 签名更新公钥尚未配置。');
+            const manifest = await fetchJson(config.manifestUrl, 1024 * 1024);
+            this.latestSignedVersion = verifySignedSidecarManifest(manifest, keys, { expectedChannel: config.channel }).payload.version;
+        }
+        return this.status();
+    }
+
+    protected installedVersion(): string {
+        const release = path.join(this.componentRoot, 'active', 'release.json');
+        return fs.existsSync(release) ? JSON.parse(fs.readFileSync(release, 'utf8')).version : '0.2.102';
+    }
+
+    async applyLatest(): Promise<SidecarUpdateResult> {
+        return this.exclusive(() => this.applyLatestUnlocked());
+    }
+
+    protected async applyLatestUnlocked(): Promise<SidecarUpdateResult> {
+        const config = this.readConfig();
+        if (config.source === 'official-npm') return this.applyOfficial(config);
         const keys = this.readKeys();
         if (!config.enabled) throw new Error('Grok component updates are disabled.');
         if (!keys.length) throw new Error('No trusted Ed25519 sidecar manifest key is configured; release remains blocked.');
@@ -81,6 +117,7 @@ export class SidecarUpdateCoordinator {
         const fixturePath = this.updateContractPath('acp-initialize-fixture.json');
         const fixtureSha256 = sha256File(fixturePath);
         const manager = new SidecarUpdateManager({
+            beforeActivate: this.prepareActivation,
             installer: new SidecarInstaller(this.componentRoot),
             downloader: { download: request => downloadArtifact(request) },
             artifactStager: { stage: request => stageRawExecutable(request) },
@@ -100,10 +137,36 @@ export class SidecarUpdateCoordinator {
         return manager.apply(manifest);
     }
 
-    async rollback(): Promise<InstalledSidecarRelease> {
-        const config = this.readConfig();
+    protected async applyOfficial(config: UpdateConfig): Promise<SidecarUpdateResult> {
+        if (!config.enabled) throw new Error('Grok 组件更新已关闭。');
+        this.latestOfficial = await this.officialSource.latest(platformTarget());
         const embedded = await this.bootstrapEmbedded(config);
-        return new SidecarInstaller(this.componentRoot).rollbackToPrevious(embedded);
+        const fixturePath = this.updateContractPath('acp-initialize-fixture.json');
+        return new OfficialGrokUpdater({
+            beforeActivate: this.prepareActivation,
+            installer: new SidecarInstaller(this.componentRoot), source: this.officialSource, embedded,
+            verifyVersion: async (binary, version) => {
+                const actual = await smokeVersion({ binaryPath: binary, args: ['--version'], expectedVersion: version });
+                if (actual !== version) throw new Error(`下载的 Grok 版本 ${actual} 与官方版本 ${version} 不一致。`);
+            },
+            verifyAcp: binary => this.smokeAcp({ binaryPath: binary,
+                args: ['--no-auto-update', '--cwd', os.tmpdir(), 'agent', '--no-leader', 'stdio'],
+                workspaceRoot: os.tmpdir(), fixtureSha256: sha256File(fixturePath) }, fixturePath)
+        }).apply(this.latestOfficial);
+    }
+
+    async rollback(): Promise<InstalledSidecarRelease> {
+        return this.exclusive(async () => {
+            const embedded = await this.bootstrapEmbedded(this.readConfig());
+            await this.prepareActivation();
+            return new SidecarInstaller(this.componentRoot).rollbackToPrevious(embedded);
+        });
+    }
+
+    protected async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+        if (this.updateBusy) throw new Error('另一个窗口正在更新或回滚 Grok，请等待完成。');
+        this.updateBusy = true;
+        try { return await operation(); } finally { this.updateBusy = false; this.activationSettled(); }
     }
 
     protected async bootstrapEmbedded(config: UpdateConfig): Promise<InstalledSidecarRelease> {
@@ -143,25 +206,36 @@ export class SidecarUpdateCoordinator {
         const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')) as Record<string, unknown>;
         const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'xora-update-smoke-'));
         const args = request.args.map(argument => argument === request.workspaceRoot ? workspace : argument);
+        const home = path.join(workspace, '.grok');
+        fs.mkdirSync(home, { mode: 0o700 });
+        fs.writeFileSync(path.join(home, 'config.toml'), '[features]\nremote_fetch = false\n');
         const child = spawn(request.binaryPath, args, {
             cwd: workspace,
-            env: this.supervisor.commandEnvironment(),
+            env: this.supervisor.commandEnvironment({ HOME: workspace, USERPROFILE: workspace, GROK_HOME: home }),
             shell: false,
             windowsHide: true,
             detached: process.platform !== 'win32',
             stdio: ['pipe', 'pipe', 'pipe']
         });
         const client = new AcpClient({ write: createNodeWritableSink(child.stdin), defaultTimeoutMs: 15_000, maxLineBytes: 2 * 1024 * 1024 });
+        const exited = new Promise<void>(resolve => child.once('close', () => resolve()));
+        child.once('error', error => client.close(error));
         const consume = client.consume(child.stdout).catch(() => undefined);
         let stderr = '';
         child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-32_000); });
         try {
             const response = await client.request<Record<string, unknown>>('initialize', fixture, { timeoutMs: 15_000 });
-            if (typeof response.protocolVersion !== 'number') throw new Error(`ACP initialize did not return a protocol version. ${stderr}`);
+            if (response.protocolVersion !== fixture.protocolVersion || !response.agentCapabilities) throw new Error(`ACP initialize did not return a protocol version. ${stderr}`);
         } finally {
             client.close(new Error('ACP update smoke complete.'));
             this.supervisor.terminateProcessTree(child, true);
-            await Promise.race([consume, new Promise(resolve => setTimeout(resolve, 1000))]);
+            let timer: NodeJS.Timeout | undefined;
+            try {
+                await Promise.race([exited, new Promise<never>((_resolve, reject) => {
+                    timer = setTimeout(() => reject(new Error('无法确认 Grok 验证进程已退出，未激活更新。请重试。')), 5_000);
+                })]);
+            } finally { if (timer) clearTimeout(timer); }
+            await consume;
             fs.rmSync(workspace, { recursive: true, force: true });
         }
     }
@@ -170,6 +244,8 @@ export class SidecarUpdateCoordinator {
         const value = JSON.parse(fs.readFileSync(path.join(this.updateResourceRoot(), 'config.json'), 'utf8')) as UpdateConfig;
         if (value.schemaVersion !== 1 || typeof value.enabled !== 'boolean' || !['stable', 'beta', 'nightly'].includes(value.channel) ||
             !Number.isSafeInteger(value.homeCompatEpoch) || value.homeCompatEpoch < 1) throw new Error('Invalid component update configuration.');
+        if (value.source !== undefined && value.source !== 'official-npm' && value.source !== 'xora-signed') throw new Error('Invalid Grok update source.');
+        if (value.source === 'official-npm' && value.channel !== 'stable') throw new Error('Official Grok updates currently require the stable channel.');
         const url = new URL(value.manifestUrl);
         if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Component manifest URL must be credential-free HTTPS.');
         return value;
