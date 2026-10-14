@@ -3801,6 +3801,143 @@ test('a failed first history read preserves the currently visible conversation a
         widget.promptLaneKey('/fixture', snapshot.providerId, visible.appSessionId));
 });
 
+function historyRecoveryHarness() {
+    const XoraAgentWidget = widgetClass();
+    const widget = Object.create(XoraAgentWidget.prototype);
+    const visible = session('visible', 'completed');
+    const requested = session('requested', 'completed');
+    const snapshot = runtimeSnapshot('/fixture', [visible, requested], visible.appSessionId);
+    const calls = { history: 0, hydrate: 0, prompt: 0, create: 0 };
+    Object.assign(widget, {
+        sessionLoadGeneration: 0,
+        agentContextGeneration: 0,
+        sessionHistoryCatchup: new Map(),
+        roots: ['/fixture'],
+        sessionLoading: false,
+        openSessionTabs: [visible.appSessionId]
+    });
+    widget.activeComposerLaneKey = widget.promptLaneKey('/fixture', snapshot.providerId, visible.appSessionId);
+    widget.storeActiveComposerDraft = () => undefined;
+    widget.resetTranscriptWindow = () => undefined;
+    widget.activateComposerLane = key => { widget.activeComposerLaneKey = key; };
+    widget.followTranscript = () => undefined;
+    widget.showInlineNotice = () => undefined;
+    widget.closePopover = () => undefined;
+    widget.update = () => undefined;
+    widget.model = {
+        snapshot,
+        transcript: [{ id: 'visible-history', kind: 'assistant', text: 'Visible local history' }],
+        showSessionHistory: (selected, events) => {
+            snapshot.activeSessionId = selected.appSessionId;
+            widget.model.transcript = events;
+        },
+        updateSession: () => undefined
+    };
+    widget.service = {
+        getSessionHistory: async () => {
+            calls.history += 1;
+            return [{ kind: 'text-delta', sessionId: requested.appSessionId, role: 'assistant', text: 'Requested local history' }];
+        },
+        loadSession: async () => {
+            calls.hydrate += 1;
+            throw new Error('Unknown session: fixture ACP id');
+        },
+        sendPrompt: async () => { calls.prompt += 1; assert.fail('history recovery must never replay a prompt'); },
+        createSession: async () => { calls.create += 1; assert.fail('history recovery must not create another local conversation'); }
+    };
+    return { widget, requested, visible, snapshot, calls };
+}
+
+test('ACP hydration failure after a successful local read keeps history and offers connection recovery', async () => {
+    const { widget, requested, snapshot, calls } = historyRecoveryHarness();
+    await widget.openSession(requested);
+
+    assert.equal(snapshot.activeSessionId, requested.appSessionId);
+    assert.equal(widget.model.transcript[0].text, 'Requested local history');
+    assert.equal(widget.sessionHistoryRecovery.kind, 'connection');
+    assert.equal(widget.sessionHistoryRecovery.showingPreviousTranscript, false);
+    assert.match(widget.sessionHistoryRecovery.message, /连接暂时不可用.*重新连接/);
+    assert.doesNotMatch(widget.sessionHistoryRecovery.message, /已失效|新会话|无法读取/);
+    const card = widget.renderSessionHistoryRecovery(widget.sessionHistoryRecovery);
+    const labels = JSON.stringify(card);
+    assert.match(labels, /会话连接暂时无法恢复/);
+    assert.match(labels, /本地记录已加载/);
+    assert.doesNotMatch(labels, /会话记录暂时无法读取|上一个会话/);
+    assert.equal(widget.sessionLoading, false);
+    assert.deepEqual(calls, { history: 1, hydrate: 1, prompt: 0, create: 0 });
+});
+
+test('successful background hydration clears only the matching connection recovery card', async () => {
+    const { widget, requested } = historyRecoveryHarness();
+    await widget.openSession(requested);
+    widget.service.loadSession = async () => requested;
+    await widget.hydrateActiveSessionInBackground();
+    assert.equal(widget.sessionHistoryRecovery, undefined);
+    assert.equal(widget.model.transcript[0].text, 'Requested local history');
+
+    const unrelated = { sessionId: 'another', kind: 'connection', message: 'another connection failed', showingPreviousTranscript: false };
+    widget.sessionHistoryRecovery = unrelated;
+    await widget.hydrateActiveSessionInBackground();
+    assert.equal(widget.sessionHistoryRecovery, unrelated);
+
+    const historyFailure = { sessionId: requested.appSessionId, kind: 'history', message: 'local read failed', showingPreviousTranscript: false };
+    widget.sessionHistoryRecovery = historyFailure;
+    await widget.hydrateActiveSessionInBackground();
+    assert.equal(widget.sessionHistoryRecovery, historyFailure, 'successful ACP connection cannot prove a local history read succeeded');
+});
+
+test('reload retries a failed local read even when the visible session is already hydrated', async () => {
+    const { widget, requested, calls } = historyRecoveryHarness();
+    widget.model.snapshot.activeSessionId = requested.appSessionId;
+    widget.hydratedSessionKeyState().add(widget.agentContextKey('/fixture', 'grok-subscription', requested.appSessionId));
+    widget.sessionHistoryRecovery = {
+        sessionId: requested.appSessionId,
+        kind: 'history',
+        message: 'temporary local history failure',
+        showingPreviousTranscript: false
+    };
+    await widget.openSession(requested);
+
+    assert.equal(calls.history, 1, 'a recovery card must bypass the hydrated-session fast return');
+    assert.equal(calls.hydrate, 0, 'an already-ready ACP session need not be loaded again');
+    assert.equal(widget.sessionHistoryRecovery, undefined);
+    assert.equal(widget.model.transcript[0].text, 'Requested local history');
+    assert.equal(calls.prompt, 0);
+    assert.equal(calls.create, 0);
+});
+
+test('a missing local history lookup preserves the previous conversation without task resend guidance', async () => {
+    const { widget, requested, visible, calls } = historyRecoveryHarness();
+    widget.service.getSessionHistory = async () => {
+        calls.history += 1;
+        const error = new Error('SESSION_NOT_FOUND: Unknown Xora Code session.');
+        error.code = 'SESSION_NOT_FOUND';
+        throw error;
+    };
+    await widget.openSession(requested);
+
+    assert.equal(widget.model.snapshot.activeSessionId, visible.appSessionId);
+    assert.equal(widget.model.transcript[0].text, 'Visible local history');
+    assert.equal(widget.sessionHistoryRecovery.kind, 'history');
+    assert.equal(widget.sessionHistoryRecovery.showingPreviousTranscript, true);
+    assert.match(widget.sessionHistoryRecovery.message, /本地会话索引.*重新加载/);
+    assert.doesNotMatch(widget.sessionHistoryRecovery.message, /原会话已失效|任务|新会话/);
+    assert.deepEqual(calls, { history: 1, hydrate: 0, prompt: 0, create: 0 });
+    assert.equal(widget.activeComposerLaneKey,
+        widget.promptLaneKey('/fixture', 'grok-subscription', visible.appSessionId));
+});
+
+test('reconnecting an unreadable ACP session reuses local history and clears recovery on success', async () => {
+    const { widget, requested, calls } = historyRecoveryHarness();
+    await widget.openSession(requested);
+    widget.service.loadSession = async () => { calls.hydrate += 1; return requested; };
+    await widget.openSession(requested);
+
+    assert.equal(widget.sessionHistoryRecovery, undefined);
+    assert.equal(widget.model.transcript[0].text, 'Requested local history');
+    assert.deepEqual(calls, { history: 1, hydrate: 2, prompt: 0, create: 0 });
+});
+
 test('a crashed runtime restarts exactly once after all prompt lanes settle without replaying a prompt', () => {
     const XoraAgentWidget = widgetClass();
     const widget = Object.create(XoraAgentWidget.prototype);

@@ -474,7 +474,7 @@ export class RuntimeMcpRegistry {
             }
             const expanded = expandTemplate(value, environment, server, 'environment value', redactions);
             validateRuntimeString(expanded, MAX_VALUE_BYTES, server, 'environment value', true);
-            redactions.add(expanded);
+            if (!isLiteralOperationalEnvironment(name, value)) redactions.add(expanded);
             return { name, value: expanded };
         });
         if (server.value.bearer_token_env_var !== undefined) {
@@ -828,6 +828,21 @@ function readBoundedRegularFile(configPath: string, maxBytes: number, scope: Mcp
  * the bound is reached would silently weaken the logging boundary, so
  * oversized configurations fail before any descriptor is passed to ACP.
  */
+/** Known literal switches and counts are configuration, not credential values.
+ * Unknown names, credential-shaped names and all template sources retain the
+ * conservative exact-value redaction policy, including one-character secrets.
+ */
+function isLiteralOperationalEnvironment(name: string, value: string): boolean {
+    if (value.includes('${')
+        || /(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSCODE|PASSPHRASE|AUTH|COOKIE|CREDENTIAL|SESSION|SIGNATURE|LICENSE|DSN|(?:^|_)PIN(?:_|$))/i.test(name)) {
+        return false;
+    }
+    if (/(?:^|_)(?:AUTOLAUNCH|ENABLED|DISABLED)$/.test(name)) return /^(?:0|1|true|false)$/i.test(value);
+    if (/(?:^|_)(?:PORT|WAIT_SEC|TIMEOUT_SEC|TIMEOUT_MS|RETRIES)$/.test(name)) return /^\d{1,9}$/.test(value);
+    if (/(?:^|_)TOOL_PROFILE$/.test(name)) return /^(?:all|default|minimal|full)$/.test(value);
+    return false;
+}
+
 class RedactionValueCollector {
     protected readonly collected = new Set<string>();
     protected totalBytes = 0;

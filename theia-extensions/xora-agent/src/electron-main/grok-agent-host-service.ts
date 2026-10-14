@@ -76,6 +76,7 @@ import {
     SessionPromptConflictError
 } from './session-repository';
 import { buildSessionExportMarkdown } from './session-export';
+import { redactAgentHostEvent } from './agent-event-redaction';
 import { GrokSidecarSupervisor, SidecarTerminationUnconfirmedError } from './sidecar-supervisor';
 import { SidecarUpdateCoordinator } from './sidecar-update-coordinator';
 import { PermissionSubject, WorkspaceSecurityStore } from './workspace-security';
@@ -1314,10 +1315,6 @@ export class GrokAgentHostService implements AgentHostService {
             && this.providerId === record.providerId
             && this.runtimeProviderEpoch === recordEpoch
             && recordEpoch === this.providers.runtimeEpoch(record.providerId);
-        if (matchingRuntime() && this.activeSessionId === appSessionId && this.loadedSessionIds.has(appSessionId)) {
-            const synchronized = await this.synchronizeLoadedSessionModel(record, globallySelectedModel);
-            return synchronized;
-        }
         if (!this.acp
             || this.workspaceRoot !== record.workspaceRoot
             || this.providerId !== record.providerId
@@ -1329,15 +1326,15 @@ export class GrokAgentHostService implements AgentHostService {
             if (this.phase === 'auth-required') {
                 throw new Error('AUTHENTICATION_REQUIRED');
             }
+            restoreRuntimeGeneration = this.runtimeGeneration;
+            // Loaded sessions can expire too. Their model synchronization
+            // shares the same recovery boundary and runtime generation fence
+            // as session/load, without replaying any previous prompt.
+            bindRuntimeGeneration(restoreRuntimeGeneration);
             if (matchingRuntime() && this.loadedSessionIds.has(appSessionId)) {
                 const synchronized = await this.synchronizeLoadedSessionModel(record, globallySelectedModel);
                 return synchronized;
             }
-            restoreRuntimeGeneration = this.runtimeGeneration;
-            // Bind coalescing to the exact sidecar that will receive
-            // session/load. A same-Provider crash/restart must not let Send
-            // await an obsolete Promise and then prompt an unhydrated process.
-            bindRuntimeGeneration(restoreRuntimeGeneration);
             this.replayedGoalStateMap().delete(appSessionId);
             this.beginSessionRestore(appSessionId);
             try {
@@ -1446,11 +1443,24 @@ export class GrokAgentHostService implements AgentHostService {
             if (this.phase === 'auth-required' || this.redactError(error) === 'AUTHENTICATION_REQUIRED') {
                 throw error;
             }
+            if (error instanceof SessionNotFoundError || error instanceof SessionPromptConflictError) {
+                throw error;
+            }
+            // A peer may have claimed this conversation while ACP was
+            // resolving the failed restore. Never replace its live session.
+            this.assertSidecarTerminationConfirmed(appSessionId);
+            const currentRecord = this.reconcilePromptClaimRecord(appSessionId);
+            if (!currentRecord) throw new SessionNotFoundError(appSessionId);
+            if (currentRecord.status === 'running' && this.promptClaimOwnership(appSessionId) !== 'none') {
+                throw new SessionPromptConflictError(
+                    'This Agent task is still running in another Xora Code process.'
+                );
+            }
             try {
                 // A missing/expired remote ACP session should not turn the
                 // local conversation into a dead end. Attach a fresh session
                 // to the same local history; never replay the stored prompts.
-                return await this.rebindHistoryToCurrentProvider(record, { mcpSnapshot });
+                return await this.rebindHistoryToCurrentProvider(currentRecord, { mcpSnapshot });
             } catch (reconnectError) {
                 if (this.redactError(reconnectError) === 'AUTHENTICATION_REQUIRED') {
                     throw reconnectError;
@@ -1480,7 +1490,7 @@ export class GrokAgentHostService implements AgentHostService {
         this.flushThoughtDeltas(appSessionId);
         const record = this.sessions.get(appSessionId);
         const providerRuntimeEpoch = record?.providerRuntimeEpoch;
-        const history = deepRedact(this.sessions.readEvents(appSessionId), this.currentSecrets)
+        const history = this.sessions.readEvents(appSessionId).map(event => redactAgentHostEvent(event, this.currentSecrets))
             .filter(event => {
                 // Goal and frozen task contracts are Provider-owned execution
                 // state. Never project them into a session rebound to another
@@ -1520,7 +1530,7 @@ export class GrokAgentHostService implements AgentHostService {
         const page = this.sessions.readEventPage(appSessionId, request);
         return {
             ...page,
-            events: deepRedact(page.events, this.currentSecrets).filter(event => {
+            events: page.events.map(event => redactAgentHostEvent(event, this.currentSecrets)).filter(event => {
                 if (event.kind !== 'goal-state' && event.kind !== 'task-contract') return true;
                 return !!providerRuntimeEpoch && event.providerRuntimeEpoch === providerRuntimeEpoch;
             })
@@ -5639,7 +5649,7 @@ export class GrokAgentHostService implements AgentHostService {
 
     protected persistedPlanObjective(session: SessionRecord, turnId: string | undefined): string | undefined {
         if (!turnId) return undefined;
-        const events = deepRedact(this.sessions.readEvents(session.appSessionId), this.currentSecrets);
+        const events = this.sessions.readEvents(session.appSessionId).map(event => redactAgentHostEvent(event, this.currentSecrets));
         const user = [...events].reverse().find(event =>
             event.kind === 'text-delta'
             && event.sessionId === session.appSessionId
@@ -6419,10 +6429,10 @@ export class GrokAgentHostService implements AgentHostService {
     }
 
     protected emitImmediately(event: AgentHostEvent, persist: boolean): void {
-        const safeEvent = deepRedact(event, this.currentSecrets);
+        const safeEvent = redactAgentHostEvent(event, this.currentSecrets);
         try { this.client?.onAgentEvent(safeEvent); } catch { /* disconnected renderer */ }
-        if (persist && 'sessionId' in safeEvent && typeof safeEvent.sessionId === 'string' && this.knownSessionIds.has(safeEvent.sessionId)) {
-            this.sessions.appendEvent(safeEvent.sessionId, safeEvent);
+        if (persist && 'sessionId' in event && typeof event.sessionId === 'string' && this.knownSessionIds.has(event.sessionId)) {
+            this.sessions.appendEvent(event.sessionId, safeEvent);
         }
     }
 

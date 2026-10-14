@@ -643,31 +643,78 @@ export class AgentSessionRepository {
         end: number,
         limit: number
     ): { events: AgentHostEvent[]; start: number } {
-        let start = end;
-        let contents = Buffer.alloc(0);
-        let selected: Array<{ event: AgentHostEvent; start: number }> = [];
-        while (start > 0 && selected.length < limit) {
-            const nextStart = Math.max(0, start - HISTORY_SCAN_BLOCK_BYTES);
-            const descriptor = fs.openSync(target, 'r');
+        let offset = end;
+        let foundLineEnd = false;
+        // Parts are encountered newest-to-oldest. Keep each byte once until
+        // its line is complete; prepending the entire scanned tail makes
+        // sparse/invalid histories quadratic in both copying and parsing.
+        let parts: Buffer[] = [];
+        let partBytes = 0;
+        const selected: Array<{ event: AgentHostEvent; start: number }> = [];
+        const acceptLine = (head: Buffer, start: number): void => {
+            const contents = parts.length > 0
+                ? Buffer.concat([head, ...parts.reverse()], head.length + partBytes)
+                : head;
+            parts = [];
+            partBytes = 0;
+            const line = contents.toString('utf8');
+            if (!line.trim()) return;
             try {
-                const chunk = Buffer.allocUnsafe(start - nextStart);
+                const envelope = JSON.parse(line) as { event?: unknown };
+                if (isStoredEvent(envelope.event, appSessionId)) {
+                    selected.push({ event: envelope.event, start });
+                }
+            } catch {
+                // A malformed or foreign record cannot hide older history.
+            }
+        };
+        const descriptor = fs.openSync(target, 'r');
+        try {
+            while (offset > 0 && selected.length < limit) {
+                const nextStart = Math.max(0, offset - HISTORY_SCAN_BLOCK_BYTES);
+                const chunk = Buffer.allocUnsafe(offset - nextStart);
                 let read = 0;
                 while (read < chunk.length) {
                     const count = fs.readSync(descriptor, chunk, read, chunk.length - read, nextStart + read);
                     if (count <= 0) break;
                     read += count;
                 }
-                contents = Buffer.concat([chunk.subarray(0, read), contents]);
-            } finally {
-                fs.closeSync(descriptor);
+                if (read !== chunk.length) {
+                    throw new Error('Agent history changed; reload the conversation before requesting older records.');
+                }
+                offset = nextStart;
+                let lineEnd = chunk.length;
+                if (!foundLineEnd) {
+                    // A writer may not have completed the newest append yet.
+                    // Discard that suffix even when it spans several blocks.
+                    lineEnd = chunk.lastIndexOf(0x0a);
+                    if (lineEnd < 0) continue;
+                    foundLineEnd = true;
+                }
+                while (lineEnd > 0 && selected.length < limit) {
+                    const newline = chunk.lastIndexOf(0x0a, lineEnd - 1);
+                    if (newline < 0) {
+                        const head = chunk.subarray(0, lineEnd);
+                        parts.push(head);
+                        partBytes += head.length;
+                        break;
+                    }
+                    acceptLine(chunk.subarray(newline + 1, lineEnd), nextStart + newline + 1);
+                    lineEnd = newline;
+                }
+                if (nextStart === 0 && foundLineEnd && selected.length < limit) {
+                    acceptLine(Buffer.alloc(0), 0);
+                }
             }
-            start = nextStart;
-            selected = parseStoredEventBufferFromEnd(contents, appSessionId, start, end, limit);
+        } finally {
+            fs.closeSync(descriptor);
         }
         selected.reverse();
         return {
             events: selected.map(item => item.event),
-            start: selected[0]?.start ?? end
+            // Once the file is exhausted, do not return a repeating cursor
+            // merely because its first lines were malformed or unsupported.
+            start: offset === 0 && selected.length < limit ? 0 : selected[0]?.start ?? 0
         };
     }
 
@@ -1260,41 +1307,6 @@ function parseStoredEventChunk(
         }
     }
     return { events, trailingPartial };
-}
-
-function parseStoredEventBufferFromEnd(
-    contents: Buffer,
-    appSessionId: string,
-    absoluteStart: number,
-    absoluteEnd: number,
-    limit: number
-): Array<{ event: AgentHostEvent; start: number }> {
-    const selected: Array<{ event: AgentHostEvent; start: number }> = [];
-    let lineEnd = contents.lastIndexOf(0x0a);
-    // Ignore a cross-process partial append after the last newline.
-    if (lineEnd < 0) return selected;
-    while (lineEnd >= 0 && selected.length < limit) {
-        const previousNewline = contents.lastIndexOf(0x0a, lineEnd - 1);
-        const lineStart = previousNewline + 1;
-        // A buffer which starts mid-line cannot safely parse its first slice.
-        if (previousNewline < 0 && absoluteStart > 0) break;
-        const line = contents.subarray(lineStart, lineEnd).toString('utf8');
-        if (line.trim()) {
-            try {
-                const envelope = JSON.parse(line) as { event?: unknown };
-                if (isStoredEvent(envelope.event, appSessionId)) {
-                    selected.push({ event: envelope.event, start: absoluteStart + lineStart });
-                }
-            } catch {
-                // Isolate a malformed record and keep scanning older lines.
-            }
-        }
-        lineEnd = previousNewline;
-    }
-    // `absoluteEnd` documents that the caller's cursor is an exclusive byte
-    // boundary; keep it part of this helper's checked contract.
-    void absoluteEnd;
-    return selected;
 }
 
 function encodeHistoryCursor(cursor: HistoryCursor): string {

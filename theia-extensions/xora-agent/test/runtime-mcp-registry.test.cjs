@@ -564,3 +564,29 @@ test('one invalid MCP never blocks healthy servers or Agent session descriptors'
     assert.equal(result.issues[0].name, 'ssh-mcp-server');
     assert.equal(result.issues[0].code, 'missing-environment');
 });
+
+test('literal MCP operational switches and numeric settings do not redact session IDs or ordinary text', t => {
+    const files = fixture(t);
+    files.user('[mcp_servers.browser]\ncommand = "node"\nenv = { FRX_AUTOLAUNCH = "1", FRX_PORT_WAIT_SEC = "30", FRX_MARIONETTE_PORT = "2828", TOOL_ENABLED = "true", RETRIES = "3", FRX_TOOL_PROFILE = "all" }');
+    const snapshot = files.registry.resolve(files.workspace, {});
+    assert.equal(snapshot.mcpServers[0].env.find(item => item.name === 'FRX_AUTOLAUNCH').value, '1');
+    assert.deepEqual(snapshot.redactionValues, []);
+    const { deepRedact } = require('../lib/electron-main/session-repository');
+    assert.equal(deepRedact('call 1 task, 30 seconds, CLI 1.0.50', snapshot.redactionValues), 'call 1 task, 30 seconds, CLI 1.0.50');
+});
+
+test('short credential values stay secret even when their environment names end in an operational suffix', t => {
+    const files = fixture(t);
+    files.user('[mcp_servers.protected]\ncommand = "node"\nenv = { API_KEY = "1", ACCESS_TOKEN = "30", SECRET_AUTOLAUNCH = "true", PASSWORD_PORT = "2828", PRIVATE_KEY_PORT = "4321", PASSPHRASE_ENABLED = "false", PIN_PORT = "5678", CUSTOM_VALUE = "short" }');
+    const snapshot = files.registry.resolve(files.workspace, {});
+    assert.deepEqual(new Set(snapshot.redactionValues), new Set(['1', '30', 'true', '2828', '4321', 'false', '5678', 'short']));
+    const { deepRedact } = require('../lib/electron-main/session-repository');
+    assert.equal(deepRedact('1 30 true 2828 short', snapshot.redactionValues), '[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]');
+});
+
+test('operational environment templates and unrecognized values retain conservative redaction', t => {
+    const files = fixture(t);
+    files.user('[mcp_servers.protected]\ncommand = "node"\nenv = { FRX_AUTOLAUNCH = "${PRIVATE_VALUE}", WAIT_SEC = "${UNSET:-30}", TOOL_ENABLED = "private-value", PORT = "port-secret" }');
+    const snapshot = files.registry.resolve(files.workspace, { PRIVATE_VALUE: '1' });
+    assert.deepEqual(new Set(snapshot.redactionValues), new Set(['1', '30', 'private-value', 'port-secret']));
+});

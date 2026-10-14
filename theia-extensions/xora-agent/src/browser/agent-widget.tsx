@@ -64,6 +64,7 @@ import {
     agentErrorSemanticKey,
     friendlyAgentErrorMessage,
     isLegacyLocalSessionNotFoundError,
+    isSessionNotFoundError,
     isTypedSessionNotFoundError
 } from './agent-error-labels';
 import { shouldCommitRenameOnEnter, shouldSubmitPromptOnEnter } from './agent-input-helpers';
@@ -219,6 +220,7 @@ interface SessionPromptLane {
 
 interface SessionHistoryRecovery {
     sessionId: string;
+    kind?: 'history' | 'connection';
     message: string;
     showingPreviousTranscript: boolean;
 }
@@ -2567,10 +2569,13 @@ export class XoraAgentWidget extends ReactWidget {
 
     protected renderSessionHistoryRecovery(recovery: SessionHistoryRecovery): React.ReactNode {
         const session = this.model.snapshot.sessions.find(candidate => candidate.appSessionId === recovery.sessionId);
+        const connectionFailure = recovery.kind === 'connection';
         return <article className='xora-card xora-retry-card xora-history-recovery-card' role='alert'>
-            <div><strong>会话记录暂时无法读取</strong><span className='codicon codicon-warning' /></div>
+            <div><strong>{connectionFailure ? '会话连接暂时无法恢复' : '会话记录暂时无法读取'}</strong><span className='codicon codicon-warning' /></div>
             <p>{recovery.message}</p>
-            <p>{recovery.showingPreviousTranscript
+            <p>{connectionFailure
+                ? '本地记录已加载，可以继续查看；重新连接不会自动重发任务。'
+                : recovery.showingPreviousTranscript
                 ? '当前仍显示上一个会话的内容；目标会话的本地记录没有被删除。'
                 : '本地记录没有被删除，可以重新加载。'}</p>
             <div className='xora-card-actions'>
@@ -2580,7 +2585,7 @@ export class XoraAgentWidget extends ReactWidget {
                     onClick={() => {
                         if (session) void this.openSession(session);
                     }}>
-                    重新加载
+                    {connectionFailure ? '重新连接' : '重新加载'}
                 </button>
                 <button
                     className='theia-button secondary'
@@ -2779,7 +2784,10 @@ export class XoraAgentWidget extends ReactWidget {
      */
     protected async ensureSessionHydrated(sessionId: string, key: string): Promise<SessionRecord> {
         const current = (this.model.snapshot.sessions ?? []).find(session => session.appSessionId === sessionId);
-        if (this.hydratedSessionKeyState().has(key) && current) return current;
+        if (this.hydratedSessionKeyState().has(key) && current) {
+            this.clearSessionConnectionRecovery(sessionId);
+            return current;
+        }
         const hydrationPromises = this.sessionHydrationPromiseState();
         const concurrent = hydrationPromises.get(key);
         if (concurrent) return concurrent;
@@ -2795,6 +2803,7 @@ export class XoraAgentWidget extends ReactWidget {
                 && this.sameWorkspaceRoot(authority.workspaceRoot, this.model.snapshot.workspaceRoot)
                 && authority.providerId === this.model.snapshot.providerId) {
                 this.hydratedSessionKeyState().add(key);
+                this.clearSessionConnectionRecovery(sessionId);
             }
             return loaded;
         } finally {
@@ -2802,6 +2811,14 @@ export class XoraAgentWidget extends ReactWidget {
             if (this.activeSessionHydrationPromise?.promise === promise) {
                 this.activeSessionHydrationPromise = undefined;
             }
+        }
+    }
+
+    protected clearSessionConnectionRecovery(sessionId: string): void {
+        if (this.sessionHistoryRecovery?.sessionId === sessionId
+            && this.sessionHistoryRecovery.kind === 'connection') {
+            this.sessionHistoryRecovery = undefined;
+            this.update();
         }
     }
 
@@ -5869,6 +5886,7 @@ export class XoraAgentWidget extends ReactWidget {
         if (openingSnapshot.phase === 'ready'
             && openingSnapshot.activeSessionId === session.appSessionId
             && !this.sessionLoading
+            && !this.sessionHistoryRecovery
             && visibleHydrationKey
             && this.hydratedSessionKeyState().has(visibleHydrationKey)) {
             this.closePopover();
@@ -5891,9 +5909,8 @@ export class XoraAgentWidget extends ReactWidget {
         this.sessionLoading = true;
         this.sessionHistoryRecovery = undefined;
         this.resetTranscriptWindow();
-        const retainedPreviousTranscript = this.model.snapshot.activeSessionId !== session.appSessionId
-            && (this.model.transcript?.length ?? 0) > 0;
         const cachedHistory = this.cachedSessionHistory(session);
+        let localHistoryLoaded = false;
         // Cached local content can switch immediately. On a first read keep
         // the currently rendered transcript until Electron returns durable
         // history; a failed RPC must never turn a healthy conversation into
@@ -5902,7 +5919,10 @@ export class XoraAgentWidget extends ReactWidget {
         this.activateComposerLane(targetContextKey);
         const openingIsCurrent = (): boolean => generation === this.sessionLoadGeneration
             && (this.activeComposerLaneKey ?? this.imageDraftContextKey()) === targetContextKey;
-        if (cachedHistory) this.model.showSessionHistory(session, cachedHistory);
+        if (cachedHistory) {
+            this.model.showSessionHistory(session, cachedHistory);
+            localHistoryLoaded = true;
+        }
         if (cachedHistory && !this.sessionHistoryPageState().has(session.appSessionId)) {
             this.sessionHistoryPageState().set(session.appSessionId, {
                 events: cachedHistory,
@@ -5929,6 +5949,7 @@ export class XoraAgentWidget extends ReactWidget {
                     });
                     this.cacheSessionHistory(session, completeHistory);
                     this.model.showSessionHistory(session, completeHistory);
+                    localHistoryLoaded = true;
                     this.sessionHistoryRecovery = undefined;
                     this.stickToBottom = true;
                     this.followTranscript();
@@ -5965,12 +5986,21 @@ export class XoraAgentWidget extends ReactWidget {
             if (history) this.cacheSessionHistory(loaded, history.events, loaded.updatedAt);
             this.model.updateSession(loaded);
         } catch (error) {
-            if (generation !== this.sessionLoadGeneration) return;
-            const message = friendlyAgentErrorMessage(error);
+            if (!openingIsCurrent()) return;
+            // Local JSONL reads and ACP hydration have different recovery
+            // paths. A transport/session failure after history is visible
+            // must not claim that the local record could not be read.
+            const message = isSessionNotFoundError(error)
+                ? localHistoryLoaded
+                    ? 'Agent 会话连接暂时不可用。历史内容已保留，请重新连接后继续。'
+                    : '本地会话索引暂时未能定位这条记录，请重新加载。'
+                : friendlyAgentErrorMessage(error);
             this.sessionHistoryRecovery = {
                 sessionId: session.appSessionId,
+                kind: localHistoryLoaded ? 'connection' : 'history',
                 message,
-                showingPreviousTranscript: retainedPreviousTranscript
+                showingPreviousTranscript: this.model.snapshot.activeSessionId !== session.appSessionId
+                    && (this.model.transcript?.length ?? 0) > 0
             };
             // If another conversation remained visible while the disk read
             // failed, restore its composer ownership as well. No transcript is

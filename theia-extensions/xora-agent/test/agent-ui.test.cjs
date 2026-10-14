@@ -231,7 +231,7 @@ test('image submissions and session restores stay bound to their original Agent 
     assert.match(source, /const openingIsCurrent = \(\): boolean => generation === this\.sessionLoadGeneration/);
     assert.match(source, /this\.activeComposerLaneKey \?\? this\.imageDraftContextKey\(\)/);
     assert.match(source, /this\.observedAgentContextKey = targetContextKey;\s*this\.activateComposerLane\(targetContextKey\)/);
-    assert.match(source, /if \(cachedHistory\) this\.model\.showSessionHistory\(session, cachedHistory\)/);
+    assert.match(source, /if \(cachedHistory\) \{\s*this\.model\.showSessionHistory\(session, cachedHistory\)/);
     assert.doesNotMatch(source, /this\.model\.showSessionHistory\(session, cachedHistory \?\? \[\]\)/,
         'a first history read must not clear the current transcript before Electron responds');
     assert.match(source, /if \(!cachedHistory\) \{[\s\S]*?readSessionHistoryPage\(session\.appSessionId[\s\S]*?mergeHistoryCatchup\(page\.events, catchup\)[\s\S]*?showSessionHistory\(session, completeHistory\)/);
