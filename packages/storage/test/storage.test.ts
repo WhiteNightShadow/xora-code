@@ -2,7 +2,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { EVENT_LOG_FILE, EventLog, XoraDatabase } from '../src/index.ts';
+import { EVENT_LOG_FILE, EventLog, MIGRATIONS, XoraDatabase } from '../src/index.ts';
 
 function tempDir(): string {
     return mkdtempSync(path.join(tmpdir(), 'xora-storage-'));
@@ -29,6 +29,41 @@ describe('XoraDatabase', () => {
             }),
         ).toThrow('boom');
         expect(db.all<{ key: string }>('select key from settings order by key').map((row) => row.key)).toEqual(['a']);
+        db.close();
+    });
+
+    it('upgrades a version 1 file with the team tables', () => {
+        const file = path.join(tempDir(), 'xora.db');
+        const old = new XoraDatabase(file);
+        old.exec(MIGRATIONS[0]?.sql ?? '');
+        old.exec('pragma user_version = 1');
+        old.run('insert into settings (key, value_json) values (?, ?)', ['kept', '1']);
+        old.close();
+        const db = new XoraDatabase(file);
+        expect(db.migrate()).toBe(XoraDatabase.latestVersion);
+        db.run(
+            `insert into team_runs (id, org_id, goal, status, phase, created_at, updated_at, run_json)
+             values (?, ?, ?, ?, ?, ?, ?, ?)`,
+            ['r1', 'default', '加登录', 'running', 'plan', 1, 1, '{}'],
+        );
+        db.run('insert into team_board_events (run_id, seq, ts, task_id, type, event_json) values (?, ?, ?, ?, ?, ?)', [
+            'r1',
+            1,
+            1,
+            'T1',
+            'added',
+            '{}',
+        ]);
+        expect(db.get<{ goal: string }>('select goal from team_runs where id = ?', ['r1'])?.goal).toBe('加登录');
+        expect(db.get<{ value_json: string }>('select value_json from settings where key = ?', ['kept'])).toEqual({
+            value_json: '1',
+        });
+        expect(() =>
+            db.run(
+                'insert into team_board_events (run_id, seq, ts, task_id, type, event_json) values (?, ?, ?, ?, ?, ?)',
+                ['r1', 1, 2, 'T1', 'status', '{}'],
+            ),
+        ).toThrow();
         db.close();
     });
 

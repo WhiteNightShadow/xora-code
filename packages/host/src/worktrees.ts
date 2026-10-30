@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { DiffFile, HandoffResult, Project } from '@xora/protocol';
 import { RpcError, RpcErrorCode } from '@xora/protocol';
@@ -85,11 +86,12 @@ export class WorktreeService {
         }
     }
 
-    async create(project: Project, threadId: string): Promise<{ path: string; port: number }> {
+    /** A detached worktree for the thread, at `ref` (HEAD by default). */
+    async create(project: Project, threadId: string, ref?: string): Promise<{ path: string; port: number }> {
         await this.#requireRepo(project);
         const manager = this.#manager(project);
         try {
-            const created = await manager.create({ id: threadId });
+            const created = await manager.create({ id: threadId, ...(ref ? { ref } : {}) });
             const port = await allocatePort(threadId);
             this.#log.info(`worktree for ${threadId} at ${created.path} (port ${port})`);
             return { path: created.path, port };
@@ -164,6 +166,101 @@ export class WorktreeService {
             return { ...toHandoff(result), status: 'nothing', message: '没有未提交的改动' };
         }
         return toHandoff(result);
+    }
+
+    /**
+     * Copies the uncommitted work of other checkouts into `target` and commits it there, one commit per source,
+     * so a worktree starts from the results of the tasks it depends on while its own uncommitted changes stay its
+     * own (agent teams, 06 §5 ⑥). The commits live only on the worktree's detached HEAD. A source that does not
+     * apply is rolled back and reported.
+     */
+    async seed(
+        target: string,
+        sources: ReadonlyArray<{ readonly dir: string; readonly label: string }>,
+    ): Promise<{ seeded: string[]; failed: Array<{ label: string; reason: string }> }> {
+        const git = (args: string[], input?: Buffer) =>
+            runGit(args, { cwd: target, eol: 'user', ...(input ? { input } : {}) });
+        const seeded: string[] = [];
+        const failed: Array<{ label: string; reason: string }> = [];
+        for (const source of sources) {
+            const patch = await runGit(
+                [
+                    'diff',
+                    'HEAD',
+                    '--binary',
+                    '--no-renames',
+                    '--no-color',
+                    '--no-ext-diff',
+                    '--ignore-submodules=all',
+                    '--src-prefix=a/',
+                    '--dst-prefix=b/',
+                ],
+                { cwd: source.dir, eol: 'user' },
+            );
+            const untracked = await runGit(['ls-files', '-z', '--others', '--exclude-standard'], {
+                cwd: source.dir,
+                eol: 'user',
+            });
+            if (patch.code !== 0 || untracked.code !== 0) {
+                failed.push({ label: source.label, reason: (patch.stderr || untracked.stderr).trim() });
+                continue;
+            }
+            try {
+                if (patch.stdout.length > 0) {
+                    const applied = await git(['apply', '--3way', '--whitespace=nowarn', '-'], patch.stdout);
+                    if (applied.code !== 0) {
+                        throw new Error(applied.stderr.trim() || 'the changes do not apply');
+                    }
+                }
+                for (const relative of untracked.stdout.toString('utf8').split('\0')) {
+                    if (!relative || relative.endsWith('/') || existsSync(path.join(target, relative))) {
+                        continue;
+                    }
+                    await mkdir(path.dirname(path.join(target, relative)), { recursive: true });
+                    await copyFile(path.join(source.dir, relative), path.join(target, relative));
+                }
+                await git(['add', '-A']);
+                const committed = await git([
+                    '-c',
+                    'user.name=Xora Code',
+                    '-c',
+                    'user.email=team@xora.invalid',
+                    '-c',
+                    'commit.gpgsign=false',
+                    'commit',
+                    '--no-verify',
+                    '--allow-empty',
+                    '-q',
+                    '-m',
+                    `xora team: start from ${source.label}`,
+                ]);
+                if (committed.code !== 0) {
+                    throw new Error(committed.stderr.trim() || 'git commit failed');
+                }
+                seeded.push(source.label);
+            } catch (error) {
+                await git(['reset', '--hard', '-q', 'HEAD']);
+                await git(['clean', '-fdq']);
+                failed.push({ label: source.label, reason: error instanceof Error ? error.message : String(error) });
+            }
+        }
+        return { seeded, failed };
+    }
+
+    /** Paths with uncommitted changes in a checkout, untracked files included, relative to its root. */
+    async changedFiles(dir: string): Promise<string[]> {
+        const result = await runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'], {
+            cwd: dir,
+            eol: 'user',
+        });
+        if (result.code !== 0) {
+            return [];
+        }
+        return result.stdout
+            .toString('utf8')
+            .split('\0')
+            .filter((entry) => entry.length > 3)
+            .map((entry) => entry.slice(3));
     }
 
     async diff(dir: string, staged: boolean): Promise<{ files: DiffFile[]; isRepo: boolean; branch?: string }> {

@@ -119,6 +119,12 @@ function ProjectGroup({
                     {project.missing && <span className="project__missing">!</span>}
                 </button>
                 <IconButton
+                    icon="route"
+                    label={s.team.start}
+                    size={14}
+                    onClick={() => useApp.setState({ teamStartFor: project.id })}
+                />
+                <IconButton
                     icon="plus"
                     label={s.sidebar.newThread}
                     size={14}

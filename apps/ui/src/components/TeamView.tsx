@@ -52,6 +52,7 @@ export function TeamView({ runId }: { runId: string }) {
     const s = useStrings();
     const run = useApp((state) => state.teamRuns[runId]);
     const [tab, setTab] = useState<'board' | 'ledger' | 'cost' | 'report'>('board');
+    const [budget, setBudget] = useState('');
     useEffect(() => {
         void host
             .call('team.get', { runId })
@@ -65,6 +66,8 @@ export function TeamView({ runId }: { runId: string }) {
             </Empty>
         );
     const share = Math.round(run.supervisionShare * 100);
+    // A run paused on its budget continues only with a larger one.
+    const spent = run.status === 'paused' && run.budget !== null && run.cost.amount >= run.budget.amount;
     return (
         <div className="team">
             <header className="team__header">
@@ -86,6 +89,12 @@ export function TeamView({ runId }: { runId: string }) {
                             {format(s.team.supervision, { share })}
                         </span>
                     </div>
+                    {run.note && <div className="team__note">{run.note}</div>}
+                    {run.warnings?.map((warning) => (
+                        <div key={warning} className="team__warning">
+                            {warning}
+                        </div>
+                    ))}
                 </div>
                 <div className="row">
                     {run.supervisorThreadId && (
@@ -102,7 +111,36 @@ export function TeamView({ runId }: { runId: string }) {
                             {s.team.openSupervisor}
                         </button>
                     )}
-                    {['planning', 'awaiting_plan_approval', 'running', 'integrating'].includes(run.status) && (
+                    {spent && (
+                        <input
+                            className="input team__budget"
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={budget}
+                            placeholder={s.team.newBudget}
+                            aria-label={s.team.newBudget}
+                            onChange={(event) => setBudget(event.target.value)}
+                        />
+                    )}
+                    {run.status === 'paused' && (
+                        <button
+                            type="button"
+                            className="button button--small button--primary"
+                            disabled={spent && !(Number(budget) > (run.budget?.amount ?? 0))}
+                            onClick={() =>
+                                void attempt(() =>
+                                    host.call('team.resume', {
+                                        runId,
+                                        ...(Number(budget) > 0 ? { budget: Number(budget) } : {}),
+                                    }),
+                                )
+                            }
+                        >
+                            {s.team.resume}
+                        </button>
+                    )}
+                    {!['done', 'failed', 'cancelled'].includes(run.status) && (
                         <button
                             type="button"
                             className="button button--small button--danger"

@@ -338,6 +338,9 @@ importers:
       '@xora/updater':
         specifier: workspace:*
         version: link:../updater
+      '@xora/workflows':
+        specifier: workspace:*
+        version: link:../workflows
       '@xora/workspace':
         specifier: workspace:*
         version: link:../workspace
