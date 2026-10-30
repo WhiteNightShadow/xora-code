@@ -262,6 +262,18 @@ try {
         await page.locator('.composer .chip', { hasText: 'preview.png' }).waitFor();
     }
     await step(page, '预览能打开本地页面');
+
+    // M4: hand a goal to a team; the team view shows the run, which can be stopped.
+    await page.getByRole('button', { name: '交给团队', exact: true }).first().click();
+    await page.locator('.modal textarea').fill('把hello.txt整理一下');
+    await page.locator('.modal').getByRole('button', { name: '开始', exact: true }).click();
+    await page.locator('.team__goal', { hasText: '把hello.txt整理一下' }).waitFor();
+    await step(page, '交给团队后显示团队视图');
+    const stop = page.locator('.team').getByRole('button', { name: '停止', exact: true });
+    if (await stop.isVisible()) {
+        await stop.click();
+        await page.locator('.team .badge', { hasText: /已停止|已暂停|失败/ }).waitFor();
+    }
 } catch (error) {
     failed = true;
     console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
