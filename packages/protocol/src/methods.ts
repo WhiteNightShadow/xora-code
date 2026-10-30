@@ -242,6 +242,7 @@ export const methods = {
                 source: z.discriminatedUnion('kind', [
                     z.object({ kind: z.literal('dir'), path: z.string() }),
                     z.object({ kind: z.literal('git'), url: z.string(), ref: z.string().optional() }),
+                    z.object({ kind: z.literal('market'), market: z.string(), plugin: z.string() }),
                 ]),
             })
             .strict(),
@@ -253,6 +254,40 @@ export const methods = {
         }),
     },
     'plugin.uninstall': { params: z.object({ name: z.string() }).strict(), result: ok },
+    /** Plugin marketplaces in the Claude format (`.claude-plugin/marketplace.json`), from git or a folder (09 §3). */
+    'market.list': {
+        params: empty,
+        result: z.array(
+            z.object({
+                name: z.string(),
+                source: z.string(),
+                description: z.string().optional(),
+                plugins: z.array(
+                    z.object({
+                        name: z.string(),
+                        description: z.string().optional(),
+                        version: z.string().optional(),
+                        installable: z.boolean(),
+                        installed: z.boolean(),
+                    }),
+                ),
+                diagnostics: z.array(z.string()),
+            }),
+        ),
+    },
+    'market.add': {
+        params: z
+            .object({
+                source: z.discriminatedUnion('kind', [
+                    z.object({ kind: z.literal('dir'), path: z.string().min(1) }),
+                    z.object({ kind: z.literal('git'), url: z.string().min(1), ref: z.string().optional() }),
+                ]),
+            })
+            .strict(),
+        result: z.object({ name: z.string(), plugins: z.number() }),
+    },
+    'market.refresh': { params: z.object({ name: z.string() }).strict(), result: ok },
+    'market.remove': { params: z.object({ name: z.string() }).strict(), result: ok },
     'mcp.save': {
         params: z
             .object({

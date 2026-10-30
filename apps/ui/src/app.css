@@ -2243,3 +2243,12 @@ pre {
     color: var(--xk-text-muted);
     font-size: 12px;
 }
+
+.market {
+    margin-bottom: 12px;
+}
+
+.market__header {
+    align-items: baseline;
+    gap: 10px;
+}

@@ -645,6 +645,16 @@ export class HostCore {
             await extensions.uninstallPlugin(name);
             return ok;
         });
+        peer.handle('market.list', () => extensions.markets());
+        peer.handle('market.add', ({ source }) => extensions.addMarket(source));
+        peer.handle('market.refresh', async ({ name }) => {
+            await extensions.refreshMarket(name);
+            return ok;
+        });
+        peer.handle('market.remove', async ({ name }) => {
+            await extensions.removeMarket(name);
+            return ok;
+        });
         peer.handle('mcp.save', async (params) => {
             await extensions.saveMcp(params);
             return ok;

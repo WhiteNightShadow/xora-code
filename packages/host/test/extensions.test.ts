@@ -302,6 +302,56 @@ describe('extension discovery and trust', () => {
         expect(snapshot.plugins).toEqual([]);
     });
 
+    it('adds a marketplace from a folder or a git repository and installs a plugin from it', async () => {
+        const u = await unit();
+        const market = temp('xora-ext-market-');
+        write(
+            path.join(market, '.claude-plugin', 'marketplace.json'),
+            JSON.stringify({
+                name: 'team-market',
+                owner: { name: 'Team' },
+                plugins: [
+                    { name: 'helper', source: './plugins/helper', description: 'Helps', version: '1.0.0' },
+                    { name: 'remote', source: { source: 'npm', package: 'remote-plugin' } },
+                ],
+            }),
+        );
+        write(
+            path.join(market, 'plugins', 'helper', '.claude-plugin', 'plugin.json'),
+            JSON.stringify({ name: 'helper', version: '1.0.0' }),
+        );
+        skill(path.join(market, 'plugins', 'helper', 'skills'), 'tidy', 'Tidy things up', 'Sort imports.');
+
+        expect(await u.service.addMarket({ kind: 'dir', path: market })).toEqual({ name: 'team-market', plugins: 2 });
+        let markets = await u.service.markets();
+        expect(markets[0]?.plugins).toEqual([
+            expect.objectContaining({ name: 'helper', installable: true, installed: false }),
+            expect.objectContaining({ name: 'remote', installable: false }),
+        ]);
+        const installed = await u.service.installPlugin({ kind: 'market', market: 'team-market', plugin: 'helper' });
+        expect(installed).toMatchObject({ name: 'helper', version: '1.0.0' });
+        markets = await u.service.markets();
+        expect(markets[0]?.plugins[0]?.installed).toBe(true);
+        await expect(
+            u.service.installPlugin({ kind: 'market', market: 'team-market', plugin: 'remote' }),
+        ).rejects.toThrow();
+
+        // The same marketplace as a git repository is cloned under the data folder.
+        const git = (...args: string[]) => execFileSync('git', args, { cwd: market, stdio: 'ignore' });
+        git('init', '-q');
+        git('config', 'user.email', 'test@example.com');
+        git('config', 'user.name', 'Test');
+        git('add', '.');
+        git('commit', '-q', '-m', 'market');
+        await u.service.removeMarket('team-market');
+        expect((await u.service.addMarket({ kind: 'git', url: market })).name).toBe('team-market');
+        expect(existsSync(path.join(u.dir, 'markets', 'team-market', '.claude-plugin', 'marketplace.json'))).toBe(true);
+        await u.service.refreshMarket('team-market');
+        await u.service.removeMarket('team-market');
+        expect(existsSync(path.join(u.dir, 'markets', 'team-market'))).toBe(false);
+        expect(await u.service.markets()).toEqual([]);
+    }, 30_000);
+
     it('lists MCP servers from other tools without their secrets and imports them', async () => {
         const u = await unit();
         write(

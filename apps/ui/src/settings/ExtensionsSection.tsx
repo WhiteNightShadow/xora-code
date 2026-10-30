@@ -322,6 +322,143 @@ function McpRow({
     );
 }
 
+type MarketList = Array<{
+    name: string;
+    source: string;
+    description?: string;
+    plugins: Array<{ name: string; description?: string; version?: string; installable: boolean; installed: boolean }>;
+    diagnostics: string[];
+}>;
+
+function Markets({ onInstalled }: { onInstalled: () => void }) {
+    const s = useStrings();
+    const [markets, setMarkets] = useState<MarketList | undefined>();
+    const [value, setValue] = useState('');
+    const [busy, setBusy] = useState(false);
+    const load = () => void attempt(() => host.call('market.list', {})).then((list) => list && setMarkets(list));
+    // biome-ignore lint/correctness/useExhaustiveDependencies: load once and on every extension change
+    useEffect(() => {
+        load();
+        return host.on('extension.changed', load);
+    }, []);
+    const add = async () => {
+        const text = value.trim();
+        const source = /^(?:https?:\/\/|ssh:\/\/|git:\/\/|git@)/.test(text)
+            ? { kind: 'git' as const, url: text }
+            : { kind: 'dir' as const, path: text };
+        setBusy(true);
+        const result = await attempt(() => host.call('market.add', { source }, { timeoutMs: 180_000 }));
+        setBusy(false);
+        if (result) {
+            toast(format(s.extensions.marketAdded, { name: result.name, count: result.plugins }), 'success');
+            setValue('');
+        }
+    };
+    const install = async (market: string, plugin: string) => {
+        const result = await attempt(() =>
+            host.call('plugin.install', { source: { kind: 'market', market, plugin } }, { timeoutMs: 180_000 }),
+        );
+        if (result) {
+            toast(format(s.extensions.installed, { name: result.name, version: result.version }), 'success');
+            onInstalled();
+        }
+    };
+    return (
+        <>
+            <h3>{s.extensions.markets}</h3>
+            <Field label={s.extensions.addMarket} hint={s.extensions.marketHint}>
+                <div className="row">
+                    <input
+                        className="input"
+                        value={value}
+                        placeholder="https://github.com/owner/marketplace.git"
+                        onChange={(event) => setValue(event.target.value)}
+                    />
+                    <button
+                        type="button"
+                        className="button button--small"
+                        disabled={busy || !value.trim()}
+                        onClick={() => void add()}
+                    >
+                        {busy ? <Spinner /> : null} {s.extensions.addMarket}
+                    </button>
+                </div>
+            </Field>
+            {!markets ? (
+                <Spinner />
+            ) : markets.length === 0 ? (
+                <p className="muted">{s.extensions.noMarkets}</p>
+            ) : (
+                markets.map((market) => (
+                    <div key={market.name} className="market">
+                        <div className="row market__header">
+                            <strong>{market.name}</strong>
+                            <span className="muted extension-code">{market.source}</span>
+                            <button
+                                type="button"
+                                className="link"
+                                onClick={() =>
+                                    void attempt(() =>
+                                        host.call('market.refresh', { name: market.name }, { timeoutMs: 180_000 }),
+                                    )
+                                }
+                            >
+                                {s.extensions.refresh}
+                            </button>
+                            <button
+                                type="button"
+                                className="link"
+                                onClick={() => void attempt(() => host.call('market.remove', { name: market.name }))}
+                            >
+                                {s.extensions.remove}
+                            </button>
+                        </div>
+                        {market.description && <div className="muted">{market.description}</div>}
+                        <table className="table">
+                            <tbody>
+                                {market.plugins.map((plugin) => (
+                                    <tr key={plugin.name}>
+                                        <td>
+                                            <strong>
+                                                {plugin.name} {plugin.version ?? ''}
+                                            </strong>
+                                            {plugin.description && (
+                                                <div className="muted extension-desc">{plugin.description}</div>
+                                            )}
+                                        </td>
+                                        <td>
+                                            {plugin.installed ? (
+                                                <Badge tone="ok">{s.extensions.installedBadge}</Badge>
+                                            ) : plugin.installable ? (
+                                                <button
+                                                    type="button"
+                                                    className="button button--small"
+                                                    onClick={() => void install(market.name, plugin.name)}
+                                                >
+                                                    {s.extensions.installOne}
+                                                </button>
+                                            ) : (
+                                                <span className="muted">{s.extensions.unsupportedSource}</span>
+                                            )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                        {market.diagnostics.length > 0 && (
+                            <ul className="diagnostics">
+                                {market.diagnostics.map((line) => (
+                                    <li key={line}>{line}</li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                ))
+            )}
+        </>
+    );
+}
+
 function PluginInstall({ onInstalled }: { onInstalled: () => void }) {
     const s = useStrings();
     const [kind, setKind] = useState<'dir' | 'git'>('dir');
@@ -638,6 +775,7 @@ export function ExtensionsSection() {
                 </table>
             )}
             <PluginInstall onInstalled={reload} />
+            <Markets onInstalled={reload} />
 
             {snapshot.diagnostics.length > 0 && (
                 <>

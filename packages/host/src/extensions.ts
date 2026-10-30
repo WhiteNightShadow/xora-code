@@ -1,9 +1,11 @@
-import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {
     type AgentDefinition,
     type Diagnostic,
+    defaultGitEnv,
     discoverAgents,
     discoverCommands,
     discoverSkills,
@@ -11,17 +13,20 @@ import {
     effectiveTrust,
     expandCommand,
     findCommand,
+    gitClone,
     type HookConfig,
     type HookEvent,
     type HooksOutcome,
     type InstalledPlugin,
     loadHookConfigs,
+    type Marketplace,
     type MatchedHook,
     matchHooks,
     type PluginInfo,
     type PluginPermissions,
     PluginStore,
     parseSlashInput,
+    readMarketplace,
     readSkill,
     runHooks,
     type Skill,
@@ -86,16 +91,32 @@ const StoredServerSchema = z.object({
 });
 type StoredServer = z.infer<typeof StoredServerSchema>;
 
+const MarketSourceSchema = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('dir'), path: z.string() }),
+    z.object({ kind: z.literal('git'), url: z.string(), ref: z.string().optional() }),
+]);
+type MarketSource = z.infer<typeof MarketSourceSchema>;
+
 const StateSchema = z.object({
     schemaVersion: z.literal(1),
     disabledSkills: z.array(z.string()).default([]),
     disabledMcp: z.array(z.string()).default([]),
     servers: z.array(StoredServerSchema).default([]),
     projectServers: z.record(z.string(), z.array(StoredServerSchema)).default({}),
+    /** Plugin marketplaces (09 §3): a git repository (cloned under `markets/`) or a local folder. */
+    markets: z.array(z.object({ name: z.string(), source: MarketSourceSchema, addedAt: z.number() })).default([]),
 });
 type State = z.infer<typeof StateSchema>;
 
-const EMPTY_STATE: State = { schemaVersion: 1, disabledSkills: [], disabledMcp: [], servers: [], projectServers: {} };
+const EMPTY_STATE: State = {
+    schemaVersion: 1,
+    disabledSkills: [],
+    disabledMcp: [],
+    servers: [],
+    projectServers: {},
+    markets: [],
+};
+const MARKET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** One MCP server as a session would get it, before secrets are filled in. */
 interface McpEntry {
@@ -710,9 +731,31 @@ export class ExtensionService {
     }
 
     /** Installs a plugin disabled; enabling it is the user's confirmation of the permissions shown (09 §3). */
-    async installPlugin(source: { kind: 'dir'; path: string } | { kind: 'git'; url: string; ref?: string }) {
+    async installPlugin(
+        source:
+            | { kind: 'dir'; path: string }
+            | { kind: 'git'; url: string; ref?: string }
+            | { kind: 'market'; market: string; plugin: string },
+    ) {
         try {
-            const result = await this.plugins.install(source, { enable: false });
+            let result: Awaited<ReturnType<PluginStore['install']>>;
+            if (source.kind === 'market') {
+                const market = await this.#readMarket(source.market);
+                const entry = market.plugins.find((item) => item.name === source.plugin);
+                if (!entry) {
+                    throw new Error(`市场${source.market}里没有插件${source.plugin}`);
+                }
+                if (entry.source.kind === 'unsupported') {
+                    throw new Error(`暂不支持这种插件来源：${entry.source.type}`);
+                }
+                result = await this.plugins.install(entry.source, {
+                    enable: false,
+                    expectedName: entry.name,
+                    entry: entry.entry,
+                });
+            } else {
+                result = await this.plugins.install(source, { enable: false });
+            }
             this.#changed();
             return {
                 name: result.plugin.name,
@@ -723,6 +766,115 @@ export class ExtensionService {
         } catch (error) {
             throw new RpcError(RpcErrorCode.Rejected, `插件安装失败：${errorText(error)}`);
         }
+    }
+
+    // Marketplaces ----------------------------------------------------------------------------------------------
+
+    #marketDir(name: string): string {
+        return path.join(this.#deps.dir, 'markets', name);
+    }
+
+    async #readMarket(name: string): Promise<Marketplace> {
+        const state = await this.#readState();
+        const market = state.markets.find((item) => item.name === name);
+        if (!market) {
+            throw new RpcError(RpcErrorCode.NotFound, `没有名为${name}的插件市场`);
+        }
+        return readMarketplace(market.source.kind === 'dir' ? market.source.path : this.#marketDir(name));
+    }
+
+    /** Clones a git marketplace into a temporary folder; the caller moves or removes it. */
+    async #fetchMarket(source: MarketSource): Promise<{ dir: string; temporary: boolean }> {
+        if (source.kind === 'dir') {
+            return { dir: source.path, temporary: false };
+        }
+        const dir = path.join(this.#deps.dir, 'markets', `.tmp-${randomBytes(6).toString('hex')}`);
+        await mkdir(path.dirname(dir), { recursive: true });
+        await gitClone({
+            url: source.url,
+            dest: dir,
+            ...(source.ref ? { ref: source.ref } : {}),
+            env: defaultGitEnv(),
+        });
+        return { dir, temporary: true };
+    }
+
+    async addMarket(source: MarketSource): Promise<{ name: string; plugins: number }> {
+        const fetched = await this.#fetchMarket(source).catch((error: unknown) => {
+            throw new RpcError(RpcErrorCode.Rejected, `读取插件市场失败：${errorText(error)}`);
+        });
+        try {
+            const market = await readMarketplace(fetched.dir).catch((error: unknown) => {
+                throw new RpcError(
+                    RpcErrorCode.Rejected,
+                    `不是插件市场（没有${'.claude-plugin/marketplace.json'}）：${errorText(error)}`,
+                );
+            });
+            if (!MARKET_NAME.test(market.name)) {
+                throw new RpcError(RpcErrorCode.Rejected, `插件市场的名字不合规：${market.name}`);
+            }
+            if (fetched.temporary) {
+                await rm(this.#marketDir(market.name), { recursive: true, force: true });
+                await rename(fetched.dir, this.#marketDir(market.name));
+            }
+            const stored = source.kind === 'dir' ? { kind: 'dir' as const, path: path.resolve(source.path) } : source;
+            await this.#updateState((state) => ({
+                ...state,
+                markets: [
+                    ...state.markets.filter((item) => item.name !== market.name),
+                    { name: market.name, source: stored, addedAt: Date.now() },
+                ],
+            }));
+            this.#changed();
+            return { name: market.name, plugins: market.plugins.length };
+        } finally {
+            if (fetched.temporary) {
+                await rm(fetched.dir, { recursive: true, force: true }).catch(() => undefined);
+            }
+        }
+    }
+
+    /** Fetches a git marketplace again. */
+    async refreshMarket(name: string): Promise<void> {
+        const market = (await this.#readState()).markets.find((item) => item.name === name);
+        if (!market) {
+            throw new RpcError(RpcErrorCode.NotFound, `没有名为${name}的插件市场`);
+        }
+        await this.addMarket(market.source);
+    }
+
+    async removeMarket(name: string): Promise<void> {
+        await this.#updateState((state) => ({ ...state, markets: state.markets.filter((item) => item.name !== name) }));
+        await rm(this.#marketDir(name), { recursive: true, force: true });
+        this.#changed();
+    }
+
+    async markets() {
+        const state = await this.#readState();
+        const installed = new Set((await this.plugins.list().catch(() => [])).map((plugin) => plugin.name));
+        const out = [];
+        for (const item of state.markets) {
+            const source = item.source.kind === 'dir' ? item.source.path : item.source.url;
+            try {
+                const market = await this.#readMarket(item.name);
+                out.push({
+                    name: item.name,
+                    source,
+                    ...(market.description ? { description: market.description } : {}),
+                    plugins: market.plugins.map((plugin) => ({
+                        name: plugin.name,
+                        ...(plugin.description ? { description: plugin.description } : {}),
+                        ...(plugin.version ? { version: plugin.version } : {}),
+                        installable: plugin.source.kind !== 'unsupported',
+                        installed: installed.has(plugin.name),
+                    })),
+                    diagnostics: market.diagnostics.filter((d) => d.severity !== 'info').map(message),
+                });
+            } catch (error) {
+                out.push({ name: item.name, source, plugins: [], diagnostics: [errorText(error)] });
+            }
+        }
+        return out;
     }
 
     async uninstallPlugin(name: string): Promise<void> {
