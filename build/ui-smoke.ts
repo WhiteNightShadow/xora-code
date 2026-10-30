@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -49,6 +51,13 @@ git('add', '.');
 git('commit', '-q', '-m', 'init');
 
 const server = await startMockModelServer();
+// A page for the preview panel, served on loopback only.
+const site = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><title>Smoke page</title><h1 id="hello">hello preview</h1>');
+});
+await new Promise<void>((resolve) => site.listen(0, '127.0.0.1', resolve));
+const siteUrl = `http://127.0.0.1:${(site.address() as AddressInfo).port}/`;
 server.respondWith((request) => {
     if (request.method !== 'POST') {
         // Let the server answer `/models` itself.
@@ -225,6 +234,18 @@ try {
     }
     if (!echoed) throw new Error('the terminal did not run the command');
     await step(page, '终端能运行命令');
+
+    // The preview panel loads a local page in its sandboxed view (M3-6). Screenshots need a window on screen, so
+    // they are only checked with --show.
+    await page.getByRole('button', { name: '预览', exact: true }).click();
+    await page.locator('.preview input[aria-label=url]').fill(siteUrl);
+    await page.locator('.preview').getByRole('button', { name: '打开', exact: true }).click();
+    await page.locator('.preview__title', { hasText: 'Smoke page' }).waitFor();
+    if (values.show) {
+        await page.locator('.preview').getByRole('button', { name: '截图发给agent' }).click();
+        await page.locator('.composer .chip', { hasText: 'preview.png' }).waitFor();
+    }
+    await step(page, '预览能打开本地页面');
 } catch (error) {
     failed = true;
     console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
@@ -237,8 +258,25 @@ try {
         console.error(`  失败截图：${file}`);
     }
 } finally {
-    await app.close().catch(() => undefined);
+    // Close the window the way a user does and wait for the app to quit on its own.
+    const exited = new Promise<boolean>((resolve) => app.process().once('exit', () => resolve(true)));
+    await app
+        .evaluate(({ BrowserWindow }) => {
+            for (const window of BrowserWindow.getAllWindows()) window.close();
+        })
+        .catch(() => undefined);
+    const quit = await Promise.race([
+        exited,
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20_000)),
+    ]);
+    if (!quit) {
+        failed = true;
+        console.error('✗ 关闭窗口后应用20秒内没有退出，已强制结束');
+        app.process().kill('SIGKILL');
+    }
     await server.close();
+    site.close();
+    site.closeAllConnections();
 }
 
 console.log(`\n${steps.length}步通过${failed ? '，有失败' : ''}`);

@@ -2215,3 +2215,13 @@ pre {
     margin-left: 8px;
     color: var(--xk-text-muted);
 }
+
+.preview__title {
+    margin-left: auto;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--xk-text-muted);
+    font-size: 12px;
+}

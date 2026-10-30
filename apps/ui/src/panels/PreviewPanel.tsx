@@ -75,12 +75,14 @@ export function PreviewPanel({ thread }: { thread: ThreadMeta }) {
     };
     const capture = async () => {
         const image = await api.capture();
-        if (image) {
-            attachToComposer(thread.id, [
-                { kind: 'image', name: 'preview.png', mimeType: 'image/png', data: dataUrlToBase64(image) },
-            ]);
-            toast(s.preview.attached, 'success');
+        if (!image) {
+            toast(s.preview.captureFailed, 'error');
+            return;
         }
+        attachToComposer(thread.id, [
+            { kind: 'image', name: 'preview.png', mimeType: 'image/png', data: dataUrlToBase64(image) },
+        ]);
+        toast(s.preview.attached, 'success');
     };
     const annotate = async () => {
         setPicking(true);
@@ -152,6 +154,11 @@ export function PreviewPanel({ thread }: { thread: ThreadMeta }) {
                 <button type="button" className="link" disabled={!opened} onClick={() => void api.openExternal()}>
                     {s.preview.external}
                 </button>
+                {opened && current?.title && (
+                    <span className="preview__title" title={current.url}>
+                        {current.title}
+                    </span>
+                )}
             </div>
             <div className="preview__area" ref={area}>
                 {!opened && <div className="empty">{s.preview.hint}</div>}

@@ -206,13 +206,19 @@ export class PreviewController {
         }
     }
 
+    /** Also called while the app quits, when the window may already be gone. */
     close(): void {
         const view = this.#view;
         this.#view = undefined;
-        if (view) {
-            this.#window.contentView.removeChildView(view);
-            view.webContents.close();
-            this.#emit({ type: 'closed' });
+        if (!view) {
+            return;
         }
+        if (!this.#window.isDestroyed()) {
+            this.#window.contentView.removeChildView(view);
+        }
+        if (!view.webContents.isDestroyed()) {
+            view.webContents.close();
+        }
+        this.#emit({ type: 'closed' });
     }
 }

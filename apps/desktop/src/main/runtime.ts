@@ -104,8 +104,13 @@ export class BundleRuntime {
             clearTimeout(timer);
         }
         this.#timers.clear();
+        // One failing cleanup must not skip the rest: the host has to be stopped for the app to quit.
         for (const cleanup of this.#cleanups.splice(0)) {
-            cleanup();
+            try {
+                cleanup();
+            } catch (error) {
+                this.#options.log.warn(`cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
         }
         this.#shell?.dispose();
         this.#shell = undefined;
