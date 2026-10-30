@@ -348,3 +348,16 @@ grok bot（spacexai，2026-08-11开放beta）的资料来自第三方报道：�
   - 看板、两本账、质量门、自主级别、团队视图。
 - **M5：工作流与自动化**：yaml工作流、定时与触发、峰谷调度、从线程沉淀、团队对话、竞争假设模式。
 - **1.0之后**：可视化工作流编辑器、外部渠道、远程执行、按一次通过率自动调档。
+
+## 18. 实现落点（2026-10-30）
+
+- **代码**：`packages/workflows`（纯逻辑）、`packages/host/src/team.ts`（`TeamService`）、`team-agents.ts`（工具schema、各角色提示词、组织加载）、`team-store.ts`（sqlite，migration 2的`team_runs`和`team_board_events`）。
+- **组织**：用户级在`<数据目录>/orgs/default/`（`org.md`、`agents/*.md`），项目级是`.xora/org.md`和`.xora/agents/*.md`，项目受信后才生效（项目文件能改档位和工具白名单）。
+- **工具**：主管有task_create、task_assign、task_update、task_list、send_message、ledger_update、request_review；执行者有deliver、escalate、ask_supervisor（挂起等主管回答）。
+- **派工**：并发上限3（常量）；写任务各占一个worktree，都从运行开始时的HEAD建；有依赖的任务先把前置任务的结果带进来；卡片写`workspace: 'local'`的直接在项目目录里改。
+- **确认**：计划确认、交付确认、高风险动作都复用审批卡片，挂在主管线程里；L1确认计划和交付，L0每次派工也确认。
+- **验收与升级**：验收命令按`execute`过权限策略；命令通过才开跨家族审查；退回最多2轮，再按`shouldEscalate`升档、交主管或问人。
+- **整合**：按依赖顺序把worktree应用回项目，冲突就暂停问人；全量验收不过时运行结束为失败，报告照常生成。
+- **重启**：未结束的运行标成已暂停，用`team.resume`继续；已完成的任务不重跑。
+- **还没做**：执行者跑`git push`这类高风险命令时不额外强制审批；卡片的`maxTurns`没执行；并发上限不是设置项；没有独立的计划评审步骤（主管自己建只读卡派侦察和规划）；团队线程里的mcp工具不受角色白名单约束（每次调用仍走权限策略）。
+
