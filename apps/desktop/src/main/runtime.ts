@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { BundleManifest, Candidate } from '@xora/updater';
+import type { BundleManifest, Candidate, TrustedKeys } from '@xora/updater';
 import {
     app,
     BrowserWindow,
@@ -8,6 +8,7 @@ import {
     type IpcMainInvokeEvent,
     ipcMain,
     MessageChannelMain,
+    Notification,
     shell,
     type UtilityProcess,
     utilityProcess,
@@ -15,6 +16,10 @@ import {
 import { APP_ORIGIN, setBundleRoot } from './app-protocol.ts';
 import type { ShellEnv } from './env.ts';
 import type { BootLog } from './log.ts';
+import type { DataPaths } from './paths.ts';
+import { PreviewController } from './preview.ts';
+import { attachShellServices, releasePowerBlocker, type ShellPeer } from './shell-services.ts';
+import { AppTray, forceQuit, trayIconPath } from './tray.ts';
 
 export type LaunchOutcome =
     | { readonly kind: 'good' }
@@ -29,7 +34,8 @@ export type LaunchOutcome =
 export interface RuntimeOptions {
     readonly env: ShellEnv;
     readonly log: BootLog;
-    readonly dataDir: string;
+    readonly paths: DataPaths;
+    readonly trustedKeys: TrustedKeys;
     readonly shellVersion: string;
     readonly preloadPath: string;
     readonly bundleDir: string;
@@ -39,6 +45,8 @@ export interface RuntimeOptions {
     readonly onCrashLoop: (component: 'host' | 'renderer') => void;
     /** Called when the UI asks to restart into safe mode. */
     readonly onSafeModeRequest: () => void;
+    /** Restarts the app, e.g. to apply a staged update. */
+    readonly relaunch: () => void;
 }
 
 const CRASH_WINDOW_MS = 5 * 60_000;
@@ -56,7 +64,17 @@ export class BundleRuntime {
     readonly #rendererRestarts: number[] = [];
     #resolve: (outcome: LaunchOutcome) => void = () => undefined;
     #host: UtilityProcess | undefined;
+    #shell: ShellPeer | undefined;
     #window: BrowserWindow | undefined;
+    #quitConfirmed = false;
+    readonly #tray = new AppTray({
+        iconPath: trayIconPath(),
+        show: (threadId) => this.#showWindow(threadId),
+        quit: () => {
+            this.#quitConfirmed = true;
+            forceQuit();
+        },
+    });
     #uiReady = false;
     #good = false;
     #settled = false;
@@ -89,6 +107,10 @@ export class BundleRuntime {
         for (const cleanup of this.#cleanups.splice(0)) {
             cleanup();
         }
+        this.#shell?.dispose();
+        this.#shell = undefined;
+        this.#tray.dispose();
+        releasePowerBlocker();
         this.#host?.kill();
         this.#host = undefined;
         const window = this.#window;
@@ -119,15 +141,34 @@ export class BundleRuntime {
 
     /** Resolves true once the host reported ready, false if it failed first. */
     #startHost(): Promise<boolean> {
-        const { manifest, bundleDir, dataDir, log, env } = this.#options;
+        const { manifest, bundleDir, paths, log, env, shellVersion, trustedKeys } = this.#options;
         return new Promise((resolve) => {
             let ready = false;
             const child = utilityProcess.fork(path.join(bundleDir, ...manifest.entry.host.split('/')), [], {
                 serviceName: 'Xora Code Host',
                 stdio: 'pipe',
-                env: { ...process.env, XORA_BUNDLE_VERSION: manifest.version, XORA_DATA_DIR: dataDir },
+                env: {
+                    ...process.env,
+                    XORA_BUNDLE_VERSION: manifest.version,
+                    XORA_SHELL_VERSION: shellVersion,
+                    XORA_DATA_DIR: paths.root,
+                    NODE_NO_WARNINGS: '1',
+                },
             });
             this.#host = child;
+            this.#shell?.dispose();
+            this.#shell = attachShellServices(child, {
+                log,
+                paths,
+                shellVersion,
+                bundleVersion: manifest.version,
+                bundleDir,
+                trustedKeys,
+                window: () => this.#window,
+                relaunch: () => this.#options.relaunch(),
+                tray: this.#tray,
+                plainSecrets: env.plainSecrets,
+            });
             child.stdout?.on('data', (chunk: Buffer) => log.info(`host: ${chunk.toString('utf8').trimEnd()}`));
             child.stderr?.on('data', (chunk: Buffer) => log.warn(`host: ${chunk.toString('utf8').trimEnd()}`));
             const timer = setTimeout(() => {
@@ -182,7 +223,7 @@ export class BundleRuntime {
     }
 
     #createWindow(): void {
-        const { env, preloadPath, manifest, candidate, shellVersion, dataDir } = this.#options;
+        const { env, preloadPath, manifest, candidate, shellVersion, paths } = this.#options;
         const window = new BrowserWindow({
             width: 1180,
             height: 780,
@@ -224,6 +265,15 @@ export class BundleRuntime {
             }
         });
         window.on('closed', () => this.#windowClosed(window));
+        window.on('focus', () => this.#shell?.notify('shell.focus', { focused: true }));
+        window.on('blur', () => this.#shell?.notify('shell.focus', { focused: false }));
+        window.on('close', (event) => {
+            if (this.#quitConfirmed || !this.#good || !this.#shell) {
+                return;
+            }
+            event.preventDefault();
+            void this.#confirmClose(window);
+        });
 
         const fromThisWindow = (event: IpcMainEvent | IpcMainInvokeEvent) => event.sender === contents;
         const onRequestPort = (event: IpcMainEvent) => {
@@ -241,6 +291,47 @@ export class BundleRuntime {
                 this.#options.onSafeModeRequest();
             }
         };
+        const preview = new PreviewController(window, this.#options.log, (event) => {
+            if (!contents.isDestroyed()) contents.send('xora:preview-event', event);
+        });
+        ipcMain.handle('xora:preview', async (event, op: unknown, args: unknown) => {
+            if (!fromThisWindow(event)) {
+                throw new Error('forbidden');
+            }
+            const input = (args ?? {}) as { url?: string; bounds?: Electron.Rectangle; visible?: boolean };
+            switch (op) {
+                case 'open':
+                    preview.open(String(input.url), input.bounds ?? { x: 0, y: 0, width: 400, height: 300 });
+                    return true;
+                case 'bounds':
+                    if (input.bounds) preview.setBounds(input.bounds);
+                    return true;
+                case 'visible':
+                    preview.setVisible(Boolean(input.visible));
+                    return true;
+                case 'reload':
+                    preview.reload();
+                    return true;
+                case 'back':
+                    preview.back();
+                    return true;
+                case 'devtools':
+                    preview.devtools();
+                    return true;
+                case 'external':
+                    preview.openExternal();
+                    return true;
+                case 'capture':
+                    return preview.capture();
+                case 'annotate':
+                    return preview.annotate();
+                case 'close':
+                    preview.close();
+                    return true;
+                default:
+                    throw new Error(`unknown preview operation ${String(op)}`);
+            }
+        });
         ipcMain.on('xora:request-port', onRequestPort);
         ipcMain.on('xora:ui-ready', onUiReady);
         ipcMain.on('xora:restart-safe-mode', onSafeMode);
@@ -252,7 +343,7 @@ export class BundleRuntime {
                 shellVersion,
                 bundleVersion: manifest.version,
                 candidate: candidate.id,
-                dataDir,
+                dataDir: paths.root,
                 platform: process.platform,
             };
         });
@@ -261,9 +352,55 @@ export class BundleRuntime {
             ipcMain.removeListener('xora:ui-ready', onUiReady);
             ipcMain.removeListener('xora:restart-safe-mode', onSafeMode);
             ipcMain.removeHandler('xora:shell-info');
+            ipcMain.removeHandler('xora:preview');
+            preview.close();
         });
 
         void window.loadURL(`${APP_ORIGIN}/${manifest.entry.ui}`).catch(() => undefined);
+    }
+
+    /** Closing the window while turns run hides it to the tray instead of quitting (04 §6). */
+    async #confirmClose(window: BrowserWindow): Promise<void> {
+        let running = 0;
+        try {
+            running = (await this.#shell?.request('host.activity', {}, { timeoutMs: 1500 }))?.runningTurns ?? 0;
+        } catch {
+            running = 0;
+        }
+        if (running > 0 && !window.isDestroyed()) {
+            window.hide();
+            this.#tray.setHidden(true);
+            if (Notification.isSupported()) {
+                new Notification({
+                    title: 'Xora Code',
+                    body: `${running}个任务在后台继续运行，点托盘图标可以打开窗口`,
+                }).show();
+            }
+            return;
+        }
+        this.#quitConfirmed = true;
+        if (!window.isDestroyed()) {
+            window.close();
+        }
+    }
+
+    #showWindow(threadId?: string): void {
+        const window = this.#window;
+        if (!window || window.isDestroyed()) {
+            return;
+        }
+        this.#tray.setHidden(false);
+        if (window.isMinimized()) window.restore();
+        window.show();
+        window.focus();
+        if (threadId) {
+            this.#shell?.notify('shell.openThread', { threadId });
+        }
+    }
+
+    /** Dock click or second launch: bring a hidden window back. */
+    reveal(): void {
+        this.#showWindow();
     }
 
     #connectPort(): void {

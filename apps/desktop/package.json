@@ -17,8 +17,12 @@
     "start": "electron .",
     "package": "electron-builder --config electron-builder.yml --mac --win --linux --publish never"
   },
+  "dependencies": {
+    "node-pty": "1.2.0-beta.18"
+  },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "@xora/protocol": "workspace:*",
     "@xora/updater": "workspace:*",
     "electron": "44.10.0",
     "electron-builder": "26.18.0",

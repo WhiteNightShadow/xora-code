@@ -10,6 +10,8 @@ export interface ShellEnv {
     readonly goodAfterMs: number;
     readonly uiReadyTimeoutMs: number;
     readonly hostReadyTimeoutMs: number;
+    /** Unpackaged test runs only: keep secrets unencrypted so tests never raise a keychain prompt. */
+    readonly plainSecrets: boolean;
 }
 
 function positiveInt(name: string, fallback: number): number {
@@ -25,5 +27,6 @@ export function readShellEnv(): ShellEnv {
         goodAfterMs: positiveInt('XORA_GOOD_AFTER_MS', 20_000),
         uiReadyTimeoutMs: positiveInt('XORA_UI_READY_TIMEOUT_MS', 30_000),
         hostReadyTimeoutMs: positiveInt('XORA_HOST_READY_TIMEOUT_MS', 15_000),
+        plainSecrets: process.env.XORA_TEST_PLAIN_SECRETS === '1',
     };
 }

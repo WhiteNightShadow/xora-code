@@ -3,18 +3,37 @@
   "version": "1.0.0-alpha.1",
   "private": true,
   "type": "module",
-  "description": "Xora Code host process: owns state and serves the UI over MessagePort",
+  "description": "Xora Code host process: owns state, decides permissions and serves the UI over MessagePort",
   "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/core.ts"
+  },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/index.cjs --log-level=warning",
-    "typecheck": "tsc -p tsconfig.json"
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/index.cjs --log-level=warning --legal-comments=none",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@xora/protocol": "workspace:*"
+    "@agentclientprotocol/sdk": "2.1.0",
+    "@xora/metering": "workspace:*",
+    "@xora/protocol": "workspace:*",
+    "@xora/providers": "workspace:*",
+    "@xora/storage": "workspace:*",
+    "@xora/tools": "workspace:*",
+    "@xora/updater": "workspace:*",
+    "@xora/workspace": "workspace:*",
+    "picomatch": "4.0.7",
+    "semver": "7.8.5",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "@types/picomatch": "4.0.3",
+    "@types/semver": "7.8.0",
+    "@xora/engine": "workspace:*",
+    "@xora/test-kit": "workspace:*",
     "esbuild": "0.28.2",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
   }
 }

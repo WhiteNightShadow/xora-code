@@ -1,0 +1,29 @@
+{
+  "name": "@xora/engine",
+  "version": "1.0.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Xora engine: an ACP agent with Xora's agent loop, tools, permissions and context management",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/index.cjs --log-level=warning --legal-comments=none",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "2.1.0",
+    "@xora/providers": "workspace:*",
+    "@xora/tools": "workspace:*",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@xora/test-kit": "workspace:*",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

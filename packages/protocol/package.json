@@ -6,7 +6,10 @@
   "description": "Typed JSON-RPC protocol between the Xora Code UI and host",
   "license": "Apache-2.0",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./rpc": "./src/rpc.ts",
+    "./shell": "./src/shell.ts",
+    "./transport": "./src/transport.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",

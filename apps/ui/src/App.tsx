@@ -1,127 +1,84 @@
-import { domPortTransport, RpcPeer, type SystemInfo } from '@xora/protocol';
-import { Button, StatusDot } from '@xora/ui-kit';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { nextPort, type ShellInfo } from './shell.ts';
+import { useEffect } from 'react';
+import { NewThreadDialog } from './components/NewThreadDialog.tsx';
+import { Spinner } from './components/primitives.tsx';
+import { Sidebar } from './components/Sidebar.tsx';
+import { TeamStartDialog, TeamView } from './components/TeamView.tsx';
+import { ThreadView } from './components/ThreadView.tsx';
+import { Welcome } from './components/Welcome.tsx';
+import { RightPanel } from './panels/RightPanel.tsx';
+import { UsageModal } from './panels/UsageModal.tsx';
+import { SettingsModal } from './settings/SettingsModal.tsx';
+import { useApp, useStrings } from './store.ts';
 
-type Connection =
-    | { readonly state: 'connecting' }
-    | { readonly state: 'connected' }
-    | { readonly state: 'failed'; readonly error: string };
+function Toasts() {
+    const toasts = useApp((state) => state.toasts);
+    return (
+        <div className="toasts" role="status" aria-live="polite">
+            {toasts.map((toast) => (
+                <div key={toast.id} className={`toast toast--${toast.kind}`}>
+                    {toast.text}
+                </div>
+            ))}
+        </div>
+    );
+}
 
 export function App() {
-    const [connection, setConnection] = useState<Connection>({ state: 'connecting' });
-    const [shell, setShell] = useState<ShellInfo | null>(null);
-    const [system, setSystem] = useState<SystemInfo | null>(null);
-    const [latencyMs, setLatencyMs] = useState<number | null>(null);
-    const peerRef = useRef<RpcPeer | null>(null);
-    const readySignalled = useRef(false);
-
-    const ping = useCallback(async () => {
-        const peer = peerRef.current;
-        if (!peer) {
-            return;
-        }
-        const sentAt = performance.now();
-        await peer.request('system.ping', { sentAt: Date.now() });
-        setLatencyMs(Math.round((performance.now() - sentAt) * 10) / 10);
-    }, []);
+    const s = useStrings();
+    const connected = useApp((state) => state.connected);
+    const ready = useApp((state) => state.ready);
+    const settings = useApp((state) => state.settings);
+    const thread = useApp((state) => (state.selectedThreadId ? state.threads[state.selectedThreadId] : undefined));
+    const rightPanel = useApp((state) => state.rightPanel);
+    const settingsOpen = useApp((state) => state.settingsOpen);
+    const usageOpen = useApp((state) => state.usageOpen);
+    const newThreadFor = useApp((state) => state.newThreadFor);
+    const teamRunId = useApp((state) => state.teamRunId);
+    const teamStartFor = useApp((state) => state.teamStartFor);
+    const splitIds = useApp((state) => state.split);
+    const threads = useApp((state) => state.threads);
+    const split = splitIds.map((id) => threads[id]).filter((item) => item !== undefined);
 
     useEffect(() => {
-        const api = window.xoraShell;
-        if (!api) {
-            setConnection({ state: 'failed', error: '没有找到xoraShell，请在xora code桌面端里打开' });
-            return;
-        }
-        let cancelled = false;
+        const root = document.documentElement;
+        if (!settings || settings.theme === 'system') root.removeAttribute('data-theme');
+        else root.setAttribute('data-theme', settings.theme);
+        root.setAttribute('data-density', settings?.density ?? 'comfortable');
+        root.lang = settings?.language ?? 'zh-CN';
+    }, [settings]);
 
-        const connect = async () => {
-            const portPromise = nextPort();
-            api.requestPort();
-            const port = await portPromise;
-            if (cancelled) {
-                port.close();
-                return;
-            }
-            peerRef.current?.dispose();
-            const peer = new RpcPeer(domPortTransport(port), { timeoutMs: 10_000 });
-            peerRef.current = peer;
-            try {
-                setSystem(await peer.request('system.info', {}));
-                await ping();
-                setConnection({ state: 'connected' });
-                if (!readySignalled.current) {
-                    readySignalled.current = true;
-                    api.signalReady();
-                }
-            } catch (error) {
-                setConnection({ state: 'failed', error: error instanceof Error ? error.message : String(error) });
-            }
-        };
-
-        void api.shellInfo().then((info) => {
-            if (!cancelled) {
-                setShell(info);
-            }
-        });
-        void connect();
-        const unsubscribe = api.onHostRestarted(() => {
-            setConnection({ state: 'connecting' });
-            void connect();
-        });
-        return () => {
-            cancelled = true;
-            unsubscribe();
-            peerRef.current?.dispose();
-            peerRef.current = null;
-        };
-    }, [ping]);
-
-    const status =
-        connection.state === 'connected' ? (
-            <StatusDot tone="ok" label="host已连接" />
-        ) : connection.state === 'connecting' ? (
-            <StatusDot tone="pending" label="正在连接host" />
-        ) : (
-            <StatusDot tone="error" label={`连接失败：${connection.error}`} />
+    if (!ready) {
+        return (
+            <div className="boot">
+                <Spinner size={16} /> {connected ? s.common.loading : s.app.connecting}
+            </div>
         );
-
+    }
     return (
-        <main className="shell">
-            <header className="shell__header">
-                <h1>xora code</h1>
-                <p className="shell__subtitle">新架构骨架（M0）：bootstrap、应用包和host已经接通，功能从M1开始。</p>
-            </header>
-            <section className="shell__card" aria-label="运行状态">
-                <div className="shell__row">
-                    {status}
-                    <Button onClick={() => void ping()} disabled={connection.state !== 'connected'}>
-                        再测一次
-                    </Button>
-                </div>
-                <dl className="shell__facts">
-                    <dt>shell版本</dt>
-                    <dd>{shell?.shellVersion ?? '…'}</dd>
-                    <dt>应用包</dt>
-                    <dd>{shell ? `${shell.bundleVersion}（${shell.candidate}）` : '…'}</dd>
-                    <dt>协议版本</dt>
-                    <dd>{system?.protocolVersion ?? '…'}</dd>
-                    <dt>host</dt>
-                    <dd>
-                        {system
-                            ? `pid ${system.hostPid} · node ${system.versions.node} · electron ${system.versions.electron}`
-                            : '…'}
-                    </dd>
-                    <dt>往返延迟</dt>
-                    <dd>{latencyMs === null ? '…' : `${latencyMs} ms`}</dd>
-                    <dt>数据目录</dt>
-                    <dd className="shell__mono">{shell?.dataDir ?? '…'}</dd>
-                </dl>
-            </section>
-            <footer className="shell__footer">
-                <Button variant="danger" onClick={() => window.xoraShell?.restartToSafeMode()}>
-                    重启到修复模式
-                </Button>
-            </footer>
-        </main>
+        <div className={`app${rightPanel && thread && !teamRunId ? ' has-panel' : ''}`}>
+            <Sidebar />
+            <main className={`main${split.length > 1 ? ' main--split' : ''}`}>
+                {teamRunId ? (
+                    <TeamView runId={teamRunId} />
+                ) : split.length > 1 ? (
+                    split.map((item) => (
+                        <div key={item.id} className="split-pane">
+                            <ThreadView thread={item} />
+                        </div>
+                    ))
+                ) : thread ? (
+                    <ThreadView key={thread.id} thread={thread} />
+                ) : (
+                    <Welcome />
+                )}
+            </main>
+            {rightPanel && thread && !teamRunId && <RightPanel thread={thread} panel={rightPanel} />}
+            {settingsOpen && <SettingsModal section={settingsOpen} />}
+            {usageOpen && <UsageModal />}
+            {newThreadFor && <NewThreadDialog projectId={newThreadFor} />}
+            {teamStartFor && <TeamStartDialog projectId={teamStartFor} />}
+            {!connected && <div className="banner">{s.app.disconnected}</div>}
+            <Toasts />
+        </div>
     );
 }

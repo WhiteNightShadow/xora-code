@@ -9,7 +9,9 @@
 | 项 | 设计稿 | 调整为 | 理由 |
 |---|---|---|---|
 | 引擎内核 | pi（`@earendil-works/pi-ai`、`pi-agent-core`） | 自研wire层和agent循环，provider接口保持可替换 | pi-ai 1.4.0依赖openai、anthropic、google genai、aws bedrock四套sdk，会把每次热更新的应用包撑大好几mb；每周发版，出过不兼容改动。国产三家和其他目标厂商都能用openai chat和anthropic messages两种协议覆盖，自研两套wire层约一千多行，怪癖、用量映射、错误归类、录制回放都能自己掌控。以后需要时可以把pi-ai接成一个可选后端 |
-| acp | `@agentclientprotocol/sdk` 2.x | 同，用2.2.0的v1稳定入口 | 已核对：sdk无运行时依赖，v1稳定版已含`usage_update`、`notice`、`compaction_update`、`session/list`、`session/resume`、`session/close` |
+| acp | `@agentclientprotocol/sdk` 2.x | 同，用2.1.0的v1稳定入口 | 已核对：v1稳定版已含`usage_update`、`notice`、`compaction_update`、`session/list`、`session/resume`、`session/close`。2.2.0是当天发布的，pnpm 12的最短发布时长检查会拦下；没有加例外，退回接口相同的2.1.0 |
+| bootstrap的依赖 | 只依赖`updater` | `updater`，加上`protocol`的`shell`、`rpc`、`transport`三个子路径 | bootstrap要给host提供钥匙串、对话框、通知、防休眠、托盘、更新暂存等服务，这条通道也要做schema校验；只引入这三个文件，不带产品协议的其余部分 |
+| 引擎和host的扩展点 | `_meta`和`_xora/*` | 同；另加host工具：host在会话配置里声明工具，引擎经`_xora/tool/call`回到host执行 | 主管的派工、等待、验收等工具要由host执行（host持有看板、worktree和预算），引擎只转发 |
 | 界面样式 | tailwind v4+radix | css变量加自建组件 | 少依赖、应用包更小；组件自己补aria属性和键盘操作 |
 | 存储 | 优先`node:sqlite` | 同 | 已核对：electron 44自带的node 24.22.1里`node:sqlite`可用，fts5全文搜索可用 |
 | 搜索工具 | `@vscode/ripgrep` | 纯js实现，系统装了`rg`就优先用 | `@vscode/ripgrep`在安装时只下载本机平台的二进制，没法在mac上交叉打出另外五个平台的包 |

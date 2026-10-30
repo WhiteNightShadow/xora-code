@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -53,6 +55,7 @@ function runShell(
         XORA_TEST_HIDE_WINDOWS: '1',
         XORA_TEST_EXIT_AFTER_GOOD: '1',
         XORA_TEST_EXIT_ON_SAFE_MODE: '1',
+        XORA_TEST_PLAIN_SECRETS: '1',
         XORA_GOOD_AFTER_MS: '1500',
         XORA_UI_READY_TIMEOUT_MS: '20000',
         XORA_HOST_READY_TIMEOUT_MS: '10000',
@@ -125,6 +128,7 @@ const broken = await makeBundle({
 });
 const good2 = await makeBundle({ out: path.join(bundles, 'good-2'), version: `${base}.drill.2` });
 const good3 = await makeBundle({ out: path.join(bundles, 'good-3'), version: `${base}.drill.3` });
+const feedBundle = await makeBundle({ out: path.join(bundles, 'feed', 'bundle'), version: `${base}.drill.4` });
 const brokenFactory = await makeBundle({ out: path.join(bundles, 'factory-broken'), version: base, breakHost: true });
 const dataDir = path.join(workDir, 'data');
 
@@ -171,6 +175,49 @@ await scenario('被篡改的更新包：校验失败、不重试，继续用当�
     return `${mark?.reason}，current=${state.current}`;
 });
 
+/** Serves `<root>/feed-stable.json` and the bundle next to it, like a release host would. */
+async function serveFeed(root: string): Promise<{ url: string; server: Server }> {
+    const server = createServer((request, response) => {
+        const relative = decodeURIComponent((request.url ?? '/').split('?')[0] ?? '/').replace(/^\/+/, '');
+        const file = path.resolve(root, relative);
+        if (!file.startsWith(path.resolve(root))) {
+            response.writeHead(403).end();
+            return;
+        }
+        readFile(file)
+            .then((body) => response.writeHead(200).end(body))
+            .catch(() => response.writeHead(404).end());
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, server };
+}
+
+await scenario('在线更新：从更新源下载、校验、暂存，下次启动生效', async () => {
+    const feedRoot = path.join(bundles, 'feed');
+    await writeFile(
+        path.join(feedRoot, 'feed-stable.json'),
+        `${JSON.stringify({ schemaVersion: 1, channel: 'stable', version: feedBundle.manifest.version, manifest: 'bundle/manifest.json' })}\n`,
+        'utf8',
+    );
+    const { url, server } = await serveFeed(feedRoot);
+    try {
+        const env = {
+            XORA_UPDATE_FEED: `${url}/feed-{channel}.json`,
+            XORA_UPDATE_CHECK_ON_START: '1',
+            XORA_GOOD_AFTER_MS: '8000',
+        };
+        await runShell(dataDir, [], env);
+        const staged = await readState(dataDir);
+        expect(staged.pending === feedBundle.manifest.version, `pending=${staged.pending}`);
+        await runShell(dataDir);
+        const state = await readState(dataDir);
+        expect(state.current === feedBundle.manifest.version, `current=${state.current}`);
+        return `pending→current=${state.current}`;
+    } finally {
+        server.close();
+    }
+});
+
 await scenario('--safe-mode：直接进入修复模式', async () => {
     await runShell(dataDir, ['--safe-mode']);
     const state = await readState(dataDir);
@@ -194,7 +241,7 @@ await scenario('修复模式页面：能读出状态并列出版本', async () =
 await scenario('离开修复模式后正常启动当前版本', async () => {
     await runShell(dataDir);
     const state = await readState(dataDir);
-    expect(state.lastGood === `slot:${good2.manifest.version}`, `lastGood=${state.lastGood}`);
+    expect(state.lastGood === `slot:${feedBundle.manifest.version}`, `lastGood=${state.lastGood}`);
     return `lastGood=${state.lastGood}`;
 });
 

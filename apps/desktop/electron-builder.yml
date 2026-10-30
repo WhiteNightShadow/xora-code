@@ -13,11 +13,17 @@ extraResources:
   - from: ../../dist/app-bundle
     to: app-bundle
 asar: true
+# node-pty ships N-API prebuilds for all six targets, so nothing is rebuilt when cross-packaging from a mac.
+npmRebuild: false
+asarUnpack:
+  - node_modules/node-pty/**
 mac:
   icon: build-resources/icon.png
   category: public.app-category.developer-tools
   # Unsigned preview builds until a Developer ID certificate is available.
   identity: null
+  files:
+    - "!node_modules/node-pty/prebuilds/{linux,win32}-*/**"
   target:
     - target: dmg
       arch: [arm64, x64]
@@ -25,6 +31,9 @@ mac:
       arch: [arm64, x64]
 win:
   icon: build-resources/icon.png
+  files:
+    - "!node_modules/node-pty/prebuilds/{darwin,linux}-*/**"
+    - "!**/*.pdb"
   target:
     - target: nsis
       arch: [x64, arm64]
@@ -37,6 +46,8 @@ linux:
   executableName: xora-code
   category: Development
   maintainer: Xora Code contributors <WhiteNightShadow@users.noreply.github.com>
+  files:
+    - "!node_modules/node-pty/prebuilds/{darwin,win32}-*/**"
   target:
     - target: AppImage
       arch: [x64, arm64]

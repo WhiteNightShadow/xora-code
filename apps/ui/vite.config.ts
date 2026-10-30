@@ -6,6 +6,7 @@ export default defineConfig({
     base: './',
     plugins: [react()],
     build: {
+        chunkSizeWarningLimit: 2000,
         outDir: 'dist',
         emptyOutDir: true,
         target: 'es2023',

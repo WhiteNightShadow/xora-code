@@ -1,0 +1,273 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { XoraDatabase } from '@xora/storage';
+import { afterEach, describe, expect, it } from 'vitest';
+import { ApprovalService } from '../src/approvals.ts';
+import { Bus, type Subscriber } from '../src/bus.ts';
+import type { CallFacts } from '../src/policy.ts';
+import { PromptService } from '../src/prompts.ts';
+import { SettingsService } from '../src/settings.ts';
+import { ThreadStore } from '../src/threads.ts';
+import { UsageService } from '../src/usage.ts';
+
+const open: XoraDatabase[] = [];
+
+function database(): XoraDatabase {
+    const db = new XoraDatabase(':memory:');
+    db.migrate();
+    open.push(db);
+    return db;
+}
+
+function recorder(bus: Bus): Array<{ method: string; params: unknown }> {
+    const seen: Array<{ method: string; params: unknown }> = [];
+    const subscriber: Subscriber = { notify: (method, params) => seen.push({ method, params }) };
+    bus.add(subscriber);
+    return seen;
+}
+
+afterEach(() => {
+    for (const db of open.splice(0)) db.close();
+});
+
+describe('ThreadStore', () => {
+    it('creates threads, appends events with increasing seq and broadcasts metadata', () => {
+        const bus = new Bus();
+        const seen = recorder(bus);
+        const store = new ThreadStore(database(), bus, mkdtempSync(path.join(tmpdir(), 'xora-threads-')));
+        const thread = store.create({
+            projectId: 'p1',
+            title: '新线程',
+            engine: 'xora',
+            model: null,
+            mode: 'ask',
+            effort: 'high',
+        });
+        expect(thread.lastSeq).toBe(1);
+        const event = store.append(thread.id, 'thread.renamed', { title: 'x' });
+        expect(event.seq).toBe(2);
+        store.update(thread.id, { title: 'x', status: 'running' });
+        expect(store.get(thread.id)).toMatchObject({ title: 'x', status: 'running', lastSeq: 2 });
+        expect(seen.some((entry) => entry.method === 'thread.meta')).toBe(true);
+        expect(store.events(thread.id, 1).map((item) => item.kind)).toEqual(['thread.renamed']);
+    });
+
+    it('marks threads left running by a crash as failed', () => {
+        const store = new ThreadStore(database(), new Bus(), mkdtempSync(path.join(tmpdir(), 'xora-threads-')));
+        const thread = store.create({
+            projectId: 'p1',
+            title: 't',
+            engine: 'xora',
+            model: null,
+            mode: 'ask',
+            effort: 'high',
+        });
+        store.update(thread.id, { status: 'running' });
+        expect(store.recoverInterrupted()).toEqual([thread.id]);
+        expect(store.get(thread.id).status).toBe('failed');
+    });
+
+    it('indexes messages for search', () => {
+        const store = new ThreadStore(database(), new Bus(), mkdtempSync(path.join(tmpdir(), 'xora-threads-')));
+        const thread = store.create({
+            projectId: 'p1',
+            title: '登录改造',
+            engine: 'xora',
+            model: null,
+            mode: 'ask',
+            effort: 'high',
+        });
+        store.append(thread.id, 'turn.started', {
+            turnId: 'turn_1',
+            input: {
+                id: 'i1',
+                turnId: 'turn_1',
+                ts: 1,
+                type: 'user_message',
+                text: '给登录加短信验证码',
+                attachments: [],
+            },
+            model: null,
+            mode: 'ask',
+            effort: 'high',
+        });
+        expect(store.search('短信验证码').map((hit) => hit.threadId)).toEqual([thread.id]);
+        expect(store.search('登录').map((hit) => hit.threadId)).toEqual([thread.id]);
+        expect(store.search('100%').map((hit) => hit.threadId)).toEqual([]);
+    });
+});
+
+describe('SettingsService', () => {
+    it('returns defaults and persists valid patches only', () => {
+        const db = database();
+        const settings = new SettingsService(db);
+        expect(settings.get().language).toBe('zh-CN');
+        settings.update({ theme: 'dark' });
+        expect(new SettingsService(db).get().theme).toBe('dark');
+        db.run('update settings set value_json = ? where key = ?', [
+            JSON.stringify({ theme: 'neon', density: 'compact' }),
+            'settings',
+        ]);
+        const reloaded = new SettingsService(db).get();
+        expect(reloaded.theme).toBe('system');
+        expect(reloaded.density).toBe('compact');
+    });
+});
+
+describe('ApprovalService', () => {
+    const facts: CallFacts = {
+        toolName: 'bash',
+        kind: 'execute',
+        readOnly: false,
+        command: 'pnpm test --run',
+        readOnlyCommand: false,
+        paths: [],
+        outside: [],
+        sensitive: [],
+        external: false,
+    };
+    const base = {
+        threadId: 't1',
+        turnId: 'turn_1',
+        projectId: 'p1',
+        title: 'pnpm test --run',
+        toolKind: 'execute' as const,
+        summary: 'pnpm test --run',
+        paths: [],
+        risks: [],
+        engine: 'xora',
+    };
+    const context = { mode: 'ask' as const, projectId: 'p1', projectRoot: '/work' };
+
+    it('holds a call until the user answers and remembers "allow for this session"', async () => {
+        const bus = new Bus();
+        const seen = recorder(bus);
+        const approvals = new ApprovalService(database(), bus);
+        expect(approvals.evaluate('t1', facts, context).decision).toBe('ask');
+        let id = '';
+        const outcome = approvals.request(base, facts, (approval) => {
+            id = approval.id;
+        });
+        expect(approvals.list()).toHaveLength(1);
+        approvals.respond(id, 'allow_session');
+        await expect(outcome).resolves.toMatchObject({ status: 'allowed', decision: 'allow_session' });
+        expect(approvals.list()).toHaveLength(0);
+        expect(approvals.evaluate('t1', facts, context).decision).toBe('allow');
+        expect(approvals.evaluate('t2', facts, context).decision).toBe('ask');
+        expect(seen.map((entry) => entry.method)).toEqual(['approval.requested', 'approval.resolved']);
+    });
+
+    it('"always allow" writes a project rule', async () => {
+        const approvals = new ApprovalService(database(), new Bus());
+        let id = '';
+        const outcome = approvals.request(base, facts, (approval) => {
+            id = approval.id;
+        });
+        approvals.respond(id, 'allow_always', 'project');
+        await outcome;
+        expect(approvals.rules()).toEqual([
+            expect.objectContaining({ tool: 'bash', pattern: 'pnpm test', decision: 'allow', projectId: 'p1' }),
+        ]);
+        expect(approvals.evaluate('t9', facts, context).decision).toBe('allow');
+    });
+
+    it('never offers "always" for calls outside the workspace and rejects forged answers', async () => {
+        const approvals = new ApprovalService(database(), new Bus());
+        const outside = { ...facts, paths: ['/etc/hosts'], outside: ['/etc/hosts'] };
+        let id = '';
+        let scopes: string[] = [];
+        const outcome = approvals.request(base, outside, (approval) => {
+            id = approval.id;
+            scopes = [...approval.alwaysScopes];
+        });
+        expect(scopes).toEqual([]);
+        expect(() => approvals.respond(id, 'allow_always', 'global')).toThrow();
+        expect(() => approvals.respond('a_forged', 'allow_once')).toThrow();
+        approvals.cancelThread('t1');
+        await expect(outcome).resolves.toEqual({ status: 'cancelled' });
+    });
+});
+
+describe('UsageService', () => {
+    it('prices requests with the vendor table and converts to the display currency', () => {
+        const db = database();
+        const settings = new SettingsService(db);
+        const usage = new UsageService(db, () => settings.get());
+        const recorded = usage.record(
+            {
+                projectId: 'p1',
+                threadId: 't1',
+                turnId: 'turn_1',
+                engine: 'xora',
+                provider: 'deepseek',
+                model: 'deepseek-flash',
+                pricing: 'deepseek-flash@2026-10',
+                usage: {
+                    inputTokens: 1_000_000,
+                    cachedTokens: 0,
+                    cacheWriteTokens: 0,
+                    outputTokens: 0,
+                    reasoningTokens: 0,
+                },
+                latencyMs: 1000,
+                status: 'ok',
+                source: 'vendor',
+            },
+            // A Saturday: off-peak, half price.
+            new Date('2026-10-31T04:00:00Z'),
+        );
+        expect(recorded.cost).toEqual({ amount: 1, currency: 'CNY' });
+        const summary = usage.summary('all', 'model', { project: (id) => id, thread: (id) => id });
+        expect(summary.totals.cost.amount).toBe(1);
+        expect(summary.rows[0]?.key).toBe('deepseek/deepseek-flash');
+        settings.update({ currency: 'USD', usdToCny: 8 });
+        expect(usage.thread('t1').totals.cost).toEqual({ amount: 0.125, currency: 'USD' });
+    });
+
+    it('marks totals incomplete when a price is unknown', () => {
+        const db = database();
+        const settings = new SettingsService(db);
+        const usage = new UsageService(db, () => settings.get());
+        usage.record({
+            projectId: 'p1',
+            threadId: 't1',
+            turnId: 'turn_1',
+            engine: 'xora',
+            provider: 'custom-openai',
+            model: 'mystery',
+            usage: { inputTokens: 10, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 10, reasoningTokens: 0 },
+            latencyMs: 10,
+            status: 'ok',
+            source: 'vendor',
+        });
+        expect(usage.thread('t1').totals.complete).toBe(false);
+    });
+});
+
+describe('PromptService', () => {
+    it('orders layers from global to session and walks AGENTS.md from the root down', () => {
+        const data = mkdtempSync(path.join(tmpdir(), 'xora-prompts-'));
+        const project = mkdtempSync(path.join(tmpdir(), 'xora-project-'));
+        mkdirSync(path.join(project, 'pkg', 'web'), { recursive: true });
+        writeFileSync(path.join(project, 'AGENTS.md'), 'root rules');
+        writeFileSync(path.join(project, 'pkg', 'CLAUDE.md'), 'pkg rules');
+        const prompts = new PromptService(path.join(data, 'prompts'), path.join(data, 'projects'));
+        prompts.writeGlobal('always answer in Chinese');
+        prompts.writeProject('p1', 'my private notes');
+        const layers = prompts.layers({
+            projectId: 'p1',
+            projectRoot: project,
+            cwd: path.join(project, 'pkg', 'web'),
+            sessionPrompt: 'be brief',
+        });
+        expect(layers.map((layer) => layer.id)).toEqual([
+            'user_global_instructions',
+            'project_instructions',
+            'project_private_instructions',
+            'session_instructions',
+        ]);
+        const shared = layers.find((layer) => layer.id === 'project_instructions')?.text ?? '';
+        expect(shared.indexOf('root rules')).toBeLessThan(shared.indexOf('pkg rules'));
+    });
+});

@@ -14,9 +14,10 @@ import { repoRoot, signingKey } from './keys.ts';
 /**
  * Assembles an app bundle from the built UI and host, then writes a signed manifest:
  *
- *   <out>/ui/...            apps/ui/dist
- *   <out>/host/index.cjs    packages/host/dist/index.cjs
- *   <out>/manifest.json     files, hashes, shell range, ed25519 signature
+ *   <out>/ui/...              apps/ui/dist
+ *   <out>/host/index.cjs      packages/host/dist/index.cjs
+ *   <out>/engine/index.cjs    packages/engine/dist/index.cjs (the xora engine, run by the host)
+ *   <out>/manifest.json       files, hashes, shell range, ed25519 signature
  */
 
 export interface BundleOptions {
@@ -43,8 +44,10 @@ async function requireFile(file: string, hint: string): Promise<void> {
 export async function makeBundle(options: BundleOptions): Promise<{ dir: string; manifest: BundleManifest }> {
     const uiDist = path.join(repoRoot, 'apps', 'ui', 'dist');
     const hostEntry = path.join(repoRoot, 'packages', 'host', 'dist', 'index.cjs');
+    const engineEntry = path.join(repoRoot, 'packages', 'engine', 'dist', 'index.cjs');
     await requireFile(path.join(uiDist, 'index.html'), 'run `pnpm build` first');
     await requireFile(hostEntry, 'run `pnpm build` first');
+    await requireFile(engineEntry, 'run `pnpm build` first');
 
     const version = options.version ?? (await readVersion(path.join(repoRoot, 'package.json')));
     const shellVersion = await readVersion(path.join(repoRoot, 'apps', 'desktop', 'package.json'));
@@ -53,7 +56,9 @@ export async function makeBundle(options: BundleOptions): Promise<{ dir: string;
 
     await rm(out, { recursive: true, force: true });
     await mkdir(path.join(out, 'host'), { recursive: true });
+    await mkdir(path.join(out, 'engine'), { recursive: true });
     await cp(uiDist, path.join(out, 'ui'), { recursive: true });
+    await cp(engineEntry, path.join(out, 'engine', 'index.cjs'));
     if (options.breakHost) {
         await writeFile(path.join(out, 'host', 'index.cjs'), 'process.exit(3);\n', 'utf8');
     } else {

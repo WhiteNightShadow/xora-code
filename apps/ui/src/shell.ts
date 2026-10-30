@@ -7,12 +7,47 @@ export interface ShellInfo {
     readonly platform: string;
 }
 
+export interface PreviewAnnotation {
+    readonly selector: string;
+    readonly tag: string;
+    readonly text: string;
+    readonly html: string;
+    readonly rect: { x: number; y: number; width: number; height: number };
+    readonly url: string;
+    readonly title: string;
+    readonly image?: string;
+}
+
+export interface PreviewBounds {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+}
+
+export type PreviewEvent = { type: 'navigated'; url: string; title: string; canGoBack: boolean } | { type: 'closed' };
+
+export interface PreviewApi {
+    open(url: string, bounds: PreviewBounds): Promise<boolean>;
+    setBounds(bounds: PreviewBounds): Promise<boolean>;
+    setVisible(visible: boolean): Promise<boolean>;
+    reload(): Promise<boolean>;
+    back(): Promise<boolean>;
+    devtools(): Promise<boolean>;
+    openExternal(): Promise<boolean>;
+    capture(): Promise<string | undefined>;
+    annotate(): Promise<PreviewAnnotation | null>;
+    close(): Promise<boolean>;
+    onEvent(listener: (event: PreviewEvent) => void): () => void;
+}
+
 export interface XoraShellApi {
     requestPort(): void;
     signalReady(): void;
     shellInfo(): Promise<ShellInfo>;
     restartToSafeMode(): void;
     onHostRestarted(listener: () => void): () => void;
+    readonly preview?: PreviewApi;
 }
 
 declare global {

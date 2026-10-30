@@ -1,0 +1,313 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+    domPortTransport,
+    type EventEnvelope,
+    type HostMethods,
+    type HostNotifications,
+    methods,
+    notifications,
+    RpcPeer,
+    type ThreadMeta,
+} from '@xora/protocol';
+import { errorTurn, openaiText, openaiToolCalls, startMockModelServer } from '@xora/test-kit';
+import { build } from 'esbuild';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { HostCore } from '../src/core.ts';
+import type { Logger } from '../src/log.ts';
+import { MemoryShell } from '../src/shell.ts';
+
+/**
+ * M1 acceptance, headless: the real host, the real xora engine as a subprocess and a scripted model server.
+ * "Ask for a change → the agent edits → approve → see the diff → undo → restart → continue the thread."
+ */
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const engineSource = path.resolve(here, '../../engine/src/main.ts');
+const work = mkdtempSync(path.join(tmpdir(), 'xora-e2e-'));
+const engineEntry = path.join(work, 'engine.cjs');
+const quiet: Logger = { info: () => undefined, warn: () => undefined, error: () => undefined };
+
+type Ui = RpcPeer<HostMethods, HostNotifications>;
+
+interface Harness {
+    readonly core: HostCore;
+    readonly ui: Ui;
+    readonly shell: MemoryShell;
+    readonly events: EventEnvelope[];
+    close(): Promise<void>;
+}
+
+/** One shell per data directory, so keys survive a host restart the way the OS keychain keeps them. */
+const shells = new Map<string, MemoryShell>();
+
+async function startHost(dataDir: string): Promise<Harness> {
+    const shell = shells.get(dataDir) ?? new MemoryShell({ dataDir });
+    shells.set(dataDir, shell);
+    const core = await HostCore.create({
+        dataDir,
+        shell,
+        bundleVersion: '1.0.0-test',
+        shellVersion: '1.0.0-test',
+        engineEntry,
+        skipShellEnv: true,
+        log: quiet,
+    });
+    const channel = new MessageChannel();
+    const hostSide = core.connectUi(domPortTransport(channel.port1));
+    const ui: Ui = new RpcPeer(domPortTransport(channel.port2), { methods, notifications, timeoutMs: 60_000 });
+    const events: EventEnvelope[] = [];
+    ui.onNotification('thread.event', ({ event }) => events.push(event));
+    return {
+        core,
+        ui,
+        shell,
+        events,
+        close: async () => {
+            ui.dispose();
+            hostSide.dispose();
+            channel.port1.close();
+            channel.port2.close();
+            await core.dispose();
+        },
+    };
+}
+
+async function waitFor<T>(
+    probe: () => T | undefined | Promise<T | undefined>,
+    what: string,
+    timeoutMs = 30_000,
+): Promise<T> {
+    const started = Date.now();
+    for (;;) {
+        const value = await probe();
+        if (value !== undefined && value !== false) {
+            return value as T;
+        }
+        if (Date.now() - started > timeoutMs) {
+            throw new Error(`timed out waiting for ${what}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+}
+
+function gitRepo(): string {
+    const dir = mkdtempSync(path.join(tmpdir(), 'xora-e2e-repo-'));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    writeFileSync(path.join(dir, 'hello.txt'), 'hello\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    return dir;
+}
+
+type MockServer = Awaited<ReturnType<typeof startMockModelServer>>;
+let server: MockServer;
+const harnesses: Harness[] = [];
+
+beforeAll(async () => {
+    await build({
+        entryPoints: [engineSource],
+        bundle: true,
+        platform: 'node',
+        format: 'cjs',
+        target: 'node22',
+        outfile: engineEntry,
+        logLevel: 'silent',
+    });
+    server = await startMockModelServer();
+}, 60_000);
+
+afterEach(async () => {
+    for (const harness of harnesses.splice(0)) {
+        await harness.close().catch(() => undefined);
+    }
+});
+
+afterAll(async () => {
+    await server?.close();
+});
+
+async function setUp(dataDir = mkdtempSync(path.join(tmpdir(), 'xora-e2e-data-'))) {
+    const harness = await startHost(dataDir);
+    harnesses.push(harness);
+    const { ui } = harness;
+    const connection = await ui.request('provider.save', {
+        presetId: 'custom-openai',
+        name: 'mock',
+        apiKey: 'test-key',
+        baseUrl: server.url,
+    });
+    await ui.request('settings.update', {
+        patch: { defaultModel: { connectionId: connection.id, model: 'mock-model' } },
+    });
+    return { harness, dataDir, connectionId: connection.id };
+}
+
+function lastRole(body: unknown): string | undefined {
+    const messages = (body as { messages?: Array<{ role: string }> }).messages ?? [];
+    return messages.at(-1)?.role;
+}
+
+describe('M1 core loop', () => {
+    it('edits a file after approval, shows the diff, undoes it and continues after a restart', async () => {
+        const repo = gitRepo();
+        server.respondWith((request) => {
+            if (lastRole(request.body) === 'tool') {
+                return openaiText('Done: hello.txt now says hello world.');
+            }
+            return openaiToolCalls([
+                {
+                    name: 'edit',
+                    arguments: JSON.stringify({ path: 'hello.txt', oldString: 'hello', newString: 'hello world' }),
+                },
+            ]);
+        });
+        const { harness, dataDir } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: repo });
+        const thread = await ui.request('thread.create', { projectId: project.id });
+        await ui.request('thread.subscribe', { threadId: thread.id });
+        const approvals = new Promise<string>((resolve) =>
+            ui.onNotification('approval.requested', ({ approval }) => resolve(approval.id)),
+        );
+        const { turnId } = await ui.request('turn.start', {
+            threadId: thread.id,
+            text: 'say hello world in hello.txt',
+        });
+
+        const approvalId = await approvals;
+        await waitFor(
+            async () =>
+                (await ui.request('thread.read', { threadId: thread.id })).thread.status === 'awaiting_approval',
+            'awaiting_approval',
+        );
+        expect(readFileSync(path.join(repo, 'hello.txt'), 'utf8')).toBe('hello\n');
+        await ui.request('approval.respond', { approvalId, decision: 'allow_once' });
+
+        const done = await waitFor(async () => {
+            const snapshot = await ui.request('thread.read', { threadId: thread.id });
+            return snapshot.events.find((event) => event.kind === 'turn.completed') ? snapshot : undefined;
+        }, 'turn.completed');
+        expect(readFileSync(path.join(repo, 'hello.txt'), 'utf8')).toBe('hello world\n');
+        const meta: ThreadMeta = done.thread;
+        expect(meta.status).toBe('idle');
+        expect(meta.needsReview).toBe(true);
+        expect(done.events.map((event) => event.kind)).toEqual(
+            expect.arrayContaining(['thread.created', 'turn.started', 'item.completed', 'turn.completed']),
+        );
+
+        const review = await ui.request('review.turn', { threadId: thread.id, turnId });
+        expect(review.available).toBe(true);
+        expect(review.files.map((file) => file.path)).toEqual(['hello.txt']);
+        const file = await ui.request('review.file', { threadId: thread.id, turnId, path: 'hello.txt' });
+        expect(file).toMatchObject({ oldText: 'hello\n', newText: 'hello world\n', binary: false });
+
+        const reverted = await ui.request('review.revert', { threadId: thread.id, turnId });
+        expect(reverted.restored).toEqual(['hello.txt']);
+        expect(readFileSync(path.join(repo, 'hello.txt'), 'utf8')).toBe('hello\n');
+
+        const usage = await ui.request('usage.thread', { threadId: thread.id });
+        expect(usage.requests.length).toBe(2);
+
+        // Restart the host on the same data directory: the thread is still there and the engine resumes.
+        await harnesses.pop()?.close();
+        const restarted = await startHost(dataDir);
+        harnesses.push(restarted);
+        const snapshot = await restarted.ui.request('thread.read', { threadId: thread.id });
+        expect(snapshot.events.some((event) => event.kind === 'turn.completed')).toBe(true);
+        const before = server.requests.length;
+        server.respondWith(() => openaiText('Still here.'));
+        await restarted.ui.request('turn.start', { threadId: thread.id, text: 'are you still there?' });
+        await waitFor(async () => {
+            const read = await restarted.ui.request('thread.read', { threadId: thread.id });
+            return read.events.filter((event) => event.kind === 'turn.completed').length === 2 ? read : undefined;
+        }, 'second turn');
+        const resumed = server.requests[before]?.body as { messages: Array<{ role: string }> };
+        // System + first user message + tool call + tool result + answer + the new user message.
+        expect(resumed.messages.length).toBeGreaterThanOrEqual(5);
+    }, 90_000);
+
+    it('denies edits in plan mode without asking', async () => {
+        const repo = gitRepo();
+        server.respondWith((request) =>
+            lastRole(request.body) === 'tool'
+                ? openaiText('I will only plan.')
+                : openaiToolCalls([{ name: 'write', arguments: JSON.stringify({ path: 'new.txt', content: 'x' }) }]),
+        );
+        const { harness } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: repo });
+        const thread = await ui.request('thread.create', { projectId: project.id, mode: 'plan' });
+        let asked = false;
+        ui.onNotification('approval.requested', () => {
+            asked = true;
+        });
+        await ui.request('turn.start', { threadId: thread.id, text: 'create new.txt' });
+        const snapshot = await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: thread.id });
+            return read.events.find((event) => event.kind === 'turn.completed') ? read : undefined;
+        }, 'turn.completed');
+        expect(asked).toBe(false);
+        const tool = snapshot.events
+            .filter((event) => event.kind === 'item.completed')
+            .map((event) => (event.payload as { item?: { type: string; status?: string } }).item)
+            .find((item) => item?.type === 'tool_call');
+        expect(tool?.status).toBe('denied');
+        expect(() => readFileSync(path.join(repo, 'new.txt'))).toThrow();
+    }, 60_000);
+
+    it('reports a classified error when the key is rejected', async () => {
+        const repo = gitRepo();
+        server.respondWith(() =>
+            errorTurn(401, { error: { message: 'invalid api key', type: 'authentication_error' } }),
+        );
+        const { harness } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: repo });
+        const thread = await ui.request('thread.create', { projectId: project.id });
+        await ui.request('turn.start', { threadId: thread.id, text: 'hi' });
+        const snapshot = await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: thread.id });
+            return read.events.find((event) => event.kind === 'turn.failed') ? read : undefined;
+        }, 'turn.failed');
+        const failed = snapshot.events.find((event) => event.kind === 'turn.failed');
+        expect((failed?.payload as { error?: { errorClass?: string } } | undefined)?.error?.errorClass).toBe('auth');
+        expect(snapshot.thread.status).toBe('failed');
+    }, 60_000);
+
+    it('stops a running turn on cancel', async () => {
+        const repo = gitRepo();
+        server.respondWith(() =>
+            openaiToolCalls([{ name: 'bash', arguments: JSON.stringify({ command: 'sleep 30' }) }]),
+        );
+        const { harness } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: repo });
+        const thread = await ui.request('thread.create', { projectId: project.id, mode: 'full' });
+        await ui.request('turn.start', { threadId: thread.id, text: 'wait a bit' });
+        await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: thread.id });
+            return read.live.some((item) => item.type === 'tool_call' && item.status === 'in_progress')
+                ? true
+                : undefined;
+        }, 'command running');
+        await ui.request('turn.cancel', { threadId: thread.id });
+        const snapshot = await waitFor(
+            async () => {
+                const read = await ui.request('thread.read', { threadId: thread.id });
+                return read.events.find((event) => event.kind === 'turn.completed') ? read : undefined;
+            },
+            'cancelled turn',
+            20_000,
+        );
+        const completed = snapshot.events.find((event) => event.kind === 'turn.completed');
+        expect((completed?.payload as { stopReason?: string } | undefined)?.stopReason).toBe('cancelled');
+        expect(snapshot.thread.status).toBe('cancelled');
+    }, 60_000);
+});

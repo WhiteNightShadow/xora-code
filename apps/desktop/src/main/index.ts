@@ -1,7 +1,7 @@
 import { app, dialog, session } from 'electron';
 import { handleAppScheme, registerAppScheme } from './app-protocol.ts';
 import { parseArgs } from './args.ts';
-import { activeWindow, boot, restartIntoSafeMode } from './boot.ts';
+import { boot, restartIntoSafeMode, revealActiveWindow } from './boot.ts';
 import { readShellEnv } from './env.ts';
 import { installBundleFromCli } from './install.ts';
 import { BootLog } from './log.ts';
@@ -56,15 +56,20 @@ async function main(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
     app.quit();
 } else {
-    app.on('second-instance', () => {
-        const window = activeWindow() ?? safeModeWindow();
+    const reveal = () => {
+        if (revealActiveWindow()) {
+            return;
+        }
+        const window = safeModeWindow();
         if (window && !window.isDestroyed()) {
             if (window.isMinimized()) {
                 window.restore();
             }
             window.focus();
         }
-    });
+    };
+    app.on('second-instance', reveal);
+    app.on('activate', reveal);
     // Quitting is explicit: the boot loop replaces windows while it falls back between bundles.
     app.on('window-all-closed', () => undefined);
     app.whenReady()

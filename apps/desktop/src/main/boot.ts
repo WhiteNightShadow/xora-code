@@ -44,6 +44,15 @@ export function activeWindow() {
     return activeRuntime?.window;
 }
 
+/** Shows the running bundle's window, also when it was hidden to the tray. */
+export function revealActiveWindow(): boolean {
+    if (!activeRuntime?.window || activeRuntime.window.isDestroyed()) {
+        return false;
+    }
+    activeRuntime.reveal();
+    return true;
+}
+
 /** Records the request and restarts the app; the next boot opens the repair page. */
 export async function restartIntoSafeMode(deps: Pick<BootDeps, 'paths' | 'log'>): Promise<void> {
     const { state } = await loadState(deps.paths.stateFile);
@@ -110,7 +119,8 @@ export async function boot(deps: BootDeps): Promise<void> {
         const runtime = new BundleRuntime({
             env,
             log,
-            dataDir: paths.root,
+            paths,
+            trustedKeys: deps.trustedKeys,
             shellVersion: deps.shellVersion,
             preloadPath: deps.files.preloadApp,
             bundleDir: candidateDir(sources, candidate),
@@ -121,9 +131,15 @@ export async function boot(deps: BootDeps): Promise<void> {
                 void restartIntoSafeMode(deps);
             },
             onSafeModeRequest: () => void restartIntoSafeMode(deps),
+            relaunch: () => {
+                app.relaunch({ args: relaunchArgs(process.argv) });
+                app.exit(0);
+            },
         });
         activeRuntime = runtime;
         const outcome = await runtime.start();
+        // The host may have staged an update while this bundle ran: record the outcome on the state as it is now.
+        state = (await loadState(paths.stateFile)).state;
 
         switch (outcome.kind) {
             case 'good':

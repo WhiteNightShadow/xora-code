@@ -16,6 +16,15 @@ ipcRenderer.on('xora:host-restarted', () => {
     }
 });
 
+const previewListeners = new Set<(event: unknown) => void>();
+ipcRenderer.on('xora:preview-event', (_event, payload: unknown) => {
+    for (const listener of previewListeners) {
+        listener(payload);
+    }
+});
+
+const preview = (op: string, args?: unknown) => ipcRenderer.invoke('xora:preview', op, args);
+
 contextBridge.exposeInMainWorld('xoraShell', {
     requestPort: () => ipcRenderer.send('xora:request-port'),
     signalReady: () => ipcRenderer.send('xora:ui-ready'),
@@ -26,5 +35,23 @@ contextBridge.exposeInMainWorld('xoraShell', {
         return () => {
             hostRestartedListeners.delete(listener);
         };
+    },
+    preview: {
+        open: (url: string, bounds: unknown) => preview('open', { url, bounds }),
+        setBounds: (bounds: unknown) => preview('bounds', { bounds }),
+        setVisible: (visible: boolean) => preview('visible', { visible }),
+        reload: () => preview('reload'),
+        back: () => preview('back'),
+        devtools: () => preview('devtools'),
+        openExternal: () => preview('external'),
+        capture: () => preview('capture'),
+        annotate: () => preview('annotate'),
+        close: () => preview('close'),
+        onEvent: (listener: (event: unknown) => void) => {
+            previewListeners.add(listener);
+            return () => {
+                previewListeners.delete(listener);
+            };
+        },
     },
 });
