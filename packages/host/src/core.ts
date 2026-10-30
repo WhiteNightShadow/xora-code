@@ -265,7 +265,7 @@ export class HostCore {
         this.updates.startAutoCheck();
     }
 
-    #effectiveLayers(thread: ThreadMeta): PromptLayer[] {
+    async #effectiveLayers(thread: ThreadMeta): Promise<PromptLayer[]> {
         const project = this.db.get<{ path: string }>('select path from projects where id = ?', [thread.projectId]);
         const projectRoot = project?.path ?? '';
         const cwd = thread.location.kind === 'worktree' ? thread.location.path : projectRoot;
@@ -285,7 +285,27 @@ export class HostCore {
             truncated: false,
             editable: false,
         };
-        return [system, ...layers];
+        const extra = (layer: { id: string; title: string; text: string }, source: string): PromptLayer => ({
+            id: layer.id,
+            title: layer.title,
+            source,
+            text: layer.text,
+            chars: layer.text.length,
+            tokens: Math.ceil(layer.text.length / 4),
+            truncated: false,
+            editable: false,
+        });
+        // The same order the engine gets (see TurnService): team layers after the user's global layer, skills last.
+        const team = this.turns.hostLayers(thread.id).map((layer) => extra(layer, '团队'));
+        const globalIndex = layers.findIndex((layer) => layer.id === 'user_global_instructions');
+        let skills: PromptLayer[] = [];
+        try {
+            const project = await this.projects.get(thread.projectId);
+            skills = (await this.extensions.promptLayers(project)).map((layer) => extra(layer, '扩展'));
+        } catch (error) {
+            this.log.warn(`effective prompt: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return [system, ...layers.slice(0, globalIndex + 1), ...team, ...layers.slice(globalIndex + 1), ...skills];
     }
 
     /** Serves one UI window. The returned peer is disposed when the window's port closes. */

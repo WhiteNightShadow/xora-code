@@ -547,6 +547,8 @@ describe('extensions in a thread', () => {
             });
 
             const thread = await ui.request('thread.create', { projectId: project.id, mode: 'full' });
+            const effective = await ui.request('prompt.effective', { threadId: thread.id });
+            expect(effective.find((layer) => layer.id === 'skills')?.text).toContain('greeting: How to greet');
             await ui.request('turn.start', { threadId: thread.id, text: '/hi Bob' });
             const read = await finished(ui, thread.id);
 

@@ -1124,11 +1124,21 @@ export class ExtensionService {
 
     // Sessions ----------------------------------------------------------------------------------------------
 
-    async forSession(project: Project): Promise<SessionExtras> {
-        const loaded = await this.load(project);
-        const skills = loaded.skills.filter(
+    #enabledSkills(loaded: LoadedExtensions): Skill[] {
+        return loaded.skills.filter(
             (skill) => !loaded.disabledSkills.has(skill.id) && effectiveTrust(skill.origin, skill.trusted).readSkills,
         );
+    }
+
+    /** The prompt layers extensions add, for "view the effective prompt"; reads no secrets. */
+    async promptLayers(project: Project): Promise<Array<{ id: string; title: string; text: string }>> {
+        const skills = this.#enabledSkills(await this.load(project));
+        return skills.length > 0 ? [{ id: 'skills', title: 'Skills', text: skillIndex(skills) }] : [];
+    }
+
+    async forSession(project: Project): Promise<SessionExtras> {
+        const loaded = await this.load(project);
+        const skills = this.#enabledSkills(loaded);
         const runnable = loaded.mcp.filter(
             (entry) =>
                 !loaded.disabledMcp.has(entry.key) &&

@@ -227,6 +227,11 @@ export class TurnService {
         this.#deps = deps;
     }
 
+    /** Extra prompt layers a thread gets from its host tools (organisation, roster and agent of a team run). */
+    hostLayers(threadId: string): ReadonlyArray<{ id: string; title: string; text: string }> {
+        return this.#hostTools.get(threadId)?.layers ?? [];
+    }
+
     /** Gives a thread host-implemented tools and extra prompt layers (used by team runs). */
     setHostTools(threadId: string, provider: HostToolProvider | undefined): void {
         if (provider) this.#hostTools.set(threadId, provider);
