@@ -2188,6 +2188,17 @@ pre {
     word-break: break-all;
 }
 
+.table .toggle {
+    white-space: nowrap;
+}
+
+.extension-desc {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
 .error-text {
     color: var(--xk-error);
     font-size: 12px;

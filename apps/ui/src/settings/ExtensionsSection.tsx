@@ -277,6 +277,7 @@ function McpRow({
             <td>
                 <Toggle
                     label={server.name}
+                    text={s.extensions.enabled}
                     checked={server.enabled}
                     onChange={(enabled) =>
                         void attempt(() =>
@@ -427,7 +428,7 @@ export function ExtensionsSection() {
                             <tr key={skill.name}>
                                 <td>
                                     <strong>{skill.name}</strong>
-                                    <div className="muted">{skill.description}</div>
+                                    <div className="muted extension-desc">{skill.description}</div>
                                 </td>
                                 <td>
                                     <Badge tone="muted">{origin(skill.origin)}</Badge>{' '}
@@ -436,6 +437,7 @@ export function ExtensionsSection() {
                                 <td>
                                     <Toggle
                                         label={skill.name}
+                                        text={s.extensions.enabled}
                                         checked={skill.enabled}
                                         onChange={(enabled) => toggle('skill', skill.name, enabled)}
                                     />
@@ -479,7 +481,7 @@ export function ExtensionsSection() {
                                 <tr key={agent.name}>
                                     <td>
                                         <strong>{agent.name}</strong>
-                                        <div className="muted">{agent.description}</div>
+                                        <div className="muted extension-desc">{agent.description}</div>
                                     </td>
                                     <td>
                                         {[agent.role, agent.tier].filter(Boolean).join(' · ')}{' '}
@@ -570,7 +572,9 @@ export function ExtensionsSection() {
                                     <strong>
                                         {plugin.name} {plugin.version}
                                     </strong>
-                                    {plugin.description && <div className="muted">{plugin.description}</div>}
+                                    {plugin.description && (
+                                        <div className="muted extension-desc">{plugin.description}</div>
+                                    )}
                                     <div className="muted">
                                         {format(s.extensions.components, {
                                             skills: plugin.components.skills,
@@ -596,6 +600,7 @@ export function ExtensionsSection() {
                                 <td>
                                     <Toggle
                                         label={plugin.name}
+                                        text={s.extensions.enabled}
                                         checked={plugin.enabled}
                                         onChange={(enabled) => {
                                             if (

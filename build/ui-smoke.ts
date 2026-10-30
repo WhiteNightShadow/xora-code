@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,7 +10,8 @@ import { repoRoot } from './keys.ts';
 
 /**
  * UI smoke test in the real app (M1 acceptance): connect a model, open a project, ask for a change, approve it,
- * review the diff and undo it — all through the UI, against a scripted model server and throwaway data.
+ * review the diff and undo it — all through the UI, against a scripted model server and throwaway data. Then the
+ * M4 extensions: a project command shows up in the composer and on the settings page.
  *
  *   node build/ui-smoke.ts                 unpackaged shell with dist/app-bundle (run `pnpm build && pnpm bundle`)
  *   node build/ui-smoke.ts --app <exe>     a packaged build
@@ -182,6 +183,23 @@ try {
         throw new Error('undo did not restore the file');
     }
     await step(page, '撤销后文件恢复');
+
+    await mkdir(path.join(repo, '.xora', 'commands'), { recursive: true });
+    await writeFile(
+        path.join(repo, '.xora', 'commands', 'greet.md'),
+        '---\ndescription: 打个招呼\n---\nSay hello to $ARGUMENTS.\n',
+    );
+    const composer = page.locator('.composer__input');
+    await composer.fill('/gr');
+    await page.locator('.mention', { hasText: '/greet' }).waitFor();
+    await composer.fill('');
+    await step(page, '输入斜杠时提示项目里的命令');
+
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await page.locator('.settings__nav').getByRole('button', { name: '扩展' }).click();
+    await page.locator('.settings-section code', { hasText: '/greet' }).waitFor();
+    await step(page, '设置的扩展页列出项目命令');
+    await page.keyboard.press('Escape');
 } catch (error) {
     failed = true;
     console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);

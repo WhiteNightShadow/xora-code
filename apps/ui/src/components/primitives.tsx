@@ -77,15 +77,23 @@ export function Toggle({
     checked,
     onChange,
     label,
+    text,
 }: {
     checked: boolean;
     onChange: (value: boolean) => void;
     label: string;
+    /** Visible text when it differs from the accessible label (a table row's switch shows "enabled"). */
+    text?: string;
 }) {
     return (
         <label className="toggle">
-            <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
-            <span>{label}</span>
+            <input
+                type="checkbox"
+                checked={checked}
+                aria-label={text === undefined ? undefined : label}
+                onChange={(event) => onChange(event.target.checked)}
+            />
+            <span>{text ?? label}</span>
         </label>
     );
 }
