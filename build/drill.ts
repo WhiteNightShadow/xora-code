@@ -62,7 +62,9 @@ function runShell(
         ...extraEnv,
     };
     delete env.ELECTRON_RUN_AS_NODE;
-    const argv = packagedApp ? [...args] : [desktopDir, ...args];
+    // Chromium's mock keychain: a packaged build ignores XORA_TEST_PLAIN_SECRETS, and the real keychain can block
+    // the app on an access prompt.
+    const argv = packagedApp ? [...args, '--use-mock-keychain'] : [desktopDir, ...args, '--use-mock-keychain'];
     return new Promise((resolve, reject) => {
         const child = spawn(electronBinary, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
         let output = '';
