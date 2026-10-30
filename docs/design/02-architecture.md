@@ -52,7 +52,7 @@
 | 存储 | sqlite：node内置的`node:sqlite`（已核对electron 44可用，含fts5 trigram） | 单文件、全文搜索、免原生模块 |
 | 引擎内核 | 自研：`packages/providers`（openai chat和anthropic messages两种wire、怪癖数据）加`packages/engine`的agent循环 | 见05第3节和16第1节 |
 | acp | `@agentclientprotocol/sdk` 2.x | 官方sdk |
-| mcp | `@modelcontextprotocol/sdk` | 官方sdk |
+| mcp | `@modelcontextprotocol/client` 2.4.0 | 官方sdk的v2拆包；v1的`@modelcontextprotocol/sdk`已是维护线，不支持2026-07-28规范 |
 | 沙箱 | `@anthropic-ai/sandbox-runtime`（mac、linux）；windows先靠策略兜底 | 见10 |
 | 搜索 | 纯js遍历（遵守.gitignore），系统装了`rg`时优先用 | `@vscode/ripgrep`只下载本机平台的二进制，交叉打包拿不到另外五个平台 |
 | 日志 | pino，带脱敏 | |
@@ -93,7 +93,7 @@ xora-code/
 
 - `protocol`不依赖任何包；`ui`只依赖`protocol`和`ui-kit`。
 - `host`依赖`protocol`、`storage`、`providers`（只读目录与计价）、`metering`、`workflows`、`extensions`、`mcp`（只做配置管理）、`updater`。
-- `engine`依赖`providers`、`tools`、`sandbox`、`mcp`、`extensions`；不依赖`host`和`ui`，只通过acp通信。
+- `engine`依赖`providers`、`tools`、`mcp`；不依赖`host`和`ui`，只通过acp通信。skills、命令和hooks由host处理：skill工具和工具前后的hook经`_xora/*`扩展方法回到host执行。
 - `apps/desktop`的bootstrap只依赖`updater`，不依赖任何业务包。
 
 ## 4. 协议

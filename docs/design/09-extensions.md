@@ -89,3 +89,20 @@
 | 设计稿 | figma等设计工具 |
 
 **首次启动导入**：扫描本机claude code、codex、cursor里已配置的mcp和skills，列出来让用户勾选导入。默认不启用，也不复制其中的密钥，密钥由用户重新填写或从钥匙串引用。
+
+## 7. 实现落点（2026-10-30）
+
+- **目录**：
+  - 用户：`<数据目录>/extensions/`下的`skills/`、`commands/`、`agents/`、`hooks.json`、`plugins/`；`~/.agents/skills/`。
+  - 项目：`.xora/skills/`、`.agents/skills/`、`.claude/skills/`；`.xora/commands/`、`.claude/commands/`；`.xora/agents/`、`.claude/agents/`；`.xora/hooks.json`、`.claude/settings.json`里的`hooks`；`.mcp.json`、`.xora/mcp.json`。
+  - 开关和mcp服务器配置在`<数据目录>/extensions/state.json`；mcp的环境变量和请求头的值、oauth令牌都在系统钥匙串。
+- **信任**：用户目录和内置的直接启用；项目的hooks、mcp服务器、skill脚本要项目受信；插件安装后默认停用，界面展示权限、用户确认后才启用，升级时权限变多会重新停用。
+- **skills**：会话的提示词末尾放一层skills索引（id和一句描述），模型用`skill`工具读全文和附带文件；未受信项目的skill标注“只读，不运行脚本”。
+- **命令**：`/名字 参数`在host里展开成命令文件的内容再发给模型，时间线里保留用户原来输入的文字；`/compact`是内置命令，不会被覆盖。
+- **hooks**：
+  - 已接：SessionStart（新会话）、UserPromptSubmit（可拦截、可补充上下文）、PreToolUse（可拦截、改参数、要求确认或免确认）、PostToolUse（反馈追加到工具结果）、PreCompact（手动`/compact`）、Stop、Notification（出现审批卡片时）。
+  - 匹配用claude code的工具名（`Bash`、`Edit|Write`等），也认xora自己的工具名；`tool_input`里同时给出`file_path`这类claude的字段名。
+  - hook的“免确认”不越过拒绝规则、工作区外路径和敏感文件。
+  - 还没接：SubagentStop、SessionEnd；Stop的“继续工作”；自动压缩前的PreCompact。
+- **mcp**：xora engine按会话启动mcp服务器（工具名`mcp__服务器__工具`，每次调用都走权限策略）；外部acp agent经`session/new`的`mcpServers`拿到同一份配置。服务器状态目前只显示最近一次“测试”的结果。
+

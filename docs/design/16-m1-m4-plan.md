@@ -17,6 +17,11 @@
 | 搜索工具 | `@vscode/ripgrep` | 纯js实现，系统装了`rg`就优先用 | `@vscode/ripgrep`在安装时只下载本机平台的二进制，没法在mac上交叉打出另外五个平台的包 |
 | 终端 | node-pty 1.2 | node-pty 1.2.0-beta.18（锁版本） | 已核对：正式版1.1.0没有linux预编译；1.2.0-beta.18带齐六个平台 |
 | ui国际化 | i18next | 自写的轻量`t()`加中英文词典 | 只需要按键取文案，不需要i18next的插件体系 |
+| mcp客户端 | `@modelcontextprotocol/sdk` | `@modelcontextprotocol/client` 2.4.0 | 官方v2拆包，已满7天；v1只到2025-11-25规范，是维护线。stdio传输自己写（要杀整棵进程树、拿退出码、不混入sdk的默认环境变量） |
+| skills和hooks在哪执行 | 引擎 | host | host持有信任、密钥和项目状态；引擎只在会话配置声明了hook事件时，经`_xora/hook/run`在工具调用前后问host；skill索引作为提示词层下发，`skill`工具是host工具 |
+| 扩展的用户目录 | `<数据目录>/skills/`等 | `<数据目录>/extensions/`下的`skills/`、`commands/`、`agents/`、`hooks.json`、`plugins/`、`state.json` | 数据目录根下保持整洁；`~/.agents/skills/`照旧读取 |
+| 项目信任存放 | 信任文件 | 沿用projects表的`trusted`列 | M1已有这一列，不再多一份文件 |
+| mcp服务器配置 | 未定 | 全局和项目级的配置存`state.json`，环境变量和请求头的值一律存系统钥匙串；仓库里的`.mcp.json`、`.xora/mcp.json`只读，项目受信后才启动 | 配置文件里不出现密钥；项目级配置不写进用户仓库 |
 
 ## 2. 新增的包
 
