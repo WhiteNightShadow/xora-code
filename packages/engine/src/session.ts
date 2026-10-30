@@ -69,6 +69,14 @@ export function resolveTarget(target: ModelTarget): ResolvedTarget {
     };
 }
 
+interface TurnMark {
+    readonly length: number;
+    readonly contextStart: number;
+    readonly summary: string | undefined;
+    readonly prunedUpTo: number;
+    readonly todos: readonly TodoItem[];
+}
+
 /**
  * State of one ACP session: the message history (the model context), its todo list, background jobs and the
  * configuration the host last sent. Everything except the configuration's secrets is persisted.
@@ -95,6 +103,8 @@ export class EngineSession {
     lastPromptTokens = 0;
     /** MCP servers the client configured for this session (09 §2). */
     mcp: McpManager | undefined;
+    /** State at the start of each host turn that can still be rewound to, in order. */
+    readonly #turns = new Map<string, TurnMark>();
     #abort: AbortController | undefined;
     #artifactCounter = 0;
 
@@ -135,6 +145,12 @@ export class EngineSession {
                 case 'prune':
                     this.prunedUpTo = Math.max(this.prunedUpTo, entry.upTo);
                     break;
+                case 'turn':
+                    this.#mark(entry.turnId);
+                    break;
+                case 'rewind':
+                    this.#rewindTo(entry.turnId);
+                    break;
                 default:
                     break;
             }
@@ -169,6 +185,49 @@ export class EngineSession {
     append(message: Message): void {
         this.history.push(message);
         this.file.append({ t: 'message', ts: Date.now(), message });
+    }
+
+    /** Records where a host turn starts. */
+    beginTurn(turnId: string): void {
+        this.#mark(turnId);
+        this.file.append({ t: 'turn', ts: Date.now(), turnId });
+    }
+
+    /** Goes back to the state before the turn; false when the turn is unknown or was already rewound. */
+    rewind(turnId: string): boolean {
+        if (!this.#rewindTo(turnId)) {
+            return false;
+        }
+        this.file.append({ t: 'rewind', ts: Date.now(), turnId });
+        return true;
+    }
+
+    #mark(turnId: string): void {
+        this.#turns.set(turnId, {
+            length: this.history.length,
+            contextStart: this.contextStart,
+            summary: this.summary,
+            prunedUpTo: this.prunedUpTo,
+            todos: this.todos,
+        });
+    }
+
+    #rewindTo(turnId: string): boolean {
+        const mark = this.#turns.get(turnId);
+        if (!mark) {
+            return false;
+        }
+        this.history.splice(mark.length);
+        this.contextStart = mark.contextStart;
+        this.summary = mark.summary;
+        this.prunedUpTo = mark.prunedUpTo;
+        this.todos = mark.todos;
+        let later = false;
+        for (const key of [...this.#turns.keys()]) {
+            later ||= key === turnId;
+            if (later) this.#turns.delete(key);
+        }
+        return true;
     }
 
     setTodos(items: readonly TodoItem[]): void {

@@ -31,6 +31,7 @@ import {
     unfence,
 } from './files.ts';
 import { GoalService } from './goals.ts';
+import { HistoryService } from './history.ts';
 import { detectLocalServers } from './local-models.ts';
 import { HostLog, type Logger } from './log.ts';
 import { type HostPaths, hostPaths } from './paths.ts';
@@ -378,6 +379,19 @@ export class HostCore {
             return thread;
         };
         peer.handle('thread.create', (params) => createThread(params));
+        const history = new HistoryService({
+            threads,
+            projects,
+            review,
+            engines: this.engines,
+            turns,
+            log: this.log,
+            createThread: (params) => createThread(params),
+        });
+        peer.handle('thread.rewind', ({ threadId, turnId, files, force }) =>
+            history.rewind(threadId, turnId, files, force ?? false),
+        );
+        peer.handle('thread.fork', ({ threadId, afterTurnId }) => history.fork(threadId, afterTurnId));
         peer.handle('thread.handoff', async ({ threadId, to }) => {
             if (turns.isRunning(threadId)) {
                 throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再迁移');

@@ -61,6 +61,13 @@ export const ThreadEventPayloads = {
         paths: z.array(z.string()),
         conflicts: z.array(z.object({ path: z.string(), reason: z.string() })),
     }),
+    /** The conversation went back to before `turnId`: that turn and the later ones left the agent's context (M3-3). */
+    'thread.rewound': z.object({
+        turnId: z.string(),
+        files: z.boolean(),
+        paths: z.array(z.string()),
+        conflicts: z.array(z.object({ path: z.string(), reason: z.string() })),
+    }),
 } as const;
 
 export type ThreadEventKind = keyof typeof ThreadEventPayloads;

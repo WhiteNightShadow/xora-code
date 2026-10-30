@@ -31,7 +31,11 @@ export type SessionEntry =
           readonly tokensAfter: number;
       }
     /** Tool results before `upTo` are shown as one-line placeholders from now on (level 2). */
-    | { readonly t: 'prune'; readonly ts: number; readonly upTo: number };
+    | { readonly t: 'prune'; readonly ts: number; readonly upTo: number }
+    /** A host turn starts here, so the host can go back to before it or fork from it (M3-3). */
+    | { readonly t: 'turn'; readonly ts: number; readonly turnId: string }
+    /** The session is back at its state when the turn `turnId` started; nothing before is deleted. */
+    | { readonly t: 'rewind'; readonly ts: number; readonly turnId: string };
 
 export const SESSION_FILE = 'session.jsonl';
 
@@ -109,4 +113,18 @@ export function listStoredSessions(root: string, cwd?: string): StoredSessionInf
         });
     }
     return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/** Turns that can still be rewound to, in order: a rewind drops its turn and every later one. */
+export function liveTurns(entries: readonly SessionEntry[]): string[] {
+    const turns: string[] = [];
+    for (const entry of entries) {
+        if (entry.t === 'turn') {
+            turns.push(entry.turnId);
+        } else if (entry.t === 'rewind') {
+            const at = turns.indexOf(entry.turnId);
+            if (at >= 0) turns.length = at;
+        }
+    }
+    return turns;
 }

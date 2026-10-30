@@ -865,6 +865,8 @@ pre {
 
 .turn__footer {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 12px;
     margin-top: 8px;
     font-size: 11.5px;
@@ -873,6 +875,22 @@ pre {
 
 .turn__reverted {
     color: var(--xk-pending);
+}
+
+.turn--rewound {
+    opacity: 0.55;
+}
+
+.turn__confirm {
+    flex-basis: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--xk-border);
+    border-radius: 8px;
+    color: var(--xk-text-muted);
+    font-size: 12px;
 }
 
 .markdown {

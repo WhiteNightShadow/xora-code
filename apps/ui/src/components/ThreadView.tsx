@@ -6,6 +6,7 @@ import {
     attempt,
     openReview,
     openSettings,
+    selectThread,
     takeComposerInbox,
     toast,
     useApp,
@@ -16,7 +17,16 @@ import { format } from '../strings.ts';
 import type { TurnView } from '../timeline.ts';
 import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
 import { Icon } from './Icon.tsx';
-import { AutoFocusInput, formatMoney, formatTokens, IconButton, type Option, Select, Spinner } from './primitives.tsx';
+import {
+    AutoFocusInput,
+    formatMoney,
+    formatTokens,
+    IconButton,
+    type Option,
+    Select,
+    Spinner,
+    Toggle,
+} from './primitives.tsx';
 
 const MODES: PermissionMode[] = ['ask', 'auto_edit', 'plan', 'full'];
 const EFFORTS: Effort[] = ['off', 'low', 'medium', 'high', 'max'];
@@ -290,10 +300,78 @@ function Header({ thread }: { thread: ThreadMeta }) {
     );
 }
 
-function TurnBlock({ turn, isLast }: { turn: TurnView; isLast: boolean }) {
+/** Go back to before a turn, or fork the thread from it (M3-3); only the xora engine keeps turn markers. */
+function TurnHistory({ thread, turn }: { thread: ThreadMeta; turn: TurnView }) {
+    const s = useStrings();
+    const [confirming, setConfirming] = useState(false);
+    const [files, setFiles] = useState(true);
+    const busy = thread.status === 'running' || thread.status === 'awaiting_approval';
+    if (thread.engine !== 'xora' || busy) return null;
+    const rewind = async () => {
+        const result = await attempt(() =>
+            host.call('thread.rewind', { threadId: thread.id, turnId: turn.turnId, files }),
+        );
+        setConfirming(false);
+        if (!result) return;
+        if (result.conflicts.length > 0) {
+            toast(format(s.thread.rewindConflicts, { count: result.conflicts.length }), 'error');
+        } else {
+            toast(s.thread.rewindDone, 'success');
+        }
+    };
+    const fork = async () => {
+        const forked = await attempt(() => host.call('thread.fork', { threadId: thread.id, afterTurnId: turn.turnId }));
+        if (forked) {
+            toast(s.thread.forked, 'success');
+            await selectThread(forked.id);
+        }
+    };
+    return (
+        <>
+            <button type="button" className="link" onClick={() => setConfirming(!confirming)}>
+                {s.thread.rewind}
+            </button>
+            <button type="button" className="link" onClick={() => void fork()}>
+                {s.thread.fork}
+            </button>
+            {confirming && (
+                <div className="turn__confirm">
+                    <span>{s.thread.rewindHint}</span>
+                    <Toggle label={s.thread.rewindFiles} checked={files} onChange={setFiles} />
+                    <div className="row">
+                        <button
+                            type="button"
+                            className="button button--small button--danger"
+                            onClick={() => void rewind()}
+                        >
+                            {s.common.confirm}
+                        </button>
+                        <button type="button" className="button button--small" onClick={() => setConfirming(false)}>
+                            {s.common.cancel}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </>
+    );
+}
+
+function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; thread: ThreadMeta }) {
     const s = useStrings();
     const running = turn.status === 'running';
     const lastItem = turn.items.at(-1);
+    if (turn.rewound) {
+        return (
+            <section className="turn turn--rewound">
+                <div className="user-message">
+                    <div className="user-message__text">{turn.input.text}</div>
+                </div>
+                <div className="turn__footer">
+                    <span className="turn__reverted">{s.thread.rewound}</span>
+                </div>
+            </section>
+        );
+    }
     return (
         <section className="turn">
             <div className="user-message">
@@ -338,6 +416,7 @@ function TurnBlock({ turn, isLast }: { turn: TurnView; isLast: boolean }) {
                             {s.thread.review}
                         </button>
                     )}
+                    <TurnHistory thread={thread} turn={turn} />
                 </div>
             )}
         </section>
@@ -692,7 +771,7 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
                 )}
                 {view && turns.length === 0 && <div className="timeline__empty">{s.thread.noMessages}</div>}
                 {turns.map((turn, index) => (
-                    <TurnBlock key={turn.turnId} turn={turn} isLast={index === turns.length - 1} />
+                    <TurnBlock key={turn.turnId} turn={turn} isLast={index === turns.length - 1} thread={thread} />
                 ))}
             </div>
             <Composer thread={thread} />

@@ -26,6 +26,8 @@ export interface TurnView {
     changes?: { files: FileChange[]; additions: number; deletions: number };
     error?: ItemOf<'error'>;
     reverted?: { paths: string[]; conflicts: Array<{ path: string; reason: string }> };
+    /** Went back to before this turn or an earlier one: no longer part of the agent's context. */
+    rewound?: boolean;
 }
 
 export interface ThreadView {
@@ -108,6 +110,13 @@ export function applyEvent(view: ThreadView, envelope: EventEnvelope): boolean {
             const turn = turnOf(view, event.payload.turnId);
             if (turn) {
                 turn.reverted = { paths: event.payload.paths, conflicts: event.payload.conflicts };
+            }
+            break;
+        }
+        case 'thread.rewound': {
+            const at = view.turns.findIndex((turn) => turn.turnId === event.payload.turnId);
+            for (const turn of at >= 0 ? view.turns.slice(at) : []) {
+                turn.rewound = true;
             }
             break;
         }

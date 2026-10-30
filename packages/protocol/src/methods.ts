@@ -417,6 +417,18 @@ export const methods = {
         params: z.object({ threadId: IdSchema, turnId: z.string(), path: z.string() }).strict(),
         result: z.object({ oldText: z.string().nullable(), newText: z.string().nullable(), binary: z.boolean() }),
     },
+    /** Goes back to before a turn: the xora engine forgets it and the later turns; optionally the files too (M3-3). */
+    'thread.rewind': {
+        params: z
+            .object({ threadId: IdSchema, turnId: z.string(), files: z.boolean(), force: z.boolean().optional() })
+            .strict(),
+        result: RevertResultSchema,
+    },
+    /** A new thread with the conversation up to and including `afterTurnId` (all of it when omitted). */
+    'thread.fork': {
+        params: z.object({ threadId: IdSchema, afterTurnId: z.string().optional() }).strict(),
+        result: ThreadMetaSchema,
+    },
     'review.revert': {
         params: z
             .object({

@@ -29,7 +29,7 @@ interface Harness {
     close(): void;
 }
 
-function harness(): Harness {
+function harness(dataDir = mkdtempSync(path.join(tmpdir(), 'xora-engine-'))): Harness {
     const updates: acp.SessionUpdate[] = [];
     const permissions: acp.RequestPermissionRequest[] = [];
     const state = {
@@ -41,7 +41,7 @@ function harness(): Harness {
             payload: Record<string, unknown>,
         ) => Record<string, unknown>,
     };
-    const agentApp = createXoraAgent({ dataDir: mkdtempSync(path.join(tmpdir(), 'xora-engine-')), version: 'test' });
+    const agentApp = createXoraAgent({ dataDir, version: 'test' });
     const clientApp = acp
         .client({ name: 'test-host' })
         .onNotification('session/update', ({ params }) => {
@@ -445,5 +445,67 @@ describe('tool hooks', () => {
         await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'go' }] });
         expect(h.hookCalls).toHaveLength(0);
         h.close();
+    });
+});
+
+describe('rewind and fork', () => {
+    function userTexts(body: unknown): string[] {
+        const messages = (body as { messages?: Array<{ role: string; content: unknown }> }).messages ?? [];
+        return messages
+            .filter((message) => message.role === 'user')
+            .map((message) =>
+                typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+            );
+    }
+
+    it('goes back to before a turn, also after a restart, and forks a session from a turn', async () => {
+        const cwd = workspace();
+        server.reset();
+        server.respondWith(() => openaiText('ok'));
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-engine-rewind-'));
+        const h = harness(dataDir);
+        const sessionId = await newSession(h, cwd);
+        const prompt = (text: string, turnId: string, id = sessionId) =>
+            h.client.request('session/prompt', {
+                sessionId: id,
+                prompt: [{ type: 'text', text }],
+                _meta: { xora: { turnId } },
+            });
+        await prompt('first question', 't1');
+        await prompt('second question', 't2');
+        await prompt('third question', 't3');
+
+        await h.client.request('_xora/session/rewind', { sessionId, turnId: 't2' });
+        await prompt('second try', 't4');
+        let texts = userTexts(server.requests.at(-1)?.body).join('\n');
+        expect(texts).toContain('first question');
+        expect(texts).toContain('second try');
+        expect(texts).not.toContain('second question');
+        expect(texts).not.toContain('third question');
+        await expect(h.client.request('_xora/session/rewind', { sessionId, turnId: 't3' })).rejects.toThrow();
+
+        const { sessionId: forked } = await h.client.request('_xora/session/fork', { sessionId, beforeTurnId: 't4' });
+        h.close();
+
+        // A new engine process reads the rewound history from disk and the fork from its own file.
+        const again = harness(dataDir);
+        await again.client.request('initialize', { protocolVersion: acp.PROTOCOL_VERSION });
+        await again.client.request('session/resume', { sessionId, cwd, mcpServers: [], _meta: config() });
+        await again.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'after restart' }] });
+        texts = userTexts(server.requests.at(-1)?.body).join('\n');
+        expect(texts).toContain('second try');
+        expect(texts).not.toContain('third question');
+
+        await again.client.request('session/resume', { sessionId: forked, cwd, mcpServers: [], _meta: config() });
+        await again.client.request('session/prompt', {
+            sessionId: forked,
+            prompt: [{ type: 'text', text: 'in the fork' }],
+        });
+        texts = userTexts(server.requests.at(-1)?.body).join('\n');
+        expect(texts).toContain('first question');
+        expect(texts).toContain('in the fork');
+        expect(texts).not.toContain('second try');
+        expect(texts).not.toContain('after restart');
+        again.close();
     });
 });

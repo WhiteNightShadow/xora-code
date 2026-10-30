@@ -8,7 +8,7 @@ import { type AnyTool, createDefaultTools } from './deps.ts';
 import { type HookReply, ModelError, type TurnIO, TurnRunner } from './loop.ts';
 import { createMcpManager, readMcpServers } from './mcp.ts';
 import { EngineSession, SessionBusyError } from './session.ts';
-import { listStoredSessions, SessionFile } from './store.ts';
+import { listStoredSessions, liveTurns, SessionFile } from './store.ts';
 
 export interface XoraAgentOptions {
     /** Root for session files: `<dataDir>/sessions/<id>/`. */
@@ -33,6 +33,12 @@ function realDir(dir: string): string {
 
 const SessionRefSchema = z.object({ sessionId: z.string().min(1) }).passthrough();
 const CompactSchema = z.object({ sessionId: z.string().min(1), focus: z.string().optional() });
+const RewindSchema = z.object({ sessionId: z.string().min(1), turnId: z.string().min(1) });
+const ForkSchema = z.object({
+    sessionId: z.string().min(1),
+    /** Copy the history up to the start of this turn; without it, the whole history. */
+    beforeTurnId: z.string().min(1).optional(),
+});
 
 /** Replays a stored conversation as `session/update` notifications for `session/load`. */
 function replay(session: EngineSession, notify: (update: acp.SessionUpdate) => void): void {
@@ -241,6 +247,10 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
             }
             const onAbort = () => controller.abort();
             signal.addEventListener('abort', onAbort, { once: true });
+            const turnId = (params._meta as { xora?: { turnId?: unknown } } | null | undefined)?.xora?.turnId;
+            if (typeof turnId === 'string' && turnId.length > 0) {
+                session.beginTurn(turnId);
+            }
             try {
                 const runner = new TurnRunner(session, io(client, session.id), controller.signal, tools);
                 const stopReason = await runner.run(params.prompt);
@@ -269,6 +279,56 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
         .onRequest('_xora/session/configure', SessionRefSchema, ({ params }) => {
             require(params.sessionId).configure(readSessionConfig(params._meta));
             return {};
+        })
+        .onRequest('_xora/session/rewind', RewindSchema, ({ params }) => {
+            const live = sessions.get(params.sessionId);
+            if (live) {
+                if (live.busy) {
+                    throw new acp.RequestError(BUSY_ERROR_CODE, 'the session is running');
+                }
+                if (!live.rewind(params.turnId)) {
+                    throw acp.RequestError.invalidParams({ turnId: params.turnId }, 'unknown turn');
+                }
+                return {};
+            }
+            const file = new SessionFile(path.join(sessionsDir, params.sessionId));
+            if (!SessionFile.exists(file.dir)) {
+                throw acp.RequestError.resourceNotFound(params.sessionId);
+            }
+            if (!liveTurns(file.read()).includes(params.turnId)) {
+                throw acp.RequestError.invalidParams({ turnId: params.turnId }, 'unknown turn');
+            }
+            file.append({ t: 'rewind', ts: Date.now(), turnId: params.turnId });
+            return {};
+        })
+        .onRequest('_xora/session/fork', ForkSchema, ({ params }) => {
+            const source = new SessionFile(path.join(sessionsDir, params.sessionId));
+            if (!SessionFile.exists(source.dir)) {
+                throw acp.RequestError.resourceNotFound(params.sessionId);
+            }
+            if (sessions.get(params.sessionId)?.busy) {
+                throw new acp.RequestError(BUSY_ERROR_CODE, 'the session is running');
+            }
+            const entries = source.read();
+            const header = entries[0];
+            if (header?.t !== 'header') {
+                throw acp.RequestError.internalError({ sessionId: params.sessionId }, 'the session file has no header');
+            }
+            let end = entries.length;
+            if (params.beforeTurnId) {
+                if (!liveTurns(entries).includes(params.beforeTurnId)) {
+                    throw acp.RequestError.invalidParams({ turnId: params.beforeTurnId }, 'unknown turn');
+                }
+                end = entries.findLastIndex((entry) => entry.t === 'turn' && entry.turnId === params.beforeTurnId);
+            }
+            const sessionId = randomUUID();
+            const copy = new SessionFile(path.join(sessionsDir, sessionId));
+            copy.create({ ...header, id: sessionId, createdAt: Date.now() });
+            for (const entry of entries.slice(1, end)) {
+                copy.append(entry);
+            }
+            log(`session ${sessionId} forked from ${params.sessionId}`);
+            return { sessionId };
         })
         .onRequest('_xora/session/compact', CompactSchema, async ({ params, client }) => {
             const session = require(params.sessionId);

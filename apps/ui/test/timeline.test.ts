@@ -120,3 +120,41 @@ describe('timeline', () => {
         expect(latestPlan(view)?.entries).toEqual([{ content: 'step', status: 'pending' }]);
     });
 });
+
+describe('rewound turns', () => {
+    function turnStarted(seq: number, turnId: string) {
+        return envelope(
+            seq,
+            'turn.started',
+            {
+                turnId,
+                input: { id: `i-${turnId}`, turnId, ts: seq, type: 'user_message', text: turnId, attachments: [] },
+                model: null,
+                mode: 'ask',
+                effort: 'high',
+            },
+            turnId,
+        );
+    }
+
+    it('marks the rewound turn and the later ones, but not turns after the rewind', () => {
+        const view = viewFromSnapshot({
+            thread: {} as never,
+            events: [
+                turnStarted(1, 'a'),
+                turnStarted(2, 'b'),
+                turnStarted(3, 'c'),
+                envelope(4, 'thread.rewound', { turnId: 'b', files: true, paths: [], conflicts: [] }, 'b'),
+                turnStarted(5, 'd'),
+            ],
+            lastSeq: 5,
+            live: [],
+        } as never);
+        expect(view.turns.map((turn) => [turn.turnId, Boolean(turn.rewound)])).toEqual([
+            ['a', false],
+            ['b', true],
+            ['c', true],
+            ['d', false],
+        ]);
+    });
+});

@@ -638,7 +638,12 @@ export class TurnService {
                 ...context,
                 ...blocks,
             ];
-            const response = await running.process.agent.request('session/prompt', { sessionId, prompt });
+            const response = await running.process.agent.request('session/prompt', {
+                sessionId,
+                prompt,
+                // The xora engine marks where each host turn starts, for rewind and fork (M3-3).
+                ...(running.process.isXora ? { _meta: { xora: { turnId: running.turnId } } } : {}),
+            });
             await this.#finish(running, response.stopReason);
         } catch (error) {
             if (running.abort.signal.aborted && !running.exited) {

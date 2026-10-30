@@ -193,6 +193,20 @@ try {
     }
     await step(page, '撤销后文件恢复');
 
+    // M3-3: fork the thread from its turn, then go back to before that turn in the fork (files untouched).
+    await page.getByRole('button', { name: '从这一轮分叉' }).first().click();
+    await page.locator('.toast', { hasText: '已分叉到新线程' }).waitFor();
+    await page.locator('.sidebar', { hasText: '（分叉）' }).waitFor();
+    await step(page, '从一轮分叉出新线程');
+    await page.getByRole('button', { name: '回到这一轮之前' }).first().click();
+    await page.locator('.turn__confirm').getByRole('checkbox').uncheck();
+    await page.locator('.turn__confirm').getByRole('button', { name: '确定' }).click();
+    await page.locator('.turn--rewound').waitFor();
+    if ((await readFile(path.join(repo, 'hello.txt'), 'utf8')) !== 'hello\n') {
+        throw new Error('going back without files changed the files');
+    }
+    await step(page, '回到这一轮之前');
+
     await mkdir(path.join(repo, '.xora', 'commands'), { recursive: true });
     await writeFile(
         path.join(repo, '.xora', 'commands', 'greet.md'),

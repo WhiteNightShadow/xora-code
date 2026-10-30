@@ -383,6 +383,16 @@ export class ThreadStore {
         );
     }
 
+    /** Copies a turn's checkpoints to a fork on the same work tree, so its diff and undo keep working. */
+    copyTurn(fromThreadId: string, toThreadId: string, turnId: string): void {
+        this.#db.run(
+            `insert or ignore into turns (thread_id, turn_id, started_at, ended_at, status, checkpoint_before, checkpoint_after, files_json)
+             select ?, turn_id, started_at, ended_at, status, checkpoint_before, checkpoint_after, files_json
+             from turns where thread_id = ? and turn_id = ?`,
+            [toThreadId, fromThreadId, turnId],
+        );
+    }
+
     turn(threadId: string, turnId: string): { before?: string; after?: string; status: string } | undefined {
         const row = this.#db.get<{ checkpoint_before: string | null; checkpoint_after: string | null; status: string }>(
             'select checkpoint_before, checkpoint_after, status from turns where thread_id = ? and turn_id = ?',
