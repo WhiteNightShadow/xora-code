@@ -2,7 +2,7 @@
 
 ## 1. 结论
 
-- **默认引擎**：xora engine。它是一个独立的node子进程，对外说stdio acp。内核用pi；acp服务端、工具、审批、沙箱、子agent、检查点、压缩策略自研。
+- **默认引擎**：xora engine。它是一个独立的node子进程，对外说stdio acp。内核（wire层和agent循环）、acp服务端、工具、审批、子agent、压缩策略都是自研；内核选型的变化见第3节。
 - **外部引擎**：任何acp agent都能接，包括codex-acp、claude-agent-acp、kimi code、opencode、qwen code、gemini cli、goose、grok build，以及deepseek harness的acp启动配置。
 
 ## 2. xora engine结构
@@ -10,9 +10,9 @@
 ```
 packages/engine
 ├─ acp-server   会话new/load/resume/list/close、prompt、cancel、config options、权限请求、_xora/*扩展
-├─ session      会话树（基于pi的SessionManager）、fork、导入
-├─ loop         agent循环（pi-agent-core）：流式、并行工具、插话、重试、中断
-├─ providers    pi-ai，加xora的怪癖钩子（before-request / after-response），见07
+├─ session      jsonl会话文件、恢复、换工作目录
+├─ loop         agent循环：流式、并行只读工具、重试与回退、取消
+├─ providers    packages/providers：两种wire加怪癖数据，见07
 ├─ tools        见04第3节
 ├─ permissions  规则匹配后向host发session/request_permission，最终裁决在host
 ├─ sandbox      shell工具经sandbox-runtime包装，见10
@@ -26,7 +26,11 @@ packages/engine
 - **版本**：随应用包发布，可以热更新（见12）。
 - **测试**：用test-kit里的mock模型服务做录制回放，按厂商建立怪癖回归集（见13）。
 
-## 3. 为什么选pi做内核
+## 3. 内核选型
+
+> 2026-10-30更新：实际实现没有用pi，改为自研wire层和agent循环，理由见16第1节（依赖体积、发版节奏、怪癖和回放要自己掌控）。下面保留当初选pi的分析，作为备选方案的依据。
+
+### 3.1 当初为什么选pi
 
 1. **国产模型怪癖可控**：
    - pi-ai内置deepseek、moonshotai（含cn）、kimi-coding、zai、zai-coding-cn、qwen-token-plan等provider。

@@ -121,6 +121,6 @@
 
 ## 10. 合规
 
-- **glm coding plan**：条款只允许指定工具，xora不在名单上。默认不直连，界面引导用户改用标准api，或在名单内的工具里用套餐；同时向智谱申请加入名单。嵌入pi内核算不算"pi coding agent"，也要请智谱确认。
+- **glm coding plan**：条款只允许指定工具，xora不在名单上。默认不直连，界面引导用户改用标准api，或在名单内的工具里用套餐；同时向智谱申请加入名单。（xora最终没有嵌入pi，所以也不能借"pi coding agent"的名义。）
 - **kimi code**：可以接，但必须用xora自己真实的客户端标识，不冒充kimi cli，不复用官方oauth，只做交互式使用。
 - **官方订阅**（chatgpt、claude、grok等）：只走官方agent，xora不代为登录。anthropic的条款还规定，第三方产品未经批准不能提供claude.ai登录。

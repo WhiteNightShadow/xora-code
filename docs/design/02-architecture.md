@@ -41,20 +41,20 @@
 |---|---|---|
 | 桌面外壳 | electron，跟随最新稳定版的前一版（M0用44.10.0） | chromium三端表现一致；opencode今年4月因webkit渲染问题从tauri迁到了electron |
 | ui | react 19+typescript+vite | 生态和招人 |
-| 样式与组件 | tailwind css v4+radix ui（自建shadcn式组件库）；M0先用css变量，M1再引入 | 无障碍基础好、可定制 |
+| 样式与组件 | css变量（设计令牌）加自建组件，组件自己补aria属性和键盘操作 | 少依赖、应用包更小；原计划的tailwind+radix没有引入（见16第1节） |
 | 状态 | zustand管ui状态；线程事件流用自研订阅层 | 事件溯源配合按seq续传 |
 | 长列表 | tanstack virtual | 万级事件的线程 |
 | 编辑器与diff | monaco | 轻编辑和diff审阅共用 |
-| 终端 | xterm.js+node-pty | node-pty 1.2自带六个平台的预编译 |
+| 终端 | xterm.js 6+node-pty 1.2.0-beta.18 | node-pty正式版1.1.0缺linux预编译，1.2测试版带齐六个平台；node-pty放在外壳里，host按路径加载 |
 | markdown与高亮 | react-markdown+shiki | |
-| 国际化 | i18next，默认简体中文，另有英文 | 文案不写死在代码里 |
+| 国际化 | 自写的中英文词典，英文词典和中文同形，缺翻译是类型错误 | 文案不写死在代码里；不需要i18next的插件体系 |
 | 协议与校验 | zod v4（可导出json schema、生成类型） | 备选typebox |
-| 存储 | sqlite：优先评估node内置的`node:sqlite`（免原生模块），不成熟就用better-sqlite3（有预编译） | 单文件、fts5全文搜索 |
-| 引擎内核 | pi：`@earendil-works/pi-ai`、`@earendil-works/pi-agent-core`（mit，node≥22.19） | 见05 |
+| 存储 | sqlite：node内置的`node:sqlite`（已核对electron 44可用，含fts5 trigram） | 单文件、全文搜索、免原生模块 |
+| 引擎内核 | 自研：`packages/providers`（openai chat和anthropic messages两种wire、怪癖数据）加`packages/engine`的agent循环 | 见05第3节和16第1节 |
 | acp | `@agentclientprotocol/sdk` 2.x | 官方sdk |
 | mcp | `@modelcontextprotocol/sdk` | 官方sdk |
 | 沙箱 | `@anthropic-ai/sandbox-runtime`（mac、linux）；windows先靠策略兜底 | 见10 |
-| 搜索 | `@vscode/ripgrep` | |
+| 搜索 | 纯js遍历（遵守.gitignore），系统装了`rg`时优先用 | `@vscode/ripgrep`只下载本机平台的二进制，交叉打包拿不到另外五个平台 |
 | 日志 | pino，带脱敏 | |
 | 单仓与构建 | pnpm workspaces（`pnpm -r`）；界面用vite构建，bootstrap和host用esbuild | turborepo默认上传匿名使用数据，M0先不用，构建变慢后再评估 |
 | 打包 | electron-builder（dmg/zip、nsis、appimage/deb） | 支持在mac上交叉打windows、linux包 |
@@ -147,5 +147,5 @@ xora-code/
 - 每个线程一个只追加的事件日志，每行带`seq`和crc。格式升级写`events.v2.jsonl`，旧文件不改。
 - sqlite只存索引和设置，坏了可以从日志重建。
 - 迁移前自动备份；同一大版本内只做加法迁移，保证回滚后旧版本还能读（见12）。
-- 引擎自己的会话日志是模型上下文的来源（xora engine用pi的jsonl会话树），host的事件日志是界面时间线的来源，两者靠`turnId`关联。
+- 引擎自己的会话日志是模型上下文的来源（xora engine用自己的jsonl会话文件，压缩只记录上下文起点，不删原文），host的事件日志是界面时间线的来源，两者靠`turnId`关联。
 - 本地存原文；密钥不进日志；导出和上报时再脱敏。

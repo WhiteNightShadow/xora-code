@@ -20,7 +20,7 @@
 2. **技术栈**：electron+react+vite+typescript，pnpm+turborepo单仓。不再用theia，也不再内置rust sidecar。
 3. **分层**：bootstrap（冻结的极小启动器）→ ui（无状态）→ host（常驻，持有唯一状态，负责最终裁决）→ 引擎（acp子进程）→ 模型。
 4. **引擎**：
-   - 默认用xora engine：内核是pi，acp服务端、工具、审批、沙箱、子agent、检查点自研。
+   - 默认用xora engine：内核、acp服务端、工具、审批、子agent、压缩都是自研（原计划用pi做内核，实现时改了，见16）。
    - 外部agent经acp接入：codex、claude、kimi code、opencode、grok build、deepseek harness等。
 5. **模型**：
    - api和订阅并行支持，按"厂商×通道×区域×协议"建模，协议怪癖做成数据。
