@@ -359,7 +359,12 @@ export class ExtensionService {
     readonly #deps: ExtensionDeps;
     readonly #home: string;
     readonly #stateFile: string;
-    readonly #tested = new Map<string, { ok: boolean; tools: number; error?: string; needsAuth?: boolean }>();
+    readonly #tested = new Map<
+        string,
+        { ok: boolean; tools: number; error?: string; needsAuth?: boolean; at: number }
+    >();
+    /** What the engine last reported per `<projectId>:<server>`; the newer of this and a test is shown. */
+    readonly #live = new Map<string, { status: string; tools: number; error?: string; at: number }>();
     #state: State | undefined;
     #writing: Promise<void> = Promise.resolve();
     #builtins: Promise<void> | undefined;
@@ -657,7 +662,12 @@ export class ExtensionService {
                 ),
             ),
             mcpServers: loaded.mcp.map((entry) => {
-                const tested = this.#tested.get(entry.key);
+                const reported = projectId ? this.#live.get(`${projectId}:${entry.config.name}`) : undefined;
+                const test = this.#tested.get(entry.key);
+                const live = reported && (!test || reported.at > test.at) ? reported : undefined;
+                const tested: { ok: boolean; tools: number; error?: string; needsAuth?: boolean } | undefined = live
+                    ? { ok: live.status !== 'failed', tools: live.tools, ...(live.error ? { error: live.error } : {}) }
+                    : test;
                 return {
                     name: entry.config.name,
                     transport: entry.config.transport,
@@ -665,7 +675,14 @@ export class ExtensionService {
                     origin: entry.config.origin,
                     enabled: !loaded.disabledMcp.has(entry.key),
                     trusted: entry.config.trusted,
-                    status: tested ? (tested.ok ? 'unknown' : 'failed') : 'unknown',
+                    status:
+                        live && (live.status === 'running' || live.status === 'starting' || live.status === 'stopped')
+                            ? live.status
+                            : tested
+                              ? tested.ok
+                                  ? 'unknown'
+                                  : 'failed'
+                              : 'unknown',
                     ...(tested?.error ? { error: tested.error } : {}),
                     ...(tested?.ok ? { tools: tested.tools } : {}),
                     ...(tested?.needsAuth ? { needsAuth: true } : {}),
@@ -1067,12 +1084,18 @@ export class ExtensionService {
                 connectTimeoutMs: 30_000,
             });
             const tools = (await connection.listTools()).map((tool) => tool.name);
-            this.#tested.set(entry.key, { ok: true, tools: tools.length });
+            this.#tested.set(entry.key, { ok: true, tools: tools.length, at: Date.now() });
             return { ok: true, tools };
         } catch (error) {
             const text = errorText(error);
             const needsAuth = /401|unauthori[sz]ed/i.test(text) && entry.config.transport !== 'stdio';
-            this.#tested.set(entry.key, { ok: false, tools: 0, error: text, ...(needsAuth ? { needsAuth } : {}) });
+            this.#tested.set(entry.key, {
+                ok: false,
+                tools: 0,
+                error: text,
+                ...(needsAuth ? { needsAuth } : {}),
+                at: Date.now(),
+            });
             return { ok: false, tools: [], error: text };
         } finally {
             await connection.close().catch(() => undefined);
@@ -1156,6 +1179,28 @@ export class ExtensionService {
                 hooks.some((config) => config.groups.some((group) => group.event === event)),
             ),
         };
+    }
+
+    /** Server statuses the xora engine reported when a session opened. */
+    reportMcp(
+        projectId: string,
+        statuses: ReadonlyArray<{ name: string; status: string; tools: number; error?: string }>,
+    ): void {
+        let changed = false;
+        for (const status of statuses) {
+            const key = `${projectId}:${status.name}`;
+            const before = this.#live.get(key);
+            if (before?.status !== status.status || before.tools !== status.tools || before.error !== status.error) {
+                changed = true;
+            }
+            this.#live.set(key, {
+                status: status.status,
+                tools: status.tools,
+                ...(status.error ? { error: status.error } : {}),
+                at: Date.now(),
+            });
+        }
+        if (changed) this.#changed();
     }
 
     /** The servers for `session/new`, limited to the transports the agent supports. */

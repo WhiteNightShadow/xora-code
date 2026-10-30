@@ -145,6 +145,22 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
         clearTimeout(timer);
     }
 
+    /** How each MCP server of the session is doing, for the host to show (`_meta.xora.mcp`). */
+    function mcpStatus(session: EngineSession): { mcp?: Array<Record<string, unknown>> } {
+        const statuses = session.mcp?.statuses();
+        if (!statuses || statuses.length === 0) {
+            return {};
+        }
+        return {
+            mcp: statuses.map((status) => ({
+                name: status.name,
+                status: status.status,
+                tools: status.toolCount,
+                ...(status.error ? { error: status.error } : {}),
+            })),
+        };
+    }
+
     function require(sessionId: string): EngineSession {
         const session = sessions.get(sessionId);
         if (!session) {
@@ -208,18 +224,18 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
             sessions.set(sessionId, session);
             await configureMcp(session, params.mcpServers);
             log(`session ${sessionId} created in ${cwd}`);
-            return { sessionId, _meta: { xora: { dir } } };
+            return { sessionId, _meta: { xora: { dir, ...mcpStatus(session) } } };
         })
         .onRequest('session/load', async ({ params, client }) => {
             const session = open(params.sessionId, params.cwd, params.additionalDirectories, params._meta);
             await configureMcp(session, params.mcpServers);
             replay(session, io(client, session.id).update);
-            return {};
+            return { _meta: { xora: mcpStatus(session) } };
         })
         .onRequest('session/resume', async ({ params }) => {
             const session = open(params.sessionId, params.cwd, params.additionalDirectories, params._meta);
             await configureMcp(session, params.mcpServers);
-            return {};
+            return { _meta: { xora: mcpStatus(session) } };
         })
         .onRequest('session/list', ({ params }) => ({
             sessions: listStoredSessions(sessionsDir, params.cwd ?? undefined).map((info) => ({

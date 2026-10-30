@@ -106,5 +106,5 @@
   - 还没接：SubagentStop、SessionEnd；Stop的“继续工作”；自动压缩前的PreCompact。
 - **市场**：兼容claude插件市场（`.claude-plugin/marketplace.json`），可以添加git地址（克隆到`<数据目录>/extensions/markets/`）或本地目录，在设置里浏览并安装；npm、压缩包等来源暂不支持，内置的官方市场还没有。
 - **用对话创建**：内置skill `extension-creator`（启动时写到`<数据目录>/extensions/builtin/skills/`）告诉agent各类扩展的格式和存放位置；agent起草后用普通的write工具保存，写入前审批卡片会展示每个文件的内容。目前覆盖skill、命令和agent定义，插件和工作流还没做。
-- **mcp**：xora engine按会话启动mcp服务器（工具名`mcp__服务器__工具`，每次调用都走权限策略）；外部acp agent经`session/new`的`mcpServers`拿到同一份配置。服务器状态目前只显示最近一次“测试”的结果。
+- **mcp**：xora engine按会话启动mcp服务器（工具名`mcp__服务器__工具`，每次调用都走权限策略）；外部acp agent经`session/new`的`mcpServers`拿到同一份配置。引擎在建立或恢复会话时把各服务器的状态带回host：启动失败的在时间线上提示一次，设置页显示引擎报告和手动测试里较新的那个结果。
 

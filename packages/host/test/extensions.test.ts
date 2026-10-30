@@ -518,9 +518,16 @@ describe('extensions in a thread', () => {
                 args: [echoServer(home)],
                 env: { ECHO_SECRET: 'xyz' },
             });
+            await ui.request('mcp.save', {
+                name: 'broken',
+                scope: 'global',
+                transport: 'stdio',
+                command: process.execPath,
+                args: ['-e', 'process.exit(3)'],
+            });
             const extensions = await ui.request('extension.list', { projectId: project.id });
             expect(extensions.skills.map((item) => item.name)).toEqual(['greeting', 'extension-creator']);
-            expect(extensions.mcpServers.map((item) => item.name)).toEqual(['echo']);
+            expect(extensions.mcpServers.map((item) => item.name)).toEqual(['echo', 'broken']);
 
             server.reset();
             let step = 0;
@@ -564,6 +571,15 @@ describe('extensions in a thread', () => {
             // The timeline shows what the user typed, not the expanded command.
             const started = read.events.find((event) => event.kind === 'turn.started');
             expect(JSON.stringify(started)).toContain('/hi Bob');
+
+            // A server that does not start is reported once in the timeline and on the settings page.
+            expect(JSON.stringify(read.events)).toContain('mcp服务器broken没有启动');
+            const after = await ui.request('extension.list', { projectId: project.id });
+            expect(after.mcpServers.find((item) => item.name === 'echo')).toMatchObject({
+                status: 'running',
+                tools: 1,
+            });
+            expect(after.mcpServers.find((item) => item.name === 'broken')).toMatchObject({ status: 'failed' });
         },
         60_000,
     );

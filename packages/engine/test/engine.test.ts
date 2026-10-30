@@ -484,7 +484,10 @@ describe('rewind and fork', () => {
         expect(texts).not.toContain('third question');
         await expect(h.client.request('_xora/session/rewind', { sessionId, turnId: 't3' })).rejects.toThrow();
 
-        const { sessionId: forked } = await h.client.request('_xora/session/fork', { sessionId, beforeTurnId: 't4' });
+        const { sessionId: forked } = await h.client.request<{ sessionId: string }>('_xora/session/fork', {
+            sessionId,
+            beforeTurnId: 't4',
+        });
         h.close();
 
         // A new engine process reads the rewound history from disk and the fork from its own file.

@@ -220,6 +220,7 @@ export class TurnService {
     readonly #deps: TurnDeps;
     readonly #running = new Map<string, RunningTurn>();
     readonly #hostTools = new Map<string, HostToolProvider>();
+    readonly #mcpWarned = new Map<string, Set<string>>();
     #sleepBlocked = false;
 
     constructor(deps: TurnDeps) {
@@ -446,11 +447,12 @@ export class TurnService {
         ) ?? []) as acp.McpServer[];
         const existing = threads.sessionId(thread.id);
         let sessionId: string | undefined;
+        let opened: unknown;
         if (existing && (process.supportsResume || process.supportsLoad)) {
             try {
                 engines.register(existing, process.key, this.#handlers(running));
                 if (process.supportsResume) {
-                    await process.agent.request('session/resume', {
+                    opened = await process.agent.request('session/resume', {
                         sessionId: existing,
                         cwd: running.cwd,
                         mcpServers,
@@ -458,7 +460,7 @@ export class TurnService {
                     });
                 } else {
                     running.replaying = true;
-                    await process.agent.request('session/load', {
+                    opened = await process.agent.request('session/load', {
                         sessionId: existing,
                         cwd: running.cwd,
                         mcpServers,
@@ -484,6 +486,7 @@ export class TurnService {
                 ...(meta ? { _meta: meta } : {}),
             });
             sessionId = created.sessionId;
+            opened = created;
             running.newSession = true;
             threads.update(thread.id, { sessionId }, { touch: false });
             engines.register(sessionId, process.key, this.#handlers(running));
@@ -491,6 +494,38 @@ export class TurnService {
             await process.agent.request('_xora/session/configure', { sessionId, _meta: meta });
         }
         running.sessionId = sessionId;
+        this.#mcpReport(running, (opened as { _meta?: { xora?: { mcp?: unknown } } } | undefined)?._meta?.xora?.mcp);
+    }
+
+    /** MCP servers the engine could not start get one notice per thread and error (09 §2). */
+    #mcpReport(running: RunningTurn, value: unknown): void {
+        if (!Array.isArray(value)) {
+            return;
+        }
+        const statuses = value.flatMap((entry) => {
+            const item = entry as { name?: unknown; status?: unknown; tools?: unknown; error?: unknown };
+            return typeof item.name === 'string' && typeof item.status === 'string'
+                ? [
+                      {
+                          name: item.name,
+                          status: item.status,
+                          tools: typeof item.tools === 'number' ? item.tools : 0,
+                          ...(typeof item.error === 'string' ? { error: item.error } : {}),
+                      },
+                  ]
+                : [];
+        });
+        this.#deps.extensions?.reportMcp(running.projectId, statuses);
+        let warned = this.#mcpWarned.get(running.threadId);
+        for (const status of statuses) {
+            if (status.status !== 'failed') continue;
+            const key = `${status.name}:${status.error ?? ''}`;
+            warned ??= new Set();
+            if (warned.has(key)) continue;
+            warned.add(key);
+            this.#notice(running, 'warning', `mcp服务器${status.name}没有启动`, status.error);
+        }
+        if (warned) this.#mcpWarned.set(running.threadId, warned);
     }
 
     /** Reads the project's extensions for a turn; a broken extension never stops the turn. */
