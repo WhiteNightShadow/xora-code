@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
@@ -24,6 +24,8 @@ interface Harness {
     readonly permissions: acp.RequestPermissionRequest[];
     answer: 'allow' | 'deny' | 'cancel';
     hostToolCalls: Array<{ name: string; input: unknown }>;
+    readonly hookCalls: Array<{ event: string; payload: Record<string, unknown> }>;
+    hookReply: (event: string, payload: Record<string, unknown>) => Record<string, unknown>;
     close(): void;
 }
 
@@ -33,6 +35,11 @@ function harness(): Harness {
     const state = {
         answer: 'allow' as Harness['answer'],
         hostToolCalls: [] as Array<{ name: string; input: unknown }>,
+        hookCalls: [] as Array<{ event: string; payload: Record<string, unknown> }>,
+        hookReply: ((): Record<string, unknown> => ({})) as (
+            event: string,
+            payload: Record<string, unknown>,
+        ) => Record<string, unknown>,
     };
     const agentApp = createXoraAgent({ dataDir: mkdtempSync(path.join(tmpdir(), 'xora-engine-')), version: 'test' });
     const clientApp = acp
@@ -57,6 +64,14 @@ function harness(): Harness {
                 state.hostToolCalls.push({ name: params.name, input: params.input });
                 return { content: `host handled ${params.name}` };
             },
+        )
+        .onRequest(
+            '_xora/hook/run',
+            z.object({ sessionId: z.string(), event: z.string(), payload: z.record(z.string(), z.unknown()) }),
+            ({ params }) => {
+                state.hookCalls.push({ event: params.event, payload: params.payload });
+                return state.hookReply(params.event, params.payload);
+            },
         );
     const connection = clientApp.connect(agentApp);
     const result: Harness = {
@@ -71,6 +86,15 @@ function harness(): Harness {
         },
         get hostToolCalls() {
             return state.hostToolCalls;
+        },
+        get hookCalls() {
+            return state.hookCalls;
+        },
+        get hookReply() {
+            return state.hookReply;
+        },
+        set hookReply(value) {
+            state.hookReply = value;
         },
         set hostToolCalls(value) {
             state.hostToolCalls = value;
@@ -351,12 +375,74 @@ rl.on('line', (line) => {
             _meta: config(),
         });
         await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'echo hi' }] });
-        const tools = (server.requests[0]?.body as { tools?: Array<{ function: { name: string } }> } | undefined)?.tools ?? [];
+        const tools =
+            (server.requests[0]?.body as { tools?: Array<{ function: { name: string } }> } | undefined)?.tools ?? [];
         expect(tools.map((tool) => tool.function.name)).toContain('mcp__echo__echo');
-        expect(h.permissions.map((request) => (request._meta as { xora: { toolName: string } }).xora.toolName)).toEqual(['mcp__echo__echo']);
-        const toolMessage = (server.requests.at(-1)?.body as { messages?: Array<{ role: string; content: string }> } | undefined)?.messages?.at(-1);
+        expect(h.permissions.map((request) => (request._meta as { xora: { toolName: string } }).xora.toolName)).toEqual(
+            ['mcp__echo__echo'],
+        );
+        const toolMessage = (
+            server.requests.at(-1)?.body as { messages?: Array<{ role: string; content: string }> } | undefined
+        )?.messages?.at(-1);
         expect(toolMessage?.content).toContain('echo: hi');
         await h.client.request('session/close', { sessionId });
         h.close();
     }, 30_000);
+});
+
+describe('tool hooks', () => {
+    it('lets a PreToolUse hook block a call, rewrite input, and a PostToolUse hook add feedback', async () => {
+        const cwd = workspace();
+        writeFileSync(path.join(cwd, 'x.txt'), 'from x\n');
+        writeFileSync(path.join(cwd, 'y.txt'), 'from y\n');
+        server.reset();
+        server.respondWith((request) =>
+            lastRole(request.body) === 'tool'
+                ? openaiText('done')
+                : openaiToolCalls([
+                      { name: 'write', arguments: JSON.stringify({ path: 'blocked.txt', content: 'nope' }) },
+                      { name: 'read', arguments: JSON.stringify({ path: 'x.txt' }) },
+                  ]),
+        );
+        const h = harness();
+        h.hookReply = (event, payload) => {
+            if (event === 'PreToolUse' && payload.tool_name === 'write') return { blocked: true, reason: 'no writes here' };
+            if (event === 'PreToolUse' && payload.tool_name === 'read') return { updatedInput: { path: 'y.txt' } };
+            if (event === 'PostToolUse') return { additionalContext: 'checked by hook' };
+            return {};
+        };
+        const sessionId = await newSession(h, cwd, { hookEvents: ['PreToolUse', 'PostToolUse'] });
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'go' }] });
+        expect(existsSync(path.join(cwd, 'blocked.txt'))).toBe(false);
+        expect(h.permissions).toHaveLength(0);
+        const messages =
+            (server.requests.at(-1)?.body as { messages?: Array<{ role: string; content: string }> } | undefined)
+                ?.messages ?? [];
+        const results = messages.filter((message) => message.role === 'tool').map((message) => message.content);
+        expect(results[0]).toContain('A PreToolUse hook blocked this call: no writes here');
+        expect(results[1]).toContain('from y');
+        expect(results[1]).toContain('checked by hook');
+        expect(h.hookCalls.map((call) => `${call.event}:${String(call.payload.tool_name)}`)).toEqual([
+            'PreToolUse:write',
+            'PreToolUse:read',
+            'PostToolUse:read',
+        ]);
+        h.close();
+    });
+
+    it('does not call the host when no hook events are configured', async () => {
+        const cwd = workspace();
+        writeFileSync(path.join(cwd, 'x.txt'), 'x\n');
+        server.reset();
+        server.respondWith((request) =>
+            lastRole(request.body) === 'tool'
+                ? openaiText('done')
+                : openaiToolCalls([{ name: 'read', arguments: JSON.stringify({ path: 'x.txt' }) }]),
+        );
+        const h = harness();
+        const sessionId = await newSession(h, cwd);
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'go' }] });
+        expect(h.hookCalls).toHaveLength(0);
+        h.close();
+    });
 });

@@ -23,8 +23,9 @@ import { checkPathAccess, isReadOnlyCommand, isSensitivePath } from '@xora/tools
 import type { ApprovalService } from './approvals.ts';
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
-import type { EngineManager, EngineProcess, HostToolResult } from './engines/manager.ts';
+import type { EngineManager, EngineProcess, HostToolResult, ToolHookRequest } from './engines/manager.ts';
 import { type EngineDefinition, engineById } from './engines/registry.ts';
+import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
@@ -61,6 +62,8 @@ export interface TurnDeps {
     readonly portFor?: (threadId: string) => Promise<number>;
     /** Called after every turn ends, for goal mode and team runs. */
     readonly onTurnEnded?: (event: TurnEnded) => void;
+    /** Skills, slash commands, hooks and MCP servers of the thread's project (09). */
+    readonly extensions?: ExtensionService;
 }
 
 /** Tools a thread gets from the host (the supervisor's team tools), with their handler. */
@@ -197,6 +200,8 @@ class RunningTurn {
     lastText = '';
     /** `session/load` replays the history as updates; those belong to earlier turns and are ignored. */
     replaying = false;
+    /** What the project's extensions give this turn; read once when the turn starts. */
+    extras: SessionExtras | undefined;
 
     constructor(thread: ThreadMeta, cwd: string, engine: EngineDefinition, turnId: string) {
         this.threadId = thread.id;
@@ -304,7 +309,9 @@ export class TurnService {
         });
         projects.touch(thread.projectId);
         this.#updateSleep();
-        void this.#run(running, thread, project, () => promptBlocks(text, attachments, cwd));
+        void this.#run(running, thread, project, (extras) =>
+            promptBlocks((extras && this.#deps.extensions?.expandSlash(extras, text)) ?? text, attachments, cwd),
+        );
         return turnId;
     }
 
@@ -347,7 +354,12 @@ export class TurnService {
         this.#deps.shell.updateTray(running).catch(() => undefined);
     }
 
-    async #sessionConfig(thread: ThreadMeta, project: Project, cwd: string): Promise<SessionConfig> {
+    async #sessionConfig(
+        thread: ThreadMeta,
+        project: Project,
+        cwd: string,
+        extras: SessionExtras | undefined,
+    ): Promise<SessionConfig> {
         const { connections, settings, prompts, threads } = this.#deps;
         const current = settings.get();
         const modelRef = thread.model ?? project.defaults?.model ?? current.defaultModel;
@@ -364,7 +376,17 @@ export class TurnService {
         // Organisation and agent layers go after the user's global layer and before the project layers (08 §1.2).
         const extra = provider?.layers ?? [];
         const globalIndex = baseLayers.findIndex((layer) => layer.id === 'user_global_instructions');
-        const layers = [...baseLayers.slice(0, globalIndex + 1), ...extra, ...baseLayers.slice(globalIndex + 1)];
+        const layers = [
+            ...baseLayers.slice(0, globalIndex + 1),
+            ...extra,
+            ...baseLayers.slice(globalIndex + 1),
+            ...(extras?.layers ?? []),
+        ];
+        const ownTools = provider?.tools ?? [];
+        const tools = [
+            ...ownTools,
+            ...(extras?.tools ?? []).filter((tool) => !ownTools.some((own) => own.name === tool.name)),
+        ];
         const fast = current.fastModel;
         return {
             model: { connection: await connections.engineConfig(modelRef.connectionId), model: modelRef.model },
@@ -382,8 +404,9 @@ export class TurnService {
                 thread.location.kind === 'worktree' && this.#deps.portFor
                     ? { XORA_PORT: String(await this.#deps.portFor(thread.id)) }
                     : {},
-            hostTools: (provider?.tools ?? []).map((tool) => ({ ...tool, kind: tool.kind ?? 'other' })),
+            hostTools: tools.map((tool) => ({ ...tool, kind: tool.kind ?? 'other' })),
             disabledTools: [...(provider?.disabledTools ?? [])],
+            hookEvents: [...(extras?.hookEvents ?? [])],
         };
     }
 
@@ -414,7 +437,13 @@ export class TurnService {
         const { engines, threads } = this.#deps;
         const process = await engines.connect(running.engine, project.id);
         running.process = process;
-        const meta = process.isXora ? { xora: await this.#sessionConfig(thread, project, running.cwd) } : undefined;
+        const meta = process.isXora
+            ? { xora: await this.#sessionConfig(thread, project, running.cwd, running.extras) }
+            : undefined;
+        const mcpServers = (this.#deps.extensions?.mcpServersFor(
+            running.extras,
+            process.isXora ? { http: true, sse: true } : (process.capabilities.mcpCapabilities ?? {}),
+        ) ?? []) as acp.McpServer[];
         const existing = threads.sessionId(thread.id);
         let sessionId: string | undefined;
         if (existing && (process.supportsResume || process.supportsLoad)) {
@@ -424,7 +453,7 @@ export class TurnService {
                     await process.agent.request('session/resume', {
                         sessionId: existing,
                         cwd: running.cwd,
-                        mcpServers: [],
+                        mcpServers,
                         ...(meta ? { _meta: meta } : {}),
                     });
                 } else {
@@ -432,7 +461,7 @@ export class TurnService {
                     await process.agent.request('session/load', {
                         sessionId: existing,
                         cwd: running.cwd,
-                        mcpServers: [],
+                        mcpServers,
                         ...(meta ? { _meta: meta } : {}),
                     });
                 }
@@ -451,7 +480,7 @@ export class TurnService {
         if (!sessionId) {
             const created = await process.agent.request('session/new', {
                 cwd: running.cwd,
-                mcpServers: [],
+                mcpServers,
                 ...(meta ? { _meta: meta } : {}),
             });
             sessionId = created.sessionId;
@@ -464,15 +493,100 @@ export class TurnService {
         running.sessionId = sessionId;
     }
 
+    /** Reads the project's extensions for a turn; a broken extension never stops the turn. */
+    async #loadExtras(project: Project): Promise<SessionExtras | undefined> {
+        const extensions = this.#deps.extensions;
+        if (!extensions) {
+            return undefined;
+        }
+        try {
+            return await extensions.forSession(project);
+        } catch (error) {
+            this.#deps.log.warn(`extensions: ${error instanceof Error ? error.message : String(error)}`);
+            return undefined;
+        }
+    }
+
+    /**
+     * SessionStart (new sessions) and UserPromptSubmit hooks (09 §4). Returns context blocks to put in front of the
+     * prompt, or `undefined` when a hook blocked the prompt.
+     */
+    async #promptHooks(
+        running: RunningTurn,
+        blocks: readonly acp.ContentBlock[],
+    ): Promise<acp.ContentBlock[] | undefined> {
+        const extensions = this.#deps.extensions;
+        const extras = running.extras;
+        if (!extensions || !extras) {
+            return [];
+        }
+        const base = { sessionId: running.threadId, cwd: running.cwd, signal: running.abort.signal };
+        const context: acp.ContentBlock[] = [];
+        const note = (event: string, text: string) =>
+            context.push({ type: 'text', text: `<hook_context event="${event}">\n${text}\n</hook_context>` });
+        try {
+            if (running.newSession) {
+                const started = await extensions.runHook(extras, 'SessionStart', {
+                    ...base,
+                    targets: ['startup'],
+                    payload: { source: 'startup' },
+                });
+                if (started?.additionalContext) note('SessionStart', started.additionalContext);
+            }
+            const prompt = blocks.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+            const submitted = await extensions.runHook(extras, 'UserPromptSubmit', { ...base, payload: { prompt } });
+            if (submitted?.blocked) {
+                this.#notice(
+                    running,
+                    'warning',
+                    'hook拦截了这条消息',
+                    submitted.reason ?? submitted.messages.join('\n'),
+                );
+                return undefined;
+            }
+            if (submitted?.additionalContext) note('UserPromptSubmit', submitted.additionalContext);
+        } catch (error) {
+            this.#notice(running, 'warning', 'hook运行失败', error instanceof Error ? error.message : String(error));
+        }
+        return context;
+    }
+
+    /** Fire-and-forget hooks (Stop, Notification); failures are only logged. */
+    #sideHook(
+        running: RunningTurn,
+        event: 'Stop' | 'Notification',
+        targets: string[],
+        payload: Record<string, unknown>,
+    ): void {
+        const extensions = this.#deps.extensions;
+        const extras = running.extras;
+        if (!extensions || !extras) {
+            return;
+        }
+        void extensions
+            .runHook(extras, event, { sessionId: running.threadId, cwd: running.cwd, targets, payload })
+            .catch((error: unknown) => this.#deps.log.warn(`${event} hook: ${String(error)}`));
+    }
+
+    #notice(running: RunningTurn, severity: 'info' | 'warning' | 'error', title: string, description?: string): void {
+        this.#apply(running, {
+            sessionUpdate: 'notice',
+            severity,
+            title,
+            ...(description ? { description } : {}),
+        } as unknown as acp.SessionUpdate);
+    }
+
     async #run(
         running: RunningTurn,
         thread: ThreadMeta,
         project: Project,
-        prepare: () => Promise<acp.ContentBlock[]>,
+        prepare: (extras: SessionExtras | undefined) => Promise<acp.ContentBlock[]>,
     ): Promise<void> {
         const { threads, review, engines } = this.#deps;
         try {
-            const blocks = await prepare();
+            running.extras = await this.#loadExtras(project);
+            const blocks = await prepare(running.extras);
             running.before = await review.snapshot(running.cwd, `thread-${running.threadId}`);
             threads.startTurn(running.threadId, running.turnId, running.before);
             if (running.abort.signal.aborted) {
@@ -495,6 +609,16 @@ export class TurnService {
             if (command && running.process.isXora) {
                 // `/compact [focus]`: summarise older turns now instead of prompting (08 §3).
                 const focus = command[1]?.trim();
+                if (running.extras && this.#deps.extensions) {
+                    await this.#deps.extensions
+                        .runHook(running.extras, 'PreCompact', {
+                            sessionId: running.threadId,
+                            cwd: running.cwd,
+                            targets: ['manual'],
+                            payload: { trigger: 'manual', custom_instructions: focus ?? '' },
+                        })
+                        .catch((error: unknown) => this.#deps.log.warn(`PreCompact hook: ${String(error)}`));
+                }
                 await running.process.agent.request('_xora/session/compact', {
                     sessionId,
                     ...(focus ? { focus } : {}),
@@ -502,10 +626,18 @@ export class TurnService {
                 await this.#finish(running, 'end_turn');
                 return;
             }
-            const prompt =
-                !running.process.isXora && running.newSession
-                    ? [...this.#externalInstructions(thread, project, running.cwd), ...blocks]
-                    : blocks;
+            const context = await this.#promptHooks(running, blocks);
+            if (!context) {
+                await this.#finish(running, 'refusal');
+                return;
+            }
+            const prompt = [
+                ...(!running.process.isXora && running.newSession
+                    ? this.#externalInstructions(thread, project, running.cwd)
+                    : []),
+                ...context,
+                ...blocks,
+            ];
             const response = await running.process.agent.request('session/prompt', { sessionId, prompt });
             await this.#finish(running, response.stopReason);
         } catch (error) {
@@ -544,8 +676,34 @@ export class TurnService {
             onExit: (reason: string) => {
                 running.exited = reason;
             },
+            onHook: (request: ToolHookRequest, signal: AbortSignal) => {
+                const extensions = this.#deps.extensions;
+                if (!extensions || !running.extras) {
+                    return Promise.resolve({});
+                }
+                return extensions.runToolHook(running.extras, request.event, request.payload, {
+                    sessionId: running.threadId,
+                    cwd: running.cwd,
+                    signal,
+                });
+            },
             onHostTool: async (name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult> => {
                 const provider = this.#hostTools.get(running.threadId);
+                const extensions = this.#deps.extensions;
+                if (
+                    !provider?.tools.some((tool) => tool.name === name) &&
+                    extensions &&
+                    running.extras?.tools.some((tool) => tool.name === name)
+                ) {
+                    try {
+                        return await extensions.handleTool(running.extras, name, input);
+                    } catch (error) {
+                        return {
+                            content: `Tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
+                            isError: true,
+                        };
+                    }
+                }
                 if (!provider) {
                     return { content: `Tool ${name} is not available in this thread.`, isError: true };
                 }
@@ -931,10 +1089,25 @@ export class TurnService {
             projectId: running.projectId,
             projectRoot: running.cwd,
         });
-        if (policy.decision === 'allow') {
+        // A trusted PreToolUse hook may ask for a confirmation the policy would skip, or waive one it would ask
+        // for; it never overrides a deny, a path outside the workspace or a secret file (09 §4).
+        const hookDecision = (request._meta as { xora?: { hookDecision?: unknown } } | null | undefined)?.xora
+            ?.hookDecision;
+        let decision = policy.decision;
+        if (hookDecision === 'ask' && decision === 'allow') {
+            decision = 'ask';
+        } else if (
+            hookDecision === 'allow' &&
+            decision === 'ask' &&
+            facts.outside.length === 0 &&
+            facts.sensitive.length === 0
+        ) {
+            decision = 'allow';
+        }
+        if (decision === 'allow') {
             return select(true);
         }
-        if (policy.decision === 'deny') {
+        if (decision === 'deny') {
             this.#deps.log.info(`denied ${facts.toolName} in ${running.threadId}: ${policy.reason}`);
             return select(false, policy.reason);
         }
@@ -982,6 +1155,10 @@ export class TurnService {
                         };
                         this.#persist(running, approvalItem, 'item.started');
                         threads.update(running.threadId, { status: 'awaiting_approval' });
+                        this.#sideHook(running, 'Notification', ['permission_prompt'], {
+                            message: `Xora Code needs your permission to use ${approval.title}`,
+                            notification_type: 'permission_prompt',
+                        });
                         const prefs = settings.get().notifications;
                         if (prefs.onApproval && !bus.focused) {
                             shell
@@ -1063,6 +1240,9 @@ export class TurnService {
 
     async #finish(running: RunningTurn, stopReason: acp.StopReason): Promise<void> {
         const { threads, bus, settings, shell } = this.#deps;
+        if (stopReason !== 'cancelled' && stopReason !== 'refusal') {
+            this.#sideHook(running, 'Stop', [], { stop_hook_active: false });
+        }
         this.#closeLive(running, stopReason === 'cancelled' ? 'cancelled' : 'completed');
         const changes = await this.#changes(running);
         threads.append(

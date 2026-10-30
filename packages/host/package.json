@@ -15,6 +15,8 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "2.1.0",
+    "@xora/extensions": "workspace:*",
+    "@xora/mcp": "workspace:*",
     "@xora/metering": "workspace:*",
     "@xora/protocol": "workspace:*",
     "@xora/providers": "workspace:*",

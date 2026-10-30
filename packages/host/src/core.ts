@@ -20,6 +20,7 @@ import { Bus } from './bus.ts';
 import { ConnectionService } from './connections.ts';
 import { EngineManager } from './engines/manager.ts';
 import { EXTERNAL_ENGINES, engineById, XORA_ENGINE } from './engines/registry.ts';
+import { ExtensionService } from './extensions.ts';
 import {
     applyInlineEdit,
     findFiles,
@@ -58,6 +59,8 @@ export interface HostOptions {
     /** Skip resolving the login shell PATH (tests). */
     readonly skipShellEnv?: boolean;
     readonly fetch?: typeof fetch;
+    /** Home directory for user skills and MCP config imports; tests point it at a temporary folder. */
+    readonly home?: string;
 }
 
 export type UiPeer = RpcPeer<HostMethods, HostNotifications>;
@@ -85,6 +88,7 @@ export class HostCore {
     readonly terminals: TerminalService;
     readonly worktrees: WorktreeService;
     readonly goals: GoalService;
+    readonly extensions: ExtensionService;
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
 
@@ -104,6 +108,14 @@ export class HostCore {
         this.review = new ReviewService(this.paths.checkpointsDir, this.log);
         this.usage = new UsageService(this.db, () => this.settings.get());
         this.worktrees = new WorktreeService({ rootDir: this.paths.worktreesDir, log: this.log, review: this.review });
+        this.extensions = new ExtensionService({
+            dir: this.paths.extensionsDir,
+            projects: this.projects,
+            shell: options.shell,
+            bus: this.bus,
+            log: this.log,
+            ...(options.home ? { home: options.home } : {}),
+        });
         const engineData = path.join(this.paths.enginesDir, 'xora');
         this.engines = new EngineManager({
             log: this.log,
@@ -151,6 +163,7 @@ export class HostCore {
             log: this.log,
             userAgent,
             portFor: (threadId) => this.worktrees.port(threadId),
+            extensions: this.extensions,
             onTurnEnded: (event) =>
                 void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`)),
         });
@@ -601,6 +614,38 @@ export class HostCore {
             }),
         );
         peer.handle('goal.stop', ({ threadId }) => this.goals.stop(threadId));
+
+        // Extensions (09) ---------------------------------------------------------------------------------------
+        const extensions = this.extensions;
+        peer.handle('extension.list', ({ projectId }) => extensions.snapshot(projectId));
+        peer.handle('extension.toggle', async (params) => {
+            await extensions.toggle(params);
+            return ok;
+        });
+        peer.handle('project.trust', async ({ projectId, trusted }) => {
+            await extensions.trust(projectId, trusted);
+            return ok;
+        });
+        peer.handle('plugin.install', ({ source }) => extensions.installPlugin(source));
+        peer.handle('plugin.uninstall', async ({ name }) => {
+            await extensions.uninstallPlugin(name);
+            return ok;
+        });
+        peer.handle('mcp.save', async (params) => {
+            await extensions.saveMcp(params);
+            return ok;
+        });
+        peer.handle('mcp.remove', async (params) => {
+            await extensions.removeMcp(params);
+            return ok;
+        });
+        peer.handle('mcp.discover', ({ projectId }) => extensions.discoverMcp(projectId));
+        peer.handle('mcp.import', ({ names, projectId }) => extensions.importMcp(names, projectId));
+        peer.handle('mcp.test', ({ name, projectId }) => extensions.testMcp(name, projectId));
+        peer.handle('mcp.authorize', async ({ name, projectId }) => {
+            await extensions.authorizeMcp(name, projectId);
+            return ok;
+        });
         peer.handle('turn.compact', async ({ threadId, focus }) => {
             await turns.start(threadId, focus ? `/compact ${focus}` : '/compact', []);
             return { compacted: true };

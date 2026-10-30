@@ -314,6 +314,12 @@ importers:
       '@agentclientprotocol/sdk':
         specifier: 2.1.0
         version: 2.1.0(@modelcontextprotocol/server@2.4.0)(zod@4.6.7)
+      '@xora/extensions':
+        specifier: workspace:*
+        version: link:../extensions
+      '@xora/mcp':
+        specifier: workspace:*
+        version: link:../mcp
       '@xora/metering':
         specifier: workspace:*
         version: link:../metering

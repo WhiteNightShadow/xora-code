@@ -79,6 +79,8 @@ export const SessionConfigSchema = z.object({
     hostTools: z.array(HostToolSchema).default([]),
     /** Built-in tools to hide, e.g. write tools for a read-only role. */
     disabledTools: z.array(z.string()).default([]),
+    /** Tool hook events the host has handlers for (09 §4); the engine asks the host before and after tool calls. */
+    hookEvents: z.array(z.enum(['PreToolUse', 'PostToolUse'])).default([]),
 });
 export type SessionConfig = z.infer<typeof SessionConfigSchema>;
 

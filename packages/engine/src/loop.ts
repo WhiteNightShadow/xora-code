@@ -3,7 +3,6 @@ import type * as acp from '@agentclientprotocol/sdk';
 import type { AssistantMessage, AssistantPart, Message, ModelEvent, ModelRequest, UserPart } from '@xora/providers';
 import { z } from 'zod';
 import type { HostTool } from './config.ts';
-import { mcpTools } from './mcp.ts';
 import { contextBudget, contextMessages, currentContextTokens, pruneToolResults, summarise } from './context.ts';
 import {
     type AnyTool,
@@ -17,6 +16,7 @@ import {
     type ToolResult,
     toolSpecs,
 } from './deps.ts';
+import { mcpTools } from './mcp.ts';
 import { environmentBlock, modeNote, systemSegments } from './prompt.ts';
 import { type EngineSession, type ResolvedTarget, resolveTarget } from './session.ts';
 
@@ -29,6 +29,33 @@ export interface TurnIO {
     requestPermission(request: Omit<acp.RequestPermissionRequest, 'sessionId'>): Promise<acp.RequestPermissionResponse>;
     /** Runs a host-implemented tool (`_xora/tool/call`). */
     callHostTool(name: string, input: unknown, signal: AbortSignal): Promise<ToolResult>;
+    /** Runs the host's hooks for a tool event (`_xora/hook/run`); only called for events in `hookEvents`. */
+    runHook?(event: ToolHookEvent, payload: ToolHookPayload, signal: AbortSignal): Promise<HookReply>;
+}
+
+export type ToolHookEvent = 'PreToolUse' | 'PostToolUse';
+
+export interface ToolHookPayload {
+    readonly tool_name: string;
+    readonly tool_input: unknown;
+    readonly tool_use_id: string;
+    readonly tool_response?: { readonly content: string; readonly isError: boolean };
+}
+
+/** What the host's hooks decided; every field is optional. */
+export interface HookReply {
+    readonly blocked?: boolean;
+    readonly reason?: string;
+    readonly decision?: 'allow' | 'ask' | 'deny';
+    readonly additionalContext?: string;
+    readonly updatedInput?: Record<string, unknown>;
+}
+
+/** PreToolUse outcome for one call. */
+interface PreHook {
+    readonly blocked?: string;
+    readonly ask?: boolean;
+    readonly allowed?: boolean;
 }
 
 export class ModelError extends Error {
@@ -591,7 +618,10 @@ export class TurnRunner {
         };
     }
 
-    async #authorize(call: PreparedCall): Promise<{ allow: boolean; message?: string; cancelled?: boolean }> {
+    async #authorize(
+        call: PreparedCall,
+        hook: PreHook | undefined,
+    ): Promise<{ allow: boolean; message?: string; cancelled?: boolean }> {
         const { outside, sensitive } = await this.#pathFacts(call);
         const command =
             call.name === 'bash' && typeof (call.input as { command?: unknown }).command === 'string'
@@ -619,6 +649,7 @@ export class TurnRunner {
                     outside,
                     sensitive,
                     ...(command !== undefined ? { command, readOnlyCommand: isReadOnlyCommand(command) } : {}),
+                    ...(hook?.ask ? { hookDecision: 'ask' } : hook?.allowed ? { hookDecision: 'allow' } : {}),
                 },
             },
         });
@@ -674,6 +705,89 @@ export class TurnRunner {
         });
     }
 
+    #hookEnabled(event: ToolHookEvent): boolean {
+        return this.#io.runHook !== undefined && this.#session.config.hookEvents.includes(event);
+    }
+
+    async #runHook(event: ToolHookEvent, payload: ToolHookPayload): Promise<HookReply> {
+        try {
+            return (await this.#io.runHook?.(event, payload, this.#signal)) ?? {};
+        } catch (error) {
+            // A failing hook bridge must not take the turn down; the host applies each hook's own failure policy.
+            this.#notice('warning', `${event} hook failed`, error instanceof Error ? error.message : String(error));
+            return {};
+        }
+    }
+
+    /**
+     * Runs PreToolUse hooks for every valid call, in order, before any of them runs, so that the calls a hook
+     * blocks or wants confirmed are known when the read-only batch is formed. A hook may replace the input.
+     */
+    async #preToolHooks(
+        calls: PreparedCall[],
+        parts: readonly Extract<AssistantPart, { type: 'tool_call' }>[],
+    ): Promise<Array<PreHook | undefined>> {
+        const results: Array<PreHook | undefined> = [];
+        for (let index = 0; index < calls.length; index++) {
+            const call = calls[index] as PreparedCall;
+            const part = parts[index];
+            if (call.error || !call.tool || !part || this.#stopped) {
+                results.push(undefined);
+                continue;
+            }
+            const reply = await this.#runHook('PreToolUse', {
+                tool_name: call.name,
+                tool_input: call.input,
+                tool_use_id: call.id,
+            });
+            if (reply.blocked || reply.decision === 'deny') {
+                results.push({ blocked: reply.reason?.trim() || 'blocked by a PreToolUse hook' });
+                continue;
+            }
+            if (reply.updatedInput) {
+                const updated = prepareCall(
+                    { ...part, arguments: JSON.stringify(reply.updatedInput) },
+                    this.#tools,
+                    this.#session.cwd,
+                );
+                calls[index] = updated;
+                this.#io.update({
+                    sessionUpdate: 'tool_call_update',
+                    toolCallId: call.id,
+                    title: updated.title,
+                    rawInput: updated.input,
+                    locations: updated.targets.map((target) => ({ path: target })),
+                });
+            }
+            results.push({ ask: reply.decision === 'ask', allowed: reply.decision === 'allow' });
+        }
+        return results;
+    }
+
+    /** Runs PostToolUse hooks for a call that ran; their feedback is appended to the result the model sees. */
+    async #postToolHook(call: PreparedCall, result: ToolResult): Promise<ToolResult> {
+        if (!this.#hookEnabled('PostToolUse') || call.error || !call.tool) {
+            return result;
+        }
+        const reply = await this.#runHook('PostToolUse', {
+            tool_name: call.name,
+            tool_input: call.input,
+            tool_use_id: call.id,
+            tool_response: { content: result.content, isError: result.isError === true },
+        });
+        const notes = [
+            reply.blocked || reply.decision === 'deny' ? reply.reason?.trim() : undefined,
+            reply.additionalContext?.trim(),
+        ].filter((note): note is string => Boolean(note));
+        if (notes.length === 0) {
+            return result;
+        }
+        return {
+            ...result,
+            content: `${result.content}\n\n<hook event="PostToolUse">\n${notes.join('\n')}\n</hook>`,
+        };
+    }
+
     async #executeCalls(
         parts: readonly Extract<AssistantPart, { type: 'tool_call' }>[],
         truncated: boolean,
@@ -692,7 +806,14 @@ export class TurnRunner {
             });
         }
         const finished = new Set<string>();
-        const free = await Promise.all(calls.map((call) => this.#isFree(call)));
+        const hooks =
+            this.#hookEnabled('PreToolUse') && !truncated
+                ? await this.#preToolHooks(calls, parts)
+                : calls.map(() => undefined);
+        // A call a hook blocks or wants confirmed never joins a read-only batch.
+        const free = await Promise.all(
+            calls.map((call, index) => (hooks[index]?.blocked || hooks[index]?.ask ? false : this.#isFree(call))),
+        );
         let index = 0;
         while (index < calls.length && !this.#stopped) {
             const call = calls[index];
@@ -723,7 +844,7 @@ export class TurnRunner {
                 await Promise.all(
                     batch.map(async (item) => {
                         const startedAt = Date.now();
-                        const result = await this.#runCall(item);
+                        const result = await this.#postToolHook(item, await this.#runCall(item));
                         this.#finish(item, result, startedAt);
                         finished.add(item.id);
                     }),
@@ -737,7 +858,22 @@ export class TurnRunner {
                 index++;
                 continue;
             }
-            const decision = await this.#authorize(call);
+            const blocked = hooks[index]?.blocked;
+            if (blocked) {
+                this.#notice('warning', `hook拦截了${call.name}`, blocked);
+                this.#finish(
+                    call,
+                    { content: `A PreToolUse hook blocked this call: ${blocked}`, isError: true },
+                    startedAt,
+                    {
+                        denied: true,
+                    },
+                );
+                finished.add(call.id);
+                index++;
+                continue;
+            }
+            const decision = await this.#authorize(call, hooks[index]);
             if (this.#stopped) {
                 break;
             }
@@ -753,7 +889,7 @@ export class TurnRunner {
                 index++;
                 continue;
             }
-            this.#finish(call, await this.#runCall(call), startedAt);
+            this.#finish(call, await this.#postToolHook(call, await this.#runCall(call)), startedAt);
             finished.add(call.id);
             index++;
         }

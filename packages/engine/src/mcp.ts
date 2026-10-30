@@ -1,9 +1,12 @@
-import { fromAcpMcpServer, type McpServerConfig, McpManager, type McpTool, safeBaseEnv } from '@xora/mcp';
+import { fromAcpMcpServer, McpManager, type McpServerConfig, type McpTool, safeBaseEnv } from '@xora/mcp';
 import { z } from 'zod';
 import type { AnyTool, ToolResult } from './deps.ts';
 
 /** Turns the ACP `mcpServers` of a session into configs; unreadable entries are skipped and reported. */
-export function readMcpServers(servers: readonly unknown[] | undefined): { configs: McpServerConfig[]; problems: string[] } {
+export function readMcpServers(servers: readonly unknown[] | undefined): {
+    configs: McpServerConfig[];
+    problems: string[];
+} {
     const configs: McpServerConfig[] = [];
     const problems: string[] = [];
     for (const server of servers ?? []) {
@@ -24,7 +27,9 @@ export function createMcpManager(version: string): McpManager {
 }
 
 function textOf(result: { content: ReadonlyArray<{ type: string; text?: string }>; truncated: boolean }): string {
-    const parts = result.content.map((block) => (block.type === 'text' && typeof block.text === 'string' ? block.text : `[${block.type} content]`));
+    const parts = result.content.map((block) =>
+        block.type === 'text' && typeof block.text === 'string' ? block.text : `[${block.type} content]`,
+    );
     return `${parts.join('\n')}${result.truncated ? '\n[output truncated]' : ''}`;
 }
 
@@ -49,7 +54,10 @@ export function mcpTools(manager: McpManager): AnyTool[] {
                         const result = await manager.callTool(tool.qualifiedName, input, { signal: ctx.signal });
                         return { content: textOf(result), ...(result.isError ? { isError: true } : {}) };
                     } catch (error) {
-                        return { content: `MCP call failed: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+                        return {
+                            content: `MCP call failed: ${error instanceof Error ? error.message : String(error)}`,
+                            isError: true,
+                        };
                     }
                 },
             }) as unknown as AnyTool,

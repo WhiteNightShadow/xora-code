@@ -1,9 +1,9 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { McpManager } from '@xora/mcp';
 import type { Message, ModelInfo, ProviderConnection } from '@xora/providers';
 import { findModel, getPreset } from '@xora/providers';
 import type { BackgroundJob, JobRegistry, TodoItem } from '@xora/tools';
-import type { McpManager } from '@xora/mcp';
 import { type ConnectionConfig, type ModelTarget, publicConfig, type SessionConfig } from './config.ts';
 import { type SessionEntry, SessionFile } from './store.ts';
 

@@ -5,7 +5,7 @@ import * as acp from '@agentclientprotocol/sdk';
 import { z } from 'zod';
 import { readSessionConfig } from './config.ts';
 import { type AnyTool, createDefaultTools } from './deps.ts';
-import { ModelError, type TurnIO, TurnRunner } from './loop.ts';
+import { type HookReply, ModelError, type TurnIO, TurnRunner } from './loop.ts';
 import { createMcpManager, readMcpServers } from './mcp.ts';
 import { EngineSession, SessionBusyError } from './session.ts';
 import { listStoredSessions, SessionFile } from './store.ts';
@@ -167,6 +167,12 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
                     ...(result.display ? { display: result.display as never } : {}),
                 };
             },
+            runHook: (event, payload, signal) =>
+                client.request<HookReply>(
+                    '_xora/hook/run',
+                    { sessionId, event, payload },
+                    { cancellationSignal: signal },
+                ),
         };
     }
 
@@ -177,6 +183,7 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
             agentCapabilities: {
                 loadSession: true,
                 promptCapabilities: { image: true, embeddedContext: true },
+                mcpCapabilities: { http: true, sse: true },
                 sessionCapabilities: { list: {}, resume: {}, close: {} },
             },
             agentInfo: { name: 'xora-engine', title: 'Xora Engine', version: options.version },

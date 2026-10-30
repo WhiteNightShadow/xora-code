@@ -12,7 +12,21 @@ export interface SessionHandlers {
     onExit(reason: string): void;
     /** A host-implemented tool call from the xora engine (`_xora/tool/call`). */
     onHostTool?(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
+    /** PreToolUse and PostToolUse hooks for the xora engine (`_xora/hook/run`). */
+    onHook?(request: ToolHookRequest, signal: AbortSignal): Promise<Record<string, unknown>>;
 }
+
+const ToolHookRequestSchema = z.object({
+    sessionId: z.string(),
+    event: z.enum(['PreToolUse', 'PostToolUse']),
+    payload: z.object({
+        tool_name: z.string(),
+        tool_input: z.unknown(),
+        tool_use_id: z.string(),
+        tool_response: z.unknown().optional(),
+    }),
+});
+export type ToolHookRequest = z.infer<typeof ToolHookRequestSchema>;
 
 export interface HostToolResult {
     readonly content: string;
@@ -174,6 +188,10 @@ export class EngineManager {
                     return { content: `Tool ${params.name} is not available in this session.`, isError: true };
                 }
                 return handler(params.name, params.input, signal);
+            })
+            .onRequest('_xora/hook/run', ToolHookRequestSchema, async ({ params, signal }) => {
+                const handler = this.#sessions.get(params.sessionId)?.handlers.onHook;
+                return handler ? handler(params, signal) : {};
             });
         const stream = acp.ndJsonStream(
             Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
