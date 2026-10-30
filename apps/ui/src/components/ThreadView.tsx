@@ -406,7 +406,10 @@ function Composer({ thread }: { thread: ThreadMeta }) {
           }
         | undefined
     >();
-    const commands = useRef<{ projectId: string; items: Array<{ name: string; hint: string }> } | undefined>(undefined);
+    // Command files are read again after a short while, so a newly added file shows up without a restart.
+    const commands = useRef<
+        { projectId: string; at: number; items: Array<{ name: string; hint: string }> } | undefined
+    >(undefined);
     const updateCommands = (value: string, caret: number): boolean => {
         const slash = /^\/([^\s/]*)$/.exec(value.slice(0, caret));
         if (!slash) return false;
@@ -424,11 +427,11 @@ function Composer({ thread }: { thread: ThreadMeta }) {
         };
         const builtin = [{ name: 'compact', hint: s.thread.compactCommand }];
         const cached = commands.current;
-        if (cached && cached.projectId === thread.projectId) {
+        if (cached && cached.projectId === thread.projectId && Date.now() - cached.at < 15_000) {
             show(cached.items);
             return true;
         }
-        show(builtin);
+        show(cached?.projectId === thread.projectId ? cached.items : builtin);
         void host
             .call('extension.list', { projectId: thread.projectId })
             .then((snapshot) => {
@@ -439,7 +442,7 @@ function Composer({ thread }: { thread: ThreadMeta }) {
                         hint: [command.argumentHint, command.description].filter(Boolean).join(' · '),
                     })),
                 ];
-                commands.current = { projectId: thread.projectId, items };
+                commands.current = { projectId: thread.projectId, at: Date.now(), items };
                 show(items);
             })
             .catch(() => undefined);
