@@ -61,6 +61,10 @@ export interface FileDiff {
     /** `null` when the file did not exist before. */
     readonly oldText: string | null;
     readonly newText: string;
+    /** The file was deleted; `newText` is then empty. */
+    readonly deleted?: boolean;
+    /** The file was moved here from this path; `oldText` is the content it had there. */
+    readonly movedFrom?: string;
 }
 
 /** Structured result for the UI; the model only sees `content`. */
