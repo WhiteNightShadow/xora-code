@@ -147,6 +147,85 @@ export interface ToolHookReply {
 }
 
 export const SKILL_TOOL = 'skill';
+
+/**
+ * Built-in skills, written under `<extensions>/builtin/skills` at start-up. `extension-creator` is how extensions
+ * are made from a conversation (09 §3): the agent drafts the files and saves them with the write tool, so the user
+ * reviews every file in an approval card first.
+ */
+function builtinSkills(userDir: string): Record<string, string> {
+    return {
+        'extension-creator': `---
+name: extension-creator
+description: Create Xora Code extensions from a conversation - skills, slash commands and agent definitions. Use when the user asks to make, add or change a skill, a /command or a custom agent.
+---
+
+# Creating extensions
+
+Xora Code reads extensions from files. Draft them with the user, then save them with the write tool; the user reviews every file in an approval card before it is written.
+
+## Where files go
+
+Ask whether the extension is for this project only or for all projects, unless the user already said.
+
+- Project (lives in the repository): \`.xora/skills/<name>/SKILL.md\`, \`.xora/commands/<name>.md\`, \`.xora/agents/<name>.md\` under the project root.
+- User (all projects, never committed): \`${userDir}/skills/<name>/SKILL.md\`, \`${userDir}/commands/<name>.md\`, \`${userDir}/agents/<name>.md\`.
+
+Names use lowercase letters, digits and hyphens, at most 64 characters. A skill's folder name must equal its \`name\`.
+
+## Skills
+
+A folder with a \`SKILL.md\`:
+
+\`\`\`markdown
+---
+name: <name>
+description: <what it does and when to use it; one or two sentences, at most 1024 characters>
+---
+
+# <Title>
+
+<Instructions to follow, step by step. Keep this file short: put long references, examples and scripts in other files of the folder and say when to read or run them.>
+\`\`\`
+
+The description decides when the skill is picked, so name the tasks and words that should trigger it.
+
+## Slash commands
+
+A markdown file; \`/<name> <arguments>\` sends its body as the prompt:
+
+\`\`\`markdown
+---
+description: <shown in the command list>
+argument-hint: <for example: <file> [focus]>
+---
+<Prompt text. $ARGUMENTS is everything after the command; $1, $2 and so on are single arguments.>
+\`\`\`
+
+## Agent definitions
+
+A markdown file that agent teams can use:
+
+\`\`\`markdown
+---
+name: <name>
+description: <what this agent is for>
+tools: <optional, comma-separated tool names>
+tier: <optional: flagship, standard, economy or fast>
+role: <optional: planner, scout, executor, reviewer or expert>
+---
+<The agent's instructions.>
+\`\`\`
+
+## Steps
+
+1. Ask only what you need: the purpose, the scope (project or user) and, for commands, the arguments.
+2. Show a short draft in your reply, then write the files.
+3. Never put secrets (keys, tokens, passwords) into extension files.
+4. After saving, tell the user that the extension shows up under Settings → Extensions and how to use it.
+`,
+    };
+}
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
 
 /** Tool names as Claude Code calls them, so that hook matchers written for it (`Bash`, `Edit|Write`) work. */
@@ -262,6 +341,7 @@ export class ExtensionService {
     readonly #tested = new Map<string, { ok: boolean; tools: number; error?: string; needsAuth?: boolean }>();
     #state: State | undefined;
     #writing: Promise<void> = Promise.resolve();
+    #builtins: Promise<void> | undefined;
 
     constructor(deps: ExtensionDeps) {
         this.#deps = deps;
@@ -310,6 +390,24 @@ export class ExtensionService {
         this.#deps.bus.broadcast('extension.changed', {});
     }
 
+    /** Writes the built-in skills once per start, so an update of the app updates them too. */
+    #ensureBuiltins(): Promise<void> {
+        this.#builtins ??= (async () => {
+            for (const [name, text] of Object.entries(builtinSkills(this.#deps.dir))) {
+                const file = path.join(this.#deps.dir, 'builtin', 'skills', name, 'SKILL.md');
+                const current = await readFile(file, 'utf8').catch(() => undefined);
+                if (current !== text) {
+                    await mkdir(path.dirname(file), { recursive: true });
+                    await writeFile(file, text);
+                }
+            }
+        })().catch((error: unknown) => {
+            this.#builtins = undefined;
+            this.#deps.log.warn(`built-in skills: ${errorText(error)}`);
+        });
+        return this.#builtins;
+    }
+
     async #project(projectId: string | undefined): Promise<Project | undefined> {
         return projectId ? this.#deps.projects.get(projectId) : undefined;
     }
@@ -342,10 +440,12 @@ export class ExtensionService {
             plugin.installed.enabled && plugin.info ? [plugin.info] : [],
         );
 
+        await this.#ensureBuiltins();
         const skillFound = await discoverSkills([
             ...(project ? ['.xora/skills', '.agents/skills', '.claude/skills'].map(projectSource) : []),
             userSource(path.join(dir, 'skills')),
             userSource(path.join(this.#home, '.agents', 'skills')),
+            { dir: path.join(dir, 'builtin', 'skills'), origin: 'builtin' as const, trusted: true },
         ]);
         const skills = [...skillFound.skills];
         const skillIds = new Set(skills.map((skill) => skill.id));

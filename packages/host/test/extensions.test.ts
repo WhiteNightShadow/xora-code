@@ -126,8 +126,21 @@ describe('extension discovery and trust', () => {
         expect(snapshot.projectTrusted).toBe(true);
         expect(snapshot.skills.find((item) => item.name === 'release-notes')?.enabled).toBe(false);
         extras = await u.service.forSession(await u.projects.get(u.projectId));
-        expect(extras.skills.map((item) => item.id)).toEqual(['repo-style']);
+        expect(extras.skills.map((item) => item.id)).toEqual(['repo-style', 'extension-creator']);
         expect(extras.layers[0]?.text).not.toContain('untrusted');
+    });
+
+    it('ships the extension creator as a built-in skill that points at the right folders', async () => {
+        const u = await unit();
+        const snapshot = await u.service.snapshot(u.projectId);
+        expect(snapshot.skills).toEqual([
+            expect.objectContaining({ name: 'extension-creator', origin: 'builtin', trusted: true, enabled: true }),
+        ]);
+        const extras = await u.service.forSession(await u.projects.get(u.projectId));
+        const loaded = await u.service.handleTool(extras, 'skill', { name: 'extension-creator' });
+        expect(loaded.content).toContain(`${u.dir}/skills/<name>/SKILL.md`);
+        expect(loaded.content).toContain('.xora/commands/<name>.md');
+        expect(loaded.content).toContain('$ARGUMENTS');
     });
 
     it('expands slash commands from command files and leaves built-ins alone', async () => {
@@ -456,7 +469,7 @@ describe('extensions in a thread', () => {
                 env: { ECHO_SECRET: 'xyz' },
             });
             const extensions = await ui.request('extension.list', { projectId: project.id });
-            expect(extensions.skills.map((item) => item.name)).toEqual(['greeting']);
+            expect(extensions.skills.map((item) => item.name)).toEqual(['greeting', 'extension-creator']);
             expect(extensions.mcpServers.map((item) => item.name)).toEqual(['echo']);
 
             server.reset();

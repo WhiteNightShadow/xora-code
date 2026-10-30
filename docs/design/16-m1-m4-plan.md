@@ -21,6 +21,7 @@
 | skills和hooks在哪执行 | 引擎 | host | host持有信任、密钥和项目状态；引擎只在会话配置声明了hook事件时，经`_xora/hook/run`在工具调用前后问host；skill索引作为提示词层下发，`skill`工具是host工具 |
 | 扩展的用户目录 | `<数据目录>/skills/`等 | `<数据目录>/extensions/`下的`skills/`、`commands/`、`agents/`、`hooks.json`、`plugins/`、`state.json` | 数据目录根下保持整洁；`~/.agents/skills/`照旧读取 |
 | 项目信任存放 | 信任文件 | 沿用projects表的`trusted`列 | M1已有这一列，不再多一份文件 |
+| 用对话创建扩展 | creator模式 | 内置skill `extension-creator`加普通的write工具 | 不另做一套流程：保存前的预览就是写文件的审批卡片；`extensions`包里的`plan*`函数留给以后的界面向导 |
 | mcp服务器配置 | 未定 | 全局和项目级的配置存`state.json`，环境变量和请求头的值一律存系统钥匙串；仓库里的`.mcp.json`、`.xora/mcp.json`只读，项目受信后才启动 | 配置文件里不出现密钥；项目级配置不写进用户仓库 |
 
 ## 2. 新增的包
