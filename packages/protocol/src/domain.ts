@@ -716,6 +716,10 @@ export const McpServerInfoSchema = z.object({
     error: z.string().optional(),
     tools: z.number().optional(),
     needsAuth: z.boolean().optional(),
+    /** Where it is configured: `global` and `project` are edited in settings, `repo` is the repository's `.mcp.json`. */
+    scope: z.enum(['global', 'project', 'repo', 'plugin']).optional(),
+    /** Secrets an import could not copy. */
+    missingSecrets: z.array(z.string()).optional(),
 });
 export type McpServerInfo = z.infer<typeof McpServerInfoSchema>;
 

@@ -396,9 +396,57 @@ function Composer({ thread }: { thread: ThreadMeta }) {
         }
     }, [inbox, thread.id]);
     const [mention, setMention] = useState<
-        { query: string; start: number; items: string[]; index: number } | undefined
+        | {
+              kind: 'file' | 'command';
+              query: string;
+              start: number;
+              items: string[];
+              hints?: Record<string, string>;
+              index: number;
+          }
+        | undefined
     >();
+    const commands = useRef<{ projectId: string; items: Array<{ name: string; hint: string }> } | undefined>(undefined);
+    const updateCommands = (value: string, caret: number): boolean => {
+        const slash = /^\/([^\s/]*)$/.exec(value.slice(0, caret));
+        if (!slash) return false;
+        const query = slash[1] ?? '';
+        const show = (items: Array<{ name: string; hint: string }>) => {
+            const matching = items.filter((item) => item.name.startsWith(query)).slice(0, 12);
+            setMention({
+                kind: 'command',
+                query,
+                start: 0,
+                items: matching.map((item) => item.name),
+                hints: Object.fromEntries(matching.map((item) => [item.name, item.hint])),
+                index: 0,
+            });
+        };
+        const builtin = [{ name: 'compact', hint: s.thread.compactCommand }];
+        const cached = commands.current;
+        if (cached && cached.projectId === thread.projectId) {
+            show(cached.items);
+            return true;
+        }
+        show(builtin);
+        void host
+            .call('extension.list', { projectId: thread.projectId })
+            .then((snapshot) => {
+                const items = [
+                    ...builtin,
+                    ...snapshot.commands.map((command) => ({
+                        name: command.name,
+                        hint: [command.argumentHint, command.description].filter(Boolean).join(' · '),
+                    })),
+                ];
+                commands.current = { projectId: thread.projectId, items };
+                show(items);
+            })
+            .catch(() => undefined);
+        return true;
+    };
     const updateMention = (value: string, caret: number) => {
+        if (updateCommands(value, caret)) return;
         const match = /(^|\s)@([^\s@]*)$/.exec(value.slice(0, caret));
         if (!match) {
             setMention(undefined);
@@ -406,7 +454,13 @@ function Composer({ thread }: { thread: ThreadMeta }) {
         }
         const query = match[2] ?? '';
         const start = caret - query.length - 1;
-        setMention((current) => ({ query, start, items: current?.items ?? [], index: 0 }));
+        setMention((current) => ({
+            kind: 'file',
+            query,
+            start,
+            items: current?.kind === 'file' ? current.items : [],
+            index: 0,
+        }));
         void host
             .call('fs.find', { threadId: thread.id, query })
             .then((items) =>
@@ -418,6 +472,12 @@ function Composer({ thread }: { thread: ThreadMeta }) {
     };
     const pickMention = (file: string) => {
         if (!mention) return;
+        if (mention.kind === 'command') {
+            setText(`/${file} ${text.slice(mention.query.length + 1).trimStart()}`);
+            setMention(undefined);
+            area.current?.focus();
+            return;
+        }
         const before = text.slice(0, mention.start);
         const after = text.slice(mention.start + mention.query.length + 1);
         setText(`${before}@${file} ${after}`);
@@ -474,7 +534,11 @@ function Composer({ thread }: { thread: ThreadMeta }) {
                 </div>
             )}
             {mention && mention.items.length > 0 && (
-                <div className="mention" role="listbox" aria-label={s.thread.mentionFiles}>
+                <div
+                    className="mention"
+                    role="listbox"
+                    aria-label={mention.kind === 'command' ? s.thread.commandList : s.thread.mentionFiles}
+                >
                     {mention.items.map((file, index) => (
                         <button
                             key={file}
@@ -487,7 +551,8 @@ function Composer({ thread }: { thread: ThreadMeta }) {
                                 pickMention(file);
                             }}
                         >
-                            {file}
+                            {mention.kind === 'command' ? `/${file}` : file}
+                            {mention.hints?.[file] && <span className="mention__hint">{mention.hints[file]}</span>}
                         </button>
                     ))}
                 </div>

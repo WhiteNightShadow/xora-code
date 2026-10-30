@@ -104,6 +104,7 @@ interface McpEntry {
     readonly config: McpServerConfig;
     readonly secretKey?: string;
     readonly source: string;
+    readonly missingSecrets?: readonly string[];
 }
 
 export interface LoadedExtensions {
@@ -437,6 +438,7 @@ export class ExtensionService {
                 config: checked.config,
                 secretKey: secretKeyOf(scope, stored.name),
                 source: stored.importedFrom ?? 'settings',
+                ...(stored.missingSecrets?.length ? { missingSecrets: stored.missingSecrets } : {}),
             });
         };
         if (project) {
@@ -546,6 +548,8 @@ export class ExtensionService {
                     ...(tested?.error ? { error: tested.error } : {}),
                     ...(tested?.ok ? { tools: tested.tools } : {}),
                     ...(tested?.needsAuth ? { needsAuth: true } : {}),
+                    scope: entry.key.split(':')[0] as 'global' | 'project' | 'repo' | 'plugin',
+                    ...(entry.missingSecrets ? { missingSecrets: [...entry.missingSecrets] } : {}),
                 };
             }),
             plugins: loaded.plugins.map(({ installed, info }) => ({

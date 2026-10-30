@@ -4,6 +4,7 @@ import { Badge, Field, Modal, type Option, Select, Spinner, Toggle } from '../co
 import { errorMessage, host } from '../host.ts';
 import { attempt, refreshConnections, type SettingsSection, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { ExtensionsSection } from './ExtensionsSection.tsx';
 
 function useSettings(): [Settings | undefined, (patch: Partial<Settings>) => void] {
     const settings = useApp((state) => state.settings);
@@ -710,6 +711,7 @@ export function SettingsModal({ section }: { section: SettingsSection }) {
         ['models', s.settings.models],
         ['prompts', s.settings.prompts],
         ['permissions', s.settings.permissions],
+        ['extensions', s.settings.extensions],
         ['usage', s.settings.usage],
         ['updates', s.settings.updates],
         ['about', s.settings.about],
@@ -734,6 +736,7 @@ export function SettingsModal({ section }: { section: SettingsSection }) {
                     {section === 'models' && <Models />}
                     {section === 'prompts' && <Prompts />}
                     {section === 'permissions' && <Permissions />}
+                    {section === 'extensions' && <ExtensionsSection />}
                     {section === 'usage' && <Budgets />}
                     {section === 'updates' && <Updates />}
                     {section === 'about' && <About />}

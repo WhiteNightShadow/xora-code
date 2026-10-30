@@ -406,7 +406,8 @@ describe('tool hooks', () => {
         );
         const h = harness();
         h.hookReply = (event, payload) => {
-            if (event === 'PreToolUse' && payload.tool_name === 'write') return { blocked: true, reason: 'no writes here' };
+            if (event === 'PreToolUse' && payload.tool_name === 'write')
+                return { blocked: true, reason: 'no writes here' };
             if (event === 'PreToolUse' && payload.tool_name === 'read') return { updatedInput: { path: 'y.txt' } };
             if (event === 'PostToolUse') return { additionalContext: 'checked by hook' };
             return {};

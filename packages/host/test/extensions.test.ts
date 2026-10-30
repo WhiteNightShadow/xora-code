@@ -117,8 +117,8 @@ describe('extension discovery and trust', () => {
         expect(loaded.content).toContain('do not run its scripts');
         const file = await u.service.handleTool(extras, 'skill', { name: 'repo-style', file: 'examples/one.md' });
         expect(file.content).toContain('example one');
-        const escape = await u.service.handleTool(extras, 'skill', { name: 'repo-style', file: '../../secret' });
-        expect(escape.isError).toBe(true);
+        const outside = await u.service.handleTool(extras, 'skill', { name: 'repo-style', file: '../../secret' });
+        expect(outside.isError).toBe(true);
 
         await u.service.toggle({ kind: 'skill', name: 'release-notes', enabled: false });
         await u.service.trust(u.projectId, true);

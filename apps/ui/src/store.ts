@@ -26,7 +26,15 @@ export type RightPanel =
     | 'terminal'
     | 'preview'
     | 'file';
-export type SettingsSection = 'general' | 'models' | 'prompts' | 'permissions' | 'usage' | 'updates' | 'about';
+export type SettingsSection =
+    | 'general'
+    | 'models'
+    | 'prompts'
+    | 'permissions'
+    | 'extensions'
+    | 'usage'
+    | 'updates'
+    | 'about';
 
 export interface Toast {
     readonly id: number;

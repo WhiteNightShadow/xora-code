@@ -2167,3 +2167,40 @@ pre {
 .mention button.is-active {
     background: var(--xk-accent-subtle);
 }
+
+/* Extensions settings (09) */
+.extension-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    margin: 8px 0 16px;
+    border: 1px solid var(--xk-border);
+    border-radius: 8px;
+}
+
+.extension-form .row {
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.extension-code {
+    word-break: break-all;
+}
+
+.error-text {
+    color: var(--xk-error);
+    font-size: 12px;
+}
+
+.diagnostics {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--xk-text-muted);
+    font-size: 12px;
+}
+
+.mention__hint {
+    margin-left: 8px;
+    color: var(--xk-text-muted);
+}
