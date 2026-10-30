@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Message, ModelInfo, ProviderConnection } from '@xora/providers';
 import { findModel, getPreset } from '@xora/providers';
 import type { BackgroundJob, JobRegistry, TodoItem } from '@xora/tools';
+import type { McpManager } from '@xora/mcp';
 import { type ConnectionConfig, type ModelTarget, publicConfig, type SessionConfig } from './config.ts';
 import { type SessionEntry, SessionFile } from './store.ts';
 
@@ -92,6 +93,8 @@ export class EngineSession {
     prunedUpTo = 0;
     /** Prompt tokens reported for the latest request, for the context meter and compaction triggers. */
     lastPromptTokens = 0;
+    /** MCP servers the client configured for this session (09 §2). */
+    mcp: McpManager | undefined;
     #abort: AbortController | undefined;
     #artifactCounter = 0;
 
@@ -195,5 +198,7 @@ export class EngineSession {
     dispose(): void {
         this.cancel();
         this.jobs.killAll();
+        void this.mcp?.stopAll().catch(() => undefined);
+        this.mcp = undefined;
     }
 }

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { readSessionConfig } from './config.ts';
 import { type AnyTool, createDefaultTools } from './deps.ts';
 import { ModelError, type TurnIO, TurnRunner } from './loop.ts';
+import { createMcpManager, readMcpServers } from './mcp.ts';
 import { EngineSession, SessionBusyError } from './session.ts';
 import { listStoredSessions, SessionFile } from './store.ts';
 
@@ -119,6 +120,25 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
         return session;
     }
 
+    /** Starts (or reconciles) the session's MCP servers; a failing server never fails the session. */
+    async function configureMcp(session: EngineSession, servers: readonly unknown[] | undefined): Promise<void> {
+        const { configs, problems } = readMcpServers(servers);
+        for (const problem of problems) {
+            log(`ignored MCP server: ${problem}`);
+        }
+        if (configs.length === 0 && !session.mcp) {
+            return;
+        }
+        session.mcp ??= createMcpManager(options.version);
+        const started = session.mcp.start(configs).catch((error: unknown) => log(`MCP start failed: ${String(error)}`));
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, 30_000);
+        });
+        await Promise.race([started, timeout]);
+        clearTimeout(timer);
+    }
+
     function require(sessionId: string): EngineSession {
         const session = sessions.get(sessionId);
         if (!session) {
@@ -163,7 +183,7 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
             authMethods: [],
             _meta: { xora: { protocol: 1, features: ['configure', 'compact', 'usage', 'display'] } },
         }))
-        .onRequest('session/new', ({ params }) => {
+        .onRequest('session/new', async ({ params }) => {
             const config = readSessionConfig(params._meta);
             const cwd = realDir(params.cwd);
             const sessionId = randomUUID();
@@ -173,16 +193,19 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
             session.file.create({ t: 'header', v: 1, id: sessionId, cwd, roots, createdAt: Date.now() });
             session.configure(config);
             sessions.set(sessionId, session);
+            await configureMcp(session, params.mcpServers);
             log(`session ${sessionId} created in ${cwd}`);
             return { sessionId, _meta: { xora: { dir } } };
         })
-        .onRequest('session/load', ({ params, client }) => {
+        .onRequest('session/load', async ({ params, client }) => {
             const session = open(params.sessionId, params.cwd, params.additionalDirectories, params._meta);
+            await configureMcp(session, params.mcpServers);
             replay(session, io(client, session.id).update);
             return {};
         })
-        .onRequest('session/resume', ({ params }) => {
-            open(params.sessionId, params.cwd, params.additionalDirectories, params._meta);
+        .onRequest('session/resume', async ({ params }) => {
+            const session = open(params.sessionId, params.cwd, params.additionalDirectories, params._meta);
+            await configureMcp(session, params.mcpServers);
             return {};
         })
         .onRequest('session/list', ({ params }) => ({

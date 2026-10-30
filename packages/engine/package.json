@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "2.1.0",
+    "@xora/mcp": "workspace:*",
     "@xora/providers": "workspace:*",
     "@xora/tools": "workspace:*",
     "zod": "4.6.7"

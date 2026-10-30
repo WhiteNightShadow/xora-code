@@ -3,6 +3,7 @@ import type * as acp from '@agentclientprotocol/sdk';
 import type { AssistantMessage, AssistantPart, Message, ModelEvent, ModelRequest, UserPart } from '@xora/providers';
 import { z } from 'zod';
 import type { HostTool } from './config.ts';
+import { mcpTools } from './mcp.ts';
 import { contextBudget, contextMessages, currentContextTokens, pruneToolResults, summarise } from './context.ts';
 import {
     type AnyTool,
@@ -221,6 +222,7 @@ export class TurnRunner {
         const all = [
             ...tools.filter((tool) => !disabled.has(tool.name)),
             ...session.config.hostTools.map((spec) => hostTool(spec, io)),
+            ...(session.mcp ? mcpTools(session.mcp) : []),
         ];
         this.#tools = new Map(all.map((tool) => [tool.name, tool]));
     }

@@ -313,3 +313,50 @@ describe('xora engine over ACP', () => {
         again.close();
     });
 });
+
+describe('MCP servers', () => {
+    it('exposes tools of a stdio MCP server and asks before calling them', async () => {
+        const dir = mkdtempSync(path.join(tmpdir(), 'xora-mcp-'));
+        const script = path.join(dir, 'server.cjs');
+        writeFileSync(
+            script,
+            `const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+rl.on('line', (line) => {
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') {
+        send({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'echo', version: '1.0.0' } } });
+    } else if (message.method === 'tools/list') {
+        send({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'echo', description: 'Echo text back', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] } });
+    } else if (message.method === 'tools/call') {
+        send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: 'echo: ' + message.params.arguments.text }] } });
+    } else if (message.id !== undefined) {
+        send({ jsonrpc: '2.0', id: message.id, result: {} });
+    }
+});
+`,
+        );
+        server.reset();
+        server.respondWith((request) =>
+            lastRole(request.body) === 'tool'
+                ? openaiText('echoed')
+                : openaiToolCalls([{ name: 'mcp__echo__echo', arguments: JSON.stringify({ text: 'hi' }) }]),
+        );
+        const h = harness();
+        await h.client.request('initialize', { protocolVersion: acp.PROTOCOL_VERSION });
+        const { sessionId } = await h.client.request('session/new', {
+            cwd: workspace(),
+            mcpServers: [{ name: 'echo', command: process.execPath, args: [script], env: [] }],
+            _meta: config(),
+        });
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'echo hi' }] });
+        const tools = (server.requests[0]?.body as { tools?: Array<{ function: { name: string } }> } | undefined)?.tools ?? [];
+        expect(tools.map((tool) => tool.function.name)).toContain('mcp__echo__echo');
+        expect(h.permissions.map((request) => (request._meta as { xora: { toolName: string } }).xora.toolName)).toEqual(['mcp__echo__echo']);
+        const toolMessage = (server.requests.at(-1)?.body as { messages?: Array<{ role: string; content: string }> } | undefined)?.messages?.at(-1);
+        expect(toolMessage?.content).toContain('echo: hi');
+        await h.client.request('session/close', { sessionId });
+        h.close();
+    }, 30_000);
+});
