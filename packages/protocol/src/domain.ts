@@ -646,6 +646,10 @@ export const TeamRunSchema = z.object({
     ]),
     autonomy: z.enum(['L0', 'L1', 'L2', 'L3']),
     budget: MoneySchema.nullable(),
+    /** Why the run is paused, stuck or failed. */
+    note: z.string().optional(),
+    /** Things the user should know, e.g. a tier that fell back to the default model. */
+    warnings: z.array(z.string()).optional(),
     supervisorThreadId: z.string().optional(),
     tasks: z.array(TeamTaskSchema),
     ledger: z.unknown().optional(),

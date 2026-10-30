@@ -139,4 +139,38 @@ create virtual table thread_text using fts5 (
 );
 `,
     },
+    {
+        // Agent-team runs (06 §9): the run, a board snapshot and both ledgers per row, plus the board events
+        // after the snapshot, so a run is restored after a restart without redoing finished tasks.
+        version: 2,
+        sql: `
+create table team_runs (
+    id text primary key,
+    project_id text,
+    org_id text not null,
+    goal text not null,
+    status text not null,
+    phase text not null,
+    created_at integer not null,
+    updated_at integer not null,
+    run_json text not null,
+    board_json text,
+    board_seq integer not null default 0,
+    task_ledger_json text,
+    progress_json text,
+    host_json text
+);
+create index team_runs_by_project on team_runs (project_id, created_at desc);
+
+create table team_board_events (
+    run_id text not null,
+    seq integer not null,
+    ts integer not null,
+    task_id text not null,
+    type text not null,
+    event_json text not null,
+    primary key (run_id, seq)
+);
+`,
+    },
 ];

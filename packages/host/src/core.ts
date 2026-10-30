@@ -39,6 +39,7 @@ import { ReviewService } from './review.ts';
 import { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
 import { mergePath, resolveLoginPath } from './shell-env.ts';
+import { registerTeamHandlers, TeamService } from './team.ts';
 import { TerminalService } from './terminals.ts';
 import { ThreadStore } from './threads.ts';
 import { TurnService } from './turns.ts';
@@ -85,6 +86,7 @@ export class HostCore {
     readonly terminals: TerminalService;
     readonly worktrees: WorktreeService;
     readonly goals: GoalService;
+    readonly team: TeamService;
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
 
@@ -151,14 +153,30 @@ export class HostCore {
             log: this.log,
             userAgent,
             portFor: (threadId) => this.worktrees.port(threadId),
-            onTurnEnded: (event) =>
-                void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`)),
+            onTurnEnded: (event) => {
+                void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`));
+                this.team.onTurnEnded(event);
+            },
         });
         this.goals = new GoalService({
             threads: this.threads,
             projects: this.projects,
             turns: () => this.turns,
             log: this.log,
+        });
+        this.team = new TeamService({
+            db: this.db,
+            bus: this.bus,
+            log: this.log,
+            threads: this.threads,
+            projects: this.projects,
+            connections: this.connections,
+            settings: this.settings,
+            approvals: this.approvals,
+            usage: this.usage,
+            worktrees: this.worktrees,
+            turns: this.turns,
+            orgsDir: this.paths.orgsDir,
         });
         this.updates = new UpdateService({
             settings: this.settings,
@@ -601,6 +619,7 @@ export class HostCore {
             }),
         );
         peer.handle('goal.stop', ({ threadId }) => this.goals.stop(threadId));
+        registerTeamHandlers(peer, this.team);
         peer.handle('turn.compact', async ({ threadId, focus }) => {
             await turns.start(threadId, focus ? `/compact ${focus}` : '/compact', []);
             return { compacted: true };
@@ -799,6 +818,7 @@ export class HostCore {
     async dispose(): Promise<void> {
         this.terminals.dispose();
         this.updates.dispose();
+        this.team.dispose();
         this.approvals.dispose();
         await this.turns.dispose();
         await this.engines.dispose();

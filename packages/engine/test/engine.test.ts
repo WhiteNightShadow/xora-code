@@ -351,10 +351,15 @@ rl.on('line', (line) => {
             _meta: config(),
         });
         await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'echo hi' }] });
-        const tools = (server.requests[0]?.body as { tools?: Array<{ function: { name: string } }> } | undefined)?.tools ?? [];
+        const tools =
+            (server.requests[0]?.body as { tools?: Array<{ function: { name: string } }> } | undefined)?.tools ?? [];
         expect(tools.map((tool) => tool.function.name)).toContain('mcp__echo__echo');
-        expect(h.permissions.map((request) => (request._meta as { xora: { toolName: string } }).xora.toolName)).toEqual(['mcp__echo__echo']);
-        const toolMessage = (server.requests.at(-1)?.body as { messages?: Array<{ role: string; content: string }> } | undefined)?.messages?.at(-1);
+        expect(h.permissions.map((request) => (request._meta as { xora: { toolName: string } }).xora.toolName)).toEqual(
+            ['mcp__echo__echo'],
+        );
+        const toolMessage = (
+            server.requests.at(-1)?.body as { messages?: Array<{ role: string; content: string }> } | undefined
+        )?.messages?.at(-1);
         expect(toolMessage?.content).toContain('echo: hi');
         await h.client.request('session/close', { sessionId });
         h.close();

@@ -313,6 +313,11 @@ export const methods = {
     'team.list': { params: z.object({ projectId: IdSchema.optional() }).strict(), result: z.array(TeamRunSchema) },
     'team.get': { params: z.object({ runId: z.string() }).strict(), result: TeamRunSchema },
     'team.stop': { params: z.object({ runId: z.string() }).strict(), result: TeamRunSchema },
+    /** Continues a paused run (after a restart, a spent budget or a declined delivery), optionally with more budget. */
+    'team.resume': {
+        params: z.object({ runId: z.string(), budget: z.number().positive().optional() }).strict(),
+        result: TeamRunSchema,
+    },
     'team.roster': {
         params: z.object({ projectId: IdSchema }).strict(),
         result: z.object({

@@ -21,6 +21,7 @@
     "@xora/storage": "workspace:*",
     "@xora/tools": "workspace:*",
     "@xora/updater": "workspace:*",
+    "@xora/workflows": "workspace:*",
     "@xora/workspace": "workspace:*",
     "picomatch": "4.0.7",
     "semver": "7.8.5",

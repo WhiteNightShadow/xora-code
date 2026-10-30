@@ -2070,6 +2070,20 @@ pre {
     color: var(--xk-pending);
 }
 
+.team__note,
+.team__warning {
+    margin-top: 6px;
+    font-size: 12.5px;
+}
+
+.team__warning {
+    color: var(--xk-text-muted);
+}
+
+.team__budget {
+    width: 96px;
+}
+
 .team__tabs {
     align-self: flex-start;
 }

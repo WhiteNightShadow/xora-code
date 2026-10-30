@@ -155,7 +155,7 @@ export async function refreshConnections(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-    const [info, settings, projects, threads, approvals, presets, update] = await Promise.all([
+    const [info, settings, projects, threads, approvals, presets, update, runs] = await Promise.all([
         host.call('system.info', {}),
         host.call('settings.get', {}),
         host.call('project.list', {}),
@@ -163,6 +163,7 @@ async function loadAll(): Promise<void> {
         host.call('approval.list', {}),
         host.call('provider.presets', {}),
         host.call('update.status', {}),
+        host.call('team.list', {}),
     ]);
     await refreshConnections();
     const selectedThreadId = get().selectedThreadId;
@@ -174,6 +175,7 @@ async function loadAll(): Promise<void> {
         approvals,
         presets,
         update,
+        teamRuns: Object.fromEntries(runs.map((run) => [run.id, run])),
         ready: true,
         selectedProjectId: state.selectedProjectId ?? projects[0]?.id,
     }));

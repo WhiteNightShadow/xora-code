@@ -3,7 +3,6 @@ import type * as acp from '@agentclientprotocol/sdk';
 import type { AssistantMessage, AssistantPart, Message, ModelEvent, ModelRequest, UserPart } from '@xora/providers';
 import { z } from 'zod';
 import type { HostTool } from './config.ts';
-import { mcpTools } from './mcp.ts';
 import { contextBudget, contextMessages, currentContextTokens, pruneToolResults, summarise } from './context.ts';
 import {
     type AnyTool,
@@ -17,6 +16,7 @@ import {
     type ToolResult,
     toolSpecs,
 } from './deps.ts';
+import { mcpTools } from './mcp.ts';
 import { environmentBlock, modeNote, systemSegments } from './prompt.ts';
 import { type EngineSession, type ResolvedTarget, resolveTarget } from './session.ts';
 
