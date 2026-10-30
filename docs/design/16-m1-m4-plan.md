@@ -1,0 +1,105 @@
+# 16｜M1～M4实施计划
+
+- 日期：2026-10-30
+- 状态：执行中。用户要求M1～M4一起推进，本文把四个里程碑拆成工作包，并记录相对设计稿的调整。
+- 分支：全部在`next`上开发，本地提交，推送和合并回`main`等用户确认。
+
+## 1. 相对设计稿的调整
+
+| 项 | 设计稿 | 调整为 | 理由 |
+|---|---|---|---|
+| 引擎内核 | pi（`@earendil-works/pi-ai`、`pi-agent-core`） | 自研wire层和agent循环，provider接口保持可替换 | pi-ai 1.4.0依赖openai、anthropic、google genai、aws bedrock四套sdk，会把每次热更新的应用包撑大好几mb；每周发版，出过不兼容改动。国产三家和其他目标厂商都能用openai chat和anthropic messages两种协议覆盖，自研两套wire层约一千多行，怪癖、用量映射、错误归类、录制回放都能自己掌控。以后需要时可以把pi-ai接成一个可选后端 |
+| acp | `@agentclientprotocol/sdk` 2.x | 同，用2.2.0的v1稳定入口 | 已核对：sdk无运行时依赖，v1稳定版已含`usage_update`、`notice`、`compaction_update`、`session/list`、`session/resume`、`session/close` |
+| 界面样式 | tailwind v4+radix | css变量加自建组件 | 少依赖、应用包更小；组件自己补aria属性和键盘操作 |
+| 存储 | 优先`node:sqlite` | 同 | 已核对：electron 44自带的node 24.22.1里`node:sqlite`可用，fts5全文搜索可用 |
+| 搜索工具 | `@vscode/ripgrep` | 纯js实现，系统装了`rg`就优先用 | `@vscode/ripgrep`在安装时只下载本机平台的二进制，没法在mac上交叉打出另外五个平台的包 |
+| 终端 | node-pty 1.2 | node-pty 1.2.0-beta.18（锁版本） | 已核对：正式版1.1.0没有linux预编译；1.2.0-beta.18带齐六个平台 |
+| ui国际化 | i18next | 自写的轻量`t()`加中英文词典 | 只需要按键取文案，不需要i18next的插件体系 |
+
+## 2. 新增的包
+
+| 包 | 职责 | 里程碑 |
+|---|---|---|
+| `packages/storage` | sqlite（`node:sqlite`）、迁移、线程事件日志（jsonl，带seq和crc）、大对象存储 | M1 |
+| `packages/providers` | 厂商预设（数据）、openai chat和anthropic messages两种wire、sse解析、怪癖、用量映射、错误归类、`/models`核对、连接测试 | M1、M2 |
+| `packages/metering` | 价格表、阶梯与峰谷计价、预算判定、汇总 | M1、M2 |
+| `packages/tools` | read、list、glob、grep、write、edit、apply_patch、bash、todo；路径策略；输出截断 | M1 |
+| `packages/engine` | xora engine：acp服务端、会话存储、agent循环、权限桥接、提示词拼装、压缩、子agent、skills与mcp接入 | M1～M4 |
+| `packages/workspace` | 影子git检查点、每轮diff、撤销、worktree、hunk操作 | M1、M3 |
+| `packages/extensions` | skills、命令、hooks、claude插件与市场、信任 | M4 |
+| `packages/mcp` | mcp客户端（stdio、streamable http、oauth）、配置导入 | M4 |
+| `packages/workflows` | 组织、档位、名册、看板、两本账、主管运行时、质量门、自主级别 | M4 |
+| `packages/test-kit` | mock模型服务（openai和anthropic两种sse）、fake acp agent | M1 |
+
+依赖方向不变：`ui`只依赖`protocol`、`ui-kit`；`engine`不依赖`host`，只通过acp通信；bootstrap只依赖`updater`。
+
+## 3. 工作包
+
+### M1 核心闭环
+
+| 编号 | 内容 | 落点 | 验收 |
+|---|---|---|---|
+| M1-1 | 产品协议：project、thread、turn、item、approval、review、provider、settings、prompt、usage、update | `protocol` | schema单测；ui和host两端都校验 |
+| M1-2 | 存储：sqlite迁移、事件日志、断电后从日志重建索引 | `storage` | 单测：crc损坏行跳过、重建 |
+| M1-3 | provider：deepseek、kimi、glm、openai兼容自定义；思考回传、tool_choice降级、采样白名单、用量映射、错误归类 | `providers` | 录制回放单测覆盖07第5节九条规则 |
+| M1-4 | 工具集与路径策略 | `tools` | 单测：越界、符号链接、敏感文件、apply_patch |
+| M1-5 | xora engine：acp会话new/load/resume/list/close、prompt、cancel；流式、并行只读工具；权限请求交给host | `engine` | 对mock模型服务的端到端单测 |
+| M1-6 | host：线程状态机、引擎进程管理、审批与策略（四种模式、规则、路径边界）、设置、密钥 | `host` | 权限契约测试：每种模式下该问的都问到 |
+| M1-7 | 每轮diff与撤销：影子git、按文件撤销带哈希校验 | `workspace` | 单测：撤销不覆盖用户后来的修改 |
+| M1-8 | 主界面骨架：项目与线程侧栏、等我处理、线程流、composer、审批卡片、变更面板、设置（模型与密钥、提示词、权限） | `apps/ui` | 打包后的真实应用里走通一轮 |
+| M1-9 | shell服务：钥匙串（safeStorage）、选目录、通知、防休眠、打开外部链接 | `apps/desktop` | 演练脚本覆盖 |
+| M1-10 | 应用包热更新通道：更新源、下载、校验、交给bootstrap暂存、空闲时提示重启 | `host`、`apps/desktop`、`build` | 演练：从本地更新源升级，再回滚 |
+
+### M2 模型与上下文
+
+| 编号 | 内容 | 落点 | 验收 |
+|---|---|---|---|
+| M2-1 | 全部api厂商预设、本地模型探测、自定义端点、kimi code key直连 | `providers` | 预设schema校验；探测单测 |
+| M2-2 | 外部acp引擎：注册表（codex、claude、kimi、gemini、opencode、qwen、grok）、能力降级、免审批开关 | `host` | fake acp agent契约测试 |
+| M2-3 | 路由与回退：模型链，遇限速、过载、5xx切下一个；跨家族切换先摘要 | `engine` | 单测 |
+| M2-4 | 提示词分层：系统、全局、组织、AGENTS.md层级、个人项目、agent、会话；查看生效提示词 | `engine`、`host` | 单测：拼装顺序、来源标注 |
+| M2-5 | 四级压缩：写入时裁剪、旧结果清理、摘要压缩、换模型压缩；手动`/compact` | `engine` | 单测：两次压缩后任务继续 |
+| M2-6 | 轨迹视图：每次请求的耗时、token、费用 | `host`、`ui` | 界面 |
+| M2-7 | 用量与预算：各级汇总、预算暂停 | `metering`、`host`、`ui` | 单测：峰谷计价、预算 |
+
+### M3 并行与审阅
+
+| 编号 | 内容 | 落点 | 验收 |
+|---|---|---|---|
+| M3-1 | worktree：创建、上限、`.worktreeinclude`、setup脚本、`XORA_PORT`、hand off | `workspace`、`host` | 单测：3个worktree线程互不干扰 |
+| M3-2 | 并行候选：同一任务多个模型各占一个worktree，对比后应用其中一个 | `host`、`ui` | 单测：应用后主目录正确 |
+| M3-3 | 检查点：回到第n轮（文件加对话，或只回文件）、从第n轮分叉 | `workspace`、`engine`、`host` | 单测 |
+| M3-4 | hunk审阅：按hunk暂存、还原；行评论攒批发给agent | `workspace`、`ui` | 单测 |
+| M3-5 | 终端：node-pty加xterm | `apps/desktop`、`host`、`ui` | 手动 |
+| M3-6 | 浏览器预览与标注 | `apps/desktop`、`ui` | 手动 |
+| M3-7 | 文件预览、通知、托盘、防休眠、并排查看、goal模式 | 多处 | 手动加单测 |
+
+### M4 扩展与agent团队
+
+| 编号 | 内容 | 落点 | 验收 |
+|---|---|---|---|
+| M4-1 | skills：发现、渐进加载、信任 | `extensions`、`engine` | 单测 |
+| M4-2 | 命令与hooks：九个事件、命令和http两种handler、超时与失败策略 | `extensions`、`engine` | 单测：不受信仓库默认不执行 |
+| M4-3 | mcp：stdio、streamable http、oauth 2.1加pkce；导入claude、cursor、codex配置 | `mcp`、`engine` | 对本地mcp服务的单测 |
+| M4-4 | claude插件与市场：解析、安装、启用、锁版本 | `extensions`、`host` | 能装一个claude插件并使用 |
+| M4-5 | 用对话创建扩展（creator） | `engine`、内置模板 | 手动 |
+| M4-6 | 组织、档位与模型链、名册、三层提示词 | `workflows` | 单测 |
+| M4-7 | 主管-执行全流程：澄清、侦察、规划、计划评审、派工、执行、验收、退回与升档、整合、交付报告 | `workflows`、`engine`、`host` | 对mock模型服务的端到端：拆出多个任务、验收不过退回或升档、交付报告与花费正确 |
+| M4-8 | 看板、两本账、质量门、自主级别、团队视图 | `workflows`、`ui` | 单测加界面 |
+| M4-9 | 行内编辑、lsp诊断上下文 | `ui`、`host` | 手动 |
+
+## 4. 顺序
+
+1. 先定接口：协议、provider的消息格式、工具接口。
+2. 叶子包并行做：`providers`和`test-kit`、`tools`、`metering`。
+3. 主干：`storage`→`engine`→`host`→bootstrap的shell服务→界面，打通M1闭环。
+4. 在M1闭环上依次叠加M2、M3的worktree与检查点、M4的团队核心、M4的扩展，最后补M3的终端、预览等界面能力。
+
+每完成一层就跑类型检查、单测和演练；不达标不往下走。
+
+## 5. 本轮不做
+
+- 真实厂商端点的抽样测试：需要用户自己的key，留作手动触发。
+- windows、linux实机冒烟：测试机和pabox共用，等用户确认空闲。
+- 推送和合并回`main`：等用户确认。
+- 1.0之后的项（见14第2节）。
