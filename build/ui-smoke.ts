@@ -139,7 +139,9 @@ try {
     const editor = page.locator('.connection-editor');
     await editor.locator('select').selectOption('custom-openai');
     await editor.locator('input').first().fill('mock');
-    await editor.locator('input[type=password]').fill('test-key');
+    // A packaged build always keeps keys in the system keychain, which can block on an access prompt; the mock
+    // server needs no key, so none is saved there.
+    if (!values.app) await editor.locator('input[type=password]').fill('test-key');
     await editor.locator('input').last().fill(server.url);
     await editor.getByRole('button', { name: '保存' }).click();
     await page.locator('.connection').first().waitFor();
