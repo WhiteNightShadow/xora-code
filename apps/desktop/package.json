@@ -1,0 +1,28 @@
+{
+  "name": "@xora/desktop",
+  "productName": "Xora Code",
+  "version": "1.0.0-alpha.1",
+  "private": true,
+  "description": "Xora Code desktop shell: bootstrap, preload scripts and packaging",
+  "author": {
+    "name": "Xora Code contributors",
+    "email": "WhiteNightShadow@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/WhiteNightShadow/xora-code",
+  "license": "Apache-2.0",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mts",
+    "typecheck": "tsc -p tsconfig.json",
+    "start": "electron .",
+    "package": "electron-builder --config electron-builder.yml --mac --win --linux --publish never"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@xora/updater": "workspace:*",
+    "electron": "44.10.0",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

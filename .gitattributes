@@ -1,1 +1,4 @@
-resources/legal/grok-build/THIRD-PARTY-NOTICES -whitespace
+* text=auto eol=lf
+*.png binary
+*.icns binary
+*.ico binary

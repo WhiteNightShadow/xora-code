@@ -1,0 +1,44 @@
+appId: io.github.whitenightshadow.xoracode
+productName: Xora Code
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+directories:
+  output: release
+  buildResources: build-resources
+files:
+  - dist/**
+  - static/**
+  - package.json
+# The factory app bundle: the fallback that is always there, even after a bad update.
+extraResources:
+  - from: ../../dist/app-bundle
+    to: app-bundle
+asar: true
+mac:
+  icon: build-resources/icon.png
+  category: public.app-category.developer-tools
+  # Unsigned preview builds until a Developer ID certificate is available.
+  identity: null
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+win:
+  icon: build-resources/icon.png
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+linux:
+  icon: build-resources/icon.png
+  executableName: xora-code
+  category: Development
+  maintainer: Xora Code contributors <WhiteNightShadow@users.noreply.github.com>
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]

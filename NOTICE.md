@@ -4,17 +4,11 @@ Xora Code is an independent open-source project.
 
 Copyright 2026 Xora Code contributors.
 
-The distributed application may include third-party software. Each component remains subject to its own license and notice requirements, including:
+Distributed builds include third-party software. Each component remains subject to its own license and notice requirements, including:
 
-- Eclipse Theia, licensed under EPL-2.0 or GPL-2.0-only with the Classpath Exception, with selected files also available under MIT terms.
-- Electron, licensed under the MIT License, and Chromium and Node.js components under their respective licenses.
-- VS Code extensions installed from Open VSX or other registries, each under the license declared by its publisher.
-- Grok Build, when bundled by a distribution, licensed under Apache-2.0 together with its applicable third-party notices.
+- Electron, licensed under the MIT License, with Chromium and Node.js components under their respective licenses.
+- React and the other npm dependencies listed in the generated third-party notices of each release.
 
-The native Windows build applies the build-only compatibility change documented
-in `build/grok/PATCHES.md`. It replaces Unix-only protoc output devices with
-temporary files under Cargo `OUT_DIR`; it does not alter Grok Build runtime
-behavior. The patch is retained under the same Apache-2.0 terms as the modified
-upstream source.
+External agents (for example Grok Build, Codex or Claude Code) are not bundled. When a user installs one, it remains subject to its own license and terms of service.
 
 Release automation must generate a complete dependency inventory and include all required third-party license texts before publishing binary artifacts.

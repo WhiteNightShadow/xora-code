@@ -1,96 +1,30 @@
 {
   "name": "xora-code",
-  "version": "0.2.10",
+  "version": "1.0.0-alpha.1",
   "private": true,
-  "description": "An open-source Grok desktop app and Grok Build GUI client built with Eclipse Theia, Electron, and ACP.",
-  "author": {
-    "name": "Xora Code contributors",
-    "email": "WhiteNightShadow@users.noreply.github.com"
-  },
-  "homepage": "https://github.com/WhiteNightShadow/xora-code",
+  "type": "module",
+  "description": "Xora Code: an agent-first desktop for coding agents",
   "license": "Apache-2.0",
-  "keywords": [
-    "grok",
-    "grok-build",
-    "grok-desktop",
-    "grok-client",
-    "grok-build-gui",
-    "coding-agent",
-    "ai-coding-agent",
-    "agentic-ide",
-    "agent-client-protocol",
-    "acp",
-    "mcp",
-    "electron",
-    "eclipse-theia",
-    "desktop-app"
-  ],
-  "packageManager": "yarn@1.22.22",
+  "homepage": "https://github.com/WhiteNightShadow/xora-code",
+  "packageManager": "pnpm@12.16.1",
   "engines": {
-    "node": ">=24 <25",
-    "yarn": "1.22.22"
+    "node": ">=24"
   },
-  "workspaces": [
-    "applications/*",
-    "build/*",
-    "packages/*",
-    "theia-extensions/*"
-  ],
   "scripts": {
-    "build": "yarn build:packages && yarn build:extensions && yarn build:applications",
-    "build:dev": "yarn build",
-    "build:packages": "lerna run build --scope \"@xora-code/acp-client\" --scope \"@xora-code/fake-acp-agent\" --scope \"@xora-code/runtime-core\" --scope \"@xora-code/update-build-tools\" --stream",
-    "build:extensions": "lerna run build --scope \"@xora-code/product-extension\" --scope \"@xora-code/agent\" --stream",
-    "build:applications": "lerna run build --scope \"@xora-code/browser-app\" --scope \"@xora-code/electron-app\" --concurrency 1 --stream",
-    "clean": "lerna run clean --stream",
-    "lint": "lerna run lint --stream",
-    "test": "lerna run test --stream",
-    "download:plugins": "theia download:plugins --rate-limit=15 --parallel=false && node applications/electron/scripts/ensure-plugins.js",
-    "ensure:plugins": "node applications/electron/scripts/ensure-plugins.js",
-    "start:browser": "yarn workspace @xora-code/browser-app start",
-    "start:electron": "yarn ensure:plugins && yarn workspace @xora-code/electron-app start",
-    "start:electron:debug": "yarn ensure:plugins && yarn workspace @xora-code/electron-app start:debug",
-    "package:electron": "yarn workspace @xora-code/electron-app package",
-    "package:electron:preview": "yarn workspace @xora-code/electron-app package:preview",
-    "package:mac:preview": "yarn workspace @xora-code/electron-app package:preview",
-    "package:mac:preview:installers": "yarn workspace @xora-code/electron-app package:preview:installers:mac",
-    "sbom:preview": "node build/sbom/generate-preview-sbom.mjs"
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck && tsc -p build/tsconfig.json",
+    "test": "pnpm -r run test",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "keys:dev": "node build/keys.ts",
+    "bundle": "node build/make-bundle.ts",
+    "dev": "pnpm build && pnpm bundle && pnpm --filter @xora/desktop start",
+    "package": "pnpm build && pnpm bundle && pnpm --filter @xora/desktop package",
+    "drill": "pnpm build && pnpm bundle && node build/drill.ts"
   },
-  "theiaPluginsDir": "plugins",
-  "theiaPlugins": {
-    "vscode-builtin-extensions": "https://github.com/eclipse-theia/vscode-builtin-extensions/releases/download/1.108.2/vscode-builtin-extensions-1.108.2.tar.gz"
-  },
-  "theiaPluginsExcludeIds": [
-    "ms-vscode.js-debug",
-    "ms-vscode.js-debug-companion",
-    "ms-vscode.vscode-js-profile-table",
-    "vscode.extension-editing",
-    "vscode.microsoft-authentication"
-  ],
-  "xoraBuiltinLanguages": [
-    "javascript",
-    "typescript",
-    "c",
-    "cpp",
-    "python",
-    "json",
-    "markdown",
-    "html",
-    "css",
-    "scss",
-    "shell",
-    "yaml",
-    "xml",
-    "sql",
-    "go",
-    "rust",
-    "java",
-    "dockerfile",
-    "plaintext"
-  ],
   "devDependencies": {
-    "lerna": "9.0.7",
-    "playwright": "1.62.1",
-    "rimraf": "6.0.1"
+    "@biomejs/biome": "2.6.4",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
   }
 }

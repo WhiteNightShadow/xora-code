@@ -1,0 +1,86 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { domPortTransport, RpcError, RpcErrorCode, RpcPeer } from '../src/index.ts';
+
+const cleanups: Array<() => void> = [];
+
+function connectedPeers(): { client: RpcPeer; server: RpcPeer } {
+    const channel = new MessageChannel();
+    const client = new RpcPeer(domPortTransport(channel.port1), { timeoutMs: 2_000 });
+    const server = new RpcPeer(domPortTransport(channel.port2));
+    cleanups.push(() => {
+        client.dispose();
+        server.dispose();
+        channel.port1.close();
+        channel.port2.close();
+    });
+    return { client, server };
+}
+
+afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) {
+        cleanup();
+    }
+});
+
+describe('RpcPeer', () => {
+    it('round-trips a typed request', async () => {
+        const { client, server } = connectedPeers();
+        server.handle('system.ping', ({ sentAt }) => ({ sentAt, receivedAt: sentAt + 1 }));
+        await expect(client.request('system.ping', { sentAt: 41 })).resolves.toEqual({ sentAt: 41, receivedAt: 42 });
+    });
+
+    it('reports an unknown method', async () => {
+        const { client } = connectedPeers();
+        const failure = await client.request('system.info', {}).catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(RpcError);
+        expect((failure as RpcError).code).toBe(RpcErrorCode.MethodNotFound);
+    });
+
+    it('rejects params that do not match the schema before sending', () => {
+        const { client } = connectedPeers();
+        expect(() => client.request('system.ping', { sentAt: 'soon' } as never)).toThrow();
+    });
+
+    it('validates the result on the serving side', async () => {
+        const { client, server } = connectedPeers();
+        server.handle('system.ping', () => ({ sentAt: 1 }) as never);
+        const failure = await client.request('system.ping', { sentAt: 1 }).catch((error: unknown) => error);
+        expect((failure as RpcError).code).toBe(RpcErrorCode.InternalError);
+    });
+
+    it('times out when the other side never answers', async () => {
+        const { client, server } = connectedPeers();
+        server.handle('system.ping', () => new Promise(() => undefined));
+        const failure = await client.request('system.ping', { sentAt: 1 }, { timeoutMs: 50 }).catch((error) => error);
+        expect((failure as RpcError).code).toBe(RpcErrorCode.Timeout);
+    });
+
+    it('rejects pending requests on dispose', async () => {
+        const { client, server } = connectedPeers();
+        server.handle('system.ping', () => new Promise(() => undefined));
+        const pending = client.request('system.ping', { sentAt: 1 });
+        client.dispose();
+        await expect(pending).rejects.toMatchObject({ code: RpcErrorCode.Disposed });
+    });
+
+    it('delivers notifications to listeners', async () => {
+        const { client, server } = connectedPeers();
+        const received = new Promise<unknown>((resolve) => client.onNotification('host.status', resolve));
+        server.notify('host.status', { state: 'ready' });
+        await expect(received).resolves.toEqual({ state: 'ready' });
+    });
+
+    it('ignores malformed messages and reports them', async () => {
+        const channel = new MessageChannel();
+        const errors: Error[] = [];
+        const peer = new RpcPeer(domPortTransport(channel.port1), { onProtocolError: (error) => errors.push(error) });
+        cleanups.push(() => {
+            peer.dispose();
+            channel.port1.close();
+            channel.port2.close();
+        });
+        channel.port2.postMessage({ hello: 'world' });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(errors).toHaveLength(1);
+    });
+});

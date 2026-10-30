@@ -1,80 +1,42 @@
+# Dependencies and build output
 node_modules/
-lib/
-src-gen/
 dist/
+out/
+release/
 coverage/
-.nyc_output/
-.playwright-cli/
-/output/
-/sample-notes.txt
-/website/
 *.tsbuildinfo
 *.log
 .DS_Store
 
-# Local environment files, credentials, and signing material
+# Local signing keys. Never commit private keys; committed public keys use the .pub extension.
+.keys/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local environment, credentials and session state
 .env
 .env.*
 !.env.example
-!.env.*.example
-*.secret
-*.token
 auth.json
 credentials.json
 secrets.json
-*.pem
-*.key
-*.p8
-*.p12
-*.pfx
-*.jks
-*.keystore
-*.csr
-*.crt
-*.cer
-*.der
-*.gpg
-*.kbx
-*.mobileprovision
-*.provisionprofile
-
-# Local authentication and session state
 .auth/
 .codex/
 .grok/
-playwright/.auth/
-storage-state*.json
-cookies*.json
-*.session
-*.session.json
-*.session.jsonl
-*.session.lock
-session-*.jsonl
-*.history.jsonl
+.playwright-cli/
 
-# Generated Theia build configuration and native-module staging
-.browser_modules/
-applications/*/esbuild.mjs
-applications/*/gen-esbuild.*.mjs
-
-# Theia and downloaded VS Code extensions
-plugins/*
-!plugins/.gitkeep
-
-# Local product state
-.theia/
-.xora-code/
-# Pre-Xora local state can be copied during the compatibility migration.
-.whitenight-code/
-
-# Electron packaging output
-applications/electron/generated-legal/
-applications/electron/release/
-applications/electron/dist/
-
-# Release-staged sidecar binaries
-resources/sidecars/grok/*
-!resources/sidecars/grok/README.md
+# Leftovers from a legacy 0.2.x checkout. Their history lives on the legacy/theia branch.
+/applications/
+/theia-extensions/
+/plugins/
+/resources/
+/output/
+/tmp/
+/website/
+/.browser_modules/
+/sample-notes.txt
 
 # IDE metadata
 .idea/

@@ -1,0 +1,115 @@
+:root {
+    --xk-font-sans:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+        "Noto Sans CJK SC", sans-serif;
+    --xk-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+    --xk-space-1: 4px;
+    --xk-space-2: 8px;
+    --xk-space-3: 12px;
+    --xk-space-4: 16px;
+    --xk-space-6: 24px;
+    --xk-radius-sm: 6px;
+    --xk-radius-md: 10px;
+
+    --xk-bg: #ffffff;
+    --xk-bg-subtle: #f6f7f9;
+    --xk-border: #e3e6eb;
+    --xk-text: #1b1f24;
+    --xk-text-muted: #5d6673;
+    --xk-accent: #3d5afe;
+    --xk-accent-text: #ffffff;
+    --xk-ok: #1a7f37;
+    --xk-pending: #b07800;
+    --xk-error: #cf222e;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --xk-bg: #121418;
+        --xk-bg-subtle: #1a1d23;
+        --xk-border: #2c313a;
+        --xk-text: #e6e8eb;
+        --xk-text-muted: #9aa3ae;
+        --xk-accent: #7c8cff;
+        --xk-accent-text: #0d0f14;
+        --xk-ok: #4ac26b;
+        --xk-pending: #e3b341;
+        --xk-error: #ff7b72;
+    }
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    height: 100%;
+    background: var(--xk-bg);
+    color: var(--xk-text);
+    font-family: var(--xk-font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.xk-button {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+    padding: 6px 14px;
+    border-radius: var(--xk-radius-sm);
+    border: 1px solid var(--xk-border);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.xk-button:focus-visible {
+    outline: 2px solid var(--xk-accent);
+    outline-offset: 2px;
+}
+
+.xk-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.xk-button--primary {
+    background: var(--xk-accent);
+    border-color: var(--xk-accent);
+    color: var(--xk-accent-text);
+}
+
+.xk-button--danger {
+    color: var(--xk-error);
+}
+
+.xk-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+}
+
+.xk-status__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.xk-status--ok {
+    color: var(--xk-ok);
+}
+
+.xk-status--pending {
+    color: var(--xk-pending);
+}
+
+.xk-status--error {
+    color: var(--xk-error);
+}

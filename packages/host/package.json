@@ -1,0 +1,20 @@
+{
+  "name": "@xora/host",
+  "version": "1.0.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Xora Code host process: owns state and serves the UI over MessagePort",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/index.cjs --log-level=warning",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@xora/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}
