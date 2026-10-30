@@ -11,6 +11,9 @@ export function TerminalPanel({ thread }: { thread: ThreadMeta }) {
     const s = useStrings();
     const element = useRef<HTMLDivElement>(null);
     const [error, setError] = useState<string | undefined>();
+    // Read through a ref so a language switch does not restart the shell.
+    const exitedText = useRef(s.panel.terminalExited);
+    exitedText.current = s.panel.terminalExited;
     useEffect(() => {
         const container = element.current;
         if (!container) return;
@@ -34,7 +37,8 @@ export function TerminalPanel({ thread }: { thread: ThreadMeta }) {
             if (id === terminalId) terminal.write(data);
         });
         const offExit = host.on('terminal.exit', ({ terminalId: id, exitCode }) => {
-            if (id === terminalId) terminal.write(`\r\n[进程已退出，退出码${exitCode ?? '?'}]\r\n`);
+            if (id === terminalId)
+                terminal.write(`\r\n[${exitedText.current.replace('{code}', String(exitCode ?? '?'))}]\r\n`);
         });
         const input = terminal.onData((data) => {
             if (terminalId) void host.call('terminal.write', { terminalId, data }).catch(() => undefined);

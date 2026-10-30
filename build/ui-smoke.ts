@@ -200,6 +200,31 @@ try {
     await page.locator('.settings-section code', { hasText: '/greet' }).waitFor();
     await step(page, '设置的扩展页列出项目命令');
     await page.keyboard.press('Escape');
+
+    // A real shell through node-pty in the thread's folder (M3-5).
+    await page.getByRole('button', { name: '终端', exact: true }).click();
+    await page.locator('.terminal-panel .xterm').waitFor();
+    // Type only once the shell has drawn its prompt; some shells drop what was typed while they start.
+    await page.waitForFunction(
+        () => (document.querySelector('.terminal-panel .xterm-rows')?.textContent ?? '').trim().length > 0,
+        undefined,
+        { timeout: 30_000 },
+    );
+    let echoed = false;
+    for (let attempt = 0; attempt < 3 && !echoed; attempt++) {
+        await page.waitForTimeout(500);
+        await page.locator('.terminal-panel .xterm').click();
+        await page.keyboard.type('echo xora-smoke-$((40+2))\n');
+        echoed = await page
+            .locator('.terminal-panel .xterm-rows', { hasText: 'xora-smoke-42' })
+            .waitFor({ timeout: 10_000 })
+            .then(
+                () => true,
+                () => false,
+            );
+    }
+    if (!echoed) throw new Error('the terminal did not run the command');
+    await step(page, '终端能运行命令');
 } catch (error) {
     failed = true;
     console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
