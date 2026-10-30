@@ -1,0 +1,28 @@
+{
+  "name": "@xora/mcp",
+  "version": "1.0.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "MCP client layer: server configs, imports from other tools, connections, OAuth and ACP conversion",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "cross-spawn": "7.0.6",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/node": "2.1.2",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@types/cross-spawn": "6.0.6",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}
