@@ -97,7 +97,11 @@ export interface Quirks {
     readonly streamUsage?: boolean;
     /** Anthropic wire only: `auto` puts cache breakpoints after the system prefix and on the last message. */
     readonly cacheControl?: 'none' | 'auto';
-    /** Vendor business error codes mapped to error classes (glm 1261, 1302, …). */
+    /**
+     * Vendor business error codes mapped to error classes (glm 1261, 1302, …). Keys are matched against the code and
+     * the type of the error body (kimi `engine_overloaded_error`); a key `http:<status>` reclassifies a bare HTTP
+     * status for a vendor that, for example, reports an exhausted plan as 403.
+     */
     readonly errorCodes?: Readonly<Record<string, ErrorClass>>;
     /** Static fields merged into every request body (for example kimi `prompt_cache_options`). */
     readonly extraBody?: Readonly<Record<string, unknown>>;
