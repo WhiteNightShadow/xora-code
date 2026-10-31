@@ -354,10 +354,14 @@ grok bot（spacexai，2026-08-11开放beta）的资料来自第三方报道：�
 - **代码**：`packages/workflows`（纯逻辑）、`packages/host/src/team.ts`（`TeamService`）、`team-agents.ts`（工具schema、各角色提示词、组织加载）、`team-store.ts`（sqlite，migration 2的`team_runs`和`team_board_events`）。
 - **组织**：用户级在`<数据目录>/orgs/default/`（`org.md`、`agents/*.md`），项目级是`.xora/org.md`和`.xora/agents/*.md`，项目受信后才生效（项目文件能改档位和工具白名单）。
 - **工具**：主管有task_create、task_assign、task_update、task_list、send_message、ledger_update、request_review；执行者有deliver、escalate、ask_supervisor（挂起等主管回答）。
-- **派工**：并发上限3（常量）；写任务各占一个worktree，都从运行开始时的HEAD建；有依赖的任务先把前置任务的结果带进来；卡片写`workspace: 'local'`的直接在项目目录里改。
-- **确认**：计划确认、交付确认、高风险动作都复用审批卡片，挂在主管线程里；L1确认计划和交付，L0每次派工也确认。
+- **派工**：同时工作的成员数是设置项（设置→通用→团队并发数，1～8，默认3），每次派工时读取，改了对正在跑的团队马上生效；写任务各占一个worktree，都从运行开始时的HEAD建；有依赖的任务先把前置任务的结果带进来；卡片写`workspace: 'local'`的直接在项目目录里改。
+- **计划评审**：主管的计划做完、确认之前，host让计划评审成员在另一家族的模型上只审一次（同一档位的模型链里挑，项目目录、只读），评审意见作为团队更新交给主管修订一轮，然后才去确认（不需要确认的自主级别直接派工）。组织里没有计划评审，或者没连接其他家族的同档模型时跳过，运行里留一条警告。
+- **确认**：计划确认、交付确认都复用审批卡片，挂在主管线程里；L1确认计划和交付，L0每次派工也确认。
+- **高风险动作**：团队线程（主管、成员、审查）里的推送、发布、工作区外或整个工作区的删除、对外发消息、付款，在任何自主级别、任何权限模式下都要人确认：总是允许的规则、本会话允许、hook的免确认、全权模式都不算数，卡片上只有允许一次和拒绝，标题写明是哪类高风险动作；计划模式和拒绝规则照样直接拒绝。命令在`splitShellCommand`的切分上识别：`git push`（含`git -C x push`）、`gh pr merge`、`gh release create`、npm、pnpm、yarn、bun、cargo、twine、poetry、uv、gem、mvn、gradle的发布和release、deploy类脚本、`docker push`、kubectl、helm、terraform和云厂商cli的部署与删除、工作区外或整个工作区的`rm -rf`、`git clean -f`、`find -delete`、curl、wget、httpie向其他主机发数据（支付接口算付款）、mail、scp和rsync上传；会穿过sudo、env、xargs、npx、`sh -c`、eval、ssh，here-document和命令替换里的也能读到。mcp工具按名字里的动词和对象判断（merge、post_message、create_refund这类）。验收命令同样处理。
+- **回合预算**：卡片的`budget.maxTurns`是执行者为这张卡最多能发的模型请求数，按一次派工算，同一线程上退回重做的也算在内，升档或重派后重新计；卡片没写时用host的默认值80。用完时引擎停下这一轮，这次尝试记为失败，不在这一档重试，直接走升档→交主管→问人；执行者的第一条消息里写明它的预算。
+- **mcp工具**：按agent的工具白名单给：`mcp`是全部服务器，`mcp__服务器`是一个服务器，`mcp__服务器__工具`是一个工具，可以用`*`。默认名单里只有执行者和专家有`mcp`，主管、规划顾问、计划评审、侦察、审查默认没有；自己写了`tools`的agent文件要把mcp工具列出来。线程只启动用得上的服务器，名单外的mcp工具调用直接拒绝，名单内的每次调用仍走权限策略。
 - **验收与升级**：验收命令按`execute`过权限策略；命令通过才开跨家族审查；退回最多2轮，再按`shouldEscalate`升档、交主管或问人。
 - **整合**：按依赖顺序把worktree应用回项目，冲突就暂停问人；全量验收不过时运行结束为失败，报告照常生成。
 - **重启**：未结束的运行标成已暂停，用`team.resume`继续；已完成的任务不重跑。
-- **还没做**：执行者跑`git push`这类高风险命令时不额外强制审批；卡片的`maxTurns`没执行；并发上限不是设置项；没有独立的计划评审步骤（主管自己建只读卡派侦察和规划）；团队线程里的mcp工具不受角色白名单约束（每次调用仍走权限策略）。
+- **还没做**：高风险动作只在团队线程里强制确认，普通线程照旧按权限模式；写在脚本文件、别名里或编码过的命令识别不到。计划评审只在计划评审成员自己档位的模型链里找其他家族的模型。
 
