@@ -134,6 +134,11 @@ try {
     page.setDefaultTimeout(30_000);
 
     await page.locator('.welcome').waitFor();
+    // The shell starts under the keychain entry's name and must be back to the product name for menus and windows.
+    const appName = await app.evaluate(({ app }) => app.name);
+    if (appName !== 'Xora Code') {
+        throw new Error(`app.name is "${appName}" after startup`);
+    }
     await step(page, '首次启动显示引导页');
 
     await page.getByRole('button', { name: /连接一个模型/ }).click();

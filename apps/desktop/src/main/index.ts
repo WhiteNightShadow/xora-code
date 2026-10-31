@@ -8,11 +8,20 @@ import { BootLog } from './log.ts';
 import { installMenu } from './menu.ts';
 import { dataPaths, resolveDataDir, resolveFactoryDir, shellFiles } from './paths.ts';
 import { safeModeWindow } from './safe-mode.ts';
+import { KEYCHAIN_APP_NAME } from './secrets.ts';
 
 /**
  * The bootstrap: the only code that ships frozen inside the installer. Everything else (UI, host, engine)
  * lives in a signed app bundle that can be updated and rolled back. Keep this layer small.
  */
+
+// The keychain entry takes its name from `app.name` once this script has loaded (see KEYCHAIN_APP_NAME). The
+// product name comes back before anything shows it: menus, windows and, on Linux, the audio stream name.
+const productName = app.name;
+app.name = KEYCHAIN_APP_NAME;
+app.once('will-finish-launching', () => {
+    app.name = productName;
+});
 
 registerAppScheme();
 

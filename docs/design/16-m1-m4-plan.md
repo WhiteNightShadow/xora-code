@@ -136,5 +136,5 @@
 
 **另外发现并修掉的问题**：开着预览关窗口时应用退不出去（shell的退出清理会抛错）；“查看生效提示词”看不到团队和skills层。
 
-**测试注意**：这台mac上有旧版0.2.x留下的钥匙串项“Xora Code Safe Storage”，打包版第一次存key时macOS会弹授权框（真实用户升级时也会遇到一次）；冒烟和演练脚本已用Chromium的`--use-mock-keychain`避开。
+**钥匙串**：1.0用自己的钥匙串项“xora-code Safe Storage”，不碰旧版0.2.x的“Xora Code Safe Storage”，从0.2.x升级不会再弹授权框。electron按主脚本加载完时的`app.name`给这一项取名，所以shell一启动就把`app.name`设成`xora-code`，到`will-finish-launching`再改回“Xora Code”，菜单和窗口用的是改回后的名字。这个时机依赖electron的`PostCreateMainMessageLoop`，升级electron时要复查。已在开发构建上用注入的探测库核对过：启动加一次加密，只请求了“xora-code Safe Storage”，调用被探测库拦下，真实钥匙串里没有生成这一项。冒烟和演练仍带Chromium的`--use-mock-keychain`，不碰真实钥匙串；冒烟还会检查启动后`app.name`已经改回。
 

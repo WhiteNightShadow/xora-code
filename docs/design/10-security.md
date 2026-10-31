@@ -44,7 +44,7 @@
 
 ## 6. 凭据
 
-- api key和oauth令牌存系统钥匙串：主进程用electron的`safeStorage`加密后落盘，只有主进程能解密。
+- api key和oauth令牌存系统钥匙串：主进程用electron的`safeStorage`加密后落盘，只有主进程能解密。macos上的钥匙串项叫“xora-code Safe Storage”，和旧版0.2.x的“Xora Code Safe Storage”分开，升级时不弹授权框。
 - key经环境变量或初始化消息交给引擎进程。shell工具派生子进程前，会剔除`*_API_KEY`、`*_TOKEN`等变量，agent执行的命令看不到这些key。
 - 订阅key单独标注用途，只给对应的编程端点用。
 - 日志、事件、诊断包里一律不出现密钥。

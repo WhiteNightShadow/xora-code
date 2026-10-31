@@ -6,6 +6,16 @@ const MAGIC_ENCRYPTED = Buffer.from('XS1\n');
 const MAGIC_PLAIN = Buffer.from('XP1\n');
 
 /**
+ * The name `app.name` carries while the main script loads. Electron names the keychain entry that holds the
+ * `safeStorage` key after it ("<name> Safe Storage" on macOS, the Secret Service entry on Linux) and reads it
+ * once, right after the main script has loaded (`ElectronBrowserMainParts::PostCreateMainMessageLoop`; re-check
+ * when upgrading Electron). The legacy 0.2.x app owns "Xora Code Safe Storage", and reading an entry another
+ * build created raises an access prompt that blocks the main thread, so the rewrite keeps its own entry, named
+ * like its data directory.
+ */
+export const KEYCHAIN_APP_NAME = 'xora-code';
+
+/**
  * API keys and tokens, encrypted with Electron's `safeStorage` (Keychain on macOS, DPAPI on Windows, the
  * Secret Service on Linux). Only this process can decrypt them; the host asks for them by name.
  * Without OS encryption (e.g. Linux without a keyring) values are stored unencrypted and the UI says so.
