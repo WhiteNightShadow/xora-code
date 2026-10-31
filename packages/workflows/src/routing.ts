@@ -1,3 +1,4 @@
+import { SUBSCRIPTION_CHANNEL } from './autonomy.ts';
 import {
     type AgentSpec,
     agentsWithRole,
@@ -84,7 +85,7 @@ export interface ConnectedModel {
     readonly presetId?: string;
     /** From the provider preset's model info. */
     readonly family?: string;
-    /** `api`, `subscription_key`, `local` …; unattended runs only use `api` (06 §3 rule 7). */
+    /** `api`, `subscription_key`, `local`, `custom`; unattended runs leave out `subscription_key` (06 §3 rule 7). */
     readonly channel?: string;
 }
 
@@ -99,7 +100,7 @@ export interface ResolvedModel {
 }
 
 export interface ModelChainOptions {
-    /** Unattended runs (L3, schedules, triggers) may only use api channels. */
+    /** Unattended runs (L3, schedules, triggers) do not use subscription quotas: api, local and custom only. */
     readonly unattended?: boolean;
 }
 
@@ -122,7 +123,7 @@ export function modelChain(
                 connected.model !== entry.model ||
                 (entry.connectionId !== undefined && connected.connectionId !== entry.connectionId) ||
                 (entry.presetId !== undefined && connected.presetId !== entry.presetId) ||
-                (options.unattended === true && connected.channel !== 'api')
+                (options.unattended === true && connected.channel === SUBSCRIPTION_CHANNEL)
             ) {
                 continue;
             }

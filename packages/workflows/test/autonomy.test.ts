@@ -49,10 +49,14 @@ describe('countsAsApproval', () => {
 });
 
 describe('validateAutonomy', () => {
-    it('accepts L3 with api channels, a budget and restricted permissions', () => {
-        expect(validateAutonomy('L3', { channels: ['api', 'api'], budget: 20, modes: ['plan', 'auto_edit'] })).toEqual({
-            ok: true,
-        });
+    it('accepts L3 with api, local and custom channels, a budget and restricted permissions', () => {
+        expect(
+            validateAutonomy('L3', {
+                channels: ['api', 'local', 'custom'],
+                budget: 20,
+                modes: ['plan', 'auto_edit'],
+            }),
+        ).toEqual({ ok: true });
     });
 
     it('lists every problem of an L3 run', () => {
@@ -62,12 +66,12 @@ describe('validateAutonomy', () => {
         });
         expect(result.ok).toBe(false);
         expect(!result.ok && result.problems.map((problem) => problem.code)).toEqual([
-            'channel_not_api',
+            'subscription_channel',
             'missing_budget',
             'full_permission',
         ]);
         expect(!result.ok && result.problems[0]?.message).toBe(
-            'L3 runs only on api channels; not allowed: subscription_key, local',
+            'L3 runs do not use subscription quotas; connect an api, local or custom model for this tier',
         );
         expect(validateAutonomy('L3', { channels: ['api'], budget: 0 }).ok).toBe(false);
     });

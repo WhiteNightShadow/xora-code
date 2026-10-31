@@ -76,10 +76,17 @@ describe('modelChain', () => {
         ]);
     });
 
-    it('uses only api channels for unattended runs', () => {
+    it('leaves subscription quotas out of unattended runs', () => {
         expect(
             modelChain('flagship', DEFAULT_ORG, available, { unattended: true }).map((model) => model.connectionId),
         ).toEqual(['glm-cn', 'relay']);
+        const local: ConnectedModel[] = [
+            ...available,
+            { connectionId: 'ollama', model: 'kimi-k3.1-pro', family: 'kimi', channel: 'local' },
+        ];
+        expect(
+            modelChain('flagship', DEFAULT_ORG, local, { unattended: true }).map((model) => model.connectionId),
+        ).toEqual(['ollama', 'glm-cn', 'relay']);
     });
 
     it('honours connections pinned in the tier table', () => {

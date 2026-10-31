@@ -1,5 +1,8 @@
 import type { PermissionMode } from './org.ts';
 
+/** Subscription keys are for interactive use only (07 §10): never in unattended runs. */
+export const SUBSCRIPTION_CHANNEL = 'subscription_key';
+
 /** Autonomy levels (06 §8): how far a team may go before a person confirms. */
 export const AUTONOMY_LEVELS = ['L0', 'L1', 'L2', 'L3'] as const;
 export type AutonomyLevel = (typeof AUTONOMY_LEVELS)[number];
@@ -63,7 +66,7 @@ export interface AutonomyContext {
     readonly modes?: readonly PermissionMode[];
 }
 
-export type AutonomyProblemCode = 'channel_not_api' | 'missing_budget' | 'full_permission';
+export type AutonomyProblemCode = 'subscription_channel' | 'missing_budget' | 'full_permission';
 
 export interface AutonomyProblem {
     readonly code: AutonomyProblemCode;
@@ -75,19 +78,19 @@ export type AutonomyValidation =
     | { readonly ok: false; readonly problems: readonly AutonomyProblem[] };
 
 /**
- * L3 runs unattended: only api channels (subscriptions are for interactive use, 07 §10), a budget, and
- * restricted permissions (no agent in `full` mode). Lower levels have a person in the loop and always pass.
+ * L3 runs unattended: no subscription channel (subscriptions are for interactive use, 07 §10; api, local and
+ * custom endpoints are fine), a budget, and restricted permissions (no agent in `full` mode). Lower levels have a
+ * person in the loop and always pass.
  */
 export function validateAutonomy(level: AutonomyLevel, context: AutonomyContext): AutonomyValidation {
     if (level !== 'L3') {
         return { ok: true };
     }
     const problems: AutonomyProblem[] = [];
-    const others = [...new Set(context.channels.filter((channel) => channel !== 'api'))];
-    if (others.length > 0) {
+    if (context.channels.includes(SUBSCRIPTION_CHANNEL)) {
         problems.push({
-            code: 'channel_not_api',
-            message: `L3 runs only on api channels; not allowed: ${others.join(', ')}`,
+            code: 'subscription_channel',
+            message: 'L3 runs do not use subscription quotas; connect an api, local or custom model for this tier',
         });
     }
     if (!(context.budget !== undefined && Number.isFinite(context.budget) && context.budget > 0)) {

@@ -383,7 +383,7 @@ describe('workflow runs', () => {
         ]);
     }, 120_000);
 
-    it('starts unattended runs only on api channels, with a budget, and pauses when it is spent', async () => {
+    it('starts unattended runs only with a budget and priced models, and pauses when the budget is spent', async () => {
         const repo = gitRepo({
             'nightly.yaml': NIGHTLY,
             'nightly-budget.yaml': NIGHTLY_BUDGET,
@@ -412,15 +412,14 @@ describe('workflow runs', () => {
         });
         expect(enabled.triggers).toEqual({ enabled: true, stale: false });
 
-        // Only a custom endpoint and no budget: the run is recorded as failed, with the reasons.
+        // A custom endpoint is fine unattended, but there is no budget: the run is recorded as failed, with the reason.
         const refused = await host.core.workflows.fire({
             projectId: project.id,
             key: 'project:nightly',
             trigger: { reason: 'schedule' },
         });
         expect(refused?.status).toBe('failed');
-        expect(refused?.note).toContain('not allowed: custom');
-        expect(refused?.note).toContain('L3 needs a budget');
+        expect(refused?.note).toBe('没有开始：L3 needs a budget for the run。已停用自动运行，解决后重新启用');
         // It would fail the same way every time: its triggers are switched off.
         expect(
             (await host.ui.request('workflow.list', { projectId: project.id })).find(
@@ -428,8 +427,8 @@ describe('workflow runs', () => {
             )?.triggers,
         ).toEqual({ enabled: false, stale: false });
 
-        // An api connection and a budget: the run starts on the api channel, then pauses once the budget is gone.
-        const api = await host.ui.request('provider.save', {
+        // With a budget the run starts, then pauses once the budget is gone.
+        await host.ui.request('provider.save', {
             presetId: 'deepseek',
             name: 'deepseek mock',
             apiKey: 'test-key',
@@ -480,7 +479,7 @@ describe('workflow runs', () => {
         expect(paused.steps.map((step) => step.status)).toEqual(['pending', 'pending']);
         const threads = await host.ui.request('thread.list', { includeArchived: true });
         const step = threads.find((thread) => thread.workflowRunId === run?.id && thread.taskId === 'first');
-        expect(step?.model?.connectionId).toBe(api.id);
+        expect(step?.model?.model).toBe('deepseek-flash');
         await expect(host.ui.request('workflow.resume', { runId: run?.id as string })).rejects.toThrow('预算还是不够');
 
         // More budget: the step continues in its thread, then the second step runs.

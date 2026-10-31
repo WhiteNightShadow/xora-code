@@ -28,6 +28,7 @@ export {
     type HighRiskAction,
     isHighRiskAction,
     needsHuman,
+    SUBSCRIPTION_CHANNEL,
     validateAutonomy,
 } from './autonomy.ts';
 export {
