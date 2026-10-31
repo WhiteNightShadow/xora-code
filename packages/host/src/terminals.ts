@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -25,6 +26,34 @@ interface PtyModule {
 }
 
 const SCROLLBACK_LIMIT = 256 * 1024;
+const TREE_KILL_MS = 3_000;
+
+/**
+ * Ends a terminal and what runs in it. On Windows node-pty finds the console's processes with
+ * `child_process.fork`, which throws now that the RunAsNode fuse is off; `taskkill /T` ends the shell's process
+ * tree first (while the shell still links it together), then node-pty closes the pseudoconsole.
+ */
+function endPty(pty: PtyProcess): void {
+    if (process.platform !== 'win32' || pty.pid <= 0) {
+        pty.kill();
+        return;
+    }
+    let done = false;
+    const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        pty.kill();
+    };
+    const timer = setTimeout(finish, TREE_KILL_MS);
+    try {
+        const killer = spawn('taskkill', ['/pid', String(pty.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+        killer.once('error', finish);
+        killer.once('exit', finish);
+    } catch {
+        finish();
+    }
+}
 
 interface Terminal {
     readonly id: string;
@@ -147,13 +176,13 @@ export class TerminalService {
         const terminal = this.#terminals.get(terminalId);
         if (terminal) {
             this.#terminals.delete(terminalId);
-            terminal.pty.kill();
+            endPty(terminal.pty);
         }
     }
 
     dispose(): void {
         for (const terminal of this.#terminals.values()) {
-            terminal.pty.kill();
+            endPty(terminal.pty);
         }
         this.#terminals.clear();
     }
