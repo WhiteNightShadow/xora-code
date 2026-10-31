@@ -29,7 +29,7 @@ import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import type { CallFacts } from './policy.ts';
+import { type CallFacts, HIGH_RISK_LABELS, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { PromptService } from './prompts.ts';
 import type { ReviewService } from './review.ts';
@@ -78,6 +78,11 @@ export interface HostToolProvider {
     readonly disabledTools?: readonly string[];
     /** Extra prompt layers for the thread (organisation and agent, 06 §4). */
     readonly layers?: ReadonlyArray<{ id: string; title: string; text: string }>;
+    /**
+     * A person approves every high-risk action of the thread (06 §8: push, publish, delete, external messages,
+     * payments), whatever its mode, rules or hooks say. Threads of a team run always get this.
+     */
+    readonly highRiskApproval?: boolean;
     handle(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
 }
 
@@ -1053,6 +1058,14 @@ export class TurnService {
 
     // Permissions -----------------------------------------------------------------------------------------
 
+    /** Whether a person approves every high-risk action of the thread (06 §8): team runs and opted-in threads. */
+    #guardsHighRisk(threadId: string): boolean {
+        return (
+            this.#deps.threads.find(threadId)?.teamRunId !== undefined ||
+            this.#hostTools.get(threadId)?.highRiskApproval === true
+        );
+    }
+
     async #facts(running: RunningTurn, request: acp.RequestPermissionRequest): Promise<CallFacts> {
         const meta = xoraMeta(request._meta);
         const kind = toolKind(request.toolCall.kind);
@@ -1087,8 +1100,12 @@ export class TurnService {
                 }
             }
         }
+        const toolName = typeof meta?.toolName === 'string' ? meta.toolName : (request.toolCall.title ?? 'tool');
+        const highRisk = this.#guardsHighRisk(running.threadId)
+            ? highRiskOf({ toolName, command }, { cwd: running.cwd })
+            : undefined;
         return {
-            toolName: typeof meta?.toolName === 'string' ? meta.toolName : (request.toolCall.title ?? 'tool'),
+            toolName,
             kind,
             readOnly: typeof meta?.readOnly === 'boolean' ? meta.readOnly : READ_KINDS.has(kind),
             ...(command !== undefined ? { command } : {}),
@@ -1104,6 +1121,7 @@ export class TurnService {
             outside,
             sensitive,
             external: running.engine.kind === 'external',
+            ...(highRisk ? { highRisk } : {}),
         };
     }
 
@@ -1135,7 +1153,7 @@ export class TurnService {
             projectRoot: running.cwd,
         });
         // A trusted PreToolUse hook may ask for a confirmation the policy would skip, or waive one it would ask
-        // for; it never overrides a deny, a path outside the workspace or a secret file (09 §4).
+        // for; it never overrides a deny, a path outside the workspace, a secret file or a high-risk action (09 §4).
         const hookDecision = (request._meta as { xora?: { hookDecision?: unknown } } | null | undefined)?.xora
             ?.hookDecision;
         let decision = policy.decision;
@@ -1145,7 +1163,8 @@ export class TurnService {
             hookDecision === 'allow' &&
             decision === 'ask' &&
             facts.outside.length === 0 &&
-            facts.sensitive.length === 0
+            facts.sensitive.length === 0 &&
+            !facts.highRisk
         ) {
             decision = 'allow';
         }
@@ -1162,6 +1181,7 @@ export class TurnService {
         });
         const summary =
             facts.command ?? (shown.length > 0 ? shown.join('\n') : (request.toolCall.title ?? facts.toolName));
+        const title = request.toolCall.title ?? facts.toolName;
         let approvalItem: ItemOf<'approval'> | undefined;
         const outcome = await new Promise<Awaited<ReturnType<ApprovalService['request']>>>((resolve) => {
             const onAbort = () => approvals.cancelThread(running.threadId);
@@ -1175,7 +1195,9 @@ export class TurnService {
                         projectId: running.projectId,
                         toolCallId: request.toolCall.toolCallId,
                         toolName: facts.toolName,
-                        title: request.toolCall.title ?? facts.toolName,
+                        title: facts.highRisk
+                            ? `高风险动作（${HIGH_RISK_LABELS[facts.highRisk.action]}）：${title}`
+                            : title,
                         toolKind: facts.kind,
                         summary,
                         ...(facts.command ? { command: facts.command } : {}),

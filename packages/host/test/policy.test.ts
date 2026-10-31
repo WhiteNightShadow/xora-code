@@ -1,6 +1,6 @@
 import type { PermissionMode, Rule } from '@xora/protocol';
 import { describe, expect, it } from 'vitest';
-import { type CallFacts, decide, type PolicyContext, rulePattern, sessionKey } from '../src/policy.ts';
+import { type CallFacts, decide, highRiskOf, type PolicyContext, rulePattern, sessionKey } from '../src/policy.ts';
 
 const root = '/work/project';
 
@@ -161,6 +161,49 @@ describe('rules', () => {
     it('derives rule patterns from the first two words of a command', () => {
         expect(rulePattern(command)).toBe('pnpm test');
         expect(rulePattern(edit)).toBe('*');
+    });
+});
+
+describe('high-risk actions (06 §8)', () => {
+    const push = facts({
+        toolName: 'bash',
+        kind: 'execute',
+        readOnly: false,
+        command: 'git push origin main',
+        readOnlyCommand: false,
+        paths: [],
+        highRisk: highRiskOf({ toolName: 'bash', command: 'git push origin main' }, { cwd: root }),
+    });
+    const allowAll: Rule = {
+        id: 'allow-all',
+        scope: 'global',
+        tool: '*',
+        pattern: '*',
+        decision: 'allow',
+        createdAt: 0,
+    };
+
+    it('are recognized for commands and MCP tools', () => {
+        expect(push.highRisk?.action).toBe('push');
+        expect(highRiskOf({ toolName: 'mcp__slack__slack_post_message' }, { cwd: root })?.action).toBe(
+            'external_message',
+        );
+        expect(highRiskOf({ toolName: 'bash', command: 'git status' }, { cwd: root })).toBeUndefined();
+    });
+
+    it('ask in every mode that would run them, whatever the rules and the session allow', () => {
+        const allowed = [sessionKey(push)];
+        for (const mode of ['ask', 'auto_edit', 'full'] as const) {
+            const result = decide(push, context(mode, [allowAll], allowed));
+            expect(result.decision).toBe('ask');
+            expect(result.reason).toContain('推送');
+        }
+    });
+
+    it('are still denied where the mode or a rule denies them', () => {
+        expect(decide(push, context('plan')).decision).toBe('deny');
+        const deny: Rule = { ...allowAll, id: 'deny-push', tool: 'bash', pattern: 'git push', decision: 'deny' };
+        expect(decide(push, context('full', [deny])).decision).toBe('deny');
     });
 });
 

@@ -281,6 +281,56 @@ describe('M1 core loop', () => {
         expect(snapshot.thread.status).toBe('failed');
     }, 60_000);
 
+    it('asks for every high-risk action of a team thread, even in full mode with an allow rule', async () => {
+        const repo = gitRepo();
+        const commands = ['git status', 'git push', 'git push'];
+        server.respondWith((request) => {
+            const body = request.body as { messages?: Array<{ role: string }> };
+            const done = (body.messages ?? []).filter((message) => message.role === 'tool').length;
+            const command = commands[done];
+            return command
+                ? openaiToolCalls([{ name: 'bash', arguments: JSON.stringify({ command }) }])
+                : openaiText('Pushed.');
+        });
+        const { harness, connectionId } = await setUp();
+        const { ui, core } = harness;
+        const project = await ui.request('project.add', { path: repo });
+        core.approvals.addRule({ scope: 'global', tool: 'bash', pattern: 'git push', decision: 'allow' });
+        const member = core.threads.create({
+            projectId: project.id,
+            title: 'T1',
+            engine: 'xora',
+            model: { connectionId, model: 'mock-model' },
+            mode: 'full',
+            effort: 'medium',
+            extra: { teamRunId: 'team-test', role: 'executor', agentId: 'coder-T1', taskId: 'T1' },
+        });
+        const asked: Array<{ title: string; alwaysScopes: readonly string[]; command?: string }> = [];
+        ui.onNotification('approval.requested', ({ approval }) => {
+            asked.push(approval);
+            // "For this session" does not carry over to the next high-risk action.
+            void ui.request('approval.respond', { approvalId: approval.id, decision: 'allow_session' });
+        });
+        await ui.request('turn.start', { threadId: member.id, text: 'push the branch' });
+        await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: member.id });
+            return read.events.find((event) => event.kind === 'turn.completed') ? read : undefined;
+        }, 'turn.completed');
+        expect(asked.map((approval) => approval.command)).toEqual(['git push', 'git push']);
+        expect(asked.every((approval) => approval.title.startsWith('高风险动作（推送）'))).toBe(true);
+        expect(asked.every((approval) => approval.alwaysScopes.length === 0)).toBe(true);
+
+        // An ordinary thread in full mode keeps running such commands on its own.
+        commands.splice(0, commands.length, 'git push');
+        const plain = await ui.request('thread.create', { projectId: project.id, mode: 'full' });
+        await ui.request('turn.start', { threadId: plain.id, text: 'push the branch' });
+        await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: plain.id });
+            return read.events.find((event) => event.kind === 'turn.completed') ? read : undefined;
+        }, 'plain turn.completed');
+        expect(asked).toHaveLength(2);
+    }, 60_000);
+
     it('stops a running turn on cancel', async () => {
         const repo = gitRepo();
         server.respondWith(() =>

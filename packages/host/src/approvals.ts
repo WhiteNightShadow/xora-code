@@ -122,8 +122,9 @@ export class ApprovalService {
             id: newId('a'),
             createdAt: now,
             expiresAt: now + APPROVAL_TTL_MS,
-            // Never offer "always" for calls that leave the workspace or touch secrets.
-            alwaysScopes: facts.outside.length > 0 || facts.sensitive.length > 0 ? [] : ['project', 'global'],
+            // Never offer "always" for calls that leave the workspace, touch secrets or are high-risk actions.
+            alwaysScopes:
+                facts.outside.length > 0 || facts.sensitive.length > 0 || facts.highRisk ? [] : ['project', 'global'],
         };
         return new Promise((resolve) => {
             const timer = setTimeout(() => this.#settle(approval.id, { status: 'expired' }), APPROVAL_TTL_MS);
@@ -139,13 +140,14 @@ export class ApprovalService {
             throw new RpcError(RpcErrorCode.NotFound, '这个审批已经处理过或已过期');
         }
         const { approval, facts } = pending;
-        if (decision === 'allow_session') {
+        // A high-risk action is approved one call at a time (06 §8): "for this session" counts as once.
+        if (decision === 'allow_session' && !facts.highRisk) {
             const keys = this.#sessionAllows.get(approval.threadId) ?? new Set<string>();
             keys.add(sessionKey(facts));
             this.#sessionAllows.set(approval.threadId, keys);
         } else if (decision === 'allow_always') {
             if (approval.alwaysScopes.length === 0) {
-                throw new RpcError(RpcErrorCode.Rejected, '超出工作区或涉及敏感文件的操作不能设为总是允许');
+                throw new RpcError(RpcErrorCode.Rejected, '高风险动作、超出工作区或涉及敏感文件的操作不能设为总是允许');
             }
             const ruleScope = scope ?? 'project';
             this.addRule({

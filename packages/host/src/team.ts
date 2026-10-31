@@ -15,7 +15,7 @@ import {
     type ToolKind,
 } from '@xora/protocol';
 import type { XoraDatabase } from '@xora/storage';
-import { isReadOnlyCommand } from '@xora/tools';
+import { type HighRisk, isReadOnlyCommand } from '@xora/tools';
 import {
     type AgentSpec,
     type AutonomyLevel,
@@ -79,7 +79,7 @@ import type { HostToolResult } from './engines/manager.ts';
 import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import type { CallFacts } from './policy.ts';
+import { type CallFacts, HIGH_RISK_LABELS, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import {
@@ -249,6 +249,8 @@ interface ConfirmRequest {
     readonly summary: string;
     readonly risks: readonly Risk[];
     readonly command?: string;
+    /** The command is a high-risk action (06 §8): approved once, never "always". */
+    readonly highRisk?: HighRisk;
 }
 
 export interface TeamDeps {
@@ -973,6 +975,7 @@ export class TeamService {
             tools: SUPERVISOR_TOOLS.filter((tool) => allowed.has(tool.name)),
             disabledTools: disabledBuiltins(agent),
             layers: systemLayers(state.host.org, agent),
+            highRiskApproval: true,
             handle: (name, input) => this.#supervisorTool(runId, name, input),
         };
     }
@@ -984,6 +987,7 @@ export class TeamService {
             tools: MEMBER_TOOLS.filter((tool) => allowed.has(tool.name)),
             disabledTools: disabledBuiltins(agent),
             layers: systemLayers(state.host.org, agent),
+            highRiskApproval: true,
             handle: (name, input, signal) => this.#memberTool(runId, taskId, name, input, signal),
         };
     }
@@ -1266,6 +1270,7 @@ export class TeamService {
                 outside: [],
                 sensitive: [],
                 external: false,
+                ...(request.highRisk ? { highRisk: request.highRisk } : {}),
             };
             let item: ItemOf<'approval'> | undefined;
             const outcome = await approvals.request(
@@ -2188,6 +2193,7 @@ export class TeamService {
             tools: [],
             disabledTools: disabledBuiltins(reviewer),
             layers: systemLayers(state.host.org, reviewer),
+            highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),
         });
         this.#save(state);
@@ -2226,6 +2232,8 @@ export class TeamService {
     ): Promise<CommandResult | undefined> {
         const { approvals, log } = this.#deps;
         const { host } = state;
+        // A card's command may push or publish too: that still needs the user, whatever the mode (06 §8).
+        const highRisk = highRiskOf({ toolName: 'acceptance', command: run }, { cwd });
         const facts: CallFacts = {
             toolName: 'acceptance',
             kind: 'execute',
@@ -2236,6 +2244,7 @@ export class TeamService {
             outside: [],
             sensitive: [],
             external: false,
+            ...(highRisk ? { highRisk } : {}),
         };
         const policy = approvals.evaluate(host.supervisorThreadId, facts, {
             mode,
@@ -2249,11 +2258,14 @@ export class TeamService {
         if (policy.decision === 'ask') {
             const outcome = await this.#confirm(state, {
                 toolName: 'acceptance',
-                title: `${label}：运行验收命令`,
+                title: highRisk
+                    ? `${label}：运行验收命令（高风险动作：${HIGH_RISK_LABELS[highRisk.action]}）`
+                    : `${label}：运行验收命令`,
                 toolKind: 'execute',
                 summary: run,
                 command: run,
                 risks: policy.risks,
+                ...(highRisk ? { highRisk } : {}),
             });
             if (outcome.status !== 'allowed') {
                 return undefined;
@@ -2503,6 +2515,7 @@ export class TeamService {
             tools: [],
             disabledTools: disabledBuiltins(reviewer),
             layers: systemLayers(host.org, reviewer),
+            highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),
         });
         this.#save(state);

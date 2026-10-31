@@ -1,5 +1,7 @@
 import path from 'node:path';
 import type { PermissionMode, Risk, Rule, ToolKind } from '@xora/protocol';
+import { type HighRisk, type HighRiskAction, highRiskOfCommand, highRiskOfTool } from '@xora/tools';
+import { isHighRiskAction } from '@xora/workflows';
 import picomatch from 'picomatch';
 
 /**
@@ -19,6 +21,8 @@ export interface CallFacts {
     readonly outside: readonly string[];
     readonly sensitive: readonly string[];
     readonly external: boolean;
+    /** A high-risk action (06 §8) in a thread whose high-risk actions a person approves; see {@link highRiskOf}. */
+    readonly highRisk?: HighRisk;
 }
 
 export interface PolicyContext {
@@ -40,6 +44,30 @@ export interface PolicyResult {
 }
 
 const WRITE_KINDS: ReadonlySet<ToolKind> = new Set(['edit', 'delete', 'move']);
+
+/** How approval cards name the high-risk actions. */
+export const HIGH_RISK_LABELS: Readonly<Record<HighRiskAction, string>> = {
+    push: '推送',
+    publish: '发布',
+    delete: '删除',
+    external_message: '对外发消息',
+    payment: '付款',
+};
+
+/**
+ * The high-risk action of a call (06 §8): a shell command by what it runs, an MCP tool by its name. `roots` are the
+ * folders the agent works in; deleting outside them, or one of them as a whole, is high risk.
+ */
+export function highRiskOf(
+    call: { readonly toolName: string; readonly command?: string | undefined },
+    where: { readonly cwd: string; readonly roots?: readonly string[] },
+): HighRisk | undefined {
+    const found =
+        call.command !== undefined
+            ? highRiskOfCommand(call.command, { cwd: where.cwd, roots: where.roots ?? [where.cwd] })
+            : highRiskOfTool(call.toolName);
+    return found && isHighRiskAction(found.action) ? found : undefined;
+}
 
 export function risksOf(facts: CallFacts): Risk[] {
     const risks = new Set<Risk>();
@@ -65,6 +93,9 @@ export function risksOf(facts: CallFacts): Risk[] {
     }
     if (facts.external) {
         risks.add('external_agent');
+    }
+    if (facts.highRisk) {
+        risks.add(facts.highRisk.action === 'delete' ? 'delete' : 'network');
     }
     return [...risks];
 }
@@ -172,6 +203,10 @@ export function decide(facts: CallFacts, context: PolicyContext): PolicyResult {
     }
     if (base.decision === 'deny') {
         return { decision: 'deny', risks, reason: base.reason };
+    }
+    // A high-risk action always waits for a person (06 §8): no rule, session allowance or mode settles it.
+    if (facts.highRisk) {
+        return { decision: 'ask', risks, reason: `高风险动作（${HIGH_RISK_LABELS[facts.highRisk.action]}）要你确认` };
     }
     const ask = context.rules.find((rule) => rule.decision === 'ask' && ruleMatches(rule, facts, context));
     if (ask) {
