@@ -532,6 +532,67 @@ describe('agent team limits', () => {
         expect(stopped.tasks.map((task) => task.status)).toEqual(['cancelled']);
     }, 60_000);
 
+    it('reminds a supervisor that planned nothing, then pauses instead of waiting for nobody', async () => {
+        const repo = gitRepo();
+        let turns = 0;
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) {
+                return undefined;
+            }
+            if (agentOf(body) !== 'Supervisor') {
+                return say('not expected');
+            }
+            turns++;
+            // What deepseek-v4-pro did once in the evaluation: a plan in prose, waiting for an approval in the chat.
+            return say('计划：一个任务改src/text.js。请批准后我再创建任务卡。');
+        });
+        const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+        approve(ui, [], new Set());
+        await connect(ui);
+        const project = await ui.request('project.add', { path: repo });
+        const run = await ui.request('team.start', {
+            projectId: project.id,
+            goal: '只写计划',
+            autonomy: 'L3',
+            budget: 5,
+        });
+        const paused = await waitFor(async () => {
+            const current = await ui.request('team.get', { runId: run.id });
+            return current.status === 'paused' ? current : undefined;
+        }, 'paused run');
+        expect(paused.note).toContain('主管几次结束都没有拆出任务');
+        expect(turns).toBe(3);
+        const reminded = server.requests.filter((request) =>
+            JSON.stringify((request.body as ChatBody | undefined)?.messages ?? []).includes(
+                'nobody approves plans in this conversation',
+            ),
+        );
+        expect(reminded.length).toBeGreaterThanOrEqual(2);
+    }, 60_000);
+
+    it('tells the user when a supervisor that planned nothing may be waiting for them', async () => {
+        const repo = gitRepo();
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) {
+                return undefined;
+            }
+            return say('需要你先确认：短信服务商用哪家？');
+        });
+        const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+        approve(ui, [], new Set());
+        await connect(ui);
+        const project = await ui.request('project.add', { path: repo });
+        const run = await ui.request('team.start', { projectId: project.id, goal: '加短信登录', autonomy: 'L1' });
+        const waiting = await waitFor(async () => {
+            const current = await ui.request('team.get', { runId: run.id });
+            return current.note ? current : undefined;
+        }, 'a note');
+        expect(waiting.status).toBe('planning');
+        expect(waiting.note).toContain('可能在主管线程里等你回复');
+    }, 60_000);
+
     it('works no more cards at once than the team concurrency setting allows', async () => {
         const repo = gitRepo();
         const cards = ['T1', 'T2', 'T3'].map((id) => ({

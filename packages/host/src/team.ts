@@ -152,6 +152,15 @@ const RECENT_ENDS = 64;
 /** Model errors after which the next model of the tier's chain takes over (06 §3 rule 2). */
 const FALLBACK_ERRORS = new Set(['rate_limit', 'overloaded', 'server', 'network', 'timeout', 'quota']);
 
+/** Planning turns that may end without a task card before a run with no person in the loop pauses. */
+const MAX_PLAN_NUDGES = 2;
+
+/** What the supervisor is told after a planning turn without a task card, when no person approves plans. */
+const PLAN_NUDGE =
+    'You ended your turn without creating any task card, and nobody approves plans in this conversation: at this ' +
+    "run's autonomy level no person is involved before the report. Create the task cards now with task_create; they " +
+    'are dispatched from there. If the goal cannot be done at all, say why in your final message.';
+
 type RunStatus = TeamRunView['status'];
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['done', 'failed', 'cancelled']);
 const WORKFLOW_STATE: Readonly<Record<RunStatus, { status: TeamRunStatus; phase?: TeamRunPhase }>> = {
@@ -213,6 +222,10 @@ interface RunHost {
     note?: string;
     /** Set while the run waits on nothing it can do itself. */
     stuck?: boolean;
+    /** Planning turns that ended without a task card (see MAX_PLAN_NUDGES). */
+    planNudges?: number;
+    /** A planning turn ended without a task card while a person is in the loop: the note says so until there is one. */
+    awaitingUser?: boolean;
     supervisorThreadId: string;
     /** Latest supervisor turn: host cards and notices are attached to it. */
     supervisorTurnId?: string;
@@ -358,6 +371,8 @@ const TEXT = bilingual(
         stuck: (blockers: readonly string[]) =>
             `没有能继续的任务（${blockers.join('，')}）；在主管线程里说明怎么处理，或者停止这次运行`,
         stuckTitle: '团队卡住了',
+        awaitingUser: '主管这一轮没有拆出任务，可能在主管线程里等你回复：回复它，或者停止这次运行',
+        noPlan: '主管几次结束都没有拆出任务；在主管线程里说明怎么做后点继续，或者停止这次运行',
         tierLowered: (taskId: string, tier: Tier, percent: number) =>
             `${taskId}降到${tierLabel(tier, 'zh-CN')}档执行（预算已用到${percent}%）`,
         notGitRepo: (taskId: string) => `项目不是git仓库，${taskId}改在项目目录里执行`,
@@ -453,6 +468,9 @@ const TEXT = bilingual(
         stuck: (blockers) =>
             `No task can go on (${blockers.join(', ')}); tell the supervisor in its thread what to do, or stop the run`,
         stuckTitle: 'The team is stuck',
+        awaitingUser:
+            'The supervisor ended its turn without task cards and may be waiting for you in its thread: reply there, or stop the run',
+        noPlan: 'The supervisor ended several turns without task cards; tell it what to do in its thread and click Continue, or stop the run',
         tierLowered: (taskId, tier, percent) =>
             `${taskId} runs at the ${tierLabel(tier, 'en')} tier instead (${percent}% of the budget is spent)`,
         notGitRepo: (taskId) => `The project is not a git repository; ${taskId} runs in the project folder instead`,
@@ -740,6 +758,7 @@ export class TeamService {
         const to = host.resumeTo ?? (host.planApproved ? 'running' : 'planning');
         host.resumeTo = undefined;
         host.stuck = false;
+        host.planNudges = 0;
         this.#setStatus(state, to === 'awaiting_plan_approval' ? 'planning' : to);
         this.#attachTools(state);
         for (const task of state.board.list({ status: ['assigned', 'in_progress', 'in_review'] })) {
@@ -1418,12 +1437,41 @@ export class TeamService {
             this.#save(state);
             return;
         }
-        if (host.status === 'planning' && event.outcome === 'completed' && state.board.list().length > 0) {
-            void this.#planReady(state);
+        if (host.status === 'planning' && event.outcome === 'completed') {
+            if (state.board.list().length > 0) {
+                if (host.awaitingUser) {
+                    host.awaitingUser = false;
+                    delete host.note;
+                }
+                void this.#planReady(state);
+            } else if (!this.#plannedNothing(state)) {
+                return;
+            }
         }
         this.#save(state);
         this.#advance(state);
         this.#scheduleWake(state);
+    }
+
+    /**
+     * The supervisor ended a planning turn without a task card. With a person in the loop it may be asking them
+     * something, which the board says; without one it is told to plan, MAX_PLAN_NUDGES times, before the run pauses
+     * instead of waiting for nobody. False when the run paused.
+     */
+    #plannedNothing(state: RunState): boolean {
+        const { host } = state;
+        if (needsHuman(state.run.autonomy, 'plan_approval')) {
+            host.awaitingUser = true;
+            host.note = textOf(TEXT).awaitingUser;
+            return true;
+        }
+        host.planNudges = (host.planNudges ?? 0) + 1;
+        if (host.planNudges > MAX_PLAN_NUDGES) {
+            this.#pause(state, textOf(TEXT).noPlan);
+            return false;
+        }
+        this.#wake(state, PLAN_NUDGE);
+        return true;
     }
 
     /** The plan is ready: the user confirms it when the autonomy level asks for that (06 §8), then dispatch starts. */
