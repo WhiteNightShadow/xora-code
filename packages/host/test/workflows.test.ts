@@ -510,6 +510,66 @@ describe('workflow runs', () => {
         ).toBeUndefined();
     }, 120_000);
 
+    it('starts a run when its webhook is called', async () => {
+        const hook = `
+name: on-hook
+budget: { perRun: 5 }
+trigger:
+  manual: false
+  webhook: true
+steps:
+  - id: look
+    agent: reviewer
+    tier: economy
+    task: "看看这个请求：{{trigger.payload}}"
+`;
+        const repo = gitRepo({ 'on-hook.yaml': hook });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        server.respondWith(respond);
+        const host = await startHost(dataDir);
+        approve(host.ui, [], new Set());
+        await connectCustom(host.ui);
+        await host.ui.request('provider.save', {
+            presetId: 'deepseek',
+            name: 'deepseek mock',
+            apiKey: 'test-key',
+            baseUrl: server.url,
+        });
+        const project = await host.ui.request('project.add', { path: repo });
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        await host.ui.request('workflow.triggers', { projectId: project.id, key: 'project:on-hook', enabled: true });
+        const webhook = await waitFor(
+            () =>
+                host.ui
+                    .request('workflow.webhook', { projectId: project.id, key: 'project:on-hook' })
+                    .catch(() => undefined),
+            'webhook address',
+        );
+        expect(webhook.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/hooks\//);
+
+        const denied = await fetch(webhook.url, {
+            method: 'POST',
+            body: '{}',
+            headers: { authorization: 'Bearer nope' },
+        });
+        expect(denied.status).toBe(401);
+        const accepted = await fetch(webhook.url, {
+            method: 'POST',
+            body: JSON.stringify({ build: 42 }),
+            headers: { authorization: `Bearer ${webhook.token}`, 'content-type': 'application/json' },
+        });
+        expect(accepted.status).toBe(202);
+        const run = await waitFor(async () => {
+            const [latest] = await host.ui.request('workflow.runs', { projectId: project.id });
+            return latest?.status === 'completed' || latest?.status === 'failed' ? latest : undefined;
+        }, 'webhook run');
+        expect(run).toMatchObject({ status: 'completed', reason: 'webhook', unattended: true });
+        const prompt = server.requests
+            .map((request) => request.body as ChatBody | undefined)
+            .find((body) => textOf(body?.messages.at(-1)?.content).includes('看看这个请求'));
+        expect(textOf(prompt?.messages.at(-1)?.content)).toContain('看看这个请求：{"build":42}');
+    }, 120_000);
+
     it('distills a thread into a workflow file that the check tool accepts', async () => {
         const repo = gitRepo({});
         const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));

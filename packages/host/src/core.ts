@@ -35,6 +35,7 @@ import { GoalService } from './goals.ts';
 import { HistoryService } from './history.ts';
 import { detectLocalServers } from './local-models.ts';
 import { HostLog, type Logger } from './log.ts';
+import { offPeakStartFor } from './off-peak.ts';
 import { type HostPaths, hostPaths } from './paths.ts';
 import { ProjectService } from './projects.ts';
 import { PromptService } from './prompts.ts';
@@ -45,11 +46,12 @@ import { mergePath, resolveLoginPath } from './shell-env.ts';
 import { registerTeamHandlers, TeamService } from './team.ts';
 import { TerminalService } from './terminals.ts';
 import { ThreadStore } from './threads.ts';
+import { type TriggerFire, TriggerService } from './triggers.ts';
 import { TurnService } from './turns.ts';
 import { UpdateService } from './updates.ts';
 import { UsageService } from './usage.ts';
 import { which } from './which.ts';
-import { registerWorkflowHandlers, WorkflowService } from './workflows.ts';
+import { registerWorkflowHandlers, triggerKey, WorkflowService } from './workflows.ts';
 import { WorktreeService } from './worktrees.ts';
 
 export interface HostOptions {
@@ -96,6 +98,8 @@ export class HostCore {
     readonly team: TeamService;
     readonly workflows: WorkflowService;
     readonly distill: DistillService;
+    readonly triggers: TriggerService;
+    #triggerSync: ReturnType<typeof setInterval> | undefined;
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
 
@@ -197,6 +201,12 @@ export class HostCore {
             turns: this.turns,
             orgsDir: this.paths.orgsDir,
         });
+        // The webhook keeps its port across restarts, so the URL given out stays valid (06 §12).
+        const webhookPort = Number(this.#value('webhookPort') ?? 0);
+        this.triggers = new TriggerService({
+            log: this.log,
+            ...(Number.isInteger(webhookPort) && webhookPort > 0 ? { webhookPort } : {}),
+        });
         this.workflows = new WorkflowService({
             db: this.db,
             bus: this.bus,
@@ -211,7 +221,20 @@ export class HostCore {
             team: this.team,
             orgsDir: this.paths.orgsDir,
             workflowsDir: this.paths.workflowsDir,
+            offPeakAt: (models, now) => offPeakStartFor(this.connections, models, new Date(now))?.getTime(),
+            onTriggersChanged: () => this.#syncTriggers(),
+            webhookUrl: (key) => this.triggers.webhookUrl(key),
+            nextScheduledAt: (key) => this.triggers.nextScheduledAt(key),
+            muteFiles: (projectDir) => {
+                const files = this.triggers.muteFiles(projectDir);
+                const git = this.triggers.muteGit(projectDir);
+                return () => {
+                    files();
+                    git();
+                };
+            },
         });
+        this.triggers.onFire((fire) => this.#onTrigger(fire));
         this.distill = new DistillService({
             threads: this.threads,
             turns: this.turns,
@@ -249,8 +272,73 @@ export class HostCore {
                 process.env.PATH = merged;
             }
         }
+        core.#syncTriggers();
+        // Also catches what no event reports: a project that lost its trust, a workflow file edited by hand.
+        core.#triggerSync = setInterval(() => core.#syncTriggers(), 60_000);
+        core.#triggerSync.unref?.();
         core.log.info(`host ${options.bundleVersion} ready, data in ${options.dataDir}`);
         return core;
+    }
+
+    #value(key: string): string | undefined {
+        return this.db.get<{ value: string }>('select value from host_values where key = ?', [key])?.value;
+    }
+
+    #setValue(key: string, value: string): void {
+        this.db.run(
+            'insert into host_values (key, value) values (?, ?) on conflict (key) do update set value = excluded.value',
+            [key, value],
+        );
+    }
+
+    #syncing: Promise<void> = Promise.resolve();
+
+    /** Hands the switched-on workflow triggers to the trigger service (06 §12). */
+    #syncTriggers(): void {
+        this.#syncing = this.#syncing
+            .then(async () => {
+                const enabled = await this.workflows.enabledTriggers();
+                await this.triggers.update(
+                    enabled.map((entry) => ({
+                        key: triggerKey(entry.projectId, entry.key),
+                        projectDir: entry.projectDir,
+                        spec: entry.definition.trigger,
+                        ...(entry.lastScheduledAt !== undefined ? { lastScheduledAt: entry.lastScheduledAt } : {}),
+                        ...(entry.webhookToken ? { webhookToken: entry.webhookToken } : {}),
+                    })),
+                );
+                const port = this.triggers.webhookPort();
+                if (port !== undefined && String(port) !== this.#value('webhookPort')) {
+                    this.#setValue('webhookPort', String(port));
+                }
+            })
+            .catch((error) =>
+                this.log.warn(`workflow triggers: ${error instanceof Error ? error.message : String(error)}`),
+            );
+    }
+
+    #onTrigger(fire: TriggerFire): void {
+        const split = fire.key.indexOf('|');
+        if (split < 0) return;
+        const projectId = fire.key.slice(0, split);
+        const key = fire.key.slice(split + 1);
+        void this.workflows
+            .fire({
+                projectId,
+                key,
+                trigger: {
+                    reason: fire.reason,
+                    ...(fire.files ? { files: fire.files } : {}),
+                    ...(fire.git ? { branch: fire.git.branch, commit: fire.git.commit, event: fire.git.event } : {}),
+                    ...(fire.payload !== undefined ? { payload: fire.payload } : {}),
+                },
+                ...(fire.scheduledFor !== undefined ? { scheduledFor: fire.scheduledFor } : {}),
+            })
+            .catch((error) =>
+                this.log.warn(
+                    `workflow ${key}: trigger failed: ${error instanceof Error ? error.message : String(error)}`,
+                ),
+            );
     }
 
     /** Threads a crash left running are marked failed, with a closing event so the timeline is complete. */
@@ -943,6 +1031,8 @@ export class HostCore {
     }
 
     async dispose(): Promise<void> {
+        clearInterval(this.#triggerSync);
+        await this.triggers.close().catch(() => undefined);
         this.terminals.dispose();
         this.updates.dispose();
         this.workflows.dispose();

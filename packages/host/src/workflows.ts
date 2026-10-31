@@ -190,6 +190,8 @@ export interface WorkflowDeps {
     readonly onTriggersChanged?: () => void;
     /** The local webhook address of a workflow, once the trigger service runs one. */
     readonly webhookUrl?: (triggerKey: string) => string | undefined;
+    /** When the trigger service starts a workflow next on its schedule. */
+    readonly nextScheduledAt?: (triggerKey: string) => number | undefined;
     /** Stops file triggers of a project while a run works in it, so its own edits start nothing; returns the undo. */
     readonly muteFiles?: (projectDir: string) => () => void;
 }
@@ -205,6 +207,10 @@ function tail(output: string): string {
 
 function round(amount: number): number {
     return Math.round(amount * 1e6) / 1e6;
+}
+
+function nextAt(at: number | undefined): { nextRunAt?: number } {
+    return at === undefined ? {} : { nextRunAt: at };
 }
 
 function stepTitle(step: WorkflowStep): string {
@@ -381,7 +387,13 @@ export class WorkflowService {
                 webhook: trigger?.webhook ?? false,
                 offPeakOnly: trigger?.offPeakOnly ?? false,
             },
-            triggers: { enabled: row?.enabled === 1, stale: row?.enabled === 1 && row.file_hash !== entry.hash },
+            triggers: {
+                enabled: row?.enabled === 1,
+                stale: row?.enabled === 1 && row.file_hash !== entry.hash,
+                ...(row?.enabled === 1 && row.file_hash === entry.hash
+                    ? nextAt(this.#deps.nextScheduledAt?.(triggerKey(project.id, entry.key)))
+                    : {}),
+            },
             budget: definition?.budget
                 ? { amount: definition.budget.perRun, currency: definition.budget.currency ?? currency }
                 : null,

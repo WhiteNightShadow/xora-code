@@ -702,7 +702,12 @@ export const WorkflowInfoSchema = z.object({
         offPeakOnly: z.boolean(),
     }),
     /** Triggers act only once the user switched them on, and stop when the file changed since (`stale`). */
-    triggers: z.object({ enabled: z.boolean(), stale: z.boolean() }),
+    triggers: z.object({
+        enabled: z.boolean(),
+        stale: z.boolean(),
+        /** The next scheduled run, while the triggers are on. */
+        nextRunAt: z.number().optional(),
+    }),
     budget: MoneySchema.nullable(),
 });
 export type WorkflowInfo = z.infer<typeof WorkflowInfoSchema>;

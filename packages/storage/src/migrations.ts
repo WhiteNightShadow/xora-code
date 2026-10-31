@@ -203,4 +203,14 @@ create table workflow_triggers (
 );
 `,
     },
+    {
+        // Small values the host keeps across restarts, e.g. the port of the local workflow webhook.
+        version: 4,
+        sql: `
+create table host_values (
+    key text primary key,
+    value text not null
+);
+`,
+    },
 ];

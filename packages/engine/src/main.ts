@@ -50,6 +50,12 @@ function shellPort(parent: ParentPort): Promise<AcpPort> {
     });
 }
 
+// A signal (the shell stopping a utility process sends SIGTERM) ends the engine through `exit`, so the language
+// servers it started go with it.
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.on(signal, () => process.exit(0));
+}
+
 const stream = parentPort
     ? shellPort(parentPort).then(portStream)
     : Promise.resolve(

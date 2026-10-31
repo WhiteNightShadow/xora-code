@@ -404,6 +404,13 @@ function WorkflowCard({
                             label={s.workflow.triggers}
                         />
                     </Field>
+                    {info.triggers.nextRunAt !== undefined && (
+                        <div className="workflow-card__meta">
+                            {format(s.workflow.nextRun, {
+                                time: new Date(info.triggers.nextRunAt).toLocaleString(undefined, { hour12: false }),
+                            })}
+                        </div>
+                    )}
                     {info.trigger.webhook && info.triggers.enabled && !info.triggers.stale && (
                         <div className="workflow-card__webhook">
                             {webhook ? (

@@ -9,7 +9,7 @@ const fromConnections: (connections: ConnectionService) => ModelLookup = (connec
 const PRICING: Record<string, string | undefined> = {
     'deepseek-flash': 'deepseek-flash@2026-10',
     'glm-5.3': 'glm-5.3@2026-10',
-    'deepseek-v4-pro': undefined,
+    'glm-5.3-flash': undefined,
 };
 
 /** Connection `c1` knows the presets' models; any other connection has been removed. */
@@ -36,7 +36,7 @@ describe('off-peak waiting for workflow runs', () => {
         expect(rules).toHaveLength(1);
         expect(rules[0]).toMatchObject({ timezone: 'Asia/Shanghai', offPeakMultiplier: 0.5 });
         // glm has no peak hours; a model without a price table adds nothing.
-        expect(peakRules(models, [glm, { connectionId: 'c1', model: 'deepseek-v4-pro' }])).toEqual([]);
+        expect(peakRules(models, [glm, { connectionId: 'c1', model: 'glm-5.3-flash' }])).toEqual([]);
         expect(peakRules(models, [{ connectionId: 'c1', model: 'local-qwen' }])).toEqual([]);
     });
 
