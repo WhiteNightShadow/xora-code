@@ -22,7 +22,7 @@ packages/engine
 └─ metering     本地计量事件经_meta交给host，不外发
 ```
 
-- **运行**：`ELECTRON_RUN_AS_NODE=1 <electron可执行文件> engine.js`，用electron自带的node，不另带node。
+- **运行**：在应用里是bootstrap启动的electron utility process，用electron自带的node，不另带node，acp走MessagePort（见02第1节）；测试和不在electron里时用node启动，acp走stdio。
 - **版本**：随应用包发布，可以热更新（见12）。
 - **测试**：用test-kit里的mock模型服务做录制回放，按厂商建立怪癖回归集（见13）。
 

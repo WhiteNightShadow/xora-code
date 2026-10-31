@@ -49,9 +49,10 @@
 - 订阅key单独标注用途，只给对应的编程端点用。
 - 日志、事件、诊断包里一律不出现密钥。
 - **安装包的electron fuses**（打包时写进electron二进制，配置在`apps/desktop/electron-builder.yml`）：
-  - 关掉：主进程的`--inspect`等调试参数和SIGUSR1（不让别的进程挂上调试器、借主进程调`safeStorage`解密）；`NODE_OPTIONS`和`NODE_EXTRA_CA_CERTS`；`file://`页面的额外权限（修复模式页面因此改走`xora://safe-mode/`）。
+  - 关掉：`RunAsNode`（`ELECTRON_RUN_AS_NODE=1`不再生效。开着时谁都能把这个二进制当node用，还能开调试器，调试参数那根fuse管不到这种模式）；主进程的`--inspect`等调试参数和SIGUSR1（不让别的进程挂上调试器、借主进程调`safeStorage`解密）；`NODE_OPTIONS`和`NODE_EXTRA_CA_CERTS`；`file://`页面的额外权限（修复模式页面因此改走`xora://safe-mode/`）。
   - 打开：cookie加密；app.asar完整性校验（mac、windows）；只从app.asar加载代码。
-  - `RunAsNode`暂时保留，因为xora engine就是用`ELECTRON_RUN_AS_NODE=1`跑在这个二进制上的。它的代价是谁都能把这个二进制当node用，包括开调试器（已核对：这种模式下调试参数那根fuse管不到）。发布前把引擎改成utility process，再关掉它。
+  - 关`RunAsNode`的前提是xora engine不再用`ELECTRON_RUN_AS_NODE=1`启动，改成utility process（见02第1节）。bootstrap只启动它正在用的、已验签应用包里的文件（`engine/index.cjs`），不接受包外的路径；引擎的环境变量里去掉`ELECTRON_RUN_AS_NODE`，host启动时也把它从自己的环境里删掉，外部agent、agent执行的命令和终端都继承不到。
+  - `RunAsNode`关掉后，`child_process.fork`会直接报错（electron 44.10.0已核对），要起node进程只能用utility process。已知影响：windows上node-pty关闭终端时要fork一个脚本查询控制台里的进程，这一步会失败（host日志里记一条未处理的rejection），终端照常关闭，只是少了逐个结束其中子进程这一步；待windows实机核对。
   - 关掉`NODE_OPTIONS`后，`NODE_EXTRA_CA_CERTS`也不再生效。host和引擎启动时把系统证书库里受信任的证书加进来，企业代理的根证书装进系统证书库就能用。
   - mac上不签名的包，翻转fuses后要重新做ad-hoc签名（`resetAdHocDarwinSignature`），否则apple silicon拒绝启动。
 

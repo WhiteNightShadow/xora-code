@@ -14,9 +14,9 @@
 [host：utilityProcess，常驻]
    线程状态机 · 审批与策略 · worktree · 审阅与检查点 · agent名册、任务与工作流 · 调度与触发
    提示词拼装 · 供应商与模型目录 · 计量与预算 · 扩展管理 · 存储
-        │ acp（json-rpc over stdio）
+        │ acp（json-rpc：xora engine走MessagePort，外部agent走stdio）
         ▼
-[引擎：子进程]  xora engine（node） | 外部acp agent（codex、claude、kimi code、opencode、grok、dsh …）
+[引擎]  xora engine（utilityProcess，由bootstrap启动） | 外部acp agent（子进程：codex、claude、kimi code、opencode、grok、dsh …）
         │ https
         ▼
 [模型]  api · 订阅 · 本地
@@ -28,7 +28,10 @@
 - **代码位置**：
   - ui、host、xora engine都在应用包里。
   - preload和原生模块（node-pty）在shell里。原生模块和electron abi绑定，应用包的清单要声明自己需要的abi。
-- **引擎启动方式**：xora engine用`ELECTRON_RUN_AS_NODE=1`加electron可执行文件启动，用的是electron自带的node，不用另外打包node。代价是安装包的`RunAsNode`这根fuse不能关，发布前改成utility process（见10第6节）。
+- **引擎启动方式**：xora engine是electron的utility process，用的是electron自带的node，不用另外打包node，安装包也就能关掉`RunAsNode`这根fuse（见10第6节）。
+  - utility process只有主进程能fork，所以host用`shell.engine.start`请bootstrap启动。bootstrap只启动它正在用的应用包里的`engine/index.cjs`，再建一对MessagePort，一端交给引擎，一端直接交给host，acp消息不经过主进程。
+  - 引擎的stdout、stderr和退出由bootstrap转告host；崩溃检测、下次用到时重启仍由host负责。host重启或应用退出时，bootstrap结束这个host的全部引擎。
+  - 不在electron里时（测试、单独用node跑host），host用自己的node经stdio启动引擎。外部agent一直是子进程，走stdio。
 - **进程生命周期**：
   - 窗口关了任务继续跑（托盘常驻）。
   - host崩溃时由bootstrap重启，并从日志恢复线程状态。
