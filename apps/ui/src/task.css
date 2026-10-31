@@ -1,0 +1,400 @@
+/* Team run overview (TeamView.tsx): progress, the supervisor's feedback, members' conclusions, progress report. */
+
+.task-overview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-4);
+    padding-bottom: var(--xk-space-6);
+}
+
+.overview-card {
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-xs);
+    padding: var(--xk-space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-3);
+    animation: overview-in var(--xk-duration-slow) var(--xk-ease-out) both;
+}
+
+.overview-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-3);
+}
+
+.overview-card h3,
+.overview-section h3 {
+    margin: 0;
+    font-size: var(--xk-text-md);
+    font-weight: var(--xk-weight-semibold);
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+}
+
+.overview-card h3 time {
+    margin-left: auto;
+    font-weight: var(--xk-weight-regular);
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-faint);
+}
+
+.overview-muted {
+    margin: 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+/* Stepper ------------------------------------------------------------------------------------------------- */
+
+.stepper {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.stepper__step {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-faint);
+}
+
+/* The line to the next step. */
+.stepper__step::after {
+    content: "";
+    position: absolute;
+    top: 6px;
+    left: calc(50% + 10px);
+    right: calc(-50% + 10px);
+    height: 2px;
+    border-radius: 1px;
+    background: var(--xk-border);
+    transition: background var(--xk-duration-base) var(--xk-ease-out);
+}
+
+.stepper__step:last-child::after {
+    display: none;
+}
+
+.stepper__dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--xk-border-strong);
+    background: var(--xk-bg);
+    transition:
+        background var(--xk-duration-base) var(--xk-ease-out),
+        border-color var(--xk-duration-base) var(--xk-ease-out),
+        transform var(--xk-duration-base) var(--xk-ease-out);
+}
+
+.stepper__step.is-done {
+    color: var(--xk-text-muted);
+}
+
+.stepper__step.is-done .stepper__dot {
+    background: var(--xk-ok);
+    border-color: var(--xk-ok);
+}
+
+.stepper__step.is-done::after {
+    background: var(--xk-ok);
+}
+
+.stepper__step.is-active {
+    color: var(--xk-accent-text);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.stepper__step.is-active .stepper__dot {
+    border-color: var(--xk-accent);
+    background: var(--xk-accent-subtle);
+    animation: overview-ring 1.6s ease-out infinite;
+}
+
+.overview-progress__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--xk-space-4);
+    font-size: var(--xk-text-sm);
+    color: var(--xk-text-muted);
+}
+
+.overview-progress__continued {
+    color: var(--xk-accent-text);
+}
+
+.progress-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--xk-bg-sunken);
+    overflow: hidden;
+}
+
+.progress-bar__fill {
+    height: 100%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--xk-accent), var(--xk-ok));
+    transition: width var(--xk-duration-slow) var(--xk-ease-out);
+}
+
+/* Supervisor feedback ---------------------------------------------------------------------------------------- */
+
+.feedback-card {
+    border-left: 3px solid var(--xk-accent);
+}
+
+.feedback-card__avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--xk-accent);
+    color: var(--xk-on-accent);
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.feedback-card__latest {
+    font-size: var(--xk-text-md);
+    line-height: var(--xk-leading-relaxed);
+}
+
+.feedback-card__earlier {
+    border-top: 1px dashed var(--xk-border);
+    padding-top: var(--xk-space-2);
+    font-size: var(--xk-text-sm);
+    color: var(--xk-text-muted);
+}
+
+.feedback-card__earlier time {
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-faint);
+}
+
+/* Members' conclusions --------------------------------------------------------------------------------------- */
+
+.conclusion-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--xk-space-3);
+}
+
+.conclusion-card {
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-xs);
+    padding: var(--xk-space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-2);
+    animation: overview-in var(--xk-duration-slow) var(--xk-ease-out) both;
+    transition:
+        box-shadow var(--xk-duration-base) var(--xk-ease-out),
+        transform var(--xk-duration-base) var(--xk-ease-out);
+}
+
+.conclusion-card:hover {
+    box-shadow: var(--xk-shadow-md);
+    transform: translateY(-1px);
+}
+
+.conclusion-card header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--xk-space-2);
+}
+
+.conclusion-card__title {
+    font-weight: var(--xk-weight-semibold);
+    font-size: var(--xk-text-md);
+}
+
+.conclusion-card__meta,
+.conclusion-card__files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--xk-space-2);
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+.conclusion-card__body {
+    font-size: var(--xk-text-sm);
+    line-height: var(--xk-leading-relaxed);
+}
+
+.conclusion-card footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--xk-space-2);
+    margin-top: auto;
+}
+
+.status-pill {
+    flex: none;
+    padding: 1px 8px;
+    border-radius: var(--xk-radius-full);
+    font-size: var(--xk-text-2xs);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text-muted);
+}
+
+.status-pill.status--done {
+    background: var(--xk-ok-subtle);
+    color: var(--xk-ok);
+}
+
+.status-pill.status--assigned,
+.status-pill.status--in_progress,
+.status-pill.status--in_review {
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+}
+
+.status-pill.status--failed,
+.status-pill.status--blocked {
+    background: var(--xk-error-subtle);
+    color: var(--xk-error);
+}
+
+.verdict {
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.verdict.is-pass {
+    color: var(--xk-ok);
+}
+
+.verdict.is-fail {
+    color: var(--xk-error);
+}
+
+/* Progress report -------------------------------------------------------------------------------------------- */
+
+.status-counts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--xk-space-2);
+}
+
+.status-count {
+    padding: 3px 10px;
+    border-radius: var(--xk-radius-full);
+    font-size: var(--xk-text-xs);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text-muted);
+}
+
+.status-count strong {
+    color: var(--xk-text);
+}
+
+.progress-timeline {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 0 14px;
+    border-left: 2px solid var(--xk-border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-2);
+}
+
+.progress-timeline__item {
+    position: relative;
+    display: flex;
+    gap: var(--xk-space-3);
+    font-size: var(--xk-text-sm);
+    animation: overview-in var(--xk-duration-slow) var(--xk-ease-out) both;
+}
+
+.progress-timeline__item::before {
+    content: "";
+    position: absolute;
+    left: -20px;
+    top: 6px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--xk-border-strong);
+}
+
+.progress-timeline__item.is-complete::before {
+    background: var(--xk-ok);
+}
+
+.progress-timeline__item time {
+    flex: none;
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+    min-width: 72px;
+}
+
+.overview-composer textarea {
+    width: 100%;
+    resize: vertical;
+}
+
+/* Motion ----------------------------------------------------------------------------------------------------- */
+
+.overview-pulse {
+    animation: overview-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes overview-in {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@keyframes overview-pulse {
+    50% {
+        opacity: 0.45;
+    }
+}
+
+@keyframes overview-ring {
+    0% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--xk-accent) 35%, transparent);
+    }
+    70% {
+        box-shadow: 0 0 0 6px transparent;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .overview-card,
+    .conclusion-card,
+    .progress-timeline__item,
+    .overview-pulse,
+    .stepper__step.is-active .stepper__dot {
+        animation: none;
+    }
+
+    .conclusion-card,
+    .progress-bar__fill,
+    .stepper__dot {
+        transition: none;
+    }
+}

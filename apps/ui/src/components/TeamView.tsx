@@ -5,6 +5,7 @@ import { PendingApproval } from '../items/ItemView.tsx';
 import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { Markdown } from './Markdown.tsx';
+import '../task.css';
 import { Badge, Empty, Field, formatMoney, Modal, Select, Spinner } from './primitives.tsx';
 
 const COLUMNS: Array<{ key: string; statuses: string[] }> = [
@@ -133,7 +134,7 @@ function Conversation({ run }: { run: TeamRun }) {
 export function TeamView({ runId }: { runId: string }) {
     const s = useStrings();
     const run = useApp((state) => state.teamRuns[runId]);
-    const [tab, setTab] = useState<'board' | 'ledger' | 'conversation' | 'cost' | 'report'>('board');
+    const [tab, setTab] = useState<'overview' | 'board' | 'ledger' | 'conversation' | 'cost' | 'report'>('overview');
     const approvals = useApp((state) => state.approvals);
     // What the run waits on from the user, wherever in its threads it was asked: the plan, risky commands, the delivery.
     const runThreads = new Set(run ? [run.supervisorThreadId, ...run.tasks.map((task) => task.threadId)] : []);
@@ -259,7 +260,7 @@ export function TeamView({ runId }: { runId: string }) {
                 </section>
             )}
             <div className="segmented team__tabs">
-                {(['board', 'ledger', 'conversation', 'cost', 'report'] as const).map((key) => (
+                {(['overview', 'board', 'ledger', 'conversation', 'cost', 'report'] as const).map((key) => (
                     <button
                         key={key}
                         type="button"
@@ -270,6 +271,7 @@ export function TeamView({ runId }: { runId: string }) {
                     </button>
                 ))}
             </div>
+            {tab === 'overview' && <TaskOverview run={run} onReport={() => setTab('report')} />}
             {tab === 'board' &&
                 (run.tasks.length === 0 ? (
                     <Empty>{s.team.noTasks}</Empty>
@@ -474,5 +476,300 @@ function LedgerView({ ledger }: { ledger: unknown }) {
                 <div className="muted">{format(s.team.ledgerVersion, { version: content.version })}</div>
             )}
         </div>
+    );
+}
+
+/** The steps a run goes through; paused, failed and stopped runs show how far they got. */
+const PHASES = ['planning', 'approval', 'running', 'integrating', 'done'] as const;
+
+function reachedPhase(run: TeamRun): number {
+    if (run.status === 'done') return 4;
+    if (run.status === 'integrating' || run.report) return 3;
+    if (run.tasks.some((task) => !['pending', 'ready'].includes(task.status))) return 2;
+    if (run.status === 'awaiting_plan_approval' || run.tasks.length > 0) return 1;
+    return 0;
+}
+
+interface Deliverable {
+    readonly summary?: string;
+    readonly changes?: ReadonlyArray<{ readonly file: string }>;
+}
+
+function useElapsed(run: TeamRun): string {
+    const s = useStrings();
+    const live = !['done', 'failed', 'cancelled'].includes(run.status);
+    const [now, setNow] = useState(Date.now());
+    useEffect(() => {
+        if (!live) return;
+        const timer = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(timer);
+    }, [live]);
+    const seconds = Math.max(0, Math.round(((live ? now : run.updatedAt) - run.createdAt) / 1000));
+    return seconds >= 60
+        ? format(s.team.minutes, { m: Math.floor(seconds / 60), s: seconds % 60 })
+        : format(s.team.seconds, { s: seconds });
+}
+
+/**
+ * The run as its supervisor reports it (the default tab): how far it got, what the supervisor last said, what each
+ * member concluded, the progress record, and a box to write to the supervisor or, once it ended, to go on with it.
+ */
+function TaskOverview({ run, onReport }: { run: TeamRun; onReport: () => void }) {
+    const s = useStrings();
+    const live = !['done', 'failed', 'cancelled'].includes(run.status);
+    const reached = reachedPhase(run);
+    const done = run.tasks.filter((task) => task.status === 'done').length;
+    const elapsed = useElapsed(run);
+    const feedback = run.feedback ?? [];
+    const latest = feedback.at(-1);
+    const earlier = feedback.slice(0, -1).reverse();
+    const [showEarlier, setShowEarlier] = useState(false);
+    const progress = [...run.progress].reverse() as Array<{ ts?: number; reason?: string; complete?: boolean }>;
+    const [showAll, setShowAll] = useState(false);
+    const counts = COLUMNS.map((column) => ({
+        key: column.key,
+        count: run.tasks.filter((task) => column.statuses.includes(task.status)).length,
+    }));
+    return (
+        <div className="task-overview">
+            <section className="overview-card overview-progress" aria-label={s.team.progressTitle}>
+                <ol className="stepper">
+                    {PHASES.map((phase, index) => (
+                        <li
+                            key={phase}
+                            className={`stepper__step${index < reached || run.status === 'done' ? ' is-done' : ''}${
+                                index === reached && live ? ' is-active' : ''
+                            }`}
+                        >
+                            <span className="stepper__dot" aria-hidden="true" />
+                            <span>{s.team.phases[phase]}</span>
+                        </li>
+                    ))}
+                </ol>
+                <div className="overview-progress__row">
+                    <span>{format(s.team.tasksDone, { done, total: run.tasks.length })}</span>
+                    <span>{format(s.team.elapsed, { time: elapsed })}</span>
+                    <span>
+                        {s.thread.cost} {formatMoney(run.cost)}
+                        {run.budget ? ` / ${formatMoney(run.budget)}` : ''}
+                    </span>
+                    {run.continues && <span className="overview-progress__continued">{s.team.continuedFrom}</span>}
+                </div>
+                <div className="progress-bar" aria-hidden="true">
+                    <div
+                        className="progress-bar__fill"
+                        style={{ width: `${run.tasks.length > 0 ? Math.round((done / run.tasks.length) * 100) : 0}%` }}
+                    />
+                </div>
+            </section>
+
+            <section className="overview-card feedback-card" aria-label={s.team.feedbackTitle}>
+                <h3>
+                    <span className="feedback-card__avatar" aria-hidden="true">
+                        {s.team.supervisorName.slice(0, 1)}
+                    </span>
+                    {s.team.feedbackTitle}
+                    {latest && <time>{new Date(latest.ts).toLocaleTimeString()}</time>}
+                </h3>
+                {latest ? (
+                    <div className="feedback-card__latest">
+                        <Markdown text={latest.text} />
+                    </div>
+                ) : (
+                    <p className="overview-muted overview-pulse">{s.team.feedbackEmpty}</p>
+                )}
+                {earlier.length > 0 && (
+                    <>
+                        <button type="button" className="link" onClick={() => setShowEarlier(!showEarlier)}>
+                            {format(s.team.earlierFeedback, { count: earlier.length })}
+                        </button>
+                        {showEarlier &&
+                            earlier.map((entry) => (
+                                <div key={entry.ts} className="feedback-card__earlier">
+                                    <time>{new Date(entry.ts).toLocaleTimeString()}</time>
+                                    <Markdown text={entry.text} />
+                                </div>
+                            ))}
+                    </>
+                )}
+            </section>
+
+            <section className="overview-section" aria-label={s.team.conclusionsTitle}>
+                <h3>{s.team.conclusionsTitle}</h3>
+                {run.tasks.length === 0 ? (
+                    <p className="overview-muted">{s.team.conclusionsEmpty}</p>
+                ) : (
+                    <div className="conclusion-grid">
+                        {run.tasks.map((task) => {
+                            const deliverable = task.deliverable as Deliverable | undefined;
+                            const files = deliverable?.changes?.map((change) => change.file) ?? [];
+                            const working = ['assigned', 'in_progress', 'in_review'].includes(task.status);
+                            return (
+                                <article key={task.id} className={`conclusion-card status--${task.status}`}>
+                                    <header>
+                                        <span className="conclusion-card__title">{task.title}</span>
+                                        <span className={`status-pill status--${task.status}`}>
+                                            {(s.team.statuses as Record<string, string>)[task.status] ?? task.status}
+                                        </span>
+                                    </header>
+                                    <div className="conclusion-card__meta">
+                                        <code>{task.id}</code>
+                                        {task.assignee && <span>{task.assignee}</span>}
+                                        <span>{s.team.tiers[task.tier as keyof typeof s.team.tiers] ?? task.tier}</span>
+                                        {task.cost && <span>{formatMoney(task.cost)}</span>}
+                                    </div>
+                                    <div className="conclusion-card__body">
+                                        {deliverable?.summary ? (
+                                            <Markdown text={deliverable.summary} />
+                                        ) : (
+                                            <p className={`overview-muted${working ? ' overview-pulse' : ''}`}>
+                                                {working ? s.team.working : s.team.waiting}
+                                            </p>
+                                        )}
+                                    </div>
+                                    {files.length > 0 && (
+                                        <div className="conclusion-card__files">
+                                            {format(s.team.changedFiles, { files: files.slice(0, 6).join('、') })}
+                                        </div>
+                                    )}
+                                    <footer>
+                                        {task.verdict && (
+                                            <span
+                                                className={
+                                                    task.verdict.verdict === 'pass'
+                                                        ? 'verdict is-pass'
+                                                        : 'verdict is-fail'
+                                                }
+                                            >
+                                                {task.verdict.verdict === 'pass'
+                                                    ? s.team.verdictPass
+                                                    : s.team.verdictFail}
+                                            </span>
+                                        )}
+                                        {task.threadId && (
+                                            <button
+                                                type="button"
+                                                className="link"
+                                                onClick={() =>
+                                                    task.threadId &&
+                                                    void selectThread(task.threadId).then(() =>
+                                                        useApp.setState({ teamRunId: undefined }),
+                                                    )
+                                                }
+                                            >
+                                                {s.team.openThread}
+                                            </button>
+                                        )}
+                                    </footer>
+                                </article>
+                            );
+                        })}
+                    </div>
+                )}
+            </section>
+
+            <section className="overview-section" aria-label={s.team.reportTitle}>
+                <h3>{s.team.reportTitle}</h3>
+                <div className="status-counts">
+                    {counts.map((item) => (
+                        <span key={item.key} className={`status-count status-count--${item.key}`}>
+                            {s.team.columns[item.key as keyof typeof s.team.columns]} <strong>{item.count}</strong>
+                        </span>
+                    ))}
+                    {run.report && (
+                        <button type="button" className="link" onClick={onReport}>
+                            {s.team.openReport}
+                        </button>
+                    )}
+                </div>
+                {progress.length === 0 ? (
+                    <p className="overview-muted">{s.team.timelineEmpty}</p>
+                ) : (
+                    <ol className="progress-timeline">
+                        {(showAll ? progress : progress.slice(0, 8)).map((entry) => (
+                            <li
+                                key={`${entry.ts ?? ''}:${entry.reason ?? ''}`}
+                                className={
+                                    entry.complete ? 'progress-timeline__item is-complete' : 'progress-timeline__item'
+                                }
+                            >
+                                <time>{entry.ts ? new Date(entry.ts).toLocaleTimeString() : ''}</time>
+                                <span>{entry.reason ?? ''}</span>
+                            </li>
+                        ))}
+                    </ol>
+                )}
+                {!showAll && progress.length > 8 && (
+                    <button type="button" className="link" onClick={() => setShowAll(true)}>
+                        {format(s.team.showAll, { count: progress.length })}
+                    </button>
+                )}
+            </section>
+
+            <OverviewComposer run={run} />
+        </div>
+    );
+}
+
+/** Writes to the supervisor while the run goes on; once it ended, starts a run that continues it. */
+function OverviewComposer({ run }: { run: TeamRun }) {
+    const s = useStrings();
+    const live = !['done', 'failed', 'cancelled'].includes(run.status);
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const send = async () => {
+        const value = text.trim();
+        if (!value) return;
+        setBusy(true);
+        try {
+            if (live) {
+                const updated = await host.call('team.message', { runId: run.id, to: 'supervisor', text: value });
+                useApp.setState((state) => ({ teamRuns: { ...state.teamRuns, [updated.id]: updated } }));
+            } else {
+                const next = await host.call('team.start', {
+                    projectId: run.projectId,
+                    goal: value,
+                    autonomy: run.autonomy,
+                    ...(run.budget ? { budget: run.budget.amount } : {}),
+                    continues: run.id,
+                });
+                useApp.setState((state) => ({ teamRuns: { ...state.teamRuns, [next.id]: next }, teamRunId: next.id }));
+            }
+            setText('');
+        } catch (error) {
+            toast(errorMessage(error), 'error');
+        }
+        setBusy(false);
+    };
+    return (
+        <section
+            className="overview-card overview-composer"
+            aria-label={live ? s.team.feedbackTitle : s.team.continueTitle}
+        >
+            {!live && <h3>{s.team.continueTitle}</h3>}
+            <textarea
+                className="textarea"
+                rows={3}
+                value={text}
+                placeholder={live ? s.team.messageSupervisor : s.team.continuePlaceholder}
+                onChange={(event) => setText(event.target.value)}
+                onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        void send();
+                    }
+                }}
+            />
+            <div className="row">
+                <button
+                    type="button"
+                    className="button button--primary"
+                    disabled={busy || !text.trim()}
+                    onClick={() => void send()}
+                >
+                    {busy ? <Spinner /> : null} {live ? s.thread.send : s.team.continueButton}
+                </button>
+            </div>
+        </section>
     );
 }
