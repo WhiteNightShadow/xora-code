@@ -7,6 +7,7 @@ export {
     type RecordedRequest,
     startMockModelServer,
 } from './mock-model-server.ts';
+export { type MainPort, mainPortChannel } from './ports.ts';
 export {
     type AnthropicToolUse,
     type AnthropicTurnOptions,
