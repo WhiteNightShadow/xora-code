@@ -1,13 +1,14 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { repoRoot } from './keys.ts';
-import { makeBundle } from './make-bundle.ts';
+import type { BundleManifest } from '../packages/updater/src/index.ts';
+import { secretStoreSwitches } from './app-switches.ts';
 
 /**
  * Rollback drill: runs the real shell against throwaway data directories and checks the recorded boot state.
@@ -15,14 +16,23 @@ import { makeBundle } from './make-bundle.ts';
  *   node build/drill.ts                         unpackaged shell (apps/desktop) with dist/app-bundle
  *   node build/drill.ts --app <executable>      a packaged build, e.g. ".../Xora Code.app/Contents/MacOS/Xora Code"
  *   node build/drill.ts --keep                  keep the temporary directories for inspection
+ *   node build/drill.ts --prepare <dir>         only make the update bundles, signed here, into <dir>
+ *   node drill.mjs --app <exe> --bundles <dir>  on a test machine (build/vm/harness.ts): use bundles made with
+ *                                               --prepare, so the signing key stays on this machine
  */
 
 const { values } = parseArgs({
     options: {
         app: { type: 'string' },
         keep: { type: 'boolean', default: false },
+        prepare: { type: 'string' },
+        bundles: { type: 'string' },
+        // Multiplies the app's start-up limits and the waits, for slow machines (software-emulated VMs).
+        'timeout-scale': { type: 'string', default: '1' },
     },
 });
+const scale = Math.max(1, Number(values['timeout-scale']) || 1);
+const ms = (value: number): string => String(value * scale);
 
 interface BootStateFile {
     current?: string;
@@ -39,6 +49,8 @@ interface RunResult {
     readonly output: string;
 }
 
+// Not from keys.ts: this file also runs bundled on test machines without the repository.
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const desktopDir = path.join(repoRoot, 'apps', 'desktop');
 const packagedApp = values.app ? path.resolve(values.app) : undefined;
 const electronBinary = packagedApp ?? (createRequire(path.join(desktopDir, 'package.json'))('electron') as string);
@@ -56,15 +68,14 @@ function runShell(
         XORA_TEST_EXIT_AFTER_GOOD: '1',
         XORA_TEST_EXIT_ON_SAFE_MODE: '1',
         XORA_TEST_PLAIN_SECRETS: '1',
-        XORA_GOOD_AFTER_MS: '1500',
-        XORA_UI_READY_TIMEOUT_MS: '20000',
-        XORA_HOST_READY_TIMEOUT_MS: '10000',
+        XORA_GOOD_AFTER_MS: ms(1500),
+        XORA_UI_READY_TIMEOUT_MS: ms(20_000),
+        XORA_HOST_READY_TIMEOUT_MS: ms(10_000),
         ...extraEnv,
     };
     delete env.ELECTRON_RUN_AS_NODE;
-    // Chromium's mock keychain: a packaged build ignores XORA_TEST_PLAIN_SECRETS, and the real keychain can block
-    // the app on an access prompt.
-    const argv = packagedApp ? [...args, '--use-mock-keychain'] : [desktopDir, ...args, '--use-mock-keychain'];
+    // A packaged build ignores XORA_TEST_PLAIN_SECRETS: keep it away from the real keychain or keyring.
+    const argv = [...(packagedApp ? [] : [desktopDir]), ...args, ...secretStoreSwitches()];
     return new Promise((resolve, reject) => {
         const child = spawn(electronBinary, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
         let output = '';
@@ -76,8 +87,8 @@ function runShell(
         });
         const timer = setTimeout(() => {
             child.kill('SIGKILL');
-            reject(new Error(`shell did not exit within 90s:\n${output}`));
-        }, 90_000);
+            reject(new Error(`shell did not exit within ${90 * scale}s:\n${output}`));
+        }, 90_000 * scale);
         child.on('error', reject);
         child.on('exit', (code) => {
             clearTimeout(timer);
@@ -120,18 +131,61 @@ async function install(dataDir: string, bundleDir: string): Promise<void> {
     expect(result.code === 0, `--install-bundle exited with ${result.code}:\n${result.output}`);
 }
 
+interface DrillBundle {
+    readonly dir: string;
+    readonly manifest: BundleManifest;
+}
+
+/** The update bundles of the drill, by folder: version suffix and whether the host exits at once. */
+const BUNDLES: Readonly<Record<string, { readonly suffix: string; readonly breakHost?: boolean }>> = {
+    broken: { suffix: '.drill.broken', breakHost: true },
+    'good-2': { suffix: '.drill.2' },
+    'good-3': { suffix: '.drill.3' },
+    'feed/bundle': { suffix: '.drill.4' },
+    'factory-broken': { suffix: '', breakHost: true },
+};
+
+/** Makes and signs the bundles; make-bundle.ts (and the signing key) only load here, never on a test machine. */
+async function makeBundles(root: string, base: string): Promise<Record<string, DrillBundle>> {
+    const { makeBundle } = await import('./make-bundle.ts');
+    const made: Record<string, DrillBundle> = {};
+    for (const [name, { suffix, breakHost }] of Object.entries(BUNDLES)) {
+        made[name] = await makeBundle({ out: path.join(root, name), version: `${base}${suffix}`, breakHost });
+    }
+    return made;
+}
+
+/** Copies bundles made with --prepare into `root`, after checking they were made for this build. */
+async function loadBundles(from: string, root: string, base: string): Promise<Record<string, DrillBundle>> {
+    await cp(path.resolve(from), root, { recursive: true });
+    const loaded: Record<string, DrillBundle> = {};
+    for (const [name, { suffix }] of Object.entries(BUNDLES)) {
+        const dir = path.join(root, name);
+        const manifest = JSON.parse(await readFile(path.join(dir, 'manifest.json'), 'utf8')) as BundleManifest;
+        if (manifest.version !== `${base}${suffix}`) {
+            throw new Error(`${name} is ${manifest.version}, made for another build than ${base}`);
+        }
+        loaded[name] = { dir, manifest };
+    }
+    return loaded;
+}
+
 const base = await factoryVersion();
 const factory = `factory:${base}`;
+if (values.prepare) {
+    await makeBundles(path.resolve(values.prepare), base);
+    console.log(`drill bundles for ${base} → ${values.prepare}`);
+    await rm(workDir, { recursive: true, force: true });
+    process.exit(0);
+}
 const bundles = path.join(workDir, 'bundles');
-const broken = await makeBundle({
-    out: path.join(bundles, 'broken'),
-    version: `${base}.drill.broken`,
-    breakHost: true,
-});
-const good2 = await makeBundle({ out: path.join(bundles, 'good-2'), version: `${base}.drill.2` });
-const good3 = await makeBundle({ out: path.join(bundles, 'good-3'), version: `${base}.drill.3` });
-const feedBundle = await makeBundle({ out: path.join(bundles, 'feed', 'bundle'), version: `${base}.drill.4` });
-const brokenFactory = await makeBundle({ out: path.join(bundles, 'factory-broken'), version: base, breakHost: true });
+const made = values.bundles ? await loadBundles(values.bundles, bundles, base) : await makeBundles(bundles, base);
+const pick = (name: string): DrillBundle => made[name] as DrillBundle;
+const broken = pick('broken');
+const good2 = pick('good-2');
+const good3 = pick('good-3');
+const feedBundle = pick('feed/bundle');
+const brokenFactory = pick('factory-broken');
 const dataDir = path.join(workDir, 'data');
 
 await scenario('首次启动：内置基线正常启动', async () => {
@@ -206,7 +260,7 @@ await scenario('在线更新：从更新源下载、校验、暂存，下次启�
         const env = {
             XORA_UPDATE_FEED: `${url}/feed-{channel}.json`,
             XORA_UPDATE_CHECK_ON_START: '1',
-            XORA_GOOD_AFTER_MS: '8000',
+            XORA_GOOD_AFTER_MS: ms(8000),
         };
         await runShell(dataDir, [], env);
         const staged = await readState(dataDir);
@@ -269,6 +323,9 @@ console.log(`\n${results.length - failed}/${results.length}通过（${packagedAp
 if (values.keep || failed > 0) {
     console.log(`演练目录：${workDir}`);
 } else {
-    await rm(workDir, { recursive: true, force: true });
+    // On Windows the app's last child processes can hold files in it for a moment after the shell quits.
+    await rm(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 }).catch((error: unknown) =>
+        console.warn(`(演练目录没删掉：${error instanceof Error ? error.message : String(error)})`),
+    );
 }
 process.exitCode = failed > 0 ? 1 : 0;

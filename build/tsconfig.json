@@ -4,5 +4,5 @@
     "types": ["node"],
     "lib": ["es2023", "dom"]
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "vm/*.ts"]
 }

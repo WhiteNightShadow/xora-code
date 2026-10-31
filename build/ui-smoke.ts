@@ -6,11 +6,12 @@ import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { FuseV1Options, FuseVersion, flipFuses, getCurrentFuseWire } from '@electron/fuses';
 import { _electron as electron, type Page } from 'playwright-core';
 import { openaiText, openaiToolCalls, startMockModelServer } from '../packages/test-kit/src/index.ts';
-import { repoRoot } from './keys.ts';
+import { secretStoreSwitches } from './app-switches.ts';
 
 /**
  * UI smoke test in the real app (M1 acceptance): connect a model, open a project, ask for a change, approve it,
@@ -28,9 +29,15 @@ const { values } = parseArgs({
         shots: { type: 'string' },
         keep: { type: 'boolean', default: false },
         show: { type: 'boolean', default: false },
+        // Multiplies every wait, for slow machines such as the x64 Windows VM under software emulation.
+        'timeout-scale': { type: 'string', default: '1' },
     },
 });
+const scale = Math.max(1, Number(values['timeout-scale']) || 1);
+const ms = (value: number): number => value * scale;
 
+// Not from keys.ts: this file also runs bundled on test machines without the repository (build/vm/harness.ts).
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const desktopDir = path.join(repoRoot, 'apps', 'desktop');
 const work = await mkdtemp(path.join(tmpdir(), 'xora-smoke-'));
 
@@ -71,7 +78,7 @@ function git(...args: string[]): void {
     execFileSync('git', args, { cwd: repo, stdio: 'ignore' });
 }
 
-execFileSync('mkdir', ['-p', repo]);
+await mkdir(repo, { recursive: true });
 git('init', '-q');
 git('config', 'user.email', 'smoke@example.com');
 git('config', 'user.name', 'Smoke');
@@ -148,8 +155,15 @@ async function hostCall(page: Page, method: string, params: unknown): Promise<un
 
 const app = await electron.launch({
     executablePath,
-    // Chromium's mock keychain keeps safeStorage and cookie encryption away from the real macOS keychain.
-    args: [...(values.app ? [] : [desktopDir]), '--use-mock-keychain'],
+    args: [
+        ...(values.app ? [] : [desktopDir]),
+        ...secretStoreSwitches(),
+        // On Linux the copy has neither the setuid sandbox helper nor the AppArmor profile that lets the installed
+        // app create its sandbox (Ubuntu 24.04); the update drill checks the installed app with its sandbox.
+        ...(process.platform === 'linux' && values.app && executablePath !== path.resolve(values.app)
+            ? ['--no-sandbox']
+            : []),
+    ],
     env: {
         ...process.env,
         XORA_DATA_DIR: dataDir,
@@ -157,16 +171,16 @@ const app = await electron.launch({
         ...(values.show ? {} : { XORA_TEST_HIDE_WINDOWS: '1' }),
         ELECTRON_RUN_AS_NODE: '',
     } as Record<string, string>,
-    timeout: 60_000,
+    timeout: ms(60_000),
 });
 
 let failed = false;
 let current: Page | undefined;
 try {
-    const page = await app.firstWindow({ timeout: 60_000 });
+    const page = await app.firstWindow({ timeout: ms(60_000) });
     current = page;
     page.on('dialog', (dialog) => void dialog.accept());
-    page.setDefaultTimeout(30_000);
+    page.setDefaultTimeout(ms(30_000));
 
     await page.locator('.welcome').waitFor();
     // The shell starts under the keychain entry's name and must be back to the product name for menus and windows.
@@ -272,16 +286,19 @@ try {
     await page.waitForFunction(
         () => (document.querySelector('.terminal-panel .xterm-rows')?.textContent ?? '').trim().length > 0,
         undefined,
-        { timeout: 30_000 },
+        { timeout: ms(30_000) },
     );
     let echoed = false;
     for (let attempt = 0; attempt < 3 && !echoed; attempt++) {
         await page.waitForTimeout(500);
         await page.locator('.terminal-panel .xterm').click();
-        await page.keyboard.type('echo xora-smoke-$((40+2))\n');
+        // PowerShell on Windows, a POSIX shell elsewhere; either way the 42 only shows up in the output.
+        await page.keyboard.type(
+            process.platform === 'win32' ? 'echo "xora-smoke-$(40+2)"\n' : 'echo xora-smoke-$((40+2))\n',
+        );
         echoed = await page
             .locator('.terminal-panel .xterm-rows', { hasText: 'xora-smoke-42' })
-            .waitFor({ timeout: 10_000 })
+            .waitFor({ timeout: ms(10_000) })
             .then(
                 () => true,
                 () => false,
@@ -352,7 +369,7 @@ try {
         .catch(() => undefined);
     const quit = await Promise.race([
         exited,
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20_000)),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms(20_000))),
     ]);
     if (!quit) {
         failed = true;
@@ -368,6 +385,9 @@ console.log(`\n${steps.length}步通过${failed ? '，有失败' : ''}`);
 if (values.keep || failed) {
     console.log(`临时目录：${work}`);
 } else {
-    await rm(work, { recursive: true, force: true });
+    // On Windows the app's last child processes can hold the copied executable for a moment after it quits.
+    await rm(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 }).catch((error: unknown) =>
+        console.warn(`(临时目录没删掉：${error instanceof Error ? error.message : String(error)})`),
+    );
 }
 process.exitCode = failed ? 1 : 0;
