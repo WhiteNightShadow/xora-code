@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
+import { trustSystemCertificates } from '@xora/providers';
 import { createXoraAgent } from './agent.ts';
 
 /**
@@ -14,6 +15,12 @@ const dataDir = process.env.XORA_ENGINE_DATA ?? path.join(homedir(), '.xora-engi
 
 function log(message: string): void {
     process.stderr.write(`[xora-engine] ${message}\n`);
+}
+
+try {
+    trustSystemCertificates();
+} catch (error) {
+    log(`system certificates not loaded: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 const stream = acp.ndJsonStream(

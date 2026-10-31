@@ -45,5 +45,6 @@ export { buildOpenAiChatBody, mapChatUsage, parseOpenAiChatStream, toChatMessage
 export { GLM_ERROR_CODES, KIMI_ERROR_CODES, PRESETS } from './presets.ts';
 export { parseSse, SseDecoder, type SseEvent } from './sse.ts';
 export { completeModel, streamModel } from './stream.ts';
+export { trustSystemCertificates } from './system-ca.ts';
 export type * from './types.ts';
 export { Clock, type WireContext } from './wire.ts';

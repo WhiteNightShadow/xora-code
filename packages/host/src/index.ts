@@ -7,6 +7,7 @@ import {
     shellMethods,
     shellNotifications,
 } from '@xora/protocol';
+import { trustSystemCertificates } from '@xora/providers';
 import { HostCore } from './core.ts';
 import { HostLog } from './log.ts';
 import { hostPaths } from './paths.ts';
@@ -44,6 +45,12 @@ if (!dataDir) {
 const bundleVersion = process.env.XORA_BUNDLE_VERSION ?? 'unknown';
 const shellVersion = process.env.XORA_SHELL_VERSION ?? 'unknown';
 const log = new HostLog(hostPaths(dataDir).logsDir);
+// Model connections, `/models` checks and update downloads use Node's TLS, not Chromium's.
+try {
+    trustSystemCertificates();
+} catch (error) {
+    log.warn(`system certificates not loaded: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 class RpcShell implements ShellApi {
     readonly #peer: ShellPeer;
