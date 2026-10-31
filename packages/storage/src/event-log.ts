@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, truncateSync, writeSync } from 'node:fs';
 import path from 'node:path';
 import { crc32 } from 'node:zlib';
 
@@ -98,23 +98,25 @@ export class EventLog {
         mkdirSync(dir, { recursive: true });
         const file = path.join(dir, EVENT_LOG_FILE);
         const { events } = readEventFile(file);
-        const fd = openSync(file, 'a+');
-        EventLog.#trimTornTail(fd);
+        EventLog.#trimTornTail(file);
+        const fd = openSync(file, 'a');
         return new EventLog(file, fd, events.at(-1)?.seq ?? 0);
     }
 
-    /** Drops a final line without a newline, left behind by a crash during append. */
-    static #trimTornTail(fd: number): void {
-        const size = fstatSync(fd).size;
-        if (size === 0) {
+    /**
+     * Drops a final line without a newline, left behind by a crash during append. Done by path, before the log is
+     * opened: on Windows an append-only handle cannot truncate.
+     */
+    static #trimTornTail(file: string): void {
+        if (!existsSync(file)) {
             return;
         }
-        const content = readFileSync(fd, 'utf8');
-        if (content.endsWith('\n')) {
+        const content = readFileSync(file, 'utf8');
+        if (content.length === 0 || content.endsWith('\n')) {
             return;
         }
         const keep = content.lastIndexOf('\n') + 1;
-        ftruncateSync(fd, Buffer.byteLength(content.slice(0, keep), 'utf8'));
+        truncateSync(file, Buffer.byteLength(content.slice(0, keep), 'utf8'));
     }
 
     get lastSeq(): number {
