@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
+import { FuseV1Options, FuseVersion, flipFuses, getCurrentFuseWire } from '@electron/fuses';
 import { _electron as electron, type Page } from 'playwright-core';
 import { openaiText, openaiToolCalls, startMockModelServer } from '../packages/test-kit/src/index.ts';
 import { repoRoot } from './keys.ts';
@@ -30,10 +32,37 @@ const { values } = parseArgs({
 });
 
 const desktopDir = path.join(repoRoot, 'apps', 'desktop');
-const executablePath = values.app
-    ? path.resolve(values.app)
-    : (createRequire(path.join(desktopDir, 'package.json'))('electron') as string);
 const work = await mkdtemp(path.join(tmpdir(), 'xora-smoke-'));
+
+/**
+ * Playwright drives Electron through the Node inspector, which a packaged build switches off with the
+ * EnableNodeCliInspectArguments fuse. Such a build runs from a copy with only that fuse switched back on.
+ */
+async function inspectable(executable: string): Promise<string> {
+    const wire = await getCurrentFuseWire(executable);
+    // @electron/fuses reports each fuse as the ASCII digit stored in the binary.
+    if (wire[FuseV1Options.EnableNodeCliInspectArguments] !== '0'.charCodeAt(0)) {
+        return executable;
+    }
+    const appDir =
+        process.platform === 'darwin'
+            ? executable.slice(0, executable.lastIndexOf('.app') + '.app'.length)
+            : path.dirname(executable);
+    const copyDir = path.join(work, 'app', path.basename(appDir));
+    await cp(appDir, copyDir, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
+    const copy = path.join(copyDir, path.relative(appDir, executable));
+    await flipFuses(copy, {
+        version: FuseVersion.V1,
+        [FuseV1Options.EnableNodeCliInspectArguments]: true,
+        resetAdHocDarwinSignature: process.platform === 'darwin',
+    });
+    console.log(`(running a copy with the inspector fuse on: ${copy})`);
+    return copy;
+}
+
+const executablePath = values.app
+    ? await inspectable(path.resolve(values.app))
+    : (createRequire(path.join(desktopDir, 'package.json'))('electron') as string);
 const dataDir = path.join(work, 'data');
 const repo = path.join(work, 'repo');
 const steps: string[] = [];

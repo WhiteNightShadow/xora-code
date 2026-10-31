@@ -169,6 +169,9 @@ importers:
       '@biomejs/biome':
         specifier: 2.6.4
         version: 2.6.4
+      '@electron/fuses':
+        specifier: 1.8.0
+        version: 1.8.0
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2

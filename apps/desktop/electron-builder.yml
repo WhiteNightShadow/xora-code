@@ -17,6 +17,25 @@ asar: true
 npmRebuild: false
 asarUnpack:
   - node_modules/node-pty/**
+# Chromium's built-in strings only in Chinese and English; the other locales add about 48 MB to a mac build.
+electronLanguages:
+  - en-US
+  - zh-CN
+  - zh-TW
+# Flipped in the Electron binary when packaging; see docs/design/10-security.md.
+electronFuses:
+  # The xora engine runs on this binary with ELECTRON_RUN_AS_NODE=1 (packages/host/src/core.ts).
+  runAsNode: true
+  enableCookieEncryption: true
+  # Also drops NODE_EXTRA_CA_CERTS; host and engine add the system certificate store instead.
+  enableNodeOptionsEnvironmentVariable: false
+  # build/ui-smoke.ts turns it back on in a copy of the app: Playwright drives Electron through the inspector.
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+  # Unsigned builds: flipping fuses breaks the ad-hoc signature, which Apple silicon requires.
+  resetAdHocDarwinSignature: true
 mac:
   icon: build-resources/icon.png
   category: public.app-category.developer-tools
