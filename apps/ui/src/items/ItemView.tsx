@@ -1,4 +1,4 @@
-import type { ApprovalDecision, Item, ItemOf, ToolDisplay } from '@xora/protocol';
+import type { Approval, ApprovalDecision, Item, ItemOf, ToolDisplay } from '@xora/protocol';
 import { useState } from 'react';
 import { DiffView } from '../components/DiffView.tsx';
 import { Icon, type IconName } from '../components/Icon.tsx';
@@ -151,20 +151,72 @@ export function PlanList({ entries }: { entries: ItemOf<'plan'>['entries'] }) {
     );
 }
 
-function ApprovalView({ item }: { item: ItemOf<'approval'> }) {
+/** A pending approval's details and answers; the thread's approval card and the team view both show it. */
+export function PendingApproval({ approval }: { approval: Approval }) {
     const s = useStrings();
-    const approval = useApp((state) => state.approvals.find((pending) => pending.id === item.approvalId));
     const [reason, setReason] = useState('');
     const [askReason, setAskReason] = useState(false);
     const respond = (decision: ApprovalDecision, scope?: 'project' | 'global') =>
         void attempt(() =>
             host.call('approval.respond', {
-                approvalId: item.approvalId,
+                approvalId: approval.id,
                 decision,
                 ...(scope ? { scope } : {}),
                 ...(decision === 'deny' && reason.trim() ? { message: reason.trim() } : {}),
             }),
         );
+    return (
+        <>
+            <div className="approval__title">{approval.title}</div>
+            <pre className="approval__summary">{approval.summary}</pre>
+            {approval.risks.length > 0 && (
+                <div className="approval__risks">
+                    {approval.risks.map((risk) => (
+                        <Badge
+                            key={risk}
+                            tone={risk === 'outside_workspace' || risk === 'sensitive_file' ? 'error' : 'warn'}
+                        >
+                            {s.approval.risks[risk]}
+                        </Badge>
+                    ))}
+                </div>
+            )}
+            {askReason && (
+                <AutoFocusInput
+                    className="input"
+                    placeholder={s.approval.reasonPlaceholder}
+                    value={reason}
+                    onChange={(event) => setReason(event.target.value)}
+                    onKeyDown={(event) => event.key === 'Enter' && respond('deny')}
+                />
+            )}
+            <div className="approval__actions">
+                <button type="button" className="button button--primary" onClick={() => respond('allow_once')}>
+                    {s.approval.allowOnce}
+                </button>
+                <button type="button" className="button" onClick={() => respond('allow_session')}>
+                    {s.approval.allowSession}
+                </button>
+                {approval.alwaysScopes.includes('project') && (
+                    <button type="button" className="button" onClick={() => respond('allow_always', 'project')}>
+                        {s.approval.alwaysProject}
+                    </button>
+                )}
+                <button
+                    type="button"
+                    className="button button--danger"
+                    onClick={() => (askReason ? respond('deny') : setAskReason(true))}
+                >
+                    {askReason ? s.approval.deny : s.approval.denyWithReason}
+                </button>
+            </div>
+        </>
+    );
+}
+
+function ApprovalView({ item }: { item: ItemOf<'approval'> }) {
+    const s = useStrings();
+    const approval = useApp((state) => state.approvals.find((pending) => pending.id === item.approvalId));
     const pending = item.status === 'pending' && approval;
     return (
         <section className={`approval approval--${item.status}`} aria-label={s.approval.title}>
@@ -177,53 +229,7 @@ function ApprovalView({ item }: { item: ItemOf<'approval'> }) {
                     </Badge>
                 )}
             </div>
-            {pending && (
-                <>
-                    <div className="approval__title">{item.title}</div>
-                    <pre className="approval__summary">{item.summary}</pre>
-                    {item.risks.length > 0 && (
-                        <div className="approval__risks">
-                            {item.risks.map((risk) => (
-                                <Badge
-                                    key={risk}
-                                    tone={risk === 'outside_workspace' || risk === 'sensitive_file' ? 'error' : 'warn'}
-                                >
-                                    {s.approval.risks[risk]}
-                                </Badge>
-                            ))}
-                        </div>
-                    )}
-                    {askReason && (
-                        <AutoFocusInput
-                            className="input"
-                            placeholder={s.approval.reasonPlaceholder}
-                            value={reason}
-                            onChange={(event) => setReason(event.target.value)}
-                            onKeyDown={(event) => event.key === 'Enter' && respond('deny')}
-                        />
-                    )}
-                    <div className="approval__actions">
-                        <button type="button" className="button button--primary" onClick={() => respond('allow_once')}>
-                            {s.approval.allowOnce}
-                        </button>
-                        <button type="button" className="button" onClick={() => respond('allow_session')}>
-                            {s.approval.allowSession}
-                        </button>
-                        {approval.alwaysScopes.includes('project') && (
-                            <button type="button" className="button" onClick={() => respond('allow_always', 'project')}>
-                                {s.approval.alwaysProject}
-                            </button>
-                        )}
-                        <button
-                            type="button"
-                            className="button button--danger"
-                            onClick={() => (askReason ? respond('deny') : setAskReason(true))}
-                        >
-                            {askReason ? s.approval.deny : s.approval.denyWithReason}
-                        </button>
-                    </div>
-                </>
-            )}
+            {pending && <PendingApproval approval={approval} />}
             {!pending && item.message && <div className="approval__message">{item.message}</div>}
         </section>
     );

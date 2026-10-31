@@ -2124,9 +2124,41 @@ pre {
     gap: 12px;
 }
 
+.team__approvals {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.team__approvals h3 {
+    margin: 0;
+    font-size: 13.5px;
+}
+
+.ledger {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.ledger__section h4 {
+    margin: 0 0 4px;
+    font-size: 13px;
+}
+
+.ledger__section ul,
+.ledger__section p {
+    margin: 0;
+}
+
 .team__goal h1 {
     margin: 0;
     font-size: 16px;
+    /* A long goal would push the board down: two lines here, all of it on hover and in the supervisor thread. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .team__meta {

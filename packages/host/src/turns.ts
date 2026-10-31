@@ -1746,14 +1746,16 @@ export class TurnService {
         );
         const thread = threads.get(running.threadId);
         // A subagent works in its parent's folder: its changes are reviewed with the parent's turn, which also
-        // reports its outcome, so it raises neither a review mark nor a notification of its own.
+        // reports its outcome. A team member's changes reach the project through integration, which the delivery
+        // confirmation covers, and the run reports its end. Neither raises a review mark or a notification.
+        const ownTurn = !thread.parent && !thread.teamRunId;
         threads.update(running.threadId, {
             status: stopReason === 'cancelled' ? 'cancelled' : 'idle',
-            needsReview: Boolean(changes) && !thread.parent,
+            needsReview: Boolean(changes) && ownTurn,
             unread: !bus.focused,
             ...(thread.turns <= 1 && hasDefaultTitle(thread.title) ? { title: this.#title(running) } : {}),
         });
-        if (stopReason !== 'cancelled' && settings.get().notifications.onComplete && !bus.focused && !thread.parent) {
+        if (stopReason !== 'cancelled' && settings.get().notifications.onComplete && !bus.focused && ownTurn) {
             shell.notify(textOf(TEXT).completed, thread.title, running.threadId).catch(() => undefined);
         }
         this.#ended(

@@ -1,6 +1,7 @@
 import type { TeamRun, TeamTask } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
+import { PendingApproval } from '../items/ItemView.tsx';
 import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { Markdown } from './Markdown.tsx';
@@ -133,6 +134,10 @@ export function TeamView({ runId }: { runId: string }) {
     const s = useStrings();
     const run = useApp((state) => state.teamRuns[runId]);
     const [tab, setTab] = useState<'board' | 'ledger' | 'conversation' | 'cost' | 'report'>('board');
+    const approvals = useApp((state) => state.approvals);
+    // What the run waits on from the user, wherever in its threads it was asked: the plan, risky commands, the delivery.
+    const runThreads = new Set(run ? [run.supervisorThreadId, ...run.tasks.map((task) => task.threadId)] : []);
+    const pending = approvals.filter((approval) => runThreads.has(approval.threadId));
     const [budget, setBudget] = useState('');
     useEffect(() => {
         void host
@@ -147,13 +152,15 @@ export function TeamView({ runId }: { runId: string }) {
             </Empty>
         );
     const share = Math.round(run.supervisionShare * 100);
+    // Until a member has spent anything the supervisor's share is all of it, which says nothing yet.
+    const membersSpent = run.tasks.some((task) => (task.cost?.amount ?? 0) > 0);
     // A run paused on its budget continues only with a larger one.
     const spent = run.status === 'paused' && run.budget !== null && run.cost.amount >= run.budget.amount;
     return (
         <div className="team">
             <header className="team__header">
                 <div className="team__goal">
-                    <h1>{run.goal}</h1>
+                    <h1 title={run.goal}>{run.goal}</h1>
                     <div className="team__meta">
                         <Badge tone={run.status === 'done' ? 'ok' : run.status === 'failed' ? 'error' : 'accent'}>
                             {s.team.statuses[run.status]}
@@ -167,9 +174,11 @@ export function TeamView({ runId }: { runId: string }) {
                             {s.thread.cost} {formatMoney(run.cost)}
                             {run.budget ? ` / ${formatMoney(run.budget)}` : ''}
                         </span>
-                        <span className={share > 25 ? 'team__share is-high' : 'team__share'}>
-                            {format(s.team.supervision, { share })}
-                        </span>
+                        {membersSpent && (
+                            <span className={share > 25 ? 'team__share is-high' : 'team__share'}>
+                                {format(s.team.supervision, { share })}
+                            </span>
+                        )}
                     </div>
                     {run.note && <div className="team__note">{run.note}</div>}
                     {run.warnings?.map((warning) => (
@@ -233,6 +242,22 @@ export function TeamView({ runId }: { runId: string }) {
                     )}
                 </div>
             </header>
+            {pending.length > 0 && (
+                <section
+                    className="team__approvals"
+                    aria-label={format(s.team.pendingApprovals, { count: pending.length })}
+                >
+                    <h3>{format(s.team.pendingApprovals, { count: pending.length })}</h3>
+                    {pending.map((approval) => (
+                        <div key={approval.id} className="approval approval--pending">
+                            <PendingApproval approval={approval} />
+                            <button type="button" className="link" onClick={() => selectThread(approval.threadId)}>
+                                {s.team.openThread}
+                            </button>
+                        </div>
+                    ))}
+                </section>
+            )}
             <div className="segmented team__tabs">
                 {(['board', 'ledger', 'conversation', 'cost', 'report'] as const).map((key) => (
                     <button
@@ -269,7 +294,7 @@ export function TeamView({ runId }: { runId: string }) {
             {tab === 'ledger' && (
                 <div className="team__ledger">
                     <h3>{s.team.taskLedger}</h3>
-                    <pre className="layer__text">{run.ledger ? JSON.stringify(run.ledger, null, 2) : '—'}</pre>
+                    <LedgerView ledger={run.ledger} />
                     <h3>{s.team.progressLedger}</h3>
                     <ol className="progress-list">
                         {run.progress.map((entry, index) => {
@@ -403,5 +428,51 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
                 </div>
             </div>
         </Modal>
+    );
+}
+
+/** The task ledger as sections: the approach, then facts, assumptions, decisions and risks. */
+function LedgerView({ ledger }: { ledger: unknown }) {
+    const s = useStrings();
+    const content = (ledger ?? undefined) as
+        | Partial<{
+              plan: string;
+              facts: string[];
+              assumptions: string[];
+              decisions: string[];
+              risks: string[];
+              version: number;
+          }>
+        | undefined;
+    if (!content || typeof content !== 'object') {
+        return <p className="muted">—</p>;
+    }
+    const list = (title: string, items: readonly string[] | undefined) =>
+        items && items.length > 0 ? (
+            <section className="ledger__section">
+                <h4>{title}</h4>
+                <ul>
+                    {items.map((item) => (
+                        <li key={item}>{item}</li>
+                    ))}
+                </ul>
+            </section>
+        ) : null;
+    return (
+        <div className="ledger">
+            {content.plan && (
+                <section className="ledger__section">
+                    <h4>{s.team.ledgerPlan}</h4>
+                    <p>{content.plan}</p>
+                </section>
+            )}
+            {list(s.team.ledgerFacts, content.facts)}
+            {list(s.team.ledgerAssumptions, content.assumptions)}
+            {list(s.team.ledgerDecisions, content.decisions)}
+            {list(s.team.ledgerRisks, content.risks)}
+            {content.version !== undefined && (
+                <div className="muted">{format(s.team.ledgerVersion, { version: content.version })}</div>
+            )}
+        </div>
     );
 }
