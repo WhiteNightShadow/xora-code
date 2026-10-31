@@ -2,6 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { type Candidate, factoryId, loadState, parseCandidateId, rollbackTo, saveState, slotId } from '@xora/updater';
 import { app, BrowserWindow, dialog, type IpcMainInvokeEvent, ipcMain, shell } from 'electron';
+import { SAFE_MODE_URL } from './app-protocol.ts';
 import { relaunchArgs } from './args.ts';
 import type { ShellEnv } from './env.ts';
 import { type InventorySources, readInventory, verifyCandidate } from './inventory.ts';
@@ -191,7 +192,7 @@ export async function openSafeMode(deps: SafeModeDeps): Promise<void> {
     if (process.env.XORA_TEST_SAFE_MODE_PROBE === '1') {
         probeAfterLoad(window, deps);
     }
-    await window.loadFile(files.safeModePage);
+    await window.loadURL(SAFE_MODE_URL);
 }
 
 /** Drill hook: reports what the repair page rendered, then quits. Proves the page, its CSP and IPC all work. */

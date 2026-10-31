@@ -46,13 +46,14 @@ export function resolveFactoryDir(): string {
 export interface ShellFiles {
     readonly preloadApp: string;
     readonly preloadSafe: string;
-    readonly safeModePage: string;
+    /** The repair page and its assets, served as `xora://safe-mode/`. */
+    readonly safeModeDir: string;
 }
 
 export function shellFiles(): ShellFiles {
     return {
         preloadApp: path.join(__dirname, 'preload-app.cjs'),
         preloadSafe: path.join(__dirname, 'preload-safe.cjs'),
-        safeModePage: path.join(__dirname, '..', 'static', 'safe-mode', 'index.html'),
+        safeModeDir: path.join(__dirname, '..', 'static', 'safe-mode'),
     };
 }

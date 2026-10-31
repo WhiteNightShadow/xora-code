@@ -31,9 +31,10 @@ const paths = dataPaths(resolveDataDir());
 app.setPath('userData', paths.electronDir);
 const log = new BootLog(paths.logsDir);
 const trustedKeys = __XORA_TRUSTED_KEYS__;
+const files = shellFiles();
 
 async function main(): Promise<void> {
-    handleAppScheme();
+    handleAppScheme(files.safeModeDir);
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     if (env.hideWindows) {
         app.dock?.hide();
@@ -54,7 +55,7 @@ async function main(): Promise<void> {
         env,
         log,
         paths,
-        files: shellFiles(),
+        files,
         factoryDir: resolveFactoryDir(),
         trustedKeys,
         shellVersion,
