@@ -13,6 +13,7 @@ import {
 } from '@xora/protocol';
 import { XoraDatabase } from '@xora/storage';
 import { openaiText, openaiToolCalls, startMockModelServer } from '@xora/test-kit';
+import { type AgentSpec, DEFAULT_ORG, findAgent } from '@xora/workflows';
 import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Bus } from '../src/bus.ts';
@@ -21,6 +22,7 @@ import { ExtensionService } from '../src/extensions.ts';
 import type { Logger } from '../src/log.ts';
 import { ProjectService } from '../src/projects.ts';
 import { MemoryShell } from '../src/shell.ts';
+import { mcpToolsOf } from '../src/team-agents.ts';
 
 /** Extensions (09): discovery, trust, the skill tool, slash commands, hooks, MCP servers and plugins. */
 
@@ -651,6 +653,45 @@ function notices(events: ReadonlyArray<{ kind: string; payload: unknown }>): str
         .filter((item) => item?.type === 'notice')
         .map((item) => item?.title ?? '');
 }
+
+describe('MCP tools and the agent tool list', () => {
+    it.skipIf(isWindows)(
+        'offers a thread only the MCP tools its agent may use',
+        async () => {
+            const repo = gitRepo();
+            const { ui, core, home } = await host();
+            await ui.request('mcp.save', {
+                name: 'echo',
+                scope: 'global',
+                transport: 'stdio',
+                command: process.execPath,
+                args: [echoServer(home)],
+            });
+            server.reset();
+            server.respondWith((request) => (request.method === 'POST' ? openaiText('ok') : undefined));
+            const project = await ui.request('project.add', { path: repo });
+            const offered = async (mcpTools: readonly string[]): Promise<string[]> => {
+                const thread = await ui.request('thread.create', { projectId: project.id });
+                core.turns.setHostTools(thread.id, { tools: [], mcpTools, handle: async () => ({ content: '' }) });
+                const before = server.requests.length;
+                await ui.request('turn.start', { threadId: thread.id, text: 'hi' });
+                await finished(ui, thread.id);
+                const body = server.requests.slice(before).find((request) => request.method === 'POST')?.body as
+                    | Body
+                    | undefined;
+                return (body?.tools ?? []).map((tool) => tool.function.name).filter((name) => name.startsWith('mcp__'));
+            };
+            const agent = (id: string) => findAgent(DEFAULT_ORG, id) as AgentSpec;
+            expect(await offered(mcpToolsOf(agent('coder')))).toEqual(['mcp__echo__echo']);
+            expect(await offered(mcpToolsOf(agent('scout')))).toEqual([]);
+            expect(await offered(mcpToolsOf({ ...agent('reviewer'), tools: ['read', 'mcp__echo'] }))).toEqual([
+                'mcp__echo__echo',
+            ]);
+            expect(await offered(['mcp__github__*'])).toEqual([]);
+        },
+        60_000,
+    );
+});
 
 describe('lifecycle hooks', () => {
     it('lets a Stop hook send the agent back to work, three times at most', async () => {

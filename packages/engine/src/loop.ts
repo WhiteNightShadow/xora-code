@@ -266,7 +266,7 @@ export class TurnRunner {
         const all = [
             ...tools.filter((tool) => !disabled.has(tool.name)),
             ...session.config.hostTools.map((spec) => hostTool(spec, io)),
-            ...(session.mcp ? mcpTools(session.mcp) : []),
+            ...(session.mcp ? mcpTools(session.mcp, session.config.mcpTools) : []),
         ];
         this.#tools = new Map(all.map((tool) => [tool.name, tool]));
     }

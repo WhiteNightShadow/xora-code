@@ -338,13 +338,13 @@ describe('xora engine over ACP', () => {
     });
 });
 
-describe('MCP servers', () => {
-    it('exposes tools of a stdio MCP server and asks before calling them', async () => {
-        const dir = mkdtempSync(path.join(tmpdir(), 'xora-mcp-'));
-        const script = path.join(dir, 'server.cjs');
-        writeFileSync(
-            script,
-            `const readline = require('node:readline');
+/** A stdio MCP server with one `echo` tool, as a script for `node`. */
+function echoServer(): string {
+    const dir = mkdtempSync(path.join(tmpdir(), 'xora-mcp-'));
+    const script = path.join(dir, 'server.cjs');
+    writeFileSync(
+        script,
+        `const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
 rl.on('line', (line) => {
@@ -360,7 +360,13 @@ rl.on('line', (line) => {
     }
 });
 `,
-        );
+    );
+    return script;
+}
+
+describe('MCP servers', () => {
+    it('exposes tools of a stdio MCP server and asks before calling them', async () => {
+        const script = echoServer();
         server.reset();
         server.respondWith((request) =>
             lastRole(request.body) === 'tool'
@@ -386,6 +392,31 @@ rl.on('line', (line) => {
         )?.messages?.at(-1);
         expect(toolMessage?.content).toContain('echo: hi');
         await h.client.request('session/close', { sessionId });
+        h.close();
+    }, 30_000);
+
+    it('offers only the MCP tools the session allows', async () => {
+        const script = echoServer();
+        server.reset();
+        server.respondWith(() => openaiText('ok'));
+        const h = harness();
+        await h.client.request('initialize', { protocolVersion: acp.PROTOCOL_VERSION });
+        const offered = async (mcpTools?: string[]) => {
+            const before = server.requests.length;
+            const { sessionId } = await h.client.request('session/new', {
+                cwd: workspace(),
+                mcpServers: [{ name: 'echo', command: process.execPath, args: [script], env: [] }],
+                _meta: config(mcpTools ? { mcpTools } : {}),
+            });
+            await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] });
+            await h.client.request('session/close', { sessionId });
+            const body = server.requests[before]?.body as { tools?: Array<{ function: { name: string } }> } | undefined;
+            return (body?.tools ?? []).map((tool) => tool.function.name).filter((name) => name.startsWith('mcp__'));
+        };
+        expect(await offered()).toEqual(['mcp__echo__echo']);
+        expect(await offered(['mcp__echo__*'])).toEqual(['mcp__echo__echo']);
+        expect(await offered(['mcp__other__*'])).toEqual([]);
+        expect(await offered([])).toEqual([]);
         h.close();
     }, 30_000);
 });

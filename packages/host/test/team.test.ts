@@ -21,13 +21,13 @@ import {
     openaiToolCalls,
     startMockModelServer,
 } from '@xora/test-kit';
-import { createTeamRun, findAgent, loadTeamState, TaskBoard } from '@xora/workflows';
+import { type AgentSpec, createTeamRun, DEFAULT_ORG, findAgent, loadTeamState, TaskBoard } from '@xora/workflows';
 import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { HostCore } from '../src/core.ts';
 import type { Logger } from '../src/log.ts';
 import { MemoryShell } from '../src/shell.ts';
-import { loadTeamOrganization } from '../src/team-agents.ts';
+import { loadTeamOrganization, mcpToolsOf } from '../src/team-agents.ts';
 import { SqliteTeamStore } from '../src/team-store.ts';
 
 /**
@@ -716,5 +716,19 @@ describe('team persistence and organizations', () => {
 
         const trusted = await loadTeamOrganization({ orgsDir, projectDir: project, trusted: true });
         expect(findAgent(trusted.org, 'coder')).toMatchObject({ tier: 'standard', mode: 'full' });
+    });
+
+    it('grants MCP tools through the agent tool list', () => {
+        const agent = (id: string) => findAgent(DEFAULT_ORG, id) as AgentSpec;
+        expect(mcpToolsOf(agent('coder'))).toEqual(['mcp__*']);
+        expect(mcpToolsOf(agent('specialist'))).toEqual(['mcp__*']);
+        for (const id of ['supervisor', 'planner', 'plan-reviewer', 'scout', 'reviewer']) {
+            expect(mcpToolsOf(agent(id))).toEqual([]);
+        }
+        expect(mcpToolsOf({ ...agent('scout'), tools: ['read', 'mcp'] })).toEqual(['mcp__*']);
+        expect(
+            mcpToolsOf({ ...agent('reviewer'), tools: ['read', 'mcp__github', 'mcp__slack__post_message'] }),
+        ).toEqual(['mcp__github__*', 'mcp__slack__post_message']);
+        expect(mcpToolsOf({ ...agent('coder'), tools: ['read', 'edit'] })).toEqual([]);
     });
 });

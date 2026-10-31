@@ -93,6 +93,7 @@ import {
     LedgerUpdateInput,
     loadTeamOrganization,
     MEMBER_TOOLS,
+    mcpToolsOf,
     RESUME_PROMPT,
     RequestReviewInput,
     reviewPrompt,
@@ -985,6 +986,7 @@ export class TeamService {
         return {
             tools: SUPERVISOR_TOOLS.filter((tool) => allowed.has(tool.name)),
             disabledTools: disabledBuiltins(agent),
+            mcpTools: mcpToolsOf(agent),
             layers: systemLayers(state.host.org, agent),
             highRiskApproval: true,
             handle: (name, input) => this.#supervisorTool(runId, name, input),
@@ -997,6 +999,7 @@ export class TeamService {
         return {
             tools: MEMBER_TOOLS.filter((tool) => allowed.has(tool.name)),
             disabledTools: disabledBuiltins(agent),
+            mcpTools: mcpToolsOf(agent),
             layers: systemLayers(state.host.org, agent),
             highRiskApproval: true,
             // The engine stops the turn where the card's turn budget runs out.
@@ -2281,6 +2284,7 @@ export class TeamService {
         this.#deps.turns.setHostTools(thread.id, {
             tools: [],
             disabledTools: disabledBuiltins(reviewer),
+            mcpTools: mcpToolsOf(reviewer),
             layers: systemLayers(state.host.org, reviewer),
             highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),
@@ -2603,6 +2607,7 @@ export class TeamService {
         this.#deps.turns.setHostTools(thread.id, {
             tools: [],
             disabledTools: disabledBuiltins(reviewer),
+            mcpTools: mcpToolsOf(reviewer),
             layers: systemLayers(host.org, reviewer),
             highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),

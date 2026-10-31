@@ -4,6 +4,7 @@ import path from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import type { SessionConfig } from '@xora/engine';
 import type { HooksOutcome } from '@xora/extensions';
+import { matchesToolPattern } from '@xora/mcp';
 import {
     type Attachment,
     type ErrorClass,
@@ -55,6 +56,12 @@ export const SESSION_END_TIMEOUT_MS = 1500;
 /** Why a session ends, the SessionEnd matcher's target: the thread was deleted or archived, or the app quits. */
 export type SessionEndReason = 'delete' | 'archive' | 'app_exit';
 
+/** Whether a pattern over `mcp__<server>__<tool>` names can match a tool of `server`. */
+function grantsServer(pattern: string, server: string): boolean {
+    const part = pattern.startsWith('mcp__') ? (pattern.slice('mcp__'.length).split('__')[0] ?? '') : '';
+    return part !== '' && matchesToolPattern(part, server);
+}
+
 /** The roster agent a team member was started from: `coder` for `coder-T1`. */
 function agentTypeOf(thread: ThreadMeta): string {
     const id = thread.agentId ?? thread.role ?? 'agent';
@@ -102,6 +109,11 @@ export interface HostToolProvider {
     readonly highRiskApproval?: boolean;
     /** Model requests the next turn may make at most, e.g. what is left of a task card's `budget.maxTurns`. */
     maxTurnRequests?(): number | undefined;
+    /**
+     * MCP tools the thread may use, as `mcp__<server>__<tool>` names with `*` globs (a team role's allowlist);
+     * absent means every tool of the project's servers. Servers none of them can match are not started.
+     */
+    readonly mcpTools?: readonly string[];
     handle(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
 }
 
@@ -445,6 +457,7 @@ export class TurnService {
                     : {},
             hostTools: tools.map((tool) => ({ ...tool, kind: tool.kind ?? 'other' })),
             disabledTools: [...(provider?.disabledTools ?? [])],
+            ...(provider?.mcpTools ? { mcpTools: [...provider.mcpTools] } : {}),
             hookEvents: [...(extras?.hookEvents ?? [])],
         };
     }
@@ -479,10 +492,16 @@ export class TurnService {
         const meta = process.isXora
             ? { xora: await this.#sessionConfig(thread, project, running.cwd, running.extras) }
             : undefined;
-        const mcpServers = (this.#deps.extensions?.mcpServersFor(
-            running.extras,
-            process.isXora ? { http: true, sse: true } : (process.capabilities.mcpCapabilities ?? {}),
-        ) ?? []) as acp.McpServer[];
+        // A thread with an MCP allowlist (team roles, 06 §4) only starts the servers it may use.
+        const granted = this.#hostTools.get(thread.id)?.mcpTools;
+        const mcpServers = (
+            this.#deps.extensions?.mcpServersFor(
+                running.extras,
+                process.isXora ? { http: true, sse: true } : (process.capabilities.mcpCapabilities ?? {}),
+            ) ?? []
+        ).filter(
+            (server) => granted === undefined || granted.some((pattern) => grantsServer(pattern, server.name)),
+        ) as acp.McpServer[];
         const existing = threads.sessionId(thread.id);
         let sessionId: string | undefined;
         let opened: unknown;
@@ -1328,6 +1347,16 @@ export class TurnService {
         };
         const thread = threads.get(running.threadId);
         const facts = await this.#facts(running, request);
+        // The engine only offers allowed MCP tools; a call to another one is refused all the same (06 §4).
+        const granted = this.#hostTools.get(running.threadId)?.mcpTools;
+        if (
+            granted &&
+            facts.toolName.startsWith('mcp__') &&
+            !granted.some((pattern) => matchesToolPattern(pattern, facts.toolName))
+        ) {
+            this.#deps.log.info(`denied ${facts.toolName} in ${running.threadId}: not in the agent's tools`);
+            return select(false, '这个agent的工具白名单里没有这个mcp工具');
+        }
         const policy = approvals.evaluate(running.threadId, facts, {
             mode: thread.mode,
             projectId: running.projectId,

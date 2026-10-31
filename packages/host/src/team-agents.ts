@@ -277,6 +277,25 @@ export function disabledBuiltins(agent: AgentSpec): string[] {
     return BUILTIN_TOOLS.filter((tool) => !allowed.has(tool));
 }
 
+/**
+ * The MCP tools an agent may use, as patterns over `mcp__<server>__<tool>` names (06 §4: enforced by the host,
+ * every call still goes through the permission policy). The agent's tool list grants them: `mcp` every server,
+ * `mcp__<server>` one server, `mcp__<server>__<tool>` one tool, `*` globs allowed. The default lists grant `mcp`
+ * to executors and specialists; read-only roles get none unless their list names some.
+ */
+export function mcpToolsOf(agent: AgentSpec): string[] {
+    const patterns = new Set<string>();
+    for (const entry of toolsOf(agent)) {
+        const name = entry.trim();
+        if (name.toLowerCase() === 'mcp') {
+            patterns.add('mcp__*');
+        } else if (name.startsWith('mcp__')) {
+            patterns.add(name.slice('mcp__'.length).includes('__') ? name : `${name}__*`);
+        }
+    }
+    return [...patterns];
+}
+
 /** The role a card's work goes to: its assignee's, a scout for read-only research, else an executor. */
 export function roleFor(org: Organization, card: Pick<TaskCard, 'assignee' | 'category' | 'workspace'>): Role {
     const assigned = card.assignee ? findAgent(org, card.assignee) : undefined;

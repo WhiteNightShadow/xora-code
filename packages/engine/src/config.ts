@@ -80,6 +80,11 @@ export const SessionConfigSchema = z.object({
     /** Built-in tools to hide, e.g. write tools for a read-only role. */
     disabledTools: z.array(z.string()).default([]),
     /**
+     * MCP tools the session may use, as `mcp__<server>__<tool>` names with `*` globs (a team role's allowlist);
+     * absent means every tool of the session's servers.
+     */
+    mcpTools: z.array(z.string()).optional(),
+    /**
      * Hook events the host has handlers for (09 §4): the engine asks the host before and after tool calls, and before
      * it compacts the context on its own.
      */
