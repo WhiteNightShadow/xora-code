@@ -150,7 +150,8 @@ function hasShort(args: readonly ShellWord[], letter: string): boolean {
     return args.some((arg) => /^-[A-Za-z]+$/.test(arg.value) && arg.value.slice(1).includes(letter));
 }
 
-const dryRun = (args: readonly ShellWord[]): boolean => hasOption(args, '--dry-run', '-n');
+/** `--dry-run` rehearses; `-n` means other things to other tools (helm's namespace, poetry's no-interaction). */
+const dryRun = (args: readonly ShellWord[]): boolean => hasOption(args, '--dry-run');
 
 /** Index of the first argument that is not an option, skipping the values of `valued` options; -1 if none. */
 function firstOperand(args: readonly ShellWord[], valued: ReadonlySet<string> = new Set()): number {
@@ -223,7 +224,7 @@ function reachOf(word: ShellWord, context: Context, recursive: boolean): Reach |
     if (value === '') {
         return undefined;
     }
-    if (/[$`]/.test(value)) {
+    if (word.dynamic && /[$`]/.test(value)) {
         return recursive ? 'whole' : undefined;
     }
     if (/^~[^/\\]/.test(value) || (path.sep === '/' && /^(?:[A-Za-z]:[\\/]|\\\\)/.test(value))) {
@@ -352,7 +353,9 @@ const git: ProgramReader = (args) => {
     const rest = index < 0 ? [] : args.slice(index + 1);
     switch (subcommand) {
         case 'push':
-            return dryRun(rest) ? undefined : hit('push', shown('git push', rest));
+            return dryRun(rest) || rest.some((arg) => arg.value === '-n')
+                ? undefined
+                : hit('push', shown('git push', rest));
         case 'send-email':
             return hit('external_message', 'git send-email');
         case 'svn':
@@ -436,9 +439,19 @@ const gh: ProgramReader = (args) => {
         }
         return hit(verb === 'DELETE' ? 'delete' : 'push', `gh api -X ${verb}`);
     }
-    const action = group && command ? GH[group]?.[command] : undefined;
+    const action = lookup(GH, group, command);
     return action ? hit(action, `gh ${group} ${command}`) : undefined;
 };
+
+/** The action of `group command` in a table, own keys only (`constructor` is no command). */
+function lookup(
+    table: Readonly<Record<string, Readonly<Record<string, HighRiskAction>>>>,
+    group: string | undefined,
+    command: string | undefined,
+): HighRiskAction | undefined {
+    const actions = group !== undefined && Object.hasOwn(table, group) ? table[group] : undefined;
+    return actions && command !== undefined && Object.hasOwn(actions, command) ? actions[command] : undefined;
+}
 
 const GLAB: Readonly<Record<string, Readonly<Record<string, HighRiskAction>>>> = {
     mr: {
@@ -465,7 +478,7 @@ const GLAB: Readonly<Record<string, Readonly<Record<string, HighRiskAction>>>> =
 
 const glab: ProgramReader = (args) => {
     const [group, command] = operands(args, GH_VALUED);
-    const action = group && command ? GLAB[group]?.[command] : undefined;
+    const action = lookup(GLAB, group, command);
     return action ? hit(action, `glab ${group} ${command}`) : undefined;
 };
 
@@ -609,7 +622,7 @@ function subcommands(
         if (options.run?.includes(command)) {
             return read.command(wrapped(plain.slice(index + 1), valued));
         }
-        const action = actions[command];
+        const action = Object.hasOwn(actions, command) ? actions[command] : undefined;
         if (!action || (action !== 'delete' && dryRun(args))) {
             return undefined;
         }
@@ -708,14 +721,7 @@ const kubectl: ProgramReader = (args, read, name) => {
     const [command, sub] = operands(args, new Set(['-n', '--namespace', '--context', '--kubeconfig', '-f', '-l']));
     if (command === 'exec') {
         const separator = args.findIndex((arg) => arg.value === '--');
-        return separator < 0
-            ? undefined
-            : read.remote(
-                  args
-                      .slice(separator + 1)
-                      .map((arg) => arg.value)
-                      .join(' '),
-              );
+        return separator < 0 ? undefined : read.remote(joined(args.slice(separator + 1)));
     }
     if (hasOption(args, '--dry-run')) {
         return undefined;
@@ -752,11 +758,12 @@ const vercel: ProgramReader = (args) => {
     if (command === 'rm' || command === 'remove') {
         return hit('delete', 'vercel remove');
     }
-    if (command === undefined || command === 'deploy' || !VERCEL_COMMANDS.has(command)) {
-        return hit('publish', 'vercel deploy');
+    if (command === 'promote' || command === 'redeploy' || command === 'rollback') {
+        return hit('publish', `vercel ${command}`);
     }
-    return command === 'promote' || command === 'redeploy' || command === 'rollback'
-        ? hit('publish', `vercel ${command}`)
+    // Without a command, or with a folder, vercel deploys.
+    return command === undefined || command === 'deploy' || !VERCEL_COMMANDS.has(command)
+        ? hit('publish', 'vercel deploy')
         : undefined;
 };
 

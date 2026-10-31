@@ -75,6 +75,8 @@ const FLAGGED: Array<[string, HighRiskAction]> = [
     ['fly deploy', 'publish'],
     ['kubectl apply -f deploy.yaml', 'publish'],
     ['helm upgrade --install app ./chart', 'publish'],
+    ['helm install -n prod app ./chart', 'publish'],
+    ['poetry publish -n', 'publish'],
     ['terraform apply -auto-approve', 'publish'],
     ['aws s3 sync dist s3://bucket/site', 'publish'],
     ['gcloud run deploy api --image x', 'publish'],
@@ -189,6 +191,9 @@ const NOT_FLAGGED: string[] = [
     'ssh host ls -la',
     'mail',
     'stripe listen --forward-to localhost:3000',
+    'gh constructor create',
+    'cargo constructor',
+    "rm -rf '$NOT_EXPANDED'",
 ];
 
 describe('highRiskOfCommand', () => {
