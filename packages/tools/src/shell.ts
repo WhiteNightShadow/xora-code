@@ -58,9 +58,14 @@ export function shellInvocation(
     return { file: fallbackShell, args: ['-c', command], verbatim: false };
 }
 
-/** `-EncodedCommand` takes base64 of UTF-16LE. Output is switched to UTF-8 first so that non-ASCII text survives. */
+/**
+ * `-EncodedCommand` takes base64 of UTF-16LE. Output is switched to UTF-8 first so that non-ASCII text survives, and
+ * progress records are off: with stderr redirected PowerShell writes them there as CLIXML (e.g. "Preparing modules
+ * for first use").
+ */
 function encodePowerShell(command: string): string {
     const prelude =
+        "$ProgressPreference = 'SilentlyContinue'\n" +
         'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\n' +
         '$OutputEncoding = [System.Text.Encoding]::UTF8\n';
     return Buffer.from(prelude + command, 'utf16le').toString('base64');

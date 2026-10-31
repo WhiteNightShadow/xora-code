@@ -186,6 +186,7 @@ export class ProcessTransport implements Transport {
     #stderrPartial = '';
     #child: ChildProcess | undefined;
     #exit: ProcessExit | undefined;
+    #notFound: Error | undefined;
     #closed = false;
     #closing: Promise<void> | undefined;
 
@@ -200,6 +201,14 @@ export class ProcessTransport implements Transport {
     /** Set once the process has exited. */
     get exit(): ProcessExit | undefined {
         return this.#exit;
+    }
+
+    /**
+     * Set when the command turned out not to exist after the process had started: on Windows cross-spawn runs a
+     * command it cannot resolve through cmd.exe and reports it missing (ENOENT) only once cmd.exe exits.
+     */
+    get notFound(): Error | undefined {
+        return this.#notFound;
     }
 
     start(): Promise<void> {
@@ -227,6 +236,9 @@ export class ProcessTransport implements Transport {
             this.#child = child;
             const reportError = (error: Error): void => {
                 if (spawned) {
+                    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                        this.#notFound = error;
+                    }
                     this.onerror?.(error);
                 } else {
                     reject(error);

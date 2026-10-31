@@ -103,16 +103,20 @@ describe.skipIf(!hasGit)('checkpoint snapshots', { timeout: GIT_TIMEOUT }, () =>
 
     it('leaves untracked files over the size limit out, and takes them once they shrink', async () => {
         const { workTree, gitDir, store } = await setup({ maxFileBytes: 1024 });
+        // Windows does not allow `*` in file names.
+        const starred = process.platform !== 'win32';
         await writeFiles(workTree, {
             'small.txt': 'small\n',
             'big [1].bin': Buffer.alloc(4096, 1),
-            'nested/big*.dat': Buffer.alloc(2048, 2),
+            ...(starred ? { 'nested/big*.dat': Buffer.alloc(2048, 2) } : {}),
         });
         const first = await store.snapshot('t');
         expect(treeFiles(gitDir, first.tree)).toEqual(['small.txt']);
         const exclude = readFileSync(path.join(gitDir, 'info', 'exclude'), 'utf8');
         expect(exclude).toContain('/big \\[1\\].bin');
-        expect(exclude).toContain('/nested/big\\*.dat');
+        if (starred) {
+            expect(exclude).toContain('/nested/big\\*.dat');
+        }
 
         await writeFiles(workTree, { 'big [1].bin': 'now small\n' });
         const second = await store.snapshot('t');

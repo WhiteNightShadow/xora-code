@@ -23,6 +23,7 @@ describe('shellInvocation', () => {
         const script = Buffer.from(invocation.args[3] ?? '', 'base64').toString('utf16le');
         expect(script.endsWith('Get-ChildItem "C:\\a b" | Select -First 1')).toBe(true);
         expect(script).toContain('[System.Text.Encoding]::UTF8');
+        expect(script).toContain("$ProgressPreference = 'SilentlyContinue'");
     });
 
     it('honours a configured shell', () => {

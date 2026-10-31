@@ -71,7 +71,7 @@ describe('list', () => {
         expect(result.content).toContain('  top.txt');
         expect(result.content).toContain('    nested/ …');
         expect(result.content).toContain(`(Stopped after ${LIST_MAX_ENTRIES} entries`);
-    });
+    }, 30_000); // creating the files alone can take several seconds on Windows
 
     it('marks empty directories and refuses files and missing paths', async () => {
         const root = await temporaryDir();

@@ -536,8 +536,10 @@ export class McpConnection {
         if (isUnauthorized(error)) {
             return new McpError('unauthorized', 'the server requires authorization');
         }
-        if (isSpawnError(error) && config.transport === 'stdio') {
-            return new McpError('spawn-failed', this.#redact(`cannot start ${config.command}: ${error.message}`));
+        const notFound = this.#transport instanceof ProcessTransport ? this.#transport.notFound : undefined;
+        const spawnError = isSpawnError(error) ? error : notFound;
+        if (spawnError && config.transport === 'stdio') {
+            return new McpError('spawn-failed', this.#redact(`cannot start ${config.command}: ${spawnError.message}`));
         }
         if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) {
             const ms = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
