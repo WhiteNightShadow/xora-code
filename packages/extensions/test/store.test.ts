@@ -281,7 +281,7 @@ describe.skipIf(!hasGit)('PluginStore with git sources', () => {
         expect(tagged.plugin.version).toBe('1.0.0');
         const pinned = await store.install({ kind: 'git', url, sha: first, path: 'packages/sub' });
         expect(pinned.plugin).toMatchObject({ name: 'sub', source: { commit: first, path: 'packages/sub' } });
-    });
+    }, 30_000); // git is slow to start on Windows
 
     it('refuses unsafe urls and reports clone failures', async () => {
         const root = await temporaryDir();

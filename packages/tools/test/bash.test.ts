@@ -75,7 +75,7 @@ describe('bash', () => {
         expect(result.isError).toBe(false);
         expect(result.display).toMatchObject({ kind: 'command', command: 'echo hello', exitCode: 0, truncated: false });
         expect(ctx.chunks.join('')).toContain('hello');
-    });
+    }, 30_000); // the first PowerShell start on a fresh Windows machine takes seconds
 
     it('reports a non-zero exit code', async () => {
         const result = await runTool(bashTool, { command: 'exit 3' }, await makeContext(await temporaryDir()));
