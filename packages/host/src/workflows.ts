@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { findPriceTableForModel, getPriceTable } from '@xora/metering';
 import {
     type HostMethods,
     type HostNotifications,
@@ -789,12 +788,7 @@ export class WorkflowService {
     }
 
     #priced(ref: ModelRef): boolean {
-        const connection = this.#deps.connections.list().find((item) => item.id === ref.connectionId);
-        const pricing = connection?.models.find((model) => model.id === ref.model)?.pricing;
-        return (
-            (pricing !== undefined && getPriceTable(pricing) !== undefined) ||
-            findPriceTableForModel(ref.model) !== undefined
-        );
+        return this.#deps.connections.priceTable(ref) !== undefined;
     }
 
     /** The off-peak start of the models the run would use first, or `undefined` to start now. */

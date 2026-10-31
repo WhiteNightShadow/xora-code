@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { findPriceTableForModel, getPriceTable, PRICE_TABLES, type PriceTable, periodAt } from '../src/index.ts';
-import { followsChineseStyle } from './helpers.ts';
+import {
+    findPriceTableForModel,
+    getPriceTable,
+    LOCAL_PRICE_TABLE_ID,
+    PRICE_TABLES,
+    type PriceTable,
+    periodAt,
+    priceTableFor,
+    priceUsage,
+} from '../src/index.ts';
+import { followsChineseStyle, usage } from './helpers.ts';
 
 describe('built-in price tables', () => {
     it('have unique ids and give every model at most one table', () => {
@@ -50,6 +59,28 @@ describe('built-in price tables', () => {
 });
 
 describe('table lookup', () => {
+    it('prices a request by its preset id, then local servers at zero, then by model id', () => {
+        expect(priceTableFor({ id: 'deepseek-flash', pricing: 'deepseek-flash@2026-10' })?.id).toBe(
+            'deepseek-flash@2026-10',
+        );
+        // A local server serving a vendor's open model under the vendor's id is still free.
+        expect(priceTableFor({ id: 'deepseek-flash', channel: 'local' })?.id).toBe(LOCAL_PRICE_TABLE_ID);
+        expect(priceTableFor({ id: 'qwen3-coder:30b', channel: 'local' })?.id).toBe(LOCAL_PRICE_TABLE_ID);
+        // A custom endpoint may forward to a paid API: only the model id prices it.
+        expect(priceTableFor({ id: 'deepseek-flash', channel: 'custom' })?.id).toBe('deepseek-flash@2026-10');
+        expect(priceTableFor({ id: 'qwen3-coder:30b', channel: 'custom' })).toBeUndefined();
+        const local = getPriceTable(LOCAL_PRICE_TABLE_ID) as PriceTable;
+        expect(findPriceTableForModel('qwen3-coder:30b')).toBeUndefined();
+        expect(
+            priceUsage(local, usage({ inputTokens: 3000, cachedTokens: 1000, outputTokens: 400 }), {
+                at: new Date('2026-10-31T10:00:00+08:00'),
+            }),
+        ).toMatchObject({
+            amount: 0,
+            complete: true,
+        });
+    });
+
     it('finds tables by id and by model', () => {
         expect(getPriceTable('glm-5.3@2026-10')?.models).toEqual(['glm-5.3']);
         expect(findPriceTableForModel('deepseek-flash')?.id).toBe('deepseek-flash@2026-10');

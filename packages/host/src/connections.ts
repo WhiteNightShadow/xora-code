@@ -1,4 +1,5 @@
 import type { ConnectionConfig } from '@xora/engine';
+import { type PriceTable, priceTableFor } from '@xora/metering';
 import {
     type Connection,
     type ModelOption,
@@ -264,6 +265,16 @@ export class ConnectionService {
 
     model(ref: ModelRef): ModelSummary | undefined {
         return this.get(ref.connectionId).models.find((model) => model.id === ref.model);
+    }
+
+    /** The price table of a model's requests ({@link priceTableFor}); for a removed connection, by model id alone. */
+    priceTable(ref: ModelRef): PriceTable | undefined {
+        const connection = this.list().find((item) => item.id === ref.connectionId);
+        return priceTableFor({
+            id: ref.model,
+            pricing: connection?.models.find((model) => model.id === ref.model)?.pricing,
+            channel: connection ? getPreset(connection.presetId)?.channel : undefined,
+        });
     }
 
     async test(

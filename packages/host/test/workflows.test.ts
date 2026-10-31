@@ -509,6 +509,47 @@ describe('workflow runs', () => {
         ).toBeUndefined();
     }, 120_000);
 
+    it('prices local models at zero, so an unattended run on them stays within any budget', async () => {
+        const repo = gitRepo({ 'nightly-budget.yaml': NIGHTLY_BUDGET });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        server.respondWith(respond);
+        const host = await startHost(dataDir);
+        approve(host.ui, [], new Set());
+        // An Ollama server with an open model under its vendor's id: the vendor's prices do not apply.
+        const local = await host.ui.request('provider.save', {
+            presetId: 'ollama',
+            name: 'ollama mock',
+            baseUrl: server.url,
+        });
+        await host.ui.request('provider.refreshModels', { connectionId: local.id });
+        await host.ui.request('settings.update', {
+            patch: { defaultModel: { connectionId: local.id, model: 'deepseek-flash' } },
+        });
+        const project = await host.ui.request('project.add', { path: repo });
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        await host.ui.request('workflow.triggers', {
+            projectId: project.id,
+            key: 'project:nightly-budget',
+            enabled: true,
+        });
+        const run = await host.core.workflows.fire({
+            projectId: project.id,
+            key: 'project:nightly-budget',
+            trigger: { reason: 'schedule' },
+        });
+        expect(run).toMatchObject({ status: 'running', unattended: true });
+        const finished = await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run?.id as string });
+            return current.status === 'completed' || current.status === 'failed' ? current : undefined;
+        }, 'local run');
+        expect(finished.status).toBe('completed');
+        expect(finished.cost.amount).toBe(0);
+        // Every request is priced, at zero.
+        const usage = await host.ui.request('usage.summary', { range: 'all', groupBy: 'model' });
+        expect(usage.totals.requests).toBeGreaterThan(0);
+        expect(usage.totals).toMatchObject({ cost: { amount: 0 }, complete: true });
+    }, 120_000);
+
     it('starts a run when its webhook is called', async () => {
         const hook = `
 name: on-hook

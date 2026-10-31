@@ -1,3 +1,4 @@
+import { priceTableFor } from '@xora/metering';
 import type { ModelRef } from '@xora/protocol';
 import { describe, expect, it } from 'vitest';
 import type { ConnectionService } from '../src/connections.ts';
@@ -12,17 +13,14 @@ const PRICING: Record<string, string | undefined> = {
     'glm-5.3-flash': undefined,
 };
 
-/** Connection `c1` knows the presets' models; any other connection has been removed. */
+/** Connection `c1` knows the presets' models, `local` is a local server; any other connection has been removed. */
 const models: ModelLookup = {
-    model(ref: ModelRef) {
-        if (ref.connectionId !== 'c1') {
-            throw new Error(`connection not found: ${ref.connectionId}`);
-        }
-        if (!(ref.model in PRICING)) {
-            return undefined;
-        }
-        const pricing = PRICING[ref.model];
-        return pricing ? { pricing } : {};
+    priceTable(ref: ModelRef) {
+        return priceTableFor({
+            id: ref.model,
+            pricing: ref.connectionId === 'c1' ? PRICING[ref.model] : undefined,
+            channel: ref.connectionId === 'local' ? 'local' : undefined,
+        });
     },
 };
 
@@ -38,6 +36,8 @@ describe('off-peak waiting for workflow runs', () => {
         // glm has no peak hours; a model without a price table adds nothing.
         expect(peakRules(models, [glm, { connectionId: 'c1', model: 'glm-5.3-flash' }])).toEqual([]);
         expect(peakRules(models, [{ connectionId: 'c1', model: 'local-qwen' }])).toEqual([]);
+        // A local server does not follow the vendor's hours, even when it serves the vendor's model.
+        expect(peakRules(models, [{ connectionId: 'local', model: 'deepseek-flash' }])).toEqual([]);
     });
 
     it('falls back to the model id when the connection is gone', () => {

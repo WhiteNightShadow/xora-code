@@ -36,10 +36,12 @@ export {
     type Currency,
     findPriceTableForModel,
     getPriceTable,
+    LOCAL_PRICE_TABLE_ID,
     type PeakWindow,
     type PeriodRule,
     PRICE_TABLES,
     type PriceTable,
+    priceTableFor,
     type ServerToolPrice,
 } from './prices.ts';
 export { estimateGlmPoints, GLM_POINTS_RULE, type GlmPointsEstimate, type QuotaWindow } from './quota.ts';

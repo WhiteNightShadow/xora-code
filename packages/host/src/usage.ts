@@ -1,4 +1,4 @@
-import { convert, findPriceTableForModel, getPriceTable, priceUsage } from '@xora/metering';
+import { convert, priceTableFor, priceUsage } from '@xora/metering';
 import type { Money, Settings, UsageRequest, UsageRow, UsageTotals } from '@xora/protocol';
 import type { XoraDatabase } from '@xora/storage';
 import { newId } from './ids.ts';
@@ -114,8 +114,7 @@ export class UsageService {
     /** Records a request and returns its cost in the display currency (null when the price is unknown). */
     record(report: RequestReport, at = new Date()): { cost: Money | null; complete: boolean } {
         const usage = report.usage ?? EMPTY_USAGE;
-        const table =
-            (report.pricing ? getPriceTable(report.pricing) : undefined) ?? findPriceTableForModel(report.model);
+        const table = priceTableFor({ id: report.model, pricing: report.pricing, channel: report.channel });
         let cost: Money | null = null;
         let complete = false;
         let period: string | null = null;

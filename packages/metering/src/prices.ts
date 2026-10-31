@@ -81,6 +81,9 @@ const WEEKDAYS = [1, 2, 3, 4, 5];
 const ANTHROPIC_PRICING = 'https://platform.claude.com/docs/en/about-claude/pricing';
 const ANTHROPIC_NOTE = '价格来自anthropic文档（2026-10-06缓存版）。缓存写入单价没有逐条核实，按未知处理。';
 
+/** Models of local servers (Ollama, LM Studio, llama.cpp, vLLM): no vendor bills them (11 §3). */
+export const LOCAL_PRICE_TABLE_ID = 'local@2026-10';
+
 /** Built-in tables. Every number here was checked against the source named in the table. */
 export const PRICE_TABLES: readonly PriceTable[] = [
     {
@@ -220,6 +223,19 @@ export const PRICE_TABLES: readonly PriceTable[] = [
         source: ANTHROPIC_PRICING,
         notes: ANTHROPIC_NOTE,
     },
+    {
+        id: LOCAL_PRICE_TABLE_ID,
+        // Found by channel, never by model id: a model served locally often keeps its vendor's id.
+        models: [],
+        currency: 'CNY',
+        unit: 'per_million_tokens',
+        input: 0,
+        cachedInput: 0,
+        output: 0,
+        verified: '2026-10-31',
+        source: '本地推理没有厂商账单，2026-10-31用户确认按0元计',
+        notes: '本地预设（ollama、lm studio、llama.cpp、vllm）的模型都按这张表计，电费和硬件折旧不算在内；自定义端点可能转发到收费的api，不按它计。',
+    },
 ];
 
 export function getPriceTable(id: string, tables: readonly PriceTable[] = PRICE_TABLES): PriceTable | undefined {
@@ -232,4 +248,22 @@ export function findPriceTableForModel(
     tables: readonly PriceTable[] = PRICE_TABLES,
 ): PriceTable | undefined {
     return tables.find((table) => table.models.includes(modelId));
+}
+
+/**
+ * The table a model's requests are priced with: the preset's `pricing` id, the local table for a model of a local
+ * server, else the first table that lists the model id.
+ */
+export function priceTableFor(
+    model: { readonly id: string; readonly pricing?: string | undefined; readonly channel?: string | undefined },
+    tables: readonly PriceTable[] = PRICE_TABLES,
+): PriceTable | undefined {
+    const own = model.pricing ? getPriceTable(model.pricing, tables) : undefined;
+    if (own) {
+        return own;
+    }
+    if (model.channel === 'local') {
+        return getPriceTable(LOCAL_PRICE_TABLE_ID, tables);
+    }
+    return findPriceTableForModel(model.id, tables);
 }
