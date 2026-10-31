@@ -140,9 +140,9 @@
 
 **安装包加固（10-30）**：
 - `electronLanguages`只留中英文语言包，mac arm64的dmg从128mb降到117mb，装好后从317mb降到270mb。
-- 打开electron fuses（见10第6节），`RunAsNode`暂时保留。
+- 打开electron fuses（见10第6节）。xora engine改由shell用utility process启动、经MessagePort和host通信之后，`RunAsNode`也关掉了：安装包不能再被当成node运行。
 - 修复模式页面从`file://`改走`xora://safe-mode/`：关掉`file://`的额外权限后，chromium读不到app.asar里的文件，演练时发现修复模式页面打不开。
 - host和引擎启动时加载系统证书库，代替不再生效的`NODE_EXTRA_CA_CERTS`。
 - 在mac arm64安装包上核对过：fuses状态、ad-hoc签名、Info.plist里的asar完整性；更新演练8项、界面冒烟14步都通过；主进程不再接受`--inspect`。
 
-**发布前要做**：把xora engine改成由shell用utility process启动、经MessagePort和host通信，然后关掉`RunAsNode`。
+**还要核对**：windows上关掉`RunAsNode`后`child_process.fork`会报错，node-pty关终端时的fork会失败；host已改成先用`taskkill /T`结束终端的进程树，没在windows实机上跑过。
