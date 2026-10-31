@@ -13,6 +13,7 @@ import {
     loadOrganization,
     needsHuman,
     type Organization,
+    type ReviewParse,
     type Role,
     renderTaskCard,
     renderTeamGoal,
@@ -21,6 +22,7 @@ import {
     type TaskBoard,
     type TaskCard,
     TaskCardSchema,
+    type TaskLedgerContent,
     type TeamRun,
     TierSchema,
     toolsOf,
@@ -388,12 +390,55 @@ export function supervisorBrief(goal: string, run: TeamRun, maxParallel: number)
         '<team_host>',
         '- Create the task cards with task_create; one call may hold several cards that depend on each other. Invalid cards come back with the reason: fix them and call again.',
         '- Writable cards (workspace worktree or local) need ownership globs. A worktree card runs in its own git worktree that starts from the results of the cards it depends on; a readonly card runs in the project folder without write access.',
-        approval
-            ? '- When the plan is complete, end your turn: the user approves it before anything is dispatched.'
-            : '- When the plan is complete, end your turn: dispatch starts right away.',
+        `- When the plan is complete, end your turn. The host then has a plan reviewer of another model family audit it once and gives you the findings for one revision (do not create a card for that review); ${approval ? 'then the user approves the plan before anything is dispatched' : 'then dispatch starts'}.`,
         `- The host dispatches ready cards (at most ${maxParallel} at a time), runs their acceptance checks, sends failed deliveries back, escalates tiers, integrates the worktrees in dependency order and writes the delivery report. You get a <team_update> after task events.`,
         '- Members ask you questions through ask_supervisor; answer with send_message.',
         '</team_host>',
+    ].join('\n');
+}
+
+/** What the plan reviewer audits once (06 §5 ④): the goal, the task ledger and every card. */
+export function planReviewPrompt(
+    goal: string,
+    ledger: TaskLedgerContent | undefined,
+    cards: readonly TaskCard[],
+): string {
+    const list = (title: string, items: readonly string[] | undefined) =>
+        items && items.length > 0 ? [`${title}:`, ...items.map((item) => `- ${item}`)] : [];
+    return [
+        '<goal>',
+        goal,
+        '</goal>',
+        '',
+        '<task_ledger>',
+        ...(ledger?.plan ? [`Approach: ${ledger.plan}`] : []),
+        ...list('Facts', ledger?.facts),
+        ...list('Assumptions', ledger?.assumptions),
+        ...list('Decisions', ledger?.decisions),
+        ...list('Risks', ledger?.risks),
+        '</task_ledger>',
+        '',
+        ...cards.map((card) => renderTaskCard(card)),
+        '',
+        'Audit this plan once. You are read-only: check its claims against the code in your working directory. Finish with the verdict JSON: "fail" when the plan should change before anything is dispatched, "pass" when it can go as it is.',
+    ].join('\n');
+}
+
+/** The plan review as a team update for the supervisor's one revision turn. */
+export function planReviewFeedback(review: ReviewParse, text: string, model: string): string {
+    const revise =
+        'Revise the plan where the review is right (task_update, task_create, task_update with status "cancelled", ledger_update), then end your turn: the plan goes on to approval. The review is another agent’s opinion, not the user’s decision.';
+    if (!review.ok) {
+        return `The plan reviewer (${model}, another model family) gave no readable verdict. Its notes:\n${shorten(text, 2000)}\n${revise}`;
+    }
+    const { verdict, summary, issues } = review.review;
+    return [
+        `Plan review by ${model} (another model family), once: ${verdict}${summary ? ` — ${summary}` : ''}`,
+        ...issues.map(
+            (issue) =>
+                `- ${issue.blocking ? '' : '(suggestion) '}${issue.file ? `${issue.file}: ` : ''}${issue.problem}${issue.fix ? ` Fix: ${issue.fix}` : ''}`,
+        ),
+        revise,
     ].join('\n');
 }
 

@@ -36,6 +36,7 @@ import {
     type EscalationDecision,
     findAgent,
     formatIssues,
+    inferFamily,
     type Judgement,
     judge,
     loadTeamState,
@@ -94,6 +95,8 @@ import {
     loadTeamOrganization,
     MEMBER_TOOLS,
     mcpToolsOf,
+    planReviewFeedback,
+    planReviewPrompt,
     RESUME_PROMPT,
     RequestReviewInput,
     reviewPrompt,
@@ -203,6 +206,10 @@ interface RunHost {
     supervisorTurnId?: string;
     /** The rest of the flagship chain, for model errors of the supervisor. */
     supervisorFallbacks?: Array<{ ref: ModelRef; family?: string }>;
+    /** Model family the supervisor runs on; the plan reviewer uses another one. */
+    supervisorFamily?: string;
+    /** The separate plan review (06 §5 ④) ran, or was skipped with a warning. */
+    planReviewed?: boolean;
     planApproved: boolean;
     deliveryApproved: boolean;
     /** Commit every worktree of the run starts from. */
@@ -236,6 +243,7 @@ interface RunState {
     readonly questions: Map<string, Question>;
     abort: AbortController;
     supervisorStarting: boolean;
+    reviewingPlan: boolean;
     approvingPlan: boolean;
     integrating: boolean;
     wakeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -406,6 +414,7 @@ export class TeamService {
             status: 'planning',
             supervisorThreadId: thread.id,
             supervisorFallbacks: pick.fallbacks,
+            ...(pick.family ? { supervisorFamily: pick.family } : {}),
             planApproved: false,
             deliveryApproved: false,
             ...(base ? { base } : {}),
@@ -633,6 +642,7 @@ export class TeamService {
             questions: new Map(),
             abort: new AbortController(),
             supervisorStarting: false,
+            reviewingPlan: false,
             approvingPlan: false,
             integrating: false,
             wakeTimer: undefined,
@@ -1166,6 +1176,7 @@ export class TeamService {
                 return;
             }
             this.#deps.threads.update(host.supervisorThreadId, { model: next.ref });
+            host.supervisorFamily = next.family;
             this.#warn(state, `主管的模型出错（${errorClass}），换成了${next.ref.model}`);
             this.#wake(
                 state,
@@ -1185,8 +1196,21 @@ export class TeamService {
     /** The plan is ready: the user confirms it when the autonomy level asks for that (06 §8), then dispatch starts. */
     async #planReady(state: RunState): Promise<void> {
         const { host } = state;
-        if (host.planApproved || state.approvingPlan || host.status !== 'planning') {
+        if (host.planApproved || state.approvingPlan || state.reviewingPlan || host.status !== 'planning') {
             return;
+        }
+        if (!host.planReviewed) {
+            state.reviewingPlan = true;
+            let revising = false;
+            try {
+                revising = await this.#reviewPlan(state);
+            } finally {
+                state.reviewingPlan = false;
+            }
+            // With findings the supervisor revises first; its turn's end brings the plan back here.
+            if (revising || !this.#active(state) || (host.status as RunStatus) !== 'planning') {
+                return;
+            }
         }
         if (!needsHuman(state.run.autonomy, 'plan_approval')) {
             this.#approvePlan(state, '计划按自主级别自动确认');
@@ -1220,6 +1244,86 @@ export class TeamService {
         } finally {
             state.approvingPlan = false;
         }
+    }
+
+    /**
+     * Separate plan review (06 §5 ④): before the plan is confirmed, the plan reviewer audits it once on a model of
+     * another family than the supervisor's, and the supervisor gets the findings for one revision turn. Without a
+     * plan reviewer, or without a connected model of another family on its tier, the run goes on with a warning.
+     * Returns true when the findings went to the supervisor.
+     */
+    async #reviewPlan(state: RunState): Promise<boolean> {
+        const { host } = state;
+        const skip = (warning: string): false => {
+            host.planReviewed = true;
+            this.#warn(state, warning);
+            this.#save(state);
+            return false;
+        };
+        const reviewer = agentsWithRole(host.org, 'plan_reviewer')[0];
+        if (!reviewer) {
+            return skip('组织里没有计划评审，跳过了独立的计划评审');
+        }
+        const family =
+            host.supervisorFamily ?? inferFamily(this.#deps.threads.find(host.supervisorThreadId)?.model?.model ?? '');
+        const crossFamily = reviewer.crossFamily !== false;
+        const project = await this.#deps.projects.get(host.projectId);
+        let pick: ModelPick;
+        try {
+            pick = this.#pickModel(
+                host.org,
+                state.run.autonomy,
+                project,
+                reviewer.tier,
+                host.warnings,
+                crossFamily ? (family ?? '') : undefined,
+            );
+        } catch (error) {
+            return skip(`计划评审没有可用的模型，跳过了：${errorText(error)}`);
+        }
+        if (crossFamily && pick.crossFamily !== true) {
+            return skip(
+                `没有连接${family ?? '主管'}以外家族的${TIER_LABELS[reviewer.tier]}档模型，跳过了独立的计划评审`,
+            );
+        }
+        const thread = this.#createThread(state, {
+            title: '评审计划',
+            role: reviewer.role,
+            tier: reviewer.tier,
+            agentId: reviewer.id,
+            pick,
+            mode: 'plan',
+        });
+        host.reviewThreads.push(thread.id);
+        this.#deps.turns.setHostTools(thread.id, {
+            tools: [],
+            disabledTools: disabledBuiltins(reviewer),
+            mcpTools: mcpToolsOf(reviewer),
+            layers: systemLayers(host.org, reviewer),
+            highRiskApproval: true,
+            handle: async (name) => fail(`Tool ${name} is not available here.`),
+        });
+        host.note = '计划评审中';
+        this.#save(state);
+        const cards = state.board
+            .list()
+            .filter((task) => task.status !== 'cancelled')
+            .map((task) => task.card);
+        const ended = await this.#turn(thread.id, planReviewPrompt(state.run.goal, state.ledger?.current, cards));
+        if (host.note === '计划评审中') {
+            host.note = undefined;
+        }
+        if (!this.#live(state)) {
+            return false;
+        }
+        if (ended.outcome !== 'completed') {
+            return skip(`计划评审没有做完（${ended.outcome}），计划直接去确认`);
+        }
+        host.planReviewed = true;
+        // A paused run keeps the findings in the inbox for when it continues.
+        this.#wake(state, planReviewFeedback(parseReview(ended.lastText), ended.lastText, pick.ref.model));
+        this.#save(state);
+        return true;
     }
 
     #approvePlan(state: RunState, decision: string): void {

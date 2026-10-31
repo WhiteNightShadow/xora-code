@@ -372,6 +372,8 @@ describe('agent team run', () => {
         expect(planning).toBeDefined();
         expect((waiting.ledger as { plan?: string } | undefined)?.plan).toBe('a.txt first, then b.txt next to it');
         expect(waiting.progress.length).toBeGreaterThanOrEqual(4);
+        // Only glm serves the flagship tier here: no other family for the plan review, which is skipped.
+        expect(waiting.warnings?.some((warning) => warning.includes('跳过了独立的计划评审'))).toBe(true);
 
         // Threads: the supervisor plans read-only, T2 ran at economy and then a tier up, the reviewer is cross-family.
         const threads = await first.ui.request('thread.list', { includeArchived: true });
@@ -663,6 +665,104 @@ describe('agent team limits', () => {
         const progress = done.progress as Array<{ reason: string }>;
         expect(progress.some((entry) => entry.reason.includes('used up its turn budget (3 of 3'))).toBe(true);
         expect(readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('done\n');
+    }, 90_000);
+});
+
+describe('plan review', () => {
+    it('has another model family review the plan once before it is confirmed', async () => {
+        const repo = gitRepo();
+        const check = `node -e "process.exit(require('fs').readFileSync('a.txt','utf8').trim()==='hello'?0:1)"`;
+        const card = {
+            id: 'T1',
+            title: 'Write a.txt',
+            goal: 'a.txt says hello',
+            category: 'coding',
+            tier: 'economy',
+            ownership: ['a.txt'],
+            acceptance: [{ type: 'command', run: 'node -e "process.exit(0)"' }],
+            deliverable: { kind: 'code-change' },
+            budget: { cost: 2 },
+            workspace: 'worktree',
+        };
+        // deepseek and glm both serve the flagship tier: the supervisor runs on deepseek, the review on glm.
+        server.setModels([{ id: 'deepseek-v4-pro' }, { id: 'glm-5.3' }, { id: 'deepseek-flash' }]);
+        try {
+            server.respondWith((request) => {
+                const body = request.body as ChatBody | undefined;
+                if (!body?.messages) {
+                    return undefined;
+                }
+                const last = body.messages.at(-1);
+                const agent = agentOf(body);
+                if (agent === 'Plan reviewer') {
+                    return say(
+                        'Read the plan.\n\n```json\n{"verdict": "fail", "summary": "T1 cannot prove its goal", "issues": [{"problem": "T1 checks nothing about a.txt", "fix": "check that a.txt says hello", "blocking": true}]}\n```',
+                    );
+                }
+                if (agent !== 'Supervisor') {
+                    return say('ok');
+                }
+                if (last?.role === 'tool') {
+                    return say('Done.');
+                }
+                const input = textOf(last?.content);
+                if (input.includes('<team_goal>')) {
+                    return call({ name: 'task_create', arguments: { tasks: [card] } });
+                }
+                if (input.includes('Plan review by')) {
+                    return call({
+                        name: 'task_update',
+                        arguments: {
+                            taskId: 'T1',
+                            changes: { acceptance: [{ type: 'command', run: check }] },
+                            reason: 'the plan review was right',
+                        },
+                    });
+                }
+                return say('Noted.');
+            });
+            const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+            const seen: Approval[] = [];
+            approve(ui, seen, new Set(['team_plan']));
+            await connect(ui);
+            const project = await ui.request('project.add', { path: repo });
+            const before = server.requests.length;
+            const run = await ui.request('team.start', { projectId: project.id, goal: '写a.txt', autonomy: 'L1' });
+            const plan = await waitFor(() => seen.find((approval) => approval.toolName === 'team_plan'), 'plan card');
+
+            // The supervisor plans, the plan reviewer audits once, the supervisor revises, then the user confirms.
+            const bodies = server.requests
+                .slice(before)
+                .map((request) => request.body as ChatBody | undefined)
+                .filter((body) => body?.messages !== undefined) as ChatBody[];
+            const agents = bodies.map(agentOf);
+            const reviewAt = agents.indexOf('Plan reviewer');
+            expect(reviewAt).toBeGreaterThan(0);
+            expect(agents.filter((agent) => agent === 'Plan reviewer')).toHaveLength(1);
+            expect(agents.slice(0, reviewAt).every((agent) => agent === 'Supervisor')).toBe(true);
+            const review = bodies[reviewAt] as ChatBody;
+            expect(review.model).toBe('glm-5.3');
+            const audited = textOf(review.messages.find((message) => message.role === 'user')?.content);
+            expect(audited).toContain('<task_card id="T1"');
+            expect(audited).toContain('Audit this plan once');
+            const revision = bodies
+                .slice(reviewAt + 1)
+                .find((body) => textOf(body.messages.at(-1)?.content).includes('Plan review by glm-5.3'));
+            expect(textOf(revision?.messages.at(-1)?.content)).toContain('T1 checks nothing about a.txt');
+            expect(revision?.model).toBe('deepseek-v4-pro');
+            expect(plan.summary).toContain('readFileSync');
+
+            const view = await ui.request('team.get', { runId: run.id });
+            expect(view.status).toBe('awaiting_plan_approval');
+            expect(view.warnings ?? []).toEqual([]);
+            const threads = await ui.request('thread.list', { includeArchived: true });
+            expect(
+                threads.find((thread) => thread.teamRunId === run.id && thread.role === 'plan_reviewer'),
+            ).toMatchObject({ tier: 'flagship', model: { model: 'glm-5.3' } });
+            await ui.request('team.stop', { runId: run.id });
+        } finally {
+            server.setModels([{ id: 'glm-5.3' }, { id: 'kimi-k3' }, { id: 'deepseek-flash' }]);
+        }
     }, 90_000);
 });
 
