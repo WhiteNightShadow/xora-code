@@ -40,9 +40,17 @@ export interface ShellSplit {
     readonly incomplete: boolean;
 }
 
+export interface SplitOptions {
+    /**
+     * Backslashes are ordinary characters, as in PowerShell and cmd, where they separate the parts of a path. The
+     * bash tool runs commands in PowerShell on Windows.
+     */
+    readonly literalBackslash?: boolean;
+}
+
 /** Splits a command line into simple commands and reports the risky syntax it contains. */
-export function splitShellCommand(command: string): ShellSplit {
-    return new Splitter(command).run();
+export function splitShellCommand(command: string, options: SplitOptions = {}): ShellSplit {
+    return new Splitter(command, options.literalBackslash !== true).run();
 }
 
 const DISCARD_TARGETS: ReadonlySet<string> = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
@@ -66,11 +74,11 @@ function redirectWrites(operator: string, target: ShellWord): boolean {
 }
 
 /** Index of the bracket closing the one at `openIndex`, skipping quoted text; -1 when it is not closed. */
-function findClosing(s: string, openIndex: number, open: string, close: string): number {
+function findClosing(s: string, openIndex: number, open: string, close: string, escapes = true): number {
     let depth = 0;
     for (let i = openIndex; i < s.length; i++) {
         const c = s[i];
-        if (c === '\\') {
+        if (escapes && c === '\\') {
             i++;
         } else if (c === "'") {
             const end = s.indexOf("'", i + 1);
@@ -79,7 +87,7 @@ function findClosing(s: string, openIndex: number, open: string, close: string):
             }
             i = end;
         } else if (c === '"') {
-            const end = findQuoteEnd(s, i + 1, '"');
+            const end = findQuoteEnd(s, i + 1, '"', escapes);
             if (end < 0) {
                 return -1;
             }
@@ -97,9 +105,9 @@ function findClosing(s: string, openIndex: number, open: string, close: string):
 }
 
 /** Index of the next unescaped `quote` at or after `from`; -1 when there is none. */
-function findQuoteEnd(s: string, from: number, quote: string): number {
+function findQuoteEnd(s: string, from: number, quote: string, escapes = true): number {
     for (let i = from; i < s.length; i++) {
-        if (s[i] === '\\') {
+        if (escapes && s[i] === '\\') {
             i++;
         } else if (s[i] === quote) {
             return i;
@@ -110,6 +118,8 @@ function findQuoteEnd(s: string, from: number, quote: string): number {
 
 class Splitter {
     readonly #source: string;
+    /** A backslash escapes the next character (POSIX shells), or is an ordinary one. */
+    readonly #escapes: boolean;
     #pos = 0;
     readonly #segments: ShellSegment[] = [];
     #words: ShellWord[] = [];
@@ -135,8 +145,9 @@ class Splitter {
     #subshell = false;
     #incomplete = false;
 
-    constructor(source: string) {
+    constructor(source: string, escapes: boolean) {
         this.#source = source;
+        this.#escapes = escapes;
     }
 
     run(): ShellSplit {
@@ -154,7 +165,11 @@ class Splitter {
                     this.#endSegment('\n');
                     break;
                 case '\\':
-                    this.#escape();
+                    if (this.#escapes) {
+                        this.#escape();
+                    } else {
+                        this.#literal(c);
+                    }
                     break;
                 case "'":
                     this.#singleQuoted();
@@ -275,7 +290,7 @@ class Splitter {
                 this.#pos = i + 1;
                 return;
             }
-            if (c === '\\') {
+            if (c === '\\' && this.#escapes) {
                 const next = s[i + 1];
                 if (next === '\n') {
                     i += 2;
@@ -289,7 +304,7 @@ class Splitter {
             } else if (c === '`') {
                 this.#substitution = true;
                 this.#dynamic = true;
-                const end = findQuoteEnd(s, i + 1, '`');
+                const end = findQuoteEnd(s, i + 1, '`', this.#escapes);
                 if (end < 0) {
                     break;
                 }
@@ -312,7 +327,7 @@ class Splitter {
 
     #backtick(): void {
         this.#substitution = true;
-        const end = findQuoteEnd(this.#source, this.#pos + 1, '`');
+        const end = findQuoteEnd(this.#source, this.#pos + 1, '`', this.#escapes);
         if (end < 0) {
             this.#incomplete = true;
             return;
@@ -344,12 +359,12 @@ class Splitter {
         if (next === '(') {
             this.#substitution = true;
             this.#dynamic = true;
-            const end = findClosing(s, start + 1, '(', ')');
+            const end = findClosing(s, start + 1, '(', ')', this.#escapes);
             return end < 0 ? -1 : end + 1;
         }
         if (next === '{') {
             this.#dynamic = true;
-            const end = findClosing(s, start + 1, '{', '}');
+            const end = findClosing(s, start + 1, '{', '}', this.#escapes);
             if (end < 0) {
                 return -1;
             }
@@ -361,7 +376,7 @@ class Splitter {
         if (!inDoubleQuotes && next === "'") {
             // ANSI-C quoting: its escapes (`\x2d` …) are not decoded here, so the word's value is unknown.
             this.#dynamic = true;
-            const end = findQuoteEnd(s, start + 2, "'");
+            const end = findQuoteEnd(s, start + 2, "'", this.#escapes);
             return end < 0 ? -1 : end + 1;
         }
         if (!inDoubleQuotes && next === '"') {
@@ -391,7 +406,7 @@ class Splitter {
             // Process substitution: an argument naming a pipe to a command.
             this.#substitution = true;
             this.#dynamic = true;
-            const end = findClosing(s, this.#pos + 1, '(', ')');
+            const end = findClosing(s, this.#pos + 1, '(', ')', this.#escapes);
             if (end < 0) {
                 this.#incomplete = true;
                 return;

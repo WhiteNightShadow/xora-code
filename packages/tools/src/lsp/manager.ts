@@ -158,7 +158,11 @@ export class LspManager {
         if (!match) {
             return { kind: 'unsupported' };
         }
-        const workspace = workspaceRootOf(file, roots);
+        // `file` is a real path: compare it with real roots (Windows 8.3 names, macOS /var → /private/var).
+        const realRoots = await Promise.all(
+            roots.map((root) => realpathLoose(path.resolve(root)).catch(() => path.resolve(root))),
+        );
+        const workspace = workspaceRootOf(file, realRoots);
         if (workspace === undefined) {
             return { kind: 'outside' };
         }

@@ -18,6 +18,18 @@ describe('splitShellCommand', () => {
         expect(words("echo ''")).toEqual([['echo', '']]);
     });
 
+    it('keeps backslashes as ordinary characters for PowerShell', () => {
+        const literal = (command: string): string[][] =>
+            splitShellCommand(command, { literalBackslash: true }).segments.map((segment) =>
+                segment.words.map((word) => word.value),
+            );
+        expect(literal('Remove-Item -Recurse C:\\work\\proj')).toEqual([['Remove-Item', '-Recurse', 'C:\\work\\proj']]);
+        expect(literal('rm "C:\\my work\\" x')).toEqual([['rm', 'C:\\my work\\', 'x']]);
+        expect(literal('del \\\\server\\share\\x; dir')).toEqual([['del', '\\\\server\\share\\x'], ['dir']]);
+        // POSIX shells read the same text differently.
+        expect(words('rm C:\\work\\proj')).toEqual([['rm', 'C:workproj']]);
+    });
+
     it('drops comments', () => {
         expect(words('ls -la # && rm -rf /')).toEqual([['ls', '-la']]);
         expect(words('echo a#b')).toEqual([['echo', 'a#b']]);

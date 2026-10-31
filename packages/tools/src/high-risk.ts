@@ -30,6 +30,9 @@ export interface HighRiskOptions {
     readonly home?: string;
 }
 
+// The bash tool runs commands in PowerShell on Windows, where a backslash separates path parts.
+const LITERAL_BACKSLASH = process.platform === 'win32';
+
 interface Context {
     readonly cwd: string;
     readonly roots: readonly string[];
@@ -66,7 +69,7 @@ function readLine(line: string, context: Context, depth: number): HighRisk | und
     if (depth > MAX_DEPTH) {
         return undefined;
     }
-    const split = splitShellCommand(line);
+    const split = splitShellCommand(line, { literalBackslash: LITERAL_BACKSLASH });
     for (const segment of split.segments) {
         const found = readCommand(segment.words, context, depth);
         if (found) {

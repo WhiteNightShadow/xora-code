@@ -14,7 +14,13 @@ export function pemKey(pem: string): string {
 export function trustSystemCertificates(): number {
     const current = tls.getCACertificates('default');
     const known = new Set(current.map(pemKey));
-    const added = tls.getCACertificates('system').filter((certificate) => !known.has(pemKey(certificate)));
+    // The system list itself can hold a certificate twice (Windows: from several stores; Linux: bundle and folder).
+    const added = tls.getCACertificates('system').filter((certificate) => {
+        const key = pemKey(certificate);
+        if (known.has(key)) return false;
+        known.add(key);
+        return true;
+    });
     if (added.length > 0) {
         tls.setDefaultCACertificates([...current, ...added]);
     }

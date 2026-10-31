@@ -264,10 +264,13 @@ export class TriggerService {
             return;
         }
         this.#closed = true;
+        // A git poll still running keeps its repository busy (Windows will not delete a process's working folder).
+        const polling = [...this.#gitPollers.values()].map((poller) => poller.polling);
         for (const key of [...this.#targets.keys()]) {
             this.#stop(key);
         }
         this.#listeners.clear();
+        await Promise.all(polling);
         await this.#starting;
         const server = this.#server;
         this.#server = undefined;

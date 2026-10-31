@@ -4,6 +4,7 @@ export {
     type ShellSegment,
     type ShellSplit,
     type ShellWord,
+    type SplitOptions,
     splitShellCommand,
 } from './command.ts';
 export { isSecretEnvName, KEPT_ENV_NAMES, sanitizeEnv } from './env.ts';
