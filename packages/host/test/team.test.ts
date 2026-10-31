@@ -593,6 +593,42 @@ describe('agent team limits', () => {
         expect(waiting.note).toContain('可能在主管线程里等你回复');
     }, 60_000);
 
+    it('keeps what the supervisor tells the user, and continues a finished run with its goal and report', async () => {
+        const repo = gitRepo();
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            return body?.messages ? say('短信服务商先用阿里云，还是你另有指定？') : undefined;
+        });
+        const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+        approve(ui, [], new Set());
+        await connect(ui);
+        const project = await ui.request('project.add', { path: repo });
+        const first = await ui.request('team.start', { projectId: project.id, goal: '加短信登录', autonomy: 'L1' });
+        const told = await waitFor(async () => {
+            const current = await ui.request('team.get', { runId: first.id });
+            return current.feedback?.length ? current : undefined;
+        }, 'feedback');
+        expect(told.feedback?.at(-1)?.text).toBe('短信服务商先用阿里云，还是你另有指定？');
+        await expect(
+            ui.request('team.start', { projectId: project.id, goal: '再加邮箱登录', continues: first.id }),
+        ).rejects.toThrow('上一次运行还没结束');
+        await ui.request('team.stop', { runId: first.id });
+
+        const before = server.requests.length;
+        const second = await ui.request('team.start', {
+            projectId: project.id,
+            goal: '再加邮箱登录',
+            autonomy: 'L1',
+            continues: first.id,
+        });
+        expect(second.continues).toBe(first.id);
+        await waitFor(() => (server.requests.length > before ? true : undefined), 'the new supervisor');
+        const brief = JSON.stringify((server.requests[before]?.body as ChatBody | undefined)?.messages ?? []);
+        expect(brief).toContain('<previous_run>');
+        expect(brief).toContain('加短信登录');
+        await ui.request('team.stop', { runId: second.id });
+    }, 60_000);
+
     it('works no more cards at once than the team concurrency setting allows', async () => {
         const repo = gitRepo();
         const cards = ['T1', 'T2', 'T3'].map((id) => ({

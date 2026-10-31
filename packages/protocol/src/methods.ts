@@ -356,6 +356,8 @@ export const methods = {
                 budget: z.number().positive().optional(),
                 /** `hypotheses`: rival explanations investigated in parallel and challenged (06 §7). */
                 mode: z.enum(['standard', 'hypotheses']).optional(),
+                /** A finished run of the project this one continues: its supervisor gets that run's goal and report. */
+                continues: z.string().optional(),
             })
             .strict(),
         result: TeamRunSchema,

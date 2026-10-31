@@ -675,6 +675,10 @@ export const TeamRunSchema = z.object({
     warnings: z.array(z.string()).optional(),
     supervisorThreadId: z.string().optional(),
     mode: z.enum(['standard', 'hypotheses']).optional(),
+    /** The earlier run of the project this one continues. */
+    continues: z.string().optional(),
+    /** The supervisor's last message of each turn, newest last: what it reports to the user. */
+    feedback: z.array(z.object({ ts: z.number(), text: z.string() })).optional(),
     /** Messages between the user, the supervisor and the members (06 §7), oldest first. */
     conversation: z
         .array(

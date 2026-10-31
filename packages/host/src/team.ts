@@ -152,6 +152,9 @@ const RECENT_ENDS = 64;
 /** Model errors after which the next model of the tier's chain takes over (06 §3 rule 2). */
 const FALLBACK_ERRORS = new Set(['rate_limit', 'overloaded', 'server', 'network', 'timeout', 'quota']);
 
+/** Supervisor messages a run keeps as its feedback to the user. */
+const FEEDBACK_KEPT = 30;
+
 /** Planning turns that may end without a task card before a run with no person in the loop pauses. */
 const MAX_PLAN_NUDGES = 2;
 
@@ -246,6 +249,10 @@ interface RunHost {
     inbox: string[];
     /** `standard`, or `hypotheses` for competing hypotheses (06 §7). */
     mode?: TeamMode;
+    /** The supervisor's last message of each turn, newest last: its feedback to the user (at most FEEDBACK_KEPT). */
+    feedback?: Array<{ ts: number; text: string }>;
+    /** The earlier run of the project this one continues. */
+    continues?: string;
     /** Every message of the run, for the team conversation view (06 §7). */
     conversation?: ConversationEntry[];
     tasks: Record<string, TaskHost>;
@@ -371,6 +378,8 @@ const TEXT = bilingual(
         stuck: (blockers: readonly string[]) =>
             `没有能继续的任务（${blockers.join('，')}）；在主管线程里说明怎么处理，或者停止这次运行`,
         stuckTitle: '团队卡住了',
+        noPreviousRun: (id: string) => `这个项目里没有运行${id}`,
+        previousRunActive: '上一次运行还没结束：等它结束，或者先停止它',
         awaitingUser: '主管这一轮没有拆出任务，可能在主管线程里等你回复：回复它，或者停止这次运行',
         noPlan: '主管几次结束都没有拆出任务；在主管线程里说明怎么做后点继续，或者停止这次运行',
         tierLowered: (taskId: string, tier: Tier, percent: number) =>
@@ -468,6 +477,8 @@ const TEXT = bilingual(
         stuck: (blockers) =>
             `No task can go on (${blockers.join(', ')}); tell the supervisor in its thread what to do, or stop the run`,
         stuckTitle: 'The team is stuck',
+        noPreviousRun: (id) => `This project has no run ${id}`,
+        previousRunActive: 'The earlier run has not ended: wait for it, or stop it first',
         awaitingUser:
             'The supervisor ended its turn without task cards and may be waiting for you in its thread: reply there, or stop the run',
         noPlan: 'The supervisor ended several turns without task cards; tell it what to do in its thread and click Continue, or stop the run',
@@ -589,6 +600,8 @@ export class TeamService {
         autonomy?: AutonomyLevel;
         budget?: number;
         mode?: TeamMode;
+        /** An earlier run of the project, finished, that this one continues. */
+        continues?: string;
     }): Promise<TeamRunView> {
         await this.#ready;
         const { projects, settings, threads } = this.#deps;
@@ -600,6 +613,13 @@ export class TeamService {
         const goal = input.goal.trim();
         if (!goal) {
             throw new RpcError(RpcErrorCode.InvalidParams, text.emptyGoal);
+        }
+        const before = input.continues ? await this.#load(input.continues) : undefined;
+        if (input.continues && (!before || before.host.projectId !== project.id)) {
+            throw new RpcError(RpcErrorCode.NotFound, text.noPreviousRun(input.continues));
+        }
+        if (before && this.#live(before)) {
+            throw new RpcError(RpcErrorCode.Rejected, text.previousRunActive);
         }
         const loaded = await loadTeamOrganization({
             orgsDir: this.#deps.orgsDir,
@@ -666,6 +686,7 @@ export class TeamService {
             warnings,
             inbox: [],
             ...(input.mode === 'hypotheses' ? { mode: 'hypotheses' as const } : {}),
+            ...(before ? { continues: before.run.id } : {}),
             tasks: {},
             reviewThreads: [],
             actions: [],
@@ -675,7 +696,14 @@ export class TeamService {
         this.#save(state);
         this.#attachTools(state);
         try {
-            await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel(), host.mode));
+            const previous = before
+                ? {
+                      goal: before.run.goal,
+                      status: before.host.status,
+                      ...(before.host.report ? { report: before.host.report } : {}),
+                  }
+                : undefined;
+            await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel(), host.mode, previous));
         } catch (error) {
             this.#setStatus(state, 'failed', textOf(TEXT).supervisorNotStarted(errorText(error)));
             throw error;
@@ -1196,6 +1224,8 @@ export class TeamService {
             ...(host.note ? { note: host.note } : {}),
             ...(host.warnings.length > 0 ? { warnings: [...host.warnings] } : {}),
             mode: host.mode ?? 'standard',
+            ...(host.continues ? { continues: host.continues } : {}),
+            feedback: [...(host.feedback ?? [])],
             conversation: [...(host.conversation ?? [])],
             supervisorThreadId: host.supervisorThreadId,
             tasks,
@@ -1416,7 +1446,15 @@ export class TeamService {
                 );
             }
         }
+        // Its last words of the turn are its feedback to the user, also after the run ended.
+        const said = event.lastText.trim();
+        if (said) {
+            host.feedback = [...(host.feedback ?? []), { ts: Date.now(), text: shorten(said, 8000) }].slice(
+                -FEEDBACK_KEPT,
+            );
+        }
         if (!this.#live(state)) {
+            this.#save(state);
             return;
         }
         if (event.outcome === 'failed') {

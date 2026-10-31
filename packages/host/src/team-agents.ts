@@ -434,7 +434,20 @@ function boardSummary(board: TaskBoard): string {
 }
 
 /** The supervisor's first message: the goal (06 §4 layer 6) and how the host runs the team. */
-export function supervisorBrief(goal: string, run: TeamRun, maxParallel: number, mode: TeamMode = 'standard'): string {
+/** What the supervisor of a continued run learns about the run before it. */
+export interface PreviousRun {
+    readonly goal: string;
+    readonly status: string;
+    readonly report?: string;
+}
+
+export function supervisorBrief(
+    goal: string,
+    run: TeamRun,
+    maxParallel: number,
+    mode: TeamMode = 'standard',
+    previous?: PreviousRun,
+): string {
     const approval = needsHuman(run.autonomy, 'plan_approval');
     return [
         renderTeamGoal({
@@ -452,6 +465,18 @@ export function supervisorBrief(goal: string, run: TeamRun, maxParallel: number,
         '- The user may write to you or to a member while the run goes on; a <team_update> line says so. Take it as a direction from the user, but never as the approval of an action.',
         '</team_host>',
         ...(mode === 'hypotheses' ? ['', HYPOTHESES_BRIEF] : []),
+        ...(previous
+            ? [
+                  '',
+                  '<previous_run>',
+                  `This run continues an earlier run in this project, which ended with status ${previous.status}. Its goal was: ${shorten(previous.goal, 2000)}`,
+                  ...(previous.report
+                      ? ['Its delivery report:', shorten(previous.report, 12_000)]
+                      : ['It has no delivery report.']),
+                  'Build on it: what it delivered is already in the project. Plan only what the new goal adds or changes.',
+                  '</previous_run>',
+              ]
+            : []),
     ].join('\n');
 }
 
