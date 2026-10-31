@@ -30,7 +30,7 @@ export {
     type TokenUsage,
     type UsageCost,
 } from './cost.ts';
-export { nextPeriodChange, type PeakPeriod, periodAt } from './period.ts';
+export { nextPeriodChange, offPeakStart, type PeakPeriod, periodAt } from './period.ts';
 export {
     type ContextTier,
     type Currency,
@@ -54,3 +54,13 @@ export {
     type UsageQuota,
     type UsageRow,
 } from './usage.ts';
+export {
+    addDays,
+    type CivilDate,
+    type CivilDay,
+    civilDay,
+    type ZonedTime,
+    zonedEpoch,
+    zonedTime,
+    zoneOffset,
+} from './zone.ts';

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nextPeriodChange, type PeriodRule, periodAt } from '../src/index.ts';
+import { nextPeriodChange, offPeakStart, type PeriodRule, periodAt } from '../src/index.ts';
 import { deepseekRule } from './helpers.ts';
 
 const rule = deepseekRule();
@@ -131,5 +131,65 @@ describe('nextPeriodChange', () => {
         expect(next('2026-10-26T10:00:00+08:00', { ...rule, peak: [] })).toBeUndefined();
         const always: PeriodRule = { ...rule, peak: [{ days: ALL_DAYS, from: '00:00', to: '24:00' }] };
         expect(next('2026-10-26T10:00:00+08:00', always)).toBeUndefined();
+    });
+});
+
+describe('offPeakStart', () => {
+    const start = (from: string, rules: readonly PeriodRule[] = [rule]) =>
+        offPeakStart(rules, new Date(from))?.toISOString();
+    const iso = (value: string) => new Date(value).toISOString();
+
+    it.each([
+        // Monday morning peak: wait for the lunch break.
+        ['2026-10-26T10:00:00+08:00', '2026-10-26T12:00:00+08:00'],
+        // Already off-peak: start right away.
+        ['2026-10-26T12:30:00+08:00', '2026-10-26T12:30:00+08:00'],
+        ['2026-10-26T08:59:00+08:00', '2026-10-26T08:59:00+08:00'],
+        // Afternoon peak ends at 18:00; Friday too.
+        ['2026-10-26T14:00:00+08:00', '2026-10-26T18:00:00+08:00'],
+        ['2026-10-30T17:59:00+08:00', '2026-10-30T18:00:00+08:00'],
+        // Weekends are off-peak all day.
+        ['2026-10-31T10:00:00+08:00', '2026-10-31T10:00:00+08:00'],
+    ])('a deepseek run asked for at %s starts at %s', (from, expected) => {
+        expect(start(from)).toBe(iso(expected));
+    });
+
+    it('starts at once without rules, and for vendors without peak hours', () => {
+        expect(start('2026-10-26T10:00:00+08:00', [])).toBe(iso('2026-10-26T10:00:00+08:00'));
+        expect(start('2026-10-26T10:00:00+08:00', [{ ...rule, peak: [] }])).toBe(iso('2026-10-26T10:00:00+08:00'));
+    });
+
+    it('waits until every rule is off-peak at the same time', () => {
+        // A second vendor whose peak runs 11:00–13:00 Beijing time, so the common window opens at 13:00.
+        const late: PeriodRule = {
+            timezone: 'Asia/Shanghai',
+            peak: [{ days: ALL_DAYS, from: '11:00', to: '13:00' }],
+            offPeakMultiplier: 0.5,
+        };
+        expect(start('2026-10-26T10:00:00+08:00', [rule, late])).toBe(iso('2026-10-26T13:00:00+08:00'));
+        expect(start('2026-10-26T10:00:00+08:00', [late, rule])).toBe(iso('2026-10-26T13:00:00+08:00'));
+        // A New York office-hours rule (09:00–17:00 EDT = 21:00–05:00 Beijing) pushes the evening start to 05:00.
+        const office: PeriodRule = {
+            timezone: 'America/New_York',
+            peak: [{ days: [1, 2, 3, 4, 5], from: '09:00', to: '17:00' }],
+            offPeakMultiplier: 0.5,
+        };
+        expect(start('2026-10-27T20:30:00+08:00', [rule, office])).toBe(iso('2026-10-27T20:30:00+08:00'));
+        expect(start('2026-10-27T21:30:00+08:00', [rule, office])).toBe(iso('2026-10-28T05:00:00+08:00'));
+        // 05:00 on Wednesday is off-peak for both: deepseek's day only starts at 09:00.
+        expect(periodAt(rule, new Date('2026-10-28T05:00:00+08:00'))).toBe('offpeak');
+    });
+
+    it('gives up when no common off-peak time comes within eight days', () => {
+        const always: PeriodRule = { ...rule, peak: [{ days: ALL_DAYS, from: '00:00', to: '24:00' }] };
+        expect(start('2026-10-26T10:00:00+08:00', [always])).toBeUndefined();
+        // Two vendors whose off-peak hours never overlap.
+        const morning: PeriodRule = { ...rule, peak: [{ days: ALL_DAYS, from: '00:00', to: '12:00' }] };
+        const evening: PeriodRule = { ...rule, peak: [{ days: ALL_DAYS, from: '12:00', to: '24:00' }] };
+        expect(start('2026-10-26T10:00:00+08:00', [morning, evening])).toBeUndefined();
+    });
+
+    it('rejects an invalid date', () => {
+        expect(() => offPeakStart([rule], new Date(Number.NaN))).toThrow(RangeError);
     });
 });

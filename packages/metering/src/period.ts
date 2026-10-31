@@ -82,3 +82,32 @@ export function nextPeriodChange(rule: PeriodRule, at: Date): Date | undefined {
     }
     return undefined;
 }
+
+/** How far {@link offPeakStart} looks ahead. */
+const OFF_PEAK_SEARCH_MS = 8 * 24 * 60 * 60 * 1000;
+/** Peak windows {@link offPeakStart} steps over at most; eight days of any real rule stay far below it. */
+const OFF_PEAK_MAX_STEPS = 1000;
+
+/**
+ * The earliest instant at or after `at` when every rule is off-peak, for work that waits for the cheap hours of
+ * all the models it uses (06 §12, 11 §7): `at` itself when that holds already or there are no rules, otherwise the
+ * moment the last overlapping peak window closes. Undefined when that does not happen within eight days, e.g. for
+ * a vendor that is always at peak price.
+ */
+export function offPeakStart(rules: readonly PeriodRule[], at: Date): Date | undefined {
+    const start = epochOf(at);
+    let candidate = start;
+    for (let step = 0; step < OFF_PEAK_MAX_STEPS; step++) {
+        const busy = rules.find((rule) => periodAt(rule, new Date(candidate)) === 'peak');
+        if (!busy) {
+            return new Date(candidate);
+        }
+        // The end of this rule's current window; another rule may be at peak by then, so check again.
+        const change = nextPeriodChange(busy, new Date(candidate));
+        if (!change || change.getTime() - start > OFF_PEAK_SEARCH_MS) {
+            return undefined;
+        }
+        candidate = change.getTime();
+    }
+    return undefined;
+}
