@@ -98,6 +98,8 @@ export const ThreadMetaSchema = z.object({
     taskId: z.string().optional(),
     /** Team run this thread belongs to, and its role and model tier in it (06). */
     teamRunId: z.string().optional(),
+    /** Workflow run this thread belongs to (its own thread or a step's); `taskId` is then the step id. */
+    workflowRunId: z.string().optional(),
     role: z.string().optional(),
     tier: z.string().optional(),
     group: z.string().optional(),
@@ -663,6 +665,94 @@ export const TeamRunSchema = z.object({
     updatedAt: z.number(),
 });
 export type TeamRun = z.infer<typeof TeamRunSchema>;
+
+// ---------------------------------------------------------------------------------------------------------
+// Workflows (06 §11–§12)
+
+const WorkflowScalarSchema = z.union([z.string(), z.number(), z.boolean()]);
+
+export const WorkflowInfoSchema = z.object({
+    /** `project:<name>` or `user:<name>`. */
+    key: z.string(),
+    name: z.string(),
+    title: z.string(),
+    description: z.string().optional(),
+    source: z.enum(['project', 'user']),
+    path: z.string(),
+    /** Problems in the file; a workflow with any cannot run. */
+    issues: z.array(z.object({ path: z.string(), message: z.string(), line: z.number().optional() })),
+    inputs: z.array(
+        z.object({
+            name: z.string(),
+            type: z.enum(['string', 'number', 'boolean']),
+            description: z.string().optional(),
+            default: WorkflowScalarSchema.optional(),
+        }),
+    ),
+    steps: z.array(z.object({ id: z.string(), type: z.string(), title: z.string(), needs: z.array(z.string()) })),
+    trigger: z.object({
+        manual: z.boolean(),
+        schedule: z.array(z.string()),
+        timezone: z.string().optional(),
+        files: z.array(z.string()),
+        git: z.array(z.string()),
+        webhook: z.boolean(),
+        offPeakOnly: z.boolean(),
+    }),
+    /** Triggers act only once the user switched them on, and stop when the file changed since (`stale`). */
+    triggers: z.object({ enabled: z.boolean(), stale: z.boolean() }),
+    budget: MoneySchema.nullable(),
+});
+export type WorkflowInfo = z.infer<typeof WorkflowInfoSchema>;
+
+export const WorkflowStepRunSchema = z.object({
+    id: z.string(),
+    type: z.string(),
+    title: z.string(),
+    needs: z.array(z.string()),
+    status: z.enum(['pending', 'running', 'waiting', 'succeeded', 'failed', 'skipped', 'cancelled']),
+    attempts: z.number(),
+    agent: z.string().optional(),
+    tier: z.string().optional(),
+    outputs: z.record(z.string(), z.string()),
+    summary: z.string().optional(),
+    note: z.string().optional(),
+    threadIds: z.array(z.string()),
+    teamRunId: z.string().optional(),
+    childRunId: z.string().optional(),
+    cost: MoneySchema.nullable(),
+    startedAt: z.number().optional(),
+    endedAt: z.number().optional(),
+});
+export type WorkflowStepRun = z.infer<typeof WorkflowStepRunSchema>;
+
+export const WorkflowRunSchema = z.object({
+    id: z.string(),
+    projectId: z.string(),
+    key: z.string(),
+    name: z.string(),
+    title: z.string(),
+    status: z.enum(['queued', 'running', 'waiting', 'paused', 'completed', 'failed', 'cancelled']),
+    reason: z.enum(['manual', 'schedule', 'files', 'git', 'webhook', 'parent']),
+    /** Started by a trigger: API channels only, with a budget (06 §12). */
+    unattended: z.boolean(),
+    inputs: z.record(z.string(), WorkflowScalarSchema),
+    /** Why the run is queued, paused, failed or cancelled. */
+    note: z.string().optional(),
+    warnings: z.array(z.string()),
+    /** When a run queued for the off-peak window starts. */
+    startsAt: z.number().optional(),
+    /** The run's own thread: progress notices and the approval cards of gates and commands. */
+    threadId: z.string(),
+    parentRunId: z.string().optional(),
+    steps: z.array(WorkflowStepRunSchema),
+    budget: MoneySchema.nullable(),
+    cost: MoneySchema,
+    createdAt: z.number(),
+    updatedAt: z.number(),
+    endedAt: z.number().optional(),
+});
+export type WorkflowRun = z.infer<typeof WorkflowRunSchema>;
 
 // ---------------------------------------------------------------------------------------------------------
 // Extensions (09)

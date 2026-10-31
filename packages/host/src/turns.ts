@@ -1012,7 +1012,9 @@ export class TurnService {
                 turnId: running.turnId,
                 ...(owner?.agentId ? { agentId: owner.agentId, agentPath: owner.agentId } : {}),
                 ...(owner?.taskId ? { taskId: owner.taskId } : {}),
-                ...(owner?.teamRunId ? { workflowRunId: owner.teamRunId } : {}),
+                ...(owner?.workflowRunId || owner?.teamRunId
+                    ? { workflowRunId: owner.workflowRunId ?? owner.teamRunId }
+                    : {}),
                 ...(owner?.role ? { role: owner.role } : {}),
                 ...(owner?.tier ? { tier: owner.tier } : {}),
                 engine: running.engine.id,

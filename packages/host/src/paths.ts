@@ -14,6 +14,8 @@ export interface HostPaths {
     readonly downloadsDir: string;
     readonly extensionsDir: string;
     readonly orgsDir: string;
+    /** The user's own workflows, runnable in any project (06 §11). */
+    readonly workflowsDir: string;
     readonly logsDir: string;
 }
 
@@ -32,6 +34,7 @@ export function hostPaths(root: string): HostPaths {
         downloadsDir: path.join(root, 'app', 'downloads'),
         extensionsDir: path.join(root, 'extensions'),
         orgsDir: path.join(root, 'orgs'),
+        workflowsDir: path.join(root, 'workflows'),
         logsDir: path.join(root, 'logs'),
     };
 }

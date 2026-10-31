@@ -173,4 +173,34 @@ create table team_board_events (
 );
 `,
     },
+    {
+        // Workflow runs (06 §11): the run with its definition snapshot and step states in one JSON row, so a
+        // run continues after a restart without redoing finished steps; and the user's trigger switches with
+        // the hash of the file they were switched on for (06 §12).
+        version: 3,
+        sql: `
+create table workflow_runs (
+    id text primary key,
+    project_id text not null,
+    workflow_key text not null,
+    status text not null,
+    parent_run_id text,
+    created_at integer not null,
+    updated_at integer not null,
+    run_json text not null
+);
+create index workflow_runs_by_project on workflow_runs (project_id, created_at desc);
+
+create table workflow_triggers (
+    project_id text not null,
+    workflow_key text not null,
+    enabled integer not null,
+    file_hash text,
+    last_scheduled_at integer,
+    webhook_token text,
+    updated_at integer not null,
+    primary key (project_id, workflow_key)
+);
+`,
+    },
 ];

@@ -51,6 +51,7 @@ export interface ThreadExtra {
     agentId?: string;
     taskId?: string;
     teamRunId?: string;
+    workflowRunId?: string;
     role?: string;
     tier?: string;
     group?: string;
@@ -83,6 +84,7 @@ function toMeta(row: ThreadRow): ThreadMeta {
         ...(extra.agentId ? { agentId: extra.agentId } : {}),
         ...(extra.taskId ? { taskId: extra.taskId } : {}),
         ...(extra.teamRunId ? { teamRunId: extra.teamRunId } : {}),
+        ...(extra.workflowRunId ? { workflowRunId: extra.workflowRunId } : {}),
         ...(extra.role ? { role: extra.role } : {}),
         ...(extra.tier ? { tier: extra.tier } : {}),
         ...(extra.group ? { group: extra.group } : {}),

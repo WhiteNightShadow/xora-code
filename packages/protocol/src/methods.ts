@@ -27,6 +27,8 @@ import {
     UsageRequestSchema,
     UsageRowSchema,
     UsageTotalsSchema,
+    WorkflowInfoSchema,
+    WorkflowRunSchema,
 } from './domain.ts';
 import { EventEnvelopeSchema } from './events.ts';
 
@@ -353,6 +355,42 @@ export const methods = {
         params: z.object({ runId: z.string(), budget: z.number().positive().optional() }).strict(),
         result: TeamRunSchema,
     },
+    /** Workflows of a project (`.xora/workflows/`) and the user's (`<data>/workflows/`), with their problems. */
+    'workflow.list': { params: z.object({ projectId: IdSchema }).strict(), result: z.array(WorkflowInfoSchema) },
+    'workflow.start': {
+        params: z
+            .object({
+                projectId: IdSchema,
+                key: z.string(),
+                inputs: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+                budget: z.number().positive().optional(),
+                /** Wait for the off-peak window of the models it uses. */
+                offPeak: z.boolean().optional(),
+            })
+            .strict(),
+        result: WorkflowRunSchema,
+    },
+    'workflow.runs': {
+        params: z.object({ projectId: IdSchema.optional() }).strict(),
+        result: z.array(WorkflowRunSchema),
+    },
+    'workflow.get': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
+    'workflow.stop': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
+    /** Continues a paused run (after a restart or a spent budget), optionally with more budget. */
+    'workflow.resume': {
+        params: z.object({ runId: z.string(), budget: z.number().positive().optional() }).strict(),
+        result: WorkflowRunSchema,
+    },
+    /** Switches a project workflow's schedule, file, git and webhook triggers on or off. */
+    'workflow.triggers': {
+        params: z.object({ projectId: IdSchema, key: z.string(), enabled: z.boolean() }).strict(),
+        result: WorkflowInfoSchema,
+    },
+    /** The local webhook address and token of a workflow whose triggers are on. */
+    'workflow.webhook': {
+        params: z.object({ projectId: IdSchema, key: z.string() }).strict(),
+        result: z.object({ url: z.string(), token: z.string() }),
+    },
     'team.roster': {
         params: z.object({ projectId: IdSchema }).strict(),
         result: z.object({
@@ -627,6 +665,7 @@ export const notifications = {
     'terminal.output': z.object({ terminalId: z.string(), data: z.string() }),
     'terminal.exit': z.object({ terminalId: z.string(), exitCode: z.number().nullable() }),
     'team.changed': z.object({ run: TeamRunSchema }),
+    'workflow.changed': z.object({ run: WorkflowRunSchema }),
     'extension.changed': z.object({}),
     /** The user clicked a system notification or tray entry for this thread. */
     'ui.focusThread': z.object({ threadId: z.string() }),

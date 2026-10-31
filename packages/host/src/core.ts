@@ -48,6 +48,7 @@ import { TurnService } from './turns.ts';
 import { UpdateService } from './updates.ts';
 import { UsageService } from './usage.ts';
 import { which } from './which.ts';
+import { registerWorkflowHandlers, WorkflowService } from './workflows.ts';
 import { WorktreeService } from './worktrees.ts';
 
 export interface HostOptions {
@@ -92,6 +93,7 @@ export class HostCore {
     readonly goals: GoalService;
     readonly extensions: ExtensionService;
     readonly team: TeamService;
+    readonly workflows: WorkflowService;
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
 
@@ -170,6 +172,7 @@ export class HostCore {
             onTurnEnded: (event) => {
                 void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`));
                 this.team.onTurnEnded(event);
+                this.workflows.onTurnEnded(event);
             },
         });
         this.goals = new GoalService({
@@ -191,6 +194,21 @@ export class HostCore {
             worktrees: this.worktrees,
             turns: this.turns,
             orgsDir: this.paths.orgsDir,
+        });
+        this.workflows = new WorkflowService({
+            db: this.db,
+            bus: this.bus,
+            log: this.log,
+            threads: this.threads,
+            projects: this.projects,
+            connections: this.connections,
+            settings: this.settings,
+            approvals: this.approvals,
+            usage: this.usage,
+            turns: this.turns,
+            team: this.team,
+            orgsDir: this.paths.orgsDir,
+            workflowsDir: this.paths.workflowsDir,
         });
         this.updates = new UpdateService({
             settings: this.settings,
@@ -667,6 +685,7 @@ export class HostCore {
         );
         peer.handle('goal.stop', ({ threadId }) => this.goals.stop(threadId));
         registerTeamHandlers(peer, this.team);
+        registerWorkflowHandlers(peer, this.workflows);
 
         // Extensions (09) ---------------------------------------------------------------------------------------
         const extensions = this.extensions;
@@ -907,6 +926,7 @@ export class HostCore {
     async dispose(): Promise<void> {
         this.terminals.dispose();
         this.updates.dispose();
+        this.workflows.dispose();
         this.team.dispose();
         this.approvals.dispose();
         await this.turns.dispose();

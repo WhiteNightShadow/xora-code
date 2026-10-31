@@ -18,7 +18,12 @@ export interface CheckResult {
 }
 
 /** Runs the acceptance command in the thread's working directory, without the user's secrets in the env. */
-export function runCheck(command: string, cwd: string, signal?: AbortSignal): Promise<CheckResult> {
+export function runCheck(
+    command: string,
+    cwd: string,
+    signal?: AbortSignal,
+    timeoutMs = CHECK_TIMEOUT_MS,
+): Promise<CheckResult> {
     return new Promise((resolve) => {
         const shell = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/sh';
         const args =
@@ -44,7 +49,7 @@ export function runCheck(command: string, cwd: string, signal?: AbortSignal): Pr
                 // already gone
             }
         };
-        const timer = setTimeout(kill, CHECK_TIMEOUT_MS);
+        const timer = setTimeout(kill, timeoutMs);
         signal?.addEventListener('abort', kill, { once: true });
         child.on('error', (error) => {
             clearTimeout(timer);

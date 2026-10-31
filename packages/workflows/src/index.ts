@@ -276,3 +276,22 @@ export {
     type WorkflowStep,
     WorkflowStepSchema,
 } from './workflow.ts';
+export {
+    decideSteps,
+    evaluateCondition,
+    isFinished,
+    newStepState,
+    type RunContext,
+    type RunOutcome,
+    type RunTrigger,
+    refValue,
+    renderTemplate,
+    resolveInputs,
+    runOutcome,
+    STEP_STATUSES,
+    type StepDecision,
+    type StepState,
+    type StepStatus,
+    shellQuote,
+    stepTiers,
+} from './workflow-run.ts';
