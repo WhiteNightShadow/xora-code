@@ -74,6 +74,8 @@
 | 13 | [构建、测试与发布](13-build-release.md) | 三端出包、测试策略、ci、签名 |
 | 14 | [仓库切换与路线图](14-cutover-roadmap.md) | 覆盖仓库的步骤、里程碑与验收、风险、待决策 |
 | 15 | [对标保留清单与差异化优势](15-parity-advantages.md) | codex、cursor、deepseek harness的能力逐项对照；可以继续迭代的优势 |
+| 16 | [M1～M4实施计划](16-m1-m4-plan.md) | 工作包、相对设计稿的调整、进度 |
+| 17 | [M5实施计划](17-m5-plan.md) | 工作流与自动化：工作包、调整、进度 |
 | 附录 | [调研来源](appendix-sources.md) | 已核对事实及其来源 |
 
 ## 里程碑摘要
