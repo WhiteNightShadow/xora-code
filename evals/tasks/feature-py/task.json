@@ -1,0 +1,7 @@
+{
+    "title": "给库存命令行加json输出",
+    "kind": "thread",
+    "prompt": "给inventory的命令行加一个选项：`python3 -m inventory list --format json`输出json数组，每项是{\"name\": 名称, \"qty\": 数量, \"price\": 单价}，按名称排序；--min-qty过滤照样生效。默认还是现在的表格输出。补上对应的单元测试，在README里写明用法，最后运行`python3 -m unittest discover -s tests`确认全部通过。",
+    "timeoutMinutes": 12,
+    "check": "python3 -m unittest discover -s tests"
+}

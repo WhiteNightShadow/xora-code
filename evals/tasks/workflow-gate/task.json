@@ -1,0 +1,11 @@
+{
+    "title": "工作流：复现→人工关卡→修复→审查",
+    "kind": "workflow",
+    "workflow": "project:bugfix",
+    "inputs": {
+        "issue": "formatDuration(3600)返回的是\"60m\"，应该是\"1h\"；formatDuration(90061)也不对，应该是\"1d 1h 1m 1s\""
+    },
+    "budget": 3,
+    "timeoutMinutes": 25,
+    "check": "node --test"
+}

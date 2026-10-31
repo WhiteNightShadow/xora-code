@@ -1,0 +1,9 @@
+{
+    "title": "子agent并行审查三个模块",
+    "kind": "thread",
+    "mode": "auto_edit",
+    "prompt": "这个仓库有三个模块：src/auth、src/billing、src/search。请用agent工具派三个子agent，每个只负责一个模块，并行审查各自模块的代码，找出安全问题和潜在bug。等它们都交回结果后，你汇总写进REVIEW.md：每个模块一节，列出发现的问题、所在文件和修改建议。只写REVIEW.md，不改代码。",
+    "timeoutMinutes": 15,
+    "expect": { "subagents": 2 },
+    "check": "python3 .eval/check_review.py && test -z \"$(git status --porcelain -- src)\""
+}

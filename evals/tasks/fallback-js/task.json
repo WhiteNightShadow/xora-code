@@ -1,0 +1,9 @@
+{
+    "title": "主模型一直过载，换备用模型完成修复",
+    "kind": "thread",
+    "brokenPrimary": true,
+    "prompt": "这个仓库的测试没过。先运行`node --test`看看哪里失败，找到src/range.js里的问题并修好，最后再跑一遍测试确认全部通过。不要改测试文件。",
+    "timeoutMinutes": 10,
+    "expect": { "fallback": true },
+    "check": "node --test"
+}

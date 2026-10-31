@@ -1,0 +1,9 @@
+{
+    "title": "团队竞争假设：查发票金额对不上的根因",
+    "kind": "team",
+    "teamMode": "hypotheses",
+    "budget": 5,
+    "prompt": "invoiceTotal算出的金额和财务手算的对不上，test/invoice.test.js里有一个失败的用例。规则写在src/invoice.js开头的注释里。先列出几种可能的原因分别调查，找到根因后修复，让node --test全部通过，不要改测试。",
+    "timeoutMinutes": 35,
+    "check": "node --test"
+}

@@ -1,0 +1,10 @@
+{
+    "title": "通读12章文档写摘要（逼出上下文压缩）",
+    "kind": "thread",
+    "mode": "auto_edit",
+    "settings": { "softContextWindow": 16000 },
+    "prompt": "docs目录下有12章文档。请逐章读完，然后写SUMMARY.md：每章一行，格式是`- 第N章：一句话摘要；代号：XX-1234；最大风险：……`。每章的代号在正文里，说法每章不一样（发布代号、上线编号、口令等）；最大风险也在正文里。只写SUMMARY.md，不改docs。",
+    "timeoutMinutes": 15,
+    "expect": { "compaction": true },
+    "check": "python3 .eval/check_summary.py"
+}

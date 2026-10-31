@@ -1,0 +1,7 @@
+{
+    "title": "修复range和chunk里的两个差一错误",
+    "kind": "thread",
+    "prompt": "这个仓库的测试没过。先运行`node --test`看看哪里失败，找到src/range.js里的问题并修好，最后再跑一遍测试确认全部通过。不要改测试文件。",
+    "timeoutMinutes": 10,
+    "check": "node --test"
+}

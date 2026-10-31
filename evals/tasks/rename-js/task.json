@@ -1,0 +1,7 @@
+{
+    "title": "跨文件重命名函数",
+    "kind": "thread",
+    "prompt": "把仓库里的函数calcTotal改名为computeTotal：定义、所有调用处、测试和文档里的提法都要改，行为不变。改完运行`node --test`确认通过，再搜一遍确认仓库里不再出现calcTotal。",
+    "timeoutMinutes": 10,
+    "check": "! grep -rn calcTotal --exclude-dir=.git . && grep -q 'export function computeTotal' src/cart.js && node --test"
+}

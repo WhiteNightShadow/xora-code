@@ -1,0 +1,23 @@
+name: bugfix
+title: 修缺陷
+inputs:
+  issue: { description: 问题描述 }
+steps:
+  - id: reproduce
+    agent: debugger
+    task: "复现这个问题：{{inputs.issue}}。在test/目录下写一个现在会失败的node:test测试文件，交回它的路径"
+    outputs: [testFile]
+    verify: { command: "node --test {{steps.reproduce.outputs.testFile}}", expect: fail }
+  - id: approve
+    needs: [reproduce]
+    gate: human
+    message: "复现测试是{{steps.reproduce.outputs.testFile}}，继续修吗？"
+  - id: fix
+    agent: coder
+    needs: [approve]
+    task: "修好src/duration.js，让{{steps.reproduce.outputs.testFile}}和其他测试都通过，不要改测试"
+    verify: { command: "node --test" }
+  - id: review
+    agent: reviewer
+    needs: [fix]
+    task: 审查fix这一步的改动，指出问题；只读，不改文件

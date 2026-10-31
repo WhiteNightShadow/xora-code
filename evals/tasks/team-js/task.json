@@ -1,0 +1,8 @@
+{
+    "title": "团队：实现三个文本函数",
+    "kind": "team",
+    "budget": 3,
+    "prompt": "实现src/text.js里还没写的三个函数slugify、truncate、wordCount，要求见各自的注释，test/text.test.js里的测试全部通过（验收命令：node --test）。不要改测试。",
+    "timeoutMinutes": 25,
+    "check": "node --test"
+}

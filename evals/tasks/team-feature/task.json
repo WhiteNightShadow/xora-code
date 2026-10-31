@@ -1,0 +1,8 @@
+{
+    "title": "团队：给待办命令行加三个功能（有先后依赖）",
+    "kind": "team",
+    "budget": 5,
+    "prompt": "给这个待办命令行加三个功能，每个功能都要有测试，最后在README里补上用法：\n1. 优先级：`add`支持`--priority high|normal|low`（默认normal），存进条目的`priority`字段；`list(todos, options)`按优先级排序（high、normal、low，同级按id），`format(item, today)`在优先级不是normal时在标题后加` (high)`或` (low)`。\n2. 截止日期：`add`支持`--due YYYY-MM-DD`，存进`due`字段（没有就是null）；`format`在有截止日期时加` due YYYY-MM-DD`，`today`之后才算没过期，过期的再加` !`。\n3. 状态过滤：`list`的`options.status`可以是open、done、all（默认open），命令行`list --status ...`。\n函数都在src/store.js里导出，命令行在src/cli.js。验收命令：node --test。",
+    "timeoutMinutes": 35,
+    "check": "node --test"
+}
