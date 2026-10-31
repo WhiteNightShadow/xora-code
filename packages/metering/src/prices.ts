@@ -111,6 +111,31 @@ export const PRICE_TABLES: readonly PriceTable[] = [
             '节假日日期没有内置，可以自己加到holidays里。服务端search、fetch从2026-11-01起每千次5元。',
     },
     {
+        id: 'deepseek-v4-pro@2026-10',
+        models: ['deepseek-v4-pro'],
+        currency: 'CNY',
+        unit: 'per_million_tokens',
+        input: 9,
+        cachedInput: 0.3,
+        output: 27,
+        period: {
+            timezone: 'Asia/Shanghai',
+            peak: [
+                { days: WEEKDAYS, from: '09:00', to: '12:00' },
+                { days: WEEKDAYS, from: '14:00', to: '18:00' },
+            ],
+            offPeakMultiplier: 0.5,
+            holidays: [],
+        },
+        serverTools: {
+            search: { perThousand: 5, since: '2026-11-01' },
+            fetch: { perThousand: 5, since: '2026-11-01' },
+        },
+        verified: '2026-10-30',
+        source: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing',
+        notes: '表中是高峰单价，时段规则和deepseek-flash相同：工作日9:00–12:00、14:00–18:00（北京时间）为高峰，其余时间半价。',
+    },
+    {
         id: 'glm-5.3@2026-10',
         models: ['glm-5.3'],
         currency: 'CNY',

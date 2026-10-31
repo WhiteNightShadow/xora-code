@@ -38,6 +38,7 @@
 | 事实 | 来源 |
 |---|---|
 | deepseek：模型为`deepseek-flash`（v4.1 flash）和`deepseek-v4-pro`，1m上下文，最大输出384k；价格与峰谷规则；search/fetch从11-01起收费 | [deepseek定价](https://api-docs.deepseek.com/zh-cn/quick_start/pricing) |
+| deepseek-v4-pro的单价（10-30核对）：高峰时段输入未命中缓存9元、命中0.3元、输出27元（每百万token），空闲时段半价，时段规则和deepseek-flash相同；kimi-k3.1-pro的定价表是脚本渲染的，抓不到数字；glm-5.3-flash的文档页没有单价，这两个仍没有价格表 | [deepseek定价](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)、[kimi定价](https://platform.kimi.com/docs/pricing/chat) |
 | deepseek：带tools时必须完整回传`reasoning_content`，否则报400；思考模式默认开启 | [deepseek思考模式](https://api-docs.deepseek.com/guides/thinking_mode) |
 | glm coding plan只能在23个指定工具里使用，xora不在名单上 | [智谱coding plan工具](https://docs.bigmodel.cn/cn/coding-plan/tool/others.md) |
 | kimi code：禁止伪装或篡改客户端身份，订阅只用于个人交互式使用，第三方工具名单不是穷举 | [kimi code社区规范](https://www.kimi.com/code/docs/en/kimi-code/community-guidelines.html) |

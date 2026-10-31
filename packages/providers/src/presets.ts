@@ -103,6 +103,7 @@ const deepseek: ProviderPreset = {
             input: ['text'],
             reasoning: DEEPSEEK_REASONING,
             tools: true,
+            pricing: 'deepseek-v4-pro@2026-10',
         },
     ],
     quirks: {

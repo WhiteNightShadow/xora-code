@@ -148,6 +148,18 @@ steps:
     task: 看看有什么问题
 `;
 
+const NIGHTLY_FLAGSHIP = `
+name: nightly-flagship
+budget: { perRun: 5 }
+trigger:
+  schedule: "0 2 * * *"
+steps:
+  - id: plan
+    agent: reviewer
+    tier: flagship
+    task: 想一想
+`;
+
 const NIGHTLY_BUDGET = `
 name: nightly-budget
 budget: { perRun: 0.000001 }
@@ -372,7 +384,11 @@ describe('workflow runs', () => {
     }, 120_000);
 
     it('starts unattended runs only on api channels, with a budget, and pauses when it is spent', async () => {
-        const repo = gitRepo({ 'nightly.yaml': NIGHTLY, 'nightly-budget.yaml': NIGHTLY_BUDGET });
+        const repo = gitRepo({
+            'nightly.yaml': NIGHTLY,
+            'nightly-budget.yaml': NIGHTLY_BUDGET,
+            'nightly-flagship.yaml': NIGHTLY_FLAGSHIP,
+        });
         const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
         server.respondWith(respond);
         const host = await startHost(dataDir);
@@ -413,13 +429,27 @@ describe('workflow runs', () => {
             apiKey: 'test-key',
             baseUrl: server.url,
         });
-        // The standard tier would run on deepseek-v4-pro, which has no price table: no budget could hold.
+        // With Kimi connected too, a flagship step would start on kimi-k3.1-pro, which has no price table: no
+        // budget could hold.
+        const kimi = await host.ui.request('provider.save', {
+            presetId: 'kimi-cn',
+            name: 'kimi mock',
+            apiKey: 'test-key',
+            baseUrl: server.url,
+        });
+        await host.ui.request('workflow.triggers', {
+            projectId: project.id,
+            key: 'project:nightly-flagship',
+            enabled: true,
+        });
         const unpriced = await host.core.workflows.fire({
             projectId: project.id,
-            key: 'project:nightly',
+            key: 'project:nightly-flagship',
             trigger: { reason: 'schedule' },
         });
-        expect(unpriced?.note).toContain('这些模型没有价格表：deepseek-v4-pro');
+        expect(unpriced?.status).toBe('failed');
+        expect(unpriced?.note).toBe('没有开始：无人值守运行要能计价，这些模型没有价格表：kimi-k3.1-pro');
+        await host.ui.request('provider.remove', { connectionId: kimi.id });
         await host.ui.request('workflow.triggers', {
             projectId: project.id,
             key: 'project:nightly-budget',
