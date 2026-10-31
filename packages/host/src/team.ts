@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs';
 import {
-    type Effort,
     type HostMethods,
     type HostNotifications,
     type ItemOf,
@@ -27,7 +26,6 @@ import {
     budgetPressure,
     buildAgentLayers,
     type CommandResult,
-    type ConnectedModel,
     checkCard,
     createTeamRun,
     DEFAULT_STALL_WINDOW,
@@ -38,20 +36,16 @@ import {
     type EscalationDecision,
     findAgent,
     formatIssues,
-    inferFamily,
     type Judgement,
     judge,
     loadTeamState,
-    modelChain,
     needsHuman,
     nextTier,
     type Organization,
     ProgressLedger,
     parseDeliverable,
     parseReview,
-    pickReviewerModel,
     planAcceptance,
-    type ResolvedModel,
     type ReviewOutcome,
     type Role,
     renderDeliverableRepair,
@@ -69,7 +63,6 @@ import {
     type TeamUsage,
     TIER_LABELS,
     type Tier,
-    type TierEffort,
     taskGraph,
     tierRank,
     tierUnderPressure,
@@ -78,6 +71,7 @@ import {
     zhStyle,
 } from '@xora/workflows';
 import { headCommit, releasePort } from '@xora/workspace';
+import { type ModelPick, pickTierModel, runChannels } from './agent-models.ts';
 import type { ApprovalOutcome, ApprovalService } from './approvals.ts';
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
@@ -239,13 +233,6 @@ interface RunState {
     broadcastTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
-interface ModelPick {
-    readonly ref: ModelRef;
-    readonly family?: string;
-    readonly effort: Effort;
-    readonly fallbacks: Array<{ ref: ModelRef; family?: string }>;
-}
-
 interface Costs {
     readonly currency: string;
     readonly total: number;
@@ -312,10 +299,6 @@ function fail(content: string): HostToolResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function effortOf(effort: TierEffort | undefined): Effort {
-    return effort === undefined || effort === 'auto' ? 'medium' : effort;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -819,34 +802,6 @@ export class TeamService {
     // Models and costs -----------------------------------------------------------------------------------
 
     /** Connected, usable models with their family and channel, for the tiers' chains. */
-    #available(): ConnectedModel[] {
-        const { connections } = this.#deps;
-        const presets = new Map(connections.presets().map((preset) => [preset.id, preset]));
-        return connections.list().flatMap((connection) => {
-            const preset = presets.get(connection.presetId);
-            if (!connection.enabled || (preset?.needsKey !== false && !connection.hasKey)) {
-                return [];
-            }
-            // Custom and local endpoints report their vendor as the family; the model id says more.
-            const generic = preset?.channel === 'custom' || preset?.channel === 'local';
-            return connection.models.map((model) => ({
-                connectionId: connection.id,
-                model: model.id,
-                presetId: connection.presetId,
-                family: (generic ? inferFamily(model.id) : undefined) ?? model.family,
-                ...(preset ? { channel: preset.channel } : {}),
-            }));
-        });
-    }
-
-    #defaultModel(project: Project): ModelRef | undefined {
-        return project.defaults?.model ?? this.#deps.settings.get().defaultModel ?? undefined;
-    }
-
-    /**
-     * The tier's first connected model (06 §3), or for a reviewer the first of another family; the default model
-     * with a warning when the chain has nothing connected.
-     */
     #pickModel(
         org: Organization,
         autonomy: AutonomyLevel,
@@ -855,53 +810,19 @@ export class TeamService {
         warnings: string[],
         reviewerOf?: string,
     ): ModelPick {
-        const chain = modelChain(tier, org, this.#available(), { unattended: autonomy === 'L3' });
-        const picked = reviewerOf !== undefined ? pickReviewerModel(reviewerOf, chain)?.model : chain[0];
-        const toRef = (model: ResolvedModel) => ({
-            ref: { connectionId: model.connectionId, model: model.model },
-            ...(model.family ? { family: model.family } : {}),
+        return pickTierModel(this.#deps, {
+            org,
+            project,
+            tier,
+            unattended: autonomy === 'L3',
+            warnings,
+            ...(reviewerOf !== undefined ? { reviewerOf } : {}),
         });
-        if (picked) {
-            return {
-                ...toRef(picked),
-                effort: effortOf(picked.effort),
-                fallbacks: chain.filter((model) => model !== picked).map(toRef),
-            };
-        }
-        const fallback = this.#defaultModel(project);
-        if (!fallback) {
-            throw new RpcError(RpcErrorCode.Rejected, '还没有可用的模型：先在设置里连接一个模型');
-        }
-        const warning = `${TIER_LABELS[tier]}档的模型链里没有已连接的模型，改用默认模型${fallback.model}`;
-        if (!warnings.includes(warning)) {
-            warnings.push(warning);
-        }
-        const family = inferFamily(fallback.model);
-        return {
-            ref: fallback,
-            ...(family ? { family } : {}),
-            effort: effortOf(org.tiers[tier].effort),
-            fallbacks: [],
-        };
     }
 
-    /** Channels the run would use, for the L3 check: the head of every tier's chain, or the default model's. */
+    /** Channels the run would use, for the L3 check. */
     #channels(org: Organization, autonomy: AutonomyLevel, project: Project): string[] {
-        const available = this.#available();
-        const channels = new Set<string>();
-        for (const tier of Object.keys(org.tiers) as Tier[]) {
-            const head = modelChain(tier, org, available, { unattended: autonomy === 'L3' })[0];
-            if (head) {
-                channels.add(head.channel ?? 'custom');
-                continue;
-            }
-            const fallback = this.#defaultModel(project);
-            const connection = fallback
-                ? available.find((model) => model.connectionId === fallback.connectionId)
-                : undefined;
-            channels.add(connection?.channel ?? 'custom');
-        }
-        return [...channels];
+        return runChannels(this.#deps, org, project, autonomy === 'L3');
     }
 
     /** The run's spending from the usage events, in the display currency. */
