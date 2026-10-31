@@ -41,6 +41,7 @@ const BUILTIN_TOOLS = [
     'list',
     'glob',
     'grep',
+    'lsp',
     'edit',
     'multi_edit',
     'write',

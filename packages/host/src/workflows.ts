@@ -20,7 +20,7 @@ import {
     type WorkflowStepRun,
 } from '@xora/protocol';
 import { fromJson, type XoraDatabase } from '@xora/storage';
-import { isReadOnlyCommand } from '@xora/tools';
+import { type HighRisk, isReadOnlyCommand } from '@xora/tools';
 import {
     type AgentSpec,
     type AgentStep,
@@ -63,11 +63,11 @@ import type { HostToolResult } from './engines/manager.ts';
 import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import type { CallFacts } from './policy.ts';
+import { type CallFacts, HIGH_RISK_LABELS, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import type { TeamService } from './team.ts';
-import { disabledBuiltins, loadTeamOrganization, shorten, systemLayers } from './team-agents.ts';
+import { disabledBuiltins, loadTeamOrganization, mcpToolsOf, shorten, systemLayers } from './team-agents.ts';
 import type { ThreadStore } from './threads.ts';
 import type { HostToolProvider, TurnEnded, TurnService } from './turns.ts';
 import type { UsageService } from './usage.ts';
@@ -166,6 +166,7 @@ interface ApproveRequest {
     readonly summary: string;
     readonly risks: readonly Risk[];
     readonly command?: string;
+    readonly highRisk?: HighRisk;
 }
 
 export interface WorkflowDeps {
@@ -1556,6 +1557,9 @@ export class WorkflowService {
         return {
             tools: [STEP_RESULT_TOOL],
             disabledTools: disabledBuiltins(agent),
+            // Like team members (06 §8): the agent's MCP allowlist, and a person approves every high-risk action.
+            mcpTools: mcpToolsOf(agent),
+            highRiskApproval: true,
             layers: systemLayers(state.record.org, agent),
             handle: async (name, input) => {
                 if (name !== 'step_result') {
@@ -1800,6 +1804,8 @@ export class WorkflowService {
         const { record } = state;
         const { approvals, projects, log } = this.#deps;
         const project = await projects.get(record.projectId);
+        // A step's command may push or publish: that needs a person whatever the mode or rules say (06 §8).
+        const highRisk = highRiskOf({ toolName: 'workflow_command', command }, { cwd: project.path });
         const facts: CallFacts = {
             toolName: 'workflow_command',
             kind: 'execute',
@@ -1810,6 +1816,7 @@ export class WorkflowService {
             outside: [],
             sensitive: [],
             external: false,
+            ...(highRisk ? { highRisk } : {}),
         };
         const policy = approvals.evaluate(record.threadId, facts, {
             mode,
@@ -1823,11 +1830,14 @@ export class WorkflowService {
         if (policy.decision === 'ask') {
             const outcome = await this.#approve(state, {
                 toolName: 'workflow_command',
-                title: `${label}：运行命令`,
+                title: highRisk
+                    ? `${label}：运行命令（高风险动作：${HIGH_RISK_LABELS[highRisk.action]}）`
+                    : `${label}：运行命令`,
                 toolKind: 'execute',
                 summary: command,
                 command,
                 risks: policy.risks,
+                ...(highRisk ? { highRisk } : {}),
             });
             if (outcome.status !== 'allowed') return undefined;
         }
@@ -1858,6 +1868,7 @@ export class WorkflowService {
             outside: [],
             sensitive: [],
             external: false,
+            ...(request.highRisk ? { highRisk: request.highRisk } : {}),
         };
         let item: ItemOf<'approval'> | undefined;
         const outcome = await approvals.request(

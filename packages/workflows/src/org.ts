@@ -132,7 +132,7 @@ export const TEAM_TOOLS = {
     member: ['deliver', 'escalate', 'ask_supervisor'],
 } as const;
 
-const READ_TOOLS = ['read', 'list', 'glob', 'grep'];
+const READ_TOOLS = ['read', 'list', 'glob', 'grep', 'lsp'];
 const EDIT_TOOLS = ['write', 'edit', 'apply_patch'];
 const WEB_TOOLS = ['web_fetch', 'web_search'];
 
