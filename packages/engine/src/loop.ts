@@ -7,6 +7,7 @@ import {
     contextBudget,
     contextMessages,
     currentContextTokens,
+    estimatedContextTokens,
     pruneToolResults,
     summarise,
     summaryCut,
@@ -405,7 +406,8 @@ export class TurnRunner {
                 compactionId: id,
                 status: 'completed',
                 ...(result?.summary ? { summary: [text(result.summary)] } : {}),
-                _meta: { xora: { level, before: result?.before, after: result?.after } },
+                // Nothing to summarise yet: only older tool output was replaced, which is level 2.
+                _meta: { xora: { level: result ? level : 2, before: result?.before, after: result?.after } },
             } as acp.SessionUpdate);
             return result !== undefined;
         } catch (error) {
@@ -556,6 +558,7 @@ export class TurnRunner {
         const session = this.#session;
         const promptTokens = done.usage?.inputTokens ?? currentContextTokens(session, request.system);
         session.lastPromptTokens = promptTokens;
+        session.lastPromptEstimate = estimatedContextTokens(session, request.system);
         this.#io.update({
             sessionUpdate: 'usage_update',
             used: promptTokens,

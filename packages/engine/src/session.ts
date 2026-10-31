@@ -101,6 +101,8 @@ export class EngineSession {
     prunedUpTo = 0;
     /** Prompt tokens reported for the latest request, for the context meter and compaction triggers. */
     lastPromptTokens = 0;
+    /** What `estimatedContextTokens` made of that request, to calibrate later estimates against the vendor's count. */
+    lastPromptEstimate = 0;
     /** MCP servers the client configured for this session (09 §2). */
     mcp: McpManager | undefined;
     /** State at the start of each host turn that can still be rewound to, in order. */

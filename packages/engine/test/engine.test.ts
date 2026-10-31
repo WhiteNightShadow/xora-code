@@ -305,6 +305,47 @@ describe('xora engine over ACP', () => {
         h.close();
     }, 30_000);
 
+    it('compacts inside one long turn of tool calls and keeps its request word for word', async () => {
+        server.reset();
+        const cwd = workspace();
+        for (let index = 1; index <= 12; index++) {
+            // Chinese text: each character counts as a token, so even the latest few results overflow the window.
+            writeFileSync(path.join(cwd, `big-${index}.txt`), `${index} ${'字'.repeat(6000)}\n`);
+        }
+        let summaries = 0;
+        let steps = 0;
+        server.respondWith((request) => {
+            const body = request.body as { messages: Array<{ role: string; content: unknown }> };
+            if (JSON.stringify(body.messages[0]?.content ?? '').includes('compress the earlier part')) {
+                summaries++;
+                return openaiText(
+                    'Goal: read the big files. Files: big-1.txt to big-4.txt read. Open items: the rest.',
+                );
+            }
+            steps++;
+            return steps <= 12
+                ? openaiToolCalls([{ name: 'read', arguments: JSON.stringify({ path: `big-${steps}.txt` }) }])
+                : openaiText('read all twelve');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, cwd, { softContextWindow: 9000, maxOutputTokens: 1000, mode: 'full' });
+        const done = await h.client.request('session/prompt', {
+            sessionId,
+            prompt: [{ type: 'text', text: 'Read big-1.txt to big-12.txt one by one, then say so.' }],
+        });
+        expect(done.stopReason).toBe('end_turn');
+        expect(summaries).toBeGreaterThan(0);
+        const last = JSON.stringify((server.requests.at(-1)?.body as { messages?: unknown[] } | undefined)?.messages);
+        expect(last).toContain('conversation_summary');
+        const kept = last.slice(last.indexOf('<request_in_progress>'));
+        expect(kept).toContain('Read big-1.txt to big-12.txt one by one, then say so.');
+        const levels = h.updates
+            .filter((update) => update.sessionUpdate === 'compaction_update' && update.status === 'completed')
+            .map((update) => (update._meta as { xora?: { level?: number } } | undefined)?.xora?.level);
+        expect(levels).toContain(3);
+        h.close();
+    }, 30_000);
+
     it('resumes a stored session in a new working directory', async () => {
         server.reset();
         server.respondWith(() => openaiText('ok'));
