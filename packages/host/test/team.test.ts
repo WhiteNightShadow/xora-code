@@ -523,6 +523,78 @@ describe('agent team limits', () => {
         expect(stopped.status).toBe('cancelled');
         expect(stopped.tasks.map((task) => task.status)).toEqual(['cancelled']);
     }, 60_000);
+
+    it('works no more cards at once than the team concurrency setting allows', async () => {
+        const repo = gitRepo();
+        const cards = ['T1', 'T2', 'T3'].map((id) => ({
+            id,
+            title: `Write ${id}`,
+            goal: `${id}.txt exists`,
+            category: 'coding',
+            tier: 'economy',
+            ownership: [`${id}.txt`],
+            acceptance: [{ type: 'command', run: 'node -e "process.exit(0)"' }],
+            deliverable: { kind: 'code-change' },
+            budget: { cost: 2 },
+            workspace: 'worktree',
+        }));
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) {
+                return undefined;
+            }
+            const last = body.messages.at(-1);
+            if (agentOf(body) === 'Supervisor') {
+                if (last?.role === 'tool') return say('Planned.');
+                return textOf(last?.content).includes('<team_goal>')
+                    ? call({ name: 'task_create', arguments: { tasks: cards } })
+                    : say('Noted.');
+            }
+            const first = textOf(body.messages.find((message) => message.role === 'user')?.content);
+            const taskId = /<task_card id="([^"]+)"/.exec(first)?.[1] ?? 'T?';
+            if (last?.role !== 'tool') {
+                return {
+                    ...call({ name: 'write', arguments: { path: `${taskId}.txt`, content: 'x\n' } }),
+                    delayMs: 150,
+                };
+            }
+            return lastCall(body) === 'write'
+                ? call({
+                      name: 'deliver',
+                      arguments: {
+                          status: 'done',
+                          summary: `wrote ${taskId}.txt`,
+                          changes: [{ file: `${taskId}.txt`, kind: 'added' }],
+                          evidence: [{ type: 'diff' }],
+                      },
+                  })
+                : say(`Handed in ${taskId}.`);
+        });
+        const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+        approve(ui, [], new Set());
+        await connect(ui);
+        await ui.request('settings.update', { patch: { team: { maxParallel: 1 } } });
+        const project = await ui.request('project.add', { path: repo });
+        const before = server.requests.length;
+        const run = await ui.request('team.start', { projectId: project.id, goal: '写三个文件', autonomy: 'L2' });
+        let most = 0;
+        const done = await waitFor(async () => {
+            const current = await ui.request('team.get', { runId: run.id });
+            const working = current.tasks.filter((task) => task.status === 'assigned' || task.status === 'in_progress');
+            most = Math.max(most, working.length);
+            return current.status === 'done' || current.status === 'failed' ? current : undefined;
+        }, 'run done');
+        expect(done.status).toBe('done');
+        expect(done.tasks.map((task) => task.status)).toEqual(['done', 'done', 'done']);
+        expect(most).toBe(1);
+        const brief = server.requests
+            .slice(before)
+            .find((request) => agentOf(request.body as ChatBody | undefined) === 'Supervisor')?.body as ChatBody;
+        expect(textOf(brief.messages.at(-1)?.content)).toContain('at most 1 at a time');
+        for (const id of ['T1', 'T2', 'T3']) {
+            expect(readFileSync(path.join(repo, `${id}.txt`), 'utf8')).toBe('x\n');
+        }
+    }, 90_000);
 });
 
 describe('team persistence and organizations', () => {

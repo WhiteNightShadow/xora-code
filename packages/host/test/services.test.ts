@@ -113,6 +113,20 @@ describe('SettingsService', () => {
         expect(reloaded.theme).toBe('system');
         expect(reloaded.density).toBe('compact');
     });
+
+    it('keeps team concurrency between 1 and 8, 3 by default', () => {
+        const db = database();
+        const settings = new SettingsService(db);
+        expect(settings.get().team.maxParallel).toBe(3);
+        expect(settings.update({ team: { maxParallel: 5 } }).team.maxParallel).toBe(5);
+        expect(() => settings.update({ team: { maxParallel: 9 } })).toThrow();
+        expect(() => settings.update({ team: { maxParallel: 0 } })).toThrow();
+        db.run('update settings set value_json = ? where key = ?', [
+            JSON.stringify({ team: { maxParallel: 20 } }),
+            'settings',
+        ]);
+        expect(new SettingsService(db).get().team.maxParallel).toBe(3);
+    });
 });
 
 describe('ApprovalService', () => {

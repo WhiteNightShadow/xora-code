@@ -119,8 +119,9 @@ import type { WorktreeService } from './worktrees.ts';
  * and both ledgers live in `@xora/workflows`; this service drives them and persists every change.
  */
 
-/** Executors working at once in one run (06 §1: a few members at a time is plenty). */
-export const MAX_PARALLEL_TASKS = 3;
+/** Bounds of the team concurrency setting (06 §1: a few members at a time is plenty). */
+const MIN_PARALLEL = 1;
+const MAX_PARALLEL = 8;
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 const OUTPUT_TAIL = 4_000;
 const BROADCAST_MS = 200;
@@ -267,7 +268,6 @@ export interface TeamDeps {
     readonly turns: TurnService;
     /** `<data>/orgs`: user-level organizations, one directory each (06 §2). */
     readonly orgsDir: string;
-    readonly maxParallel?: number;
     readonly commandTimeoutMs?: number;
 }
 
@@ -308,7 +308,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export class TeamService {
     readonly #deps: TeamDeps;
     readonly #store: SqliteTeamStore;
-    readonly #maxParallel: number;
     readonly #commandTimeoutMs: number;
     readonly #runs = new Map<string, RunState>();
     readonly #loading = new Map<string, Promise<RunState | undefined>>();
@@ -324,7 +323,6 @@ export class TeamService {
     constructor(deps: TeamDeps) {
         this.#deps = deps;
         this.#store = new SqliteTeamStore(deps.db);
-        this.#maxParallel = deps.maxParallel ?? MAX_PARALLEL_TASKS;
         this.#commandTimeoutMs = deps.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
         this.#ready = this.#recover().catch((error) => deps.log.warn(`team: recovery failed: ${errorText(error)}`));
     }
@@ -416,7 +414,7 @@ export class TeamService {
         this.#save(state);
         this.#attachTools(state);
         try {
-            await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel));
+            await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel()));
         } catch (error) {
             this.#setStatus(state, 'failed', `主管线程没能启动：${errorText(error)}`);
             throw error;
@@ -799,6 +797,12 @@ export class TeamService {
             { item },
             { turnId, itemId: item.id },
         );
+    }
+
+    /** Members working at once in one run: the setting, read at every dispatch so a change applies right away. */
+    #maxParallel(): number {
+        const wanted = this.#deps.settings.get().team.maxParallel;
+        return Math.min(MAX_PARALLEL, Math.max(MIN_PARALLEL, Math.round(wanted)));
     }
 
     // Models and costs -----------------------------------------------------------------------------------
@@ -1804,7 +1808,7 @@ export class TeamService {
     #dispatch(state: RunState): void {
         const { board, host } = state;
         const running = board.list({ status: ['assigned', 'in_progress'] }).length;
-        let free = this.#maxParallel - running;
+        let free = this.#maxParallel() - running;
         if (free <= 0) {
             return;
         }
