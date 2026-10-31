@@ -1,6 +1,7 @@
 import { CORE_SCHEMA, load, YAMLException } from 'js-yaml';
 import { z } from 'zod';
 import { AUTONOMY_LEVELS } from './autonomy.ts';
+import { cronError, isTimeZone } from './cron.ts';
 import { CurrencySchema, TierSchema } from './schemas.ts';
 
 /**
@@ -220,7 +221,7 @@ const WorkflowObjectSchema = z
     .strict();
 
 export const WorkflowDefinitionSchema = WorkflowObjectSchema.superRefine((definition, ctx) => {
-    for (const issue of checkGraph(definition)) {
+    for (const issue of [...triggerIssues(definition.trigger), ...checkGraph(definition)]) {
         ctx.addIssue({ code: 'custom', message: issue.message, path: issue.path });
     }
 });
@@ -346,6 +347,24 @@ export function stepTemplates(step: WorkflowStep): Array<{ readonly field: strin
             break;
     }
     return fields;
+}
+
+/** Cron expressions and the time zone of a trigger that cannot be read, at their path in the workflow. */
+export function triggerIssues(trigger: Pick<TriggerSpec, 'schedule' | 'timezone'>): WorkflowIssue[] {
+    const issues: WorkflowIssue[] = [];
+    const schedules = typeof trigger.schedule === 'string' ? [trigger.schedule] : (trigger.schedule ?? []);
+    schedules.forEach((expression, position) => {
+        const error = cronError(expression);
+        if (error) {
+            const path =
+                typeof trigger.schedule === 'string' ? ['trigger', 'schedule'] : ['trigger', 'schedule', position];
+            issues.push({ path, message: error });
+        }
+    });
+    if (trigger.timezone !== undefined && !isTimeZone(trigger.timezone)) {
+        issues.push({ path: ['trigger', 'timezone'], message: `unknown time zone ${trigger.timezone}` });
+    }
+    return issues;
 }
 
 /** Every step the given one waits for, directly or not. */

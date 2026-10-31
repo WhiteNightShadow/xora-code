@@ -13,6 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@xora/metering": "workspace:*",
     "js-yaml": "4.3.2",
     "picomatch": "4.0.7",
     "zod": "4.6.7"
