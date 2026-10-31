@@ -1,4 +1,4 @@
-import { type FSWatcher, readdir, stat, watch } from 'node:fs';
+import { existsSync, type FSWatcher, readdir, stat, watch } from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -31,11 +31,19 @@ export function inSkippedDir(relativePath: string): boolean {
 
 const posix = (name: string) => name.replaceAll('\\', '/');
 
+/**
+ * Whether an event names the watched directory itself: FSEvents and inotify report a change of the directory (its
+ * permissions, say) under the directory's own name. A child of that name is told apart by existing.
+ */
+function aboutItself(dir: string, name: string): boolean {
+    return name === path.basename(dir) && !existsSync(path.join(dir, name));
+}
+
 /** One native recursive watch over the tree. */
 export const nativeTreeWatch: WatchTree = (root, onChange, onError) => {
     const watcher = watch(root, { recursive: true, persistent: false }, (_event, name) => {
         const relative = name ? posix(name) : '';
-        if (relative !== '' && !inSkippedDir(relative)) {
+        if (relative !== '' && !inSkippedDir(relative) && !aboutItself(root, relative)) {
             onChange(relative);
         }
     });
@@ -75,9 +83,11 @@ export function walkingTreeWatch(maxDirectories = MAX_WATCHED_DIRS): WatchTree {
                 return;
             }
             let watcher: FSWatcher;
+            const absolute = path.join(root, dir);
             try {
-                watcher = watch(path.join(root, dir), { persistent: false }, (event, name) => {
-                    if (!name || closed) {
+                watcher = watch(absolute, { persistent: false }, (event, name) => {
+                    // News about the directory itself (its removal, its permissions) is the parent watch's.
+                    if (!name || closed || aboutItself(absolute, name)) {
                         return;
                     }
                     const relative = join(dir, posix(name));
@@ -109,7 +119,7 @@ export function walkingTreeWatch(maxDirectories = MAX_WATCHED_DIRS): WatchTree {
             // Removing a watched directory ends its watch with an error on some systems.
             watcher.on('error', () => drop(dir));
             watchers.set(dir, watcher);
-            readdir(path.join(root, dir), { withFileTypes: true }, (error, entries) => {
+            readdir(absolute, { withFileTypes: true }, (error, entries) => {
                 if (error || closed) {
                     return;
                 }

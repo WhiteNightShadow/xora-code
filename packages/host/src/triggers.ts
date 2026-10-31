@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
@@ -79,6 +79,11 @@ export interface TriggerFire {
 }
 
 export type TriggerListener = (fire: TriggerFire) => unknown;
+
+/** A new webhook token: 32 random bytes, base64url. */
+export function newWebhookToken(): string {
+    return randomBytes(32).toString('base64url');
+}
 
 export interface TriggerServiceOptions {
     readonly log: Logger;

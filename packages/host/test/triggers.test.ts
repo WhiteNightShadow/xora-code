@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { type IncomingHttpHeaders, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../src/log.ts';
 import { defaultTreeWatch, type WatchTree, walkingTreeWatch } from '../src/tree-watch.ts';
 import {
+    newWebhookToken,
     SCHEDULE_GRACE_MS,
     type TriggerFire,
     TriggerService,
@@ -432,10 +433,13 @@ describe('TriggerService file triggers on the real file system', () => {
         expect(fire).toMatchObject({ key: 'real', reason: 'files', files: ['src/deep/a.ts'] });
     }, 30_000);
 
-    it.each([
-        ['the default watcher', defaultTreeWatch()],
-        ['a watcher per directory', walkingTreeWatch()],
-    ])(
+    // The watcher per directory is for Linux; Windows cannot remove a directory while it is being watched.
+    const watchers: Array<[string, WatchTree]> = [['the default watcher', defaultTreeWatch()]];
+    if (process.platform !== 'win32') {
+        watchers.push(['a watcher per directory', walkingTreeWatch()]);
+    }
+
+    it.each(watchers)(
         '%s reports nested changes and new directories, skipping node_modules',
         async (_name, watchTree) => {
             const dir = project();
@@ -462,7 +466,13 @@ describe('TriggerService file triggers on the real file system', () => {
                 await pause(300);
                 writeFileSync(path.join(dir, 'fresh', 'inner', 'e.ts'), 'e');
                 await waitFor(() => seen.has('fresh/inner/e.ts'), 'a change in a directory made again');
-                await pause(200);
+                // A change to the watched directory itself names no path in it; a child of the same name does.
+                chmodSync(dir, 0o755);
+                chmodSync(path.join(dir, 'src'), 0o755);
+                writeFileSync(path.join(dir, 'src', 'src'), 'named like its directory');
+                await waitFor(() => seen.has('src/src'), 'a file named like its directory');
+                await pause(300);
+                expect(seen.has(path.basename(dir))).toBe(false);
                 expect([...seen].filter((relative) => relative.startsWith('node_modules'))).toEqual([]);
                 expect(errors).toEqual([]);
             } finally {
@@ -733,6 +743,15 @@ describe('TriggerService webhook', () => {
         expect(logs.some((line) => line.includes('webhook server listening on 127.0.0.1:'))).toBe(true);
         await triggers.close();
         await expect(send(url, { headers: auth() })).rejects.toThrow();
+    });
+
+    it('makes tokens a bearer header can carry', async () => {
+        const token = newWebhookToken();
+        expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+        expect(newWebhookToken()).not.toBe(token);
+        const { fires, url } = await serve({ webhookToken: token });
+        expect((await send(url, { headers: auth(token) })).status).toBe(202);
+        expect(fires).toHaveLength(1);
     });
 
     it('keeps a chosen port and falls back to a free one when it is taken', async () => {
