@@ -213,4 +213,11 @@ create table host_values (
 );
 `,
     },
+    {
+        // The models the user picked from a connection's list (JSON array of ids); null until they pick.
+        version: 5,
+        sql: `
+alter table connections add column selected_json text;
+`,
+    },
 ];

@@ -159,6 +159,16 @@ export function applyDelta(
     upsert(turn, { id: delta.itemId, turnId: delta.turnId, ts: Date.now(), type: delta.stream, text: delta.text });
 }
 
+/** The items a turn shows: a tool call that started a subagent is shown by the subagent's card instead. */
+export function visibleItems(items: readonly Item[]): readonly Item[] {
+    const paired = new Set(
+        items.flatMap((item) => (item.type === 'subagent' && item.toolCallId ? [item.toolCallId] : [])),
+    );
+    return paired.size === 0
+        ? items
+        : items.filter((item) => item.type !== 'tool_call' || !paired.has(item.toolCallId));
+}
+
 /** The plan of the latest turn that has one. */
 export function latestPlan(view: ThreadView | undefined): ItemOf<'plan'> | undefined {
     if (!view) return undefined;

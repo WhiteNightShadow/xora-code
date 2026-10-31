@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: Settings = {
     density: 'comfortable',
     defaultModel: null,
     fastModel: null,
+    fallbackModels: [],
     defaultMode: 'ask',
     defaultEffort: 'high',
     softContextWindow: 256_000,

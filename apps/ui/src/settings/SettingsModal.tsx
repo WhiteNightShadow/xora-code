@@ -215,12 +215,52 @@ function ConnectionEditor({ connection, onDone }: { connection?: Connection; onD
     );
 }
 
+/**
+ * Every model of the connection with a switch: the ones switched on are what model pickers, defaults and team tiers
+ * offer. The list comes from the last "refresh models"; nothing refreshes it on its own.
+ */
+function ModelPicker({ connection, onClose }: { connection: Connection; onClose: () => void }) {
+    const s = useStrings();
+    const available = connection.available ?? connection.models;
+    const selected = new Set(connection.models.map((model) => model.id));
+    const toggle = (id: string, on: boolean) =>
+        void attempt(async () => {
+            const next = available
+                .map((model) => model.id)
+                .filter((modelId) => (modelId === id ? on : selected.has(modelId)));
+            await host.call('provider.selectModels', { connectionId: connection.id, models: next });
+            await refreshConnections();
+        });
+    return (
+        <div className="connection__picker">
+            <div className="field__hint">{s.settings.pickModelsHint}</div>
+            {available.map((model) => (
+                <Toggle
+                    key={model.id}
+                    checked={selected.has(model.id)}
+                    label={model.name}
+                    text={`${model.name}${model.name === model.id ? '' : ` · ${model.id}`}${
+                        model.verified ? '' : `（${s.settings.unverified}）`
+                    }`}
+                    onChange={(on) => toggle(model.id, on)}
+                />
+            ))}
+            <div className="row">
+                <button type="button" className="button button--small" onClick={onClose}>
+                    {s.common.close}
+                </button>
+            </div>
+        </div>
+    );
+}
+
 function ConnectionCard({ connection }: { connection: Connection }) {
     const s = useStrings();
     const presets = useApp((state) => state.presets);
     const preset = presets.find((item) => item.id === connection.presetId);
     const [editing, setEditing] = useState(false);
     const [testing, setTesting] = useState(false);
+    const [picking, setPicking] = useState(false);
     const [model, setModel] = useState(connection.models[0]?.id ?? '');
     const test = async () => {
         setTesting(true);
@@ -249,10 +289,12 @@ function ConnectionCard({ connection }: { connection: Connection }) {
                 <span className="connection__preset">{preset?.name ?? connection.presetId}</span>
                 {connection.status && (
                     <Badge tone={connection.status.ok ? 'ok' : 'error'}>
-                        {connection.status.ok ? '正常' : (connection.status.errorClass ?? '异常')}
+                        {connection.status.ok
+                            ? s.settings.statusOk
+                            : (connection.status.errorClass ?? s.settings.statusError)}
                     </Badge>
                 )}
-                {!connection.hasKey && preset?.needsKey !== false && <Badge tone="warn">缺key</Badge>}
+                {!connection.hasKey && preset?.needsKey !== false && <Badge tone="warn">{s.settings.noKey}</Badge>}
             </div>
             <div className="connection__models">
                 {connection.models.length} {s.settings.models_}
@@ -284,10 +326,18 @@ function ConnectionCard({ connection }: { connection: Connection }) {
                                 { timeoutMs: 60_000 },
                             );
                             await refreshConnections();
+                            // A fresh list is for picking from.
+                            setPicking(true);
                         })
                     }
                 >
                     {s.settings.refreshModels}
+                </button>
+                <button type="button" className="button button--small" onClick={() => setPicking(!picking)}>
+                    {format(s.settings.pickModels, {
+                        picked: connection.models.length,
+                        all: (connection.available ?? connection.models).length,
+                    })}
                 </button>
                 <button type="button" className="button button--small" onClick={() => setEditing(true)}>
                     {s.sidebar.rename}/key
@@ -307,6 +357,7 @@ function ConnectionCard({ connection }: { connection: Connection }) {
                     {s.settings.remove}
                 </button>
             </div>
+            {picking && <ModelPicker connection={connection} onClose={() => setPicking(false)} />}
         </div>
     );
 }
@@ -407,6 +458,29 @@ function Models() {
                     options={[{ value: 'none', label: s.settings.none }, ...modelOptions]}
                     onChange={(value) => update({ fastModel: value === 'none' ? null : parse(value) })}
                 />
+            </Field>
+            <Field label={s.settings.fallbackModels} hint={s.settings.fallbackModelsHint}>
+                {[0, 1, 2].map((index) => {
+                    const chain = settings.fallbackModels;
+                    const current = chain[index];
+                    // A slot opens once the one before it is set, so the chain has no gaps.
+                    if (index > chain.length) return null;
+                    return (
+                        <Select
+                            key={index}
+                            label={format(s.settings.fallbackModel, { n: index + 1 })}
+                            value={current ? `${current.connectionId}::${current.model}` : 'none'}
+                            options={[{ value: 'none', label: s.settings.none }, ...modelOptions]}
+                            onChange={(value) => {
+                                const ref = parse(value);
+                                const next = [...chain];
+                                if (ref) next[index] = ref;
+                                else next.splice(index);
+                                update({ fallbackModels: next });
+                            }}
+                        />
+                    );
+                })}
             </Field>
             <Field label={s.settings.defaultMode}>
                 <Select

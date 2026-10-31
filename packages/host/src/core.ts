@@ -45,6 +45,7 @@ import { ReviewService } from './review.ts';
 import { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
 import { mergePath, resolveLoginPath } from './shell-env.ts';
+import { SubagentService } from './subagents.ts';
 import { registerTeamHandlers, TeamService } from './team.ts';
 import { TerminalService } from './terminals.ts';
 import { setLanguageSource, textOf } from './text.ts';
@@ -63,6 +64,7 @@ const TEXT = bilingual(
         systemLayer: '系统（xora统一）',
         builtIn: '内置',
         team: '团队',
+        subagent: '子agent',
         extensions: '扩展',
         projectBusy: '这个项目里还有线程在运行',
         unknownEngine: (id: string) => `未知的引擎：${id}`,
@@ -87,6 +89,7 @@ const TEXT = bilingual(
         systemLayer: 'System (unified by Xora)',
         builtIn: 'Built-in',
         team: 'Team',
+        subagent: 'Subagent',
         extensions: 'Extensions',
         projectBusy: 'Threads in this project are still running',
         unknownEngine: (id) => `Unknown engine: ${id}`,
@@ -144,6 +147,7 @@ export class HostCore {
     readonly usage: UsageService;
     readonly engines: EngineManager;
     readonly turns: TurnService;
+    readonly subagents: SubagentService;
     readonly updates: UpdateService;
     readonly terminals: TerminalService;
     readonly worktrees: WorktreeService;
@@ -231,11 +235,22 @@ export class HostCore {
             userAgent,
             portFor: (threadId) => this.worktrees.port(threadId),
             extensions: this.extensions,
+            sharedTools: () => this.subagents,
             onTurnEnded: (event) => {
+                this.subagents.onTurnEnded(event);
                 void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`));
                 this.team.onTurnEnded(event);
                 this.workflows.onTurnEnded(event);
             },
+        });
+        this.subagents = new SubagentService({
+            threads: this.threads,
+            projects: this.projects,
+            turns: this.turns,
+            connections: this.connections,
+            settings: this.settings,
+            log: this.log,
+            orgsDir: this.paths.orgsDir,
         });
         this.goals = new GoalService({
             threads: this.threads,
@@ -472,7 +487,9 @@ export class HostCore {
             editable: false,
         });
         // The same order the engine gets (see TurnService): team layers after the user's global layer, skills last.
-        const team = this.turns.hostLayers(thread.id).map((layer) => extra(layer, text.team));
+        const team = this.turns
+            .hostLayers(thread.id)
+            .map((layer) => extra(layer, thread.parent ? text.subagent : text.team));
         const globalIndex = layers.findIndex((layer) => layer.id === 'user_global_instructions');
         let skills: PromptLayer[] = [];
         try {
@@ -983,6 +1000,9 @@ export class HostCore {
         });
         peer.handle('provider.test', ({ connectionId, model }) => connections.test(connectionId, model));
         peer.handle('provider.refreshModels', ({ connectionId }) => connections.refreshModels(connectionId));
+        peer.handle('provider.selectModels', ({ connectionId, models }) =>
+            connections.selectModels(connectionId, models),
+        );
         peer.handle('model.list', () => connections.options());
         peer.handle('provider.detectLocal', () => detectLocalServers(this.#options.fetch ?? fetch));
         peer.handle('engine.list', () => [
@@ -1113,6 +1133,7 @@ export class HostCore {
         this.updates.dispose();
         this.workflows.dispose();
         this.team.dispose();
+        this.subagents.dispose();
         this.approvals.dispose();
         await this.turns.dispose();
         await this.engines.dispose();

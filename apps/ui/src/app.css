@@ -774,6 +774,18 @@ pre {
     color: var(--xk-text-faint);
 }
 
+.thread-header__parent {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    align-self: flex-start;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11.5px;
+}
+
 .thread-header__controls {
     display: flex;
     align-items: center;
@@ -1042,6 +1054,35 @@ pre {
 
 .tool__diff + .tool__diff {
     margin-top: 10px;
+}
+
+.subagent--failed {
+    border-color: color-mix(in srgb, var(--xk-error) 40%, var(--xk-border));
+}
+
+.subagent__header {
+    cursor: default;
+}
+
+.subagent__agent {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--xk-accent);
+    white-space: nowrap;
+}
+
+.subagent__open {
+    font-size: 12.5px;
+    white-space: nowrap;
+}
+
+.subagent__summary {
+    border-top: 1px solid var(--xk-border);
+    padding: 6px 10px;
+    background: var(--xk-bg-subtle);
+    font-size: 12.5px;
+    color: var(--xk-text-muted);
+    overflow-wrap: anywhere;
 }
 
 .plan {
@@ -1641,6 +1682,15 @@ pre {
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+.connection__picker {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding-top: 6px;
+    border-top: 1px solid var(--xk-border);
 }
 
 .connection__preset,

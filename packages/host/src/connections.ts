@@ -32,12 +32,14 @@ const TEXT = bilingual(
         disabled: (name: string) => `模型连接「${name}」已停用`,
         noKey: (name: string) => `模型连接「${name}」还没有填写key`,
         noModels: '这个连接还没有可用的模型，先刷新模型列表',
+        unknownModels: (ids: string) => `这个连接没有这些模型：${ids}；先刷新模型列表`,
     },
     {
         notAllowed: 'The terms of this channel do not allow direct use by Xora',
         disabled: (name) => `The model connection "${name}" is disabled`,
         noKey: (name) => `The model connection "${name}" has no key yet`,
         noModels: 'This connection has no models yet; refresh the model list first',
+        unknownModels: (ids) => `This connection has no such models: ${ids}; refresh the model list first`,
     },
 );
 
@@ -49,6 +51,8 @@ interface ConnectionRow {
     has_key: number;
     enabled: number;
     models_json: string | null;
+    /** Model ids the user picked (JSON array); null until they pick. */
+    selected_json: string | null;
     status_json: string | null;
     created_at: number;
 }
@@ -151,9 +155,23 @@ export class ConnectionService {
         return fromJson<ModelInfo[]>(row.models_json, []);
     }
 
+    /**
+     * The models the user picked. Until they pick, a preset's own models, or everything the server listed for a
+     * preset without any (custom endpoints, local servers).
+     */
+    #selected(row: ConnectionRow, available: readonly ModelInfo[]): ReadonlySet<string> {
+        const picked = fromJson<string[] | null>(row.selected_json, null);
+        if (picked) {
+            return new Set(picked);
+        }
+        const preset = getPreset(row.preset_id);
+        return new Set((preset?.models.length ? preset.models : available).map((model) => model.id));
+    }
+
     #toConnection(row: ConnectionRow): Connection {
         const preset = getPreset(row.preset_id);
-        const models = [...(preset?.models ?? []), ...this.#extraModels(row)];
+        const available = [...(preset?.models ?? []), ...this.#extraModels(row)];
+        const selected = this.#selected(row, available);
         const status = fromJson<Connection['status'] | null>(row.status_json, null);
         return {
             id: row.id,
@@ -162,10 +180,28 @@ export class ConnectionService {
             ...(row.base_url ? { baseUrl: row.base_url } : {}),
             hasKey: row.has_key === 1,
             enabled: row.enabled === 1,
-            models: models.map(modelSummary),
+            models: available.filter((model) => selected.has(model.id)).map(modelSummary),
+            available: available.map(modelSummary),
             createdAt: row.created_at,
             ...(status ? { status } : {}),
         };
+    }
+
+    /** Keeps the models the user picked from the connection's list; the others stay listed but are not offered. */
+    selectModels(connectionId: string, models: readonly string[]): Connection {
+        const connection = this.get(connectionId);
+        const known = new Set((connection.available ?? []).map((model) => model.id));
+        const unknown = models.filter((id) => !known.has(id));
+        if (unknown.length > 0) {
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).unknownModels(unknown.join(', ')));
+        }
+        this.#db.run('update connections set selected_json = ?, updated_at = ? where id = ?', [
+            toJson([...new Set(models)]),
+            Date.now(),
+            connectionId,
+        ]);
+        this.#bus.broadcast('connection.changed', {});
+        return this.get(connectionId);
     }
 
     list(): Connection[] {

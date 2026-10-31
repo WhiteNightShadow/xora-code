@@ -318,8 +318,13 @@ export function systemLayers(org: Organization, agent: AgentSpec): NonNullable<H
 
 /** Built-ins outside the agent's whitelist. */
 export function disabledBuiltins(agent: AgentSpec): string[] {
+    return builtinsOutside(toolsOf(agent));
+}
+
+/** Built-ins a tool whitelist leaves out; a whitelisted tool brings its companions along. */
+export function builtinsOutside(tools: readonly string[]): string[] {
     const allowed = new Set<string>();
-    for (const tool of toolsOf(agent)) {
+    for (const tool of tools) {
         allowed.add(tool);
         for (const companion of COMPANION_TOOLS[tool] ?? []) {
             allowed.add(companion);
@@ -335,8 +340,13 @@ export function disabledBuiltins(agent: AgentSpec): string[] {
  * to executors and specialists; read-only roles get none unless their list names some.
  */
 export function mcpToolsOf(agent: AgentSpec): string[] {
+    return mcpPatternsOf(toolsOf(agent));
+}
+
+/** The MCP tool patterns a tool whitelist grants; see {@link mcpToolsOf}. */
+export function mcpPatternsOf(tools: readonly string[]): string[] {
     const patterns = new Set<string>();
-    for (const entry of toolsOf(agent)) {
+    for (const entry of tools) {
         const name = entry.trim();
         if (name.toLowerCase() === 'mcp') {
             patterns.add('mcp__*');

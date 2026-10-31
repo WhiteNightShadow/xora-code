@@ -3,9 +3,9 @@ import { useState } from 'react';
 import { DiffView } from '../components/DiffView.tsx';
 import { Icon, type IconName } from '../components/Icon.tsx';
 import { Markdown } from '../components/Markdown.tsx';
-import { AutoFocusInput, Badge, Spinner } from '../components/primitives.tsx';
+import { AutoFocusInput, Badge, formatMoney, Spinner } from '../components/primitives.tsx';
 import { host } from '../host.ts';
-import { attempt, openReview, useApp, useStrings } from '../store.ts';
+import { attempt, openReview, selectThread, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 
 const KIND_ICON: Record<string, IconName> = {
@@ -245,7 +245,48 @@ function ReasoningView({ item, live }: { item: ItemOf<'reasoning'>; live: boolea
     );
 }
 
-export function ItemView({ item, live }: { item: Item; live: boolean }) {
+/** Work handed to a subagent: its child thread's progress, until the answer is back in this turn. */
+function SubagentView({ item, turnRunning }: { item: ItemOf<'subagent'>; turnRunning: boolean }) {
+    const s = useStrings();
+    const child = useApp((state) => (item.threadId ? state.threads[item.threadId] : undefined));
+    // A card still running in a turn that is over was left so by a crash.
+    const status = item.status === 'running' && !turnRunning ? 'cancelled' : item.status;
+    const cost = item.cost ?? child?.cost;
+    return (
+        <div className={`tool subagent subagent--${status}`}>
+            <div className="tool__header subagent__header">
+                <Icon name="route" size={14} />
+                <span className="subagent__agent">{item.agent || s.subagent.general}</span>
+                <span className="tool__title">{item.title}</span>
+                {status === 'running' ? (
+                    child?.status === 'awaiting_approval' ? (
+                        <Badge tone="warn">{s.status.awaiting_approval}</Badge>
+                    ) : (
+                        <Spinner size={10} />
+                    )
+                ) : (
+                    <Badge tone={status === 'completed' ? 'ok' : status === 'failed' ? 'error' : 'muted'}>
+                        {s.subagent.statuses[status]}
+                    </Badge>
+                )}
+                {cost && cost.amount > 0 && <span className="tool__time">{formatMoney(cost)}</span>}
+                {item.threadId && child && (
+                    <button
+                        type="button"
+                        className="link subagent__open"
+                        title={s.subagent.openHint}
+                        onClick={() => item.threadId && void selectThread(item.threadId)}
+                    >
+                        {s.subagent.open}
+                    </button>
+                )}
+            </div>
+            {item.summary && status !== 'running' && <div className="subagent__summary">{item.summary}</div>}
+        </div>
+    );
+}
+
+export function ItemView({ item, live, turnRunning = true }: { item: Item; live: boolean; turnRunning?: boolean }) {
     const s = useStrings();
     switch (item.type) {
         case 'user_message':
@@ -308,14 +349,6 @@ export function ItemView({ item, live }: { item: Item; live: boolean }) {
                 </div>
             );
         case 'subagent':
-            return (
-                <div className="notice notice--info">
-                    <Icon name="route" size={13} />{' '}
-                    <span>
-                        {item.agent}：{item.title}
-                    </span>
-                    {item.summary && <span className="notice__desc">{item.summary}</span>}
-                </div>
-            );
+            return <SubagentView item={item} turnRunning={turnRunning} />;
     }
 }

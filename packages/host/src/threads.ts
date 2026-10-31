@@ -56,6 +56,7 @@ export interface ThreadExtra {
     tier?: string;
     group?: string;
     goal?: Goal;
+    tokens?: { input: number; output: number };
 }
 
 function toMeta(row: ThreadRow): ThreadMeta {
@@ -89,6 +90,7 @@ function toMeta(row: ThreadRow): ThreadMeta {
         ...(extra.tier ? { tier: extra.tier } : {}),
         ...(extra.group ? { group: extra.group } : {}),
         ...(extra.goal ? { goal: extra.goal } : {}),
+        ...(extra.tokens ? { tokens: extra.tokens } : {}),
     };
 }
 
@@ -209,6 +211,7 @@ export class ThreadStore {
             turns: number;
             location: ThreadLocation;
             goal: Goal | null;
+            tokens: { input: number; output: number };
         }>,
         options: { touch?: boolean } = {},
     ): ThreadMeta {
@@ -236,10 +239,11 @@ export class ThreadStore {
         if (patch.context !== undefined) set('context_json', toJson(patch.context));
         if (patch.turns !== undefined) set('turns', patch.turns);
         if (patch.location !== undefined) set('location_json', JSON.stringify(patch.location));
-        if (patch.goal !== undefined) {
+        if (patch.goal !== undefined || patch.tokens !== undefined) {
             const extra = fromJson<ThreadExtra>(this.#row(threadId).extra_json, {});
             if (patch.goal) extra.goal = patch.goal;
-            else delete extra.goal;
+            else if (patch.goal === null) delete extra.goal;
+            if (patch.tokens) extra.tokens = patch.tokens;
             set('extra_json', JSON.stringify(extra));
         }
         if (options.touch !== false) set('updated_at', Date.now());

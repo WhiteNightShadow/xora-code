@@ -396,3 +396,126 @@ describe('host language', () => {
         );
     }, 60_000);
 });
+
+describe('fallback models', () => {
+    it('finishes the turn on the next model in the chain when the thread model keeps failing', async () => {
+        const broken = await startMockModelServer();
+        broken.respondWith((request) =>
+            request.method === 'POST' ? errorTurn(503, { error: { message: 'overloaded' } }) : undefined,
+        );
+        try {
+            // POST only: the server answers `/models` itself.
+            server.respondWith((request) =>
+                request.method === 'POST' ? openaiText('done by the fallback model') : undefined,
+            );
+            const { harness, connectionId } = await setUp();
+            const { ui } = harness;
+            const bad = await ui.request('provider.save', {
+                presetId: 'custom-openai',
+                name: 'broken',
+                apiKey: 'test-key',
+                baseUrl: broken.url,
+            });
+            await ui.request('settings.update', {
+                patch: {
+                    defaultModel: { connectionId: bad.id, model: 'mock-model' },
+                    fallbackModels: [{ connectionId, model: 'mock-model' }],
+                },
+            });
+            const project = await ui.request('project.add', { path: gitRepo() });
+            const thread = await ui.request('thread.create', { projectId: project.id });
+            await ui.request('turn.start', { threadId: thread.id, text: 'hello' });
+            const snapshot = await waitFor(
+                async () => {
+                    const read = await ui.request('thread.read', { threadId: thread.id });
+                    return read.events.some((event) => event.kind === 'turn.completed' || event.kind === 'turn.failed')
+                        ? read
+                        : undefined;
+                },
+                'the turn to end',
+                60_000,
+            );
+            expect(snapshot.events.map((event) => event.kind)).toContain('turn.completed');
+            const items = snapshot.events
+                .filter((event) => event.kind === 'item.completed')
+                .map((event) => (event.payload as { item: { type: string; title?: string; text?: string } }).item);
+            expect(items.some((item) => item.type === 'notice' && item.title === '切换到备用模型mock-model')).toBe(
+                true,
+            );
+            expect(
+                items.some((item) => item.type === 'agent_message' && item.text === 'done by the fallback model'),
+            ).toBe(true);
+            expect(broken.requests.filter((request) => request.method === 'POST')).toHaveLength(3);
+        } finally {
+            await broken.close();
+        }
+    }, 90_000);
+});
+
+describe('model lists', () => {
+    it('offers the models the user picked from a refreshed list, and keeps the pick', async () => {
+        server.reset();
+        server.setModels([{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }]);
+        try {
+            const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-e2e-data-'));
+            let harness = await startHost(dataDir);
+            harnesses.push(harness);
+            const connection = await harness.ui.request('provider.save', {
+                presetId: 'custom-openai',
+                name: 'local',
+                apiKey: 'test-key',
+                baseUrl: server.url,
+            });
+            const refreshed = await harness.ui.request('provider.refreshModels', { connectionId: connection.id });
+            // Nothing picked yet: a server without preset models offers everything it lists.
+            expect(refreshed.models.map((model) => model.id)).toEqual(['model-a', 'model-b', 'model-c']);
+            const picked = await harness.ui.request('provider.selectModels', {
+                connectionId: connection.id,
+                models: ['model-b'],
+            });
+            expect(picked.models.map((model) => model.id)).toEqual(['model-b']);
+            expect(picked.available?.map((model) => model.id)).toEqual(['model-a', 'model-b', 'model-c']);
+            expect((await harness.ui.request('model.list', {})).map((option) => option.model.id)).toEqual(['model-b']);
+            await expect(
+                harness.ui.request('provider.selectModels', { connectionId: connection.id, models: ['model-z'] }),
+            ).rejects.toThrow('model-z');
+
+            // A later refresh lists a new model without offering it, and the pick survives a restart.
+            server.setModels([{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'model-d' }]);
+            await harness.ui.request('provider.refreshModels', { connectionId: connection.id });
+            await harness.close();
+            harnesses.splice(harnesses.indexOf(harness), 1);
+            harness = await startHost(dataDir);
+            harnesses.push(harness);
+            const again = await harness.ui.request('provider.connections', {});
+            expect(again[0]?.models.map((model) => model.id)).toEqual(['model-b']);
+            expect(again[0]?.available?.map((model) => model.id)).toContain('model-d');
+        } finally {
+            server.reset();
+        }
+    });
+});
+
+describe('usage without a price', () => {
+    it('counts the tokens of a model that has no price table', async () => {
+        server.reset();
+        server.respondWith((request) =>
+            request.method === 'POST'
+                ? openaiText('ok', { usage: { prompt_tokens: 1200, completion_tokens: 30 } })
+                : undefined,
+        );
+        const { harness } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: gitRepo() });
+        const thread = await ui.request('thread.create', { projectId: project.id });
+        await ui.request('turn.start', { threadId: thread.id, text: 'hello' });
+        await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: thread.id });
+            return read.events.some((event) => event.kind === 'turn.completed') ? true : undefined;
+        }, 'the turn to end');
+        const meta = (await ui.request('thread.list', { projectId: project.id }))[0];
+        expect(meta?.cost).toBeNull();
+        expect(meta?.tokens).toEqual({ input: 1200, output: 30 });
+        server.reset();
+    });
+});

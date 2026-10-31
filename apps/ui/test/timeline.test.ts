@@ -1,6 +1,6 @@
 import type { EventEnvelope } from '@xora/protocol';
 import { describe, expect, it } from 'vitest';
-import { applyDelta, applyEvent, latestPlan, viewFromSnapshot } from '../src/timeline.ts';
+import { applyDelta, applyEvent, latestPlan, viewFromSnapshot, visibleItems } from '../src/timeline.ts';
 
 function envelope(seq: number, kind: string, payload: unknown, turnId?: string): EventEnvelope {
     return { threadId: 't1', seq, ts: seq, kind, payload, ...(turnId ? { turnId } : {}) };
@@ -156,5 +156,43 @@ describe('rewound turns', () => {
             ['c', true],
             ['d', false],
         ]);
+    });
+});
+
+describe('subagent cards', () => {
+    const tool = (id: string, toolCallId: string) =>
+        ({
+            id,
+            turnId: 'u1',
+            ts: 1,
+            type: 'tool_call',
+            toolCallId,
+            name: 'agent',
+            title: 'agent',
+            kind: 'other',
+            status: 'in_progress',
+        }) as const;
+
+    it('show a subagent in place of the tool call that started it', () => {
+        const items = [
+            tool('a', 'c1'),
+            tool('b', 'c2'),
+            {
+                id: 's1',
+                turnId: 'u1',
+                ts: 2,
+                type: 'subagent',
+                taskId: 'c1',
+                toolCallId: 'c1',
+                title: '查找入口',
+                agent: '',
+                status: 'running',
+                threadId: 't2',
+            } as const,
+        ];
+        // The second call has no card yet (it waits for a slot), so its tool call still shows.
+        expect(visibleItems(items).map((item) => item.id)).toEqual(['b', 's1']);
+        const plain = items.slice(0, 2);
+        expect(visibleItems(plain)).toBe(plain);
     });
 });

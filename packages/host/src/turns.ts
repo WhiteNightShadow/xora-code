@@ -156,6 +156,32 @@ export interface TurnDeps {
     readonly onTurnEnded?: (event: TurnEnded) => void;
     /** Skills, slash commands, hooks and MCP servers of the thread's project (09). */
     readonly extensions?: ExtensionService;
+    /** Host tools threads get beside their own: the `agent` tool of subagents.ts. */
+    readonly sharedTools?: () => SharedTools | undefined;
+}
+
+/** A call to a shared host tool, from the turn that made it. */
+export interface SharedToolCall {
+    readonly threadId: string;
+    readonly turnId: string;
+    /** The engine's id of the call, when the host could match the call to its tool card. */
+    readonly toolCallId?: string;
+    /** What the project's extensions gave the turn, such as its agent definitions. */
+    readonly extras: SessionExtras | undefined;
+    /** Aborted when the call is cancelled or its turn is stopped. */
+    readonly signal: AbortSignal;
+}
+
+/**
+ * Host tools a thread gets beside the ones of the run it belongs to (the `agent` tool, subagents.ts), and the
+ * instructions a user's message may add for them.
+ */
+export interface SharedTools {
+    /** The tools the thread gets for a turn of the xora engine; read when the turn configures the session. */
+    tools(thread: ThreadMeta, extras: SessionExtras | undefined): HostToolProvider['tools'];
+    /** Instructions sent after the user's message, e.g. to hand it to an agent it @-mentions. */
+    instructions(thread: ThreadMeta, extras: SessionExtras | undefined, text: string): string | undefined;
+    handle(name: string, input: unknown, call: SharedToolCall): Promise<HostToolResult>;
 }
 
 /** Tools a thread gets from the host (the supervisor's team tools), with their handler. */
@@ -310,6 +336,10 @@ class RunningTurn {
     replaying = false;
     /** What the project's extensions give this turn; read once when the turn starts. */
     extras: SessionExtras | undefined;
+    /** Shared host tools the session got for this turn, by name. */
+    shared = new Set<string>();
+    /** Tool cards already matched to a call of a shared tool. */
+    readonly matched = new Set<string>();
 
     constructor(thread: ThreadMeta, cwd: string, engine: EngineDefinition, turnId: string) {
         this.threadId = thread.id;
@@ -358,6 +388,27 @@ export class TurnService {
 
     live(threadId: string): Item[] {
         return [...(this.#running.get(threadId)?.live.values() ?? [])];
+    }
+
+    /**
+     * Adds or updates an item the host puts in a turn itself, such as a subagent card: live while `done` is false,
+     * written to the history once it is true. A turn that has ended only takes the `done` version, so the final
+     * state of the item is still kept.
+     */
+    showItem(threadId: string, item: Item, done: boolean): void {
+        const running = this.#running.get(threadId);
+        if (running?.turnId === item.turnId) {
+            if (done || !running.live.has(item.id)) {
+                this.#persist(running, item, done ? 'item.completed' : 'item.started');
+            } else {
+                running.live.set(item.id, item);
+                this.#deps.bus.toThread(threadId, 'thread.item', { threadId, item });
+            }
+            return;
+        }
+        if (done && this.#deps.threads.find(threadId)) {
+            this.#deps.threads.append(threadId, 'item.completed', { item }, { turnId: item.turnId, itemId: item.id });
+        }
     }
 
     /** Working directory of a thread: the project folder, or its worktree. */
@@ -425,9 +476,19 @@ export class TurnService {
         });
         projects.touch(thread.projectId);
         this.#updateSleep();
-        void this.#run(running, thread, project, (extras) =>
-            promptBlocks((extras && this.#deps.extensions?.expandSlash(extras, text)) ?? text, attachments, cwd),
-        );
+        void this.#run(running, thread, project, async (extras) => {
+            const blocks = await promptBlocks(
+                (extras && this.#deps.extensions?.expandSlash(extras, text)) ?? text,
+                attachments,
+                cwd,
+            );
+            // Only xora sessions get shared tools; `/compact` is a command, not a message.
+            const note =
+                engine.kind === 'builtin' && !/^\/compact(?:\s|$)/.test(text.trim())
+                    ? this.#deps.sharedTools?.()?.instructions(thread, extras, text)
+                    : undefined;
+            return note ? [...blocks, { type: 'text', text: note }] : blocks;
+        });
         return turnId;
     }
 
@@ -470,12 +531,8 @@ export class TurnService {
         this.#deps.shell.updateTray(running).catch(() => undefined);
     }
 
-    async #sessionConfig(
-        thread: ThreadMeta,
-        project: Project,
-        cwd: string,
-        extras: SessionExtras | undefined,
-    ): Promise<SessionConfig> {
+    async #sessionConfig(running: RunningTurn, thread: ThreadMeta, project: Project): Promise<SessionConfig> {
+        const { cwd, extras } = running;
         const { connections, settings, prompts, threads } = this.#deps;
         const current = settings.get();
         const modelRef = thread.model ?? project.defaults?.model ?? current.defaultModel;
@@ -498,15 +555,30 @@ export class TurnService {
             ...baseLayers.slice(globalIndex + 1),
             ...(extras?.layers ?? []),
         ];
-        const ownTools = provider?.tools ?? [];
+        const shared = (this.#deps.sharedTools?.()?.tools(thread, extras) ?? []).filter(
+            (tool) => !provider?.tools.some((own) => own.name === tool.name),
+        );
+        running.shared = new Set(shared.map((tool) => tool.name));
+        const ownTools = [...(provider?.tools ?? []), ...shared];
         const tools = [
             ...ownTools,
             ...(extras?.tools ?? []).filter((tool) => !ownTools.some((own) => own.name === tool.name)),
         ];
         const fast = current.fastModel;
+        const fallbacks: SessionConfig['fallbacks'] = [];
+        for (const ref of current.fallbackModels) {
+            if (ref.connectionId === modelRef.connectionId && ref.model === modelRef.model) {
+                continue;
+            }
+            // A connection removed, switched off or without its key since is skipped, not an error.
+            const connection = await connections.engineConfig(ref.connectionId).catch(() => undefined);
+            if (connection) {
+                fallbacks.push({ connection, model: ref.model });
+            }
+        }
         return {
             model: { connection: await connections.engineConfig(modelRef.connectionId), model: modelRef.model },
-            fallbacks: [],
+            fallbacks,
             ...(fast
                 ? { fastModel: { connection: await connections.engineConfig(fast.connectionId), model: fast.model } }
                 : {}),
@@ -559,9 +631,7 @@ export class TurnService {
         const { engines, threads } = this.#deps;
         const process = await engines.connect(running.engine, project.id);
         running.process = process;
-        const meta = process.isXora
-            ? { xora: await this.#sessionConfig(thread, project, running.cwd, running.extras) }
-            : undefined;
+        const meta = process.isXora ? { xora: await this.#sessionConfig(running, thread, project) } : undefined;
         // A thread with an MCP allowlist (team roles, 06 §4) only starts the servers it may use.
         const granted = this.#hostTools.get(thread.id)?.mcpTools;
         const mcpServers = (
@@ -753,11 +823,12 @@ export class TurnService {
     }
 
     /**
-     * Stop hooks once the agent ends its turn (09 §4): Stop, or SubagentStop for a member of a team run, matched on
-     * its agent type (`coder`) or role (`executor`). A hook that blocks (`{"decision": "block", "reason": "…"}`, or
-     * exit code 2) sends the agent back to work with the reason, within the same turn, at most
-     * {@link MAX_STOP_CONTINUATIONS} times; it then runs again with `stop_hook_active: true`. Turns that end for
-     * another reason (output limit, request cap) run the hooks without continuing. Returns the final stop reason.
+     * Stop hooks once the agent ends its turn (09 §4): Stop, or SubagentStop for a member of a team run or a subagent,
+     * matched on its agent type (`coder`, `general-purpose`) or role (`executor`). A hook that blocks
+     * (`{"decision": "block", "reason": "…"}`, or exit code 2) sends the agent back to work with the reason, within
+     * the same turn, at most {@link MAX_STOP_CONTINUATIONS} times; it then runs again with `stop_hook_active: true`.
+     * Turns that end for another reason (output limit, request cap) run the hooks without continuing. Returns the
+     * final stop reason.
      */
     async #stopHooks(
         running: RunningTurn,
@@ -771,9 +842,13 @@ export class TurnService {
             return first;
         }
         const thread = this.#deps.threads.find(running.threadId);
-        const member = thread?.teamRunId !== undefined && thread.role !== undefined && thread.role !== 'supervisor';
+        // A subagent another thread started counts as one too, as in Claude Code.
+        const member =
+            (thread?.teamRunId !== undefined && thread.role !== undefined && thread.role !== 'supervisor') ||
+            thread?.parent !== undefined;
         const event = member ? 'SubagentStop' : 'Stop';
-        const agentType = member && thread ? agentTypeOf(thread) : undefined;
+        const agentType =
+            member && thread ? (thread.parent && !thread.agentId ? 'general-purpose' : agentTypeOf(thread)) : undefined;
         let stopReason = first;
         for (let continued = 0; ; continued++) {
             if (stopReason === 'cancelled' || stopReason === 'refusal' || running.abort.signal.aborted) {
@@ -786,7 +861,9 @@ export class TurnService {
                 outcome = await extensions.runHook(extras, event, {
                     sessionId: running.threadId,
                     cwd: running.cwd,
-                    ...(agentType && thread?.role ? { targets: [...new Set([agentType, thread.role])] } : {}),
+                    ...(agentType
+                        ? { targets: [...new Set([agentType, ...(thread?.role ? [thread.role] : [])])] }
+                        : {}),
                     payload: {
                         stop_hook_active: continued > 0,
                         last_assistant_message: running.lastText,
@@ -1006,6 +1083,25 @@ export class TurnService {
             },
             onHostTool: async (name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult> => {
                 const provider = this.#hostTools.get(running.threadId);
+                const shared = this.#deps.sharedTools?.();
+                if (shared && running.shared.has(name) && !provider?.tools.some((tool) => tool.name === name)) {
+                    const toolCallId = this.#toolCallOf(running, name, input);
+                    try {
+                        return await shared.handle(name, input, {
+                            threadId: running.threadId,
+                            turnId: running.turnId,
+                            ...(toolCallId ? { toolCallId } : {}),
+                            extras: running.extras,
+                            // The engine cancels the call when the turn stops; the host may stop first.
+                            signal: AbortSignal.any([signal, running.abort.signal]),
+                        });
+                    } catch (error) {
+                        return {
+                            content: `Tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
+                            isError: true,
+                        };
+                    }
+                }
                 const extensions = this.#deps.extensions;
                 if (
                     !provider?.tools.some((tool) => tool.name === name) &&
@@ -1034,6 +1130,27 @@ export class TurnService {
                 }
             },
         };
+    }
+
+    /**
+     * The tool card of a host tool call: `_xora/tool/call` does not carry the engine's call id, so it is the first
+     * live card of that tool with the same input that no other call took.
+     */
+    #toolCallOf(running: RunningTurn, name: string, input: unknown): string | undefined {
+        const wanted = JSON.stringify(input ?? null);
+        for (const [toolCallId, itemId] of running.toolItems) {
+            const item = running.live.get(itemId);
+            if (
+                item?.type === 'tool_call' &&
+                item.name === name &&
+                !running.matched.has(toolCallId) &&
+                JSON.stringify(item.input ?? null) === wanted
+            ) {
+                running.matched.add(toolCallId);
+                return toolCallId;
+            }
+        }
+        return undefined;
     }
 
     #persist(running: RunningTurn, item: Item, kind: 'item.started' | 'item.completed' = 'item.completed'): void {
@@ -1320,11 +1437,20 @@ export class TurnService {
         }
         running.cost = money(running.cost, cost);
         const thread = threads.get(running.threadId);
+        const used = request?.usage;
         threads.update(
             running.threadId,
             {
                 context: { used: update.used, size: update.size },
                 ...(cost ? { cost: money(thread.cost, cost) } : {}),
+                ...(used
+                    ? {
+                          tokens: {
+                              input: (thread.tokens?.input ?? 0) + used.inputTokens,
+                              output: (thread.tokens?.output ?? 0) + used.outputTokens,
+                          },
+                      }
+                    : {}),
             },
             { touch: false },
         );
@@ -1554,6 +1680,9 @@ export class TurnService {
                 this.#persist(running, { ...item, status });
             } else if (item.type === 'compaction') {
                 this.#persist(running, { ...item, status: 'failed' });
+            } else if (item.type === 'subagent') {
+                // Normally done before the turn ends; this is a turn that failed or stopped under it.
+                this.#persist(running, { ...item, status: status === 'cancelled' ? 'cancelled' : 'failed' });
             } else {
                 running.live.delete(item.id);
             }
@@ -1616,13 +1745,15 @@ export class TurnService {
             { turnId: running.turnId },
         );
         const thread = threads.get(running.threadId);
+        // A subagent works in its parent's folder: its changes are reviewed with the parent's turn, which also
+        // reports its outcome, so it raises neither a review mark nor a notification of its own.
         threads.update(running.threadId, {
             status: stopReason === 'cancelled' ? 'cancelled' : 'idle',
-            needsReview: Boolean(changes),
+            needsReview: Boolean(changes) && !thread.parent,
             unread: !bus.focused,
             ...(thread.turns <= 1 && hasDefaultTitle(thread.title) ? { title: this.#title(running) } : {}),
         });
-        if (stopReason !== 'cancelled' && settings.get().notifications.onComplete && !bus.focused) {
+        if (stopReason !== 'cancelled' && settings.get().notifications.onComplete && !bus.focused && !thread.parent) {
             shell.notify(textOf(TEXT).completed, thread.title, running.threadId).catch(() => undefined);
         }
         this.#ended(
@@ -1740,7 +1871,7 @@ export class TurnService {
             { turnId: running.turnId },
         );
         const thread = threads.update(running.threadId, { status: 'failed', unread: !bus.focused });
-        if (settings.get().notifications.onFailure && !bus.focused) {
+        if (settings.get().notifications.onFailure && !bus.focused && !thread.parent) {
             const text = textOf(TEXT);
             shell
                 .notify(text.failed, text.inThread(thread.title, classified.message), running.threadId)

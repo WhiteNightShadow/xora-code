@@ -14,7 +14,7 @@ import {
     watchThread,
 } from '../store.ts';
 import { format } from '../strings.ts';
-import type { TurnView } from '../timeline.ts';
+import { type TurnView, visibleItems } from '../timeline.ts';
 import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
 import { Icon } from './Icon.tsx';
 import {
@@ -33,6 +33,18 @@ const EFFORTS: Effort[] = ['off', 'low', 'medium', 'high', 'max'];
 
 function modelKey(option: { connectionId: string; model: string }): string {
     return `${option.connectionId}::${option.model}`;
+}
+
+/** A subagent's thread links back to the thread whose agent started it. */
+function ParentLink({ threadId }: { threadId: string }) {
+    const s = useStrings();
+    const parent = useApp((state) => state.threads[threadId]);
+    if (!parent) return null;
+    return (
+        <button type="button" className="link thread-header__parent" onClick={() => void selectThread(threadId)}>
+            <Icon name="chevronLeft" size={11} /> {format(s.subagent.parent, { title: parent.title })}
+        </button>
+    );
 }
 
 function Header({ thread }: { thread: ThreadMeta }) {
@@ -117,6 +129,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
                           ? ` · ${project.git.branch}`
                           : ''}
                 </span>
+                {thread.parent && <ParentLink threadId={thread.parent.threadId} />}
             </div>
             <div className="thread-header__controls">
                 {models.length === 0 ? (
@@ -168,8 +181,24 @@ function Header({ thread }: { thread: ThreadMeta }) {
                         />
                     </span>
                 )}
-                <span className="thread-header__cost" title={s.thread.cost}>
-                    {formatMoney(thread.cost)}
+                <span
+                    className="thread-header__cost"
+                    title={[
+                        `${s.thread.cost} ${formatMoney(thread.cost)}`,
+                        thread.tokens
+                            ? format(s.thread.tokens, {
+                                  input: formatTokens(thread.tokens.input),
+                                  output: formatTokens(thread.tokens.output),
+                              })
+                            : '',
+                    ]
+                        .filter(Boolean)
+                        .join('\n')}
+                >
+                    {/* Without a price for the model, what the thread used is shown in tokens. */}
+                    {thread.cost || !thread.tokens
+                        ? formatMoney(thread.cost)
+                        : `${formatTokens(thread.tokens.input + thread.tokens.output)} token`}
                 </span>
                 <IconButton
                     icon="diff"
@@ -233,12 +262,12 @@ function Header({ thread }: { thread: ThreadMeta }) {
                     <IconButton icon="more" label={s.common.more} onClick={() => setMenu(!menu)} />
                     {menu && (
                         <div className="menu" role="menu" tabIndex={-1} onMouseLeave={() => setMenu(false)}>
-                            {project?.git.isRepo && thread.location.kind === 'local' && (
+                            {project?.git.isRepo && thread.location.kind === 'local' && !thread.parent && (
                                 <button type="button" onClick={() => void handoff('worktree')}>
                                     {s.location.toWorktree}
                                 </button>
                             )}
-                            {thread.location.kind === 'worktree' && (
+                            {thread.location.kind === 'worktree' && !thread.parent && (
                                 <>
                                     <button type="button" onClick={() => void handoff('local')}>
                                         {s.location.toLocal}
@@ -380,7 +409,8 @@ function TurnHistory({ thread, turn }: { thread: ThreadMeta; turn: TurnView }) {
 function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; thread: ThreadMeta }) {
     const s = useStrings();
     const running = turn.status === 'running';
-    const lastItem = turn.items.at(-1);
+    const items = visibleItems(turn.items);
+    const lastItem = items.at(-1);
     if (turn.rewound) {
         return (
             <section className="turn turn--rewound">
@@ -408,8 +438,8 @@ function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; 
                 )}
             </div>
             <div className="turn__items">
-                {turn.items.map((item) => (
-                    <ItemView key={item.id} item={item} live={running && item === lastItem} />
+                {items.map((item) => (
+                    <ItemView key={item.id} item={item} live={running && item === lastItem} turnRunning={running} />
                 ))}
                 {running &&
                     isLast &&
@@ -468,6 +498,14 @@ async function readAttachment(file: File): Promise<Attachment> {
     };
 }
 
+/** A suggestion of the composer: a file to mention, a slash command, or an agent to hand the message to. */
+interface Suggestion {
+    readonly kind: 'file' | 'command' | 'agent';
+    /** File path, command name or agent name. */
+    readonly value: string;
+    readonly hint?: string;
+}
+
 function Composer({ thread }: { thread: ThreadMeta }) {
     const s = useStrings();
     const [text, setText] = useState('');
@@ -500,98 +538,136 @@ function Composer({ thread }: { thread: ThreadMeta }) {
               kind: 'file' | 'command';
               query: string;
               start: number;
-              items: string[];
-              hints?: Record<string, string>;
+              items: Suggestion[];
               index: number;
           }
         | undefined
     >();
-    // Command files are read again after a short while, so a newly added file shows up without a restart.
-    const commands = useRef<
-        { projectId: string; at: number; items: Array<{ name: string; hint: string }> } | undefined
+    // Command files and agent definitions are read again after a short while, so a newly added file shows up
+    // without a restart.
+    const extensions = useRef<
+        { projectId: string; at: number; commands: Suggestion[]; agents: Suggestion[] } | undefined
     >(undefined);
+    const cachedExtensions = () =>
+        extensions.current?.projectId === thread.projectId ? extensions.current : undefined;
+    const refreshExtensions = (then: (loaded: { commands: Suggestion[]; agents: Suggestion[] }) => void) => {
+        const cached = cachedExtensions();
+        if (cached && Date.now() - cached.at < 15_000) return;
+        void host
+            .call('extension.list', { projectId: thread.projectId })
+            .then((snapshot) => {
+                const loaded = {
+                    projectId: thread.projectId,
+                    at: Date.now(),
+                    commands: snapshot.commands.map(
+                        (command): Suggestion => ({
+                            kind: 'command',
+                            value: command.name,
+                            hint: [command.argumentHint, command.description].filter(Boolean).join(' · '),
+                        }),
+                    ),
+                    agents: snapshot.agents.map(
+                        (agent): Suggestion => ({ kind: 'agent', value: agent.name, hint: agent.description }),
+                    ),
+                };
+                extensions.current = loaded;
+                then(loaded);
+            })
+            .catch(() => undefined);
+    };
     const updateCommands = (value: string, caret: number): boolean => {
         const slash = /^\/([^\s/]*)$/.exec(value.slice(0, caret));
         if (!slash) return false;
         const query = slash[1] ?? '';
-        const show = (items: Array<{ name: string; hint: string }>) => {
-            const matching = items.filter((item) => item.name.startsWith(query)).slice(0, 12);
-            setMention({
-                kind: 'command',
-                query,
-                start: 0,
-                items: matching.map((item) => item.name),
-                hints: Object.fromEntries(matching.map((item) => [item.name, item.hint])),
-                index: 0,
-            });
-        };
-        const builtin = [{ name: 'compact', hint: s.thread.compactCommand }];
-        const cached = commands.current;
-        if (cached && cached.projectId === thread.projectId && Date.now() - cached.at < 15_000) {
-            show(cached.items);
-            return true;
-        }
-        show(cached?.projectId === thread.projectId ? cached.items : builtin);
-        void host
-            .call('extension.list', { projectId: thread.projectId })
-            .then((snapshot) => {
-                const items = [
-                    ...builtin,
-                    ...snapshot.commands.map((command) => ({
-                        name: command.name,
-                        hint: [command.argumentHint, command.description].filter(Boolean).join(' · '),
-                    })),
-                ];
-                commands.current = { projectId: thread.projectId, at: Date.now(), items };
-                show(items);
-            })
-            .catch(() => undefined);
+        const builtin: Suggestion = { kind: 'command', value: 'compact', hint: s.thread.compactCommand };
+        const matching = (commands: readonly Suggestion[]) =>
+            [builtin, ...commands].filter((item) => item.value.startsWith(query)).slice(0, 12);
+        setMention({ kind: 'command', query, start: 0, items: matching(cachedExtensions()?.commands ?? []), index: 0 });
+        refreshExtensions((loaded) =>
+            setMention((current) =>
+                current?.kind === 'command' && current.query === query
+                    ? { ...current, items: matching(loaded.commands) }
+                    : current,
+            ),
+        );
         return true;
     };
+    // `@name` of a defined agent hands the message to it (03 §4); only threads that may start subagents can.
+    const delegates = thread.engine === 'xora' && !thread.parent && !thread.teamRunId && !thread.workflowRunId;
     const updateMention = (value: string, caret: number) => {
         if (updateCommands(value, caret)) return;
-        const match = /(^|\s)@([^\s@]*)$/.exec(value.slice(0, caret));
+        const match = /(^|[^A-Za-z0-9_@])@([^\s@]*)$/.exec(value.slice(0, caret));
         if (!match) {
             setMention(undefined);
             return;
         }
         const query = match[2] ?? '';
         const start = caret - query.length - 1;
+        const agentsFor = (agents: readonly Suggestion[]) =>
+            delegates
+                ? agents.filter((agent) => agent.value.toLowerCase().includes(query.toLowerCase())).slice(0, 8)
+                : [];
+        const files = (items: readonly Suggestion[]) => items.filter((item) => item.kind === 'file');
         setMention((current) => ({
             kind: 'file',
             query,
             start,
-            items: current?.kind === 'file' ? current.items : [],
+            items: [
+                ...agentsFor(cachedExtensions()?.agents ?? []),
+                ...(current?.kind === 'file' ? files(current.items) : []),
+            ],
             index: 0,
         }));
+        const same = (current: typeof mention) => current?.kind === 'file' && current.query === query;
+        if (delegates) {
+            refreshExtensions((loaded) =>
+                setMention((current) =>
+                    current && same(current)
+                        ? { ...current, items: [...agentsFor(loaded.agents), ...files(current.items)] }
+                        : current,
+                ),
+            );
+        }
         void host
             .call('fs.find', { threadId: thread.id, query })
-            .then((items) =>
+            .then((found) =>
                 setMention((current) =>
-                    current && current.query === query ? { ...current, items, index: 0 } : current,
+                    current && same(current)
+                        ? {
+                              ...current,
+                              items: [
+                                  ...current.items.filter((item) => item.kind === 'agent'),
+                                  ...found.map((file): Suggestion => ({ kind: 'file', value: file })),
+                              ],
+                              index: 0,
+                          }
+                        : current,
                 ),
             )
             .catch(() => undefined);
     };
-    const pickMention = (file: string) => {
+    const pickMention = (item: Suggestion) => {
         if (!mention) return;
-        if (mention.kind === 'command') {
-            setText(`/${file} ${text.slice(mention.query.length + 1).trimStart()}`);
+        if (item.kind === 'command') {
+            setText(`/${item.value} ${text.slice(mention.query.length + 1).trimStart()}`);
             setMention(undefined);
             area.current?.focus();
             return;
         }
         const before = text.slice(0, mention.start);
         const after = text.slice(mention.start + mention.query.length + 1);
-        setText(`${before}@${file} ${after}`);
-        setAttachments((current) =>
-            current.some((item) => item.path === file)
-                ? current
-                : [
-                      ...current,
-                      { kind: 'file', name: file.split('/').pop() ?? file, mimeType: 'text/plain', path: file },
-                  ],
-        );
+        setText(`${before}@${item.value} ${after}`);
+        const file = item.value;
+        if (item.kind === 'file') {
+            setAttachments((current) =>
+                current.some((attachment) => attachment.path === file)
+                    ? current
+                    : [
+                          ...current,
+                          { kind: 'file', name: file.split('/').pop() ?? file, mimeType: 'text/plain', path: file },
+                      ],
+            );
+        }
         setMention(undefined);
         area.current?.focus();
     };
@@ -640,22 +716,32 @@ function Composer({ thread }: { thread: ThreadMeta }) {
                 <div
                     className="mention"
                     role="listbox"
-                    aria-label={mention.kind === 'command' ? s.thread.commandList : s.thread.mentionFiles}
+                    aria-label={
+                        mention.kind === 'command'
+                            ? s.thread.commandList
+                            : mention.items.some((item) => item.kind === 'agent')
+                              ? s.thread.mention
+                              : s.thread.mentionFiles
+                    }
                 >
-                    {mention.items.map((file, index) => (
+                    {mention.items.map((item, index) => (
                         <button
-                            key={file}
+                            key={`${item.kind}:${item.value}`}
                             type="button"
                             role="option"
                             aria-selected={index === mention.index}
                             className={index === mention.index ? 'is-active' : ''}
                             onMouseDown={(event) => {
                                 event.preventDefault();
-                                pickMention(file);
+                                pickMention(item);
                             }}
                         >
-                            {mention.kind === 'command' ? `/${file}` : file}
-                            {mention.hints?.[file] && <span className="mention__hint">{mention.hints[file]}</span>}
+                            {item.kind === 'command'
+                                ? `/${item.value}`
+                                : item.kind === 'agent'
+                                  ? `@${item.value}`
+                                  : item.value}
+                            {item.hint && <span className="mention__hint">{item.hint}</span>}
                         </button>
                     ))}
                 </div>
@@ -683,8 +769,8 @@ function Composer({ thread }: { thread: ThreadMeta }) {
                         }
                         if (event.key === 'Enter' || event.key === 'Tab') {
                             event.preventDefault();
-                            const file = mention.items[mention.index];
-                            if (file) pickMention(file);
+                            const item = mention.items[mention.index];
+                            if (item) pickMention(item);
                             return;
                         }
                     }

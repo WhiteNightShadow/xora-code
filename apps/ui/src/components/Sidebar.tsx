@@ -113,8 +113,16 @@ function ProjectGroup({
         .filter((run) => run.projectId === project.id && !run.parentRunId)
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .slice(0, 5);
-    // Team members' and workflow steps' threads are reached through their run, not listed one by one.
-    const active = threads.filter((thread) => !thread.archived && !thread.teamRunId && !thread.workflowRunId);
+    // Team members' and workflow steps' threads are reached through their run, not listed one by one; subagents'
+    // through the card in their parent's turn, unless that thread is gone.
+    const threadMap = useApp((state) => state.threads);
+    const active = threads.filter(
+        (thread) =>
+            !thread.archived &&
+            !thread.teamRunId &&
+            !thread.workflowRunId &&
+            !(thread.parent && threadMap[thread.parent.threadId]),
+    );
     const archived = threads.filter((thread) => thread.archived);
     return (
         <div className={`project${selectedProjectId === project.id ? ' is-current' : ''}`}>
@@ -223,10 +231,12 @@ export function Sidebar() {
         return groups;
     }, [threadMap]);
 
+    // A subagent's failure goes back to its parent's agent; its approvals still need the user.
     const inbox = Object.values(threadMap).filter(
         (thread) =>
             !thread.archived &&
-            (thread.status === 'awaiting_approval' || thread.needsReview || thread.status === 'failed'),
+            (thread.status === 'awaiting_approval' ||
+                (!thread.parent && (thread.needsReview || thread.status === 'failed'))),
     );
 
     const search = async (text: string) => {

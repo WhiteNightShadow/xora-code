@@ -558,6 +558,11 @@ export const methods = {
         result: ConnectionTestSchema,
     },
     'provider.refreshModels': { params: z.object({ connectionId: IdSchema }).strict(), result: ConnectionSchema },
+    /** Picks which of the connection's models are offered; the user refreshes the list by hand, nothing on a timer. */
+    'provider.selectModels': {
+        params: z.object({ connectionId: IdSchema, models: z.array(z.string().min(1).max(200)).max(500) }).strict(),
+        result: ConnectionSchema,
+    },
     'model.list': { params: empty, result: z.array(ModelOptionSchema) },
     /** Probes local model servers (ollama, lm studio, llama.cpp, vllm) on their default ports. */
     'provider.detectLocal': {

@@ -92,6 +92,8 @@ export const ThreadMetaSchema = z.object({
     lastSeq: z.number().int().nonnegative(),
     turns: z.number().int().nonnegative(),
     cost: MoneySchema.nullable(),
+    /** Tokens of every model request so far: what the thread used, also where no price is known. */
+    tokens: z.object({ input: z.number(), output: z.number() }).optional(),
     /** Prompt tokens of the latest model request and the model's window, for the context meter. */
     context: z.object({ used: z.number(), size: z.number() }).nullable(),
     parent: z.object({ threadId: IdSchema, turnId: z.string() }).optional(),
@@ -316,6 +318,10 @@ export const CompactionItemSchema = z.object({
     after: z.number().optional(),
 });
 
+/**
+ * Work the thread's agent handed to a subagent (a child thread, `parent` set): its card in the parent's turn.
+ * `agent` is the defined agent's name, empty for a general-purpose subagent.
+ */
 export const SubagentItemSchema = z.object({
     ...itemBase,
     type: z.literal('subagent'),
@@ -326,6 +332,8 @@ export const SubagentItemSchema = z.object({
     summary: z.string().optional(),
     threadId: z.string().optional(),
     cost: MoneySchema.optional(),
+    /** The tool call that started it, whose own card the UI then leaves out. */
+    toolCallId: z.string().optional(),
 });
 
 export const ItemSchema = z.discriminatedUnion('type', [
@@ -438,7 +446,10 @@ export const ConnectionSchema = z.object({
     baseUrl: z.string().optional(),
     hasKey: z.boolean(),
     enabled: z.boolean(),
+    /** The models the user picked: what model pickers, defaults and team tiers offer. */
     models: z.array(ModelSummarySchema),
+    /** Everything the connection is known to serve: the preset's models and those its server listed last time. */
+    available: z.array(ModelSummarySchema).optional(),
     createdAt: z.number(),
     status: z
         .object({
@@ -469,6 +480,11 @@ export const SettingsSchema = z.object({
     defaultModel: ModelRefSchema.nullable(),
     /** Titles, summaries and compaction. */
     fastModel: ModelRefSchema.nullable(),
+    /**
+     * Tried in order when a thread's model is rate limited, overloaded or failing (07 §7); switching to another
+     * vendor summarises the context first. Team runs pick theirs by tier.
+     */
+    fallbackModels: z.array(ModelRefSchema).max(3),
     defaultMode: PermissionModeSchema,
     defaultEffort: EffortSchema,
     /** Cap on the context the engine keeps, regardless of the model window (08 §2). */
