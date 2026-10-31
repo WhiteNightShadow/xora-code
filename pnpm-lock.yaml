@@ -553,6 +553,9 @@ importers:
       '@xora/metering':
         specifier: workspace:*
         version: link:../metering
+      '@xora/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       js-yaml:
         specifier: 4.3.2
         version: 4.3.2

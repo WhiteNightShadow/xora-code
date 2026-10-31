@@ -127,7 +127,7 @@
 | M3-3 | 完成 | 回到第n轮（对话加可选的文件）、从第n轮分叉；只支持xora engine |
 | M3-5 | 完成 | 冒烟里在打包后的应用中跑过终端命令 |
 | M3-6 | 完成 | 冒烟里打开过本地页面；截图和圈选标注要窗口在屏幕上，只手动 |
-| M4-1、M4-2 | 完成 | hooks接了7个事件，SubagentStop、SessionEnd、Stop的“继续工作”还没做 |
+| M4-1、M4-2 | 完成 | hooks起初接了7个事件；SubagentStop、SessionEnd和Stop的“继续工作”后来在`9e19110`补上 |
 | M4-3 | 完成 | oauth只对测试里的授权服务器跑过；windows、linux的进程树清理没实机验证 |
 | M4-4 | 完成 | 插件安装、启用、卸载、锁版本，市场支持git和本地目录；内置官方市场、npm等来源没做 |
 | M4-5 | 完成 | 内置skill `extension-creator`；插件和工作流的向导没做 |

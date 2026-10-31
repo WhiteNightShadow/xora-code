@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { app, Menu, nativeImage, Tray } from 'electron';
+import { onLanguageChange, shellStrings } from './strings.ts';
 
 export interface TrayEntry {
     readonly threadId: string;
@@ -18,11 +19,13 @@ export class AppTray {
     #tray: Tray | undefined;
     #running: readonly TrayEntry[] = [];
     #hidden = false;
+    readonly #stopFollowingLanguage: () => void;
 
     constructor(options: { iconPath: string; show: (threadId?: string) => void; quit: () => void }) {
         this.#iconPath = options.iconPath;
         this.#show = options.show;
         this.#quit = options.quit;
+        this.#stopFollowingLanguage = onLanguageChange(() => this.#render());
     }
 
     get running(): readonly TrayEntry[] {
@@ -51,22 +54,22 @@ export class AppTray {
             this.#tray = new Tray(image);
             this.#tray.on('click', () => this.#show());
         }
-        this.#tray.setToolTip(
-            this.#running.length > 0 ? `Xora Code：${this.#running.length}个任务在运行` : 'Xora Code',
-        );
-        const items: Electron.MenuItemConstructorOptions[] = [{ label: '显示Xora Code', click: () => this.#show() }];
+        const s = shellStrings();
+        this.#tray.setToolTip(this.#running.length > 0 ? s.trayTooltip(this.#running.length) : 'Xora Code');
+        const items: Electron.MenuItemConstructorOptions[] = [{ label: s.showApp, click: () => this.#show() }];
         if (this.#running.length > 0) {
-            items.push({ type: 'separator' }, { label: `运行中（${this.#running.length}）`, enabled: false });
+            items.push({ type: 'separator' }, { label: s.trayRunning(this.#running.length), enabled: false });
             for (const entry of this.#running.slice(0, 15)) {
                 const mark = entry.status === 'awaiting_approval' ? '◐ ' : '● ';
                 items.push({ label: `${mark}${entry.title}`.slice(0, 60), click: () => this.#show(entry.threadId) });
             }
         }
-        items.push({ type: 'separator' }, { label: '退出', click: () => this.#quit() });
+        items.push({ type: 'separator' }, { label: s.quit, click: () => this.#quit() });
         this.#tray.setContextMenu(Menu.buildFromTemplate(items));
     }
 
     dispose(): void {
+        this.#stopFollowingLanguage();
         this.#tray?.destroy();
         this.#tray = undefined;
     }

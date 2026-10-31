@@ -1,3 +1,19 @@
+import { bilingual } from '@xora/protocol';
+import { textOf } from '../text.ts';
+
+const TEXT = bilingual(
+    {
+        codexNote: '使用你自己的chatgpt登录',
+        claudeNote: '使用你自己的claude登录',
+        kimiNote: '使用kimi会员登录',
+    },
+    {
+        codexNote: 'Uses your own ChatGPT login',
+        claudeNote: 'Uses your own Claude login',
+        kimiNote: 'Uses your Kimi membership login',
+    },
+);
+
 /**
  * Engines a thread can run on (05 §4). The xora engine ships in the app bundle; external ACP agents are
  * launched from the user's PATH or through npx and keep their own login and subscription.
@@ -13,6 +29,7 @@ export interface EngineDefinition {
     /** Shown on approval cards when the agent cannot route its own actions through Xora's approvals. */
     readonly bypassesApprovals?: boolean;
     readonly homepage?: string;
+    /** Shown with the engine choice; the built-in definitions read it in the current language. */
     readonly note?: string;
 }
 
@@ -30,7 +47,9 @@ export const EXTERNAL_ENGINES: readonly EngineDefinition[] = [
         command: 'npx',
         args: ['-y', '@zed-industries/codex-acp'],
         homepage: 'https://github.com/zed-industries/codex-acp',
-        note: '使用你自己的chatgpt登录',
+        get note() {
+            return textOf(TEXT).codexNote;
+        },
     },
     {
         id: 'claude',
@@ -39,7 +58,9 @@ export const EXTERNAL_ENGINES: readonly EngineDefinition[] = [
         command: 'npx',
         args: ['-y', '@zed-industries/claude-code-acp'],
         homepage: 'https://github.com/zed-industries/claude-code-acp',
-        note: '使用你自己的claude登录',
+        get note() {
+            return textOf(TEXT).claudeNote;
+        },
     },
     {
         id: 'gemini',
@@ -56,7 +77,9 @@ export const EXTERNAL_ENGINES: readonly EngineDefinition[] = [
         command: 'kimi',
         args: ['acp'],
         homepage: 'https://github.com/MoonshotAI/kimi-cli',
-        note: '使用kimi会员登录',
+        get note() {
+            return textOf(TEXT).kimiNote;
+        },
     },
     {
         id: 'opencode',

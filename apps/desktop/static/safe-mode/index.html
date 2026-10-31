@@ -6,26 +6,26 @@
             http-equiv="Content-Security-Policy"
             content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'"
         />
-        <title>Xora Code 修复模式</title>
+        <title>Xora Code修复模式</title>
         <link rel="stylesheet" href="safe-mode.css" />
         <script src="safe-mode.js" defer></script>
     </head>
     <body data-state="loading">
         <main>
             <header>
-                <h1>修复模式</h1>
-                <p id="reason" class="muted">正在读取状态…</p>
+                <h1 data-text="title">修复模式</h1>
+                <p id="reason" class="muted" data-text="loading">正在读取状态…</p>
             </header>
 
             <section>
-                <h2>可用版本</h2>
-                <p class="muted">选择一个校验通过的版本启动。启动成功后，它会成为当前版本。</p>
+                <h2 data-text="versions">可用版本</h2>
+                <p class="muted" data-text="versionsHint">选择一个校验通过的版本启动。启动成功后，它会成为当前版本。</p>
                 <table>
                     <thead>
                         <tr>
-                            <th>版本</th>
-                            <th>状态</th>
-                            <th>说明</th>
+                            <th data-text="colVersion">版本</th>
+                            <th data-text="colStatus">状态</th>
+                            <th data-text="colNote">说明</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -35,12 +35,12 @@
             </section>
 
             <section>
-                <h2>其他操作</h2>
+                <h2 data-text="other">其他操作</h2>
                 <div class="actions">
-                    <button id="export" type="button">导出诊断信息</button>
-                    <button id="logs" type="button">打开日志目录</button>
-                    <button id="extensions" type="button" disabled title="扩展系统在M4提供">禁用全部扩展（尚未提供）</button>
-                    <button id="settings" type="button" disabled title="设置在M1提供">重置设置（尚未提供）</button>
+                    <button id="export" type="button" data-text="export">导出诊断信息</button>
+                    <button id="logs" type="button" data-text="logs">打开日志目录</button>
+                    <button id="extensions" type="button" disabled data-text="disableExtensions">禁用全部扩展（尚未提供）</button>
+                    <button id="settings" type="button" disabled data-text="resetSettings">重置设置（尚未提供）</button>
                 </div>
                 <p id="notice" class="muted" role="status"></p>
             </section>
@@ -48,8 +48,8 @@
             <footer>
                 <span id="versions" class="muted"></span>
                 <span class="actions">
-                    <button id="restart" type="button" class="primary">正常重启</button>
-                    <button id="quit" type="button">退出</button>
+                    <button id="restart" type="button" class="primary" data-text="restart">正常重启</button>
+                    <button id="quit" type="button" data-text="quit">退出</button>
                 </span>
             </footer>
         </main>

@@ -18,7 +18,14 @@ function facts(overrides: Partial<CallFacts>): CallFacts {
 }
 
 function context(mode: PermissionMode, rules: Rule[] = [], sessionAllows: string[] = []): PolicyContext {
-    return { mode, projectRoot: root, projectId: 'p1', rules, sessionAllows: new Set(sessionAllows) };
+    return {
+        mode,
+        projectRoot: root,
+        projectId: 'p1',
+        rules,
+        sessionAllows: new Set(sessionAllows),
+        language: 'zh-CN',
+    };
 }
 
 const read = facts({});

@@ -5,7 +5,7 @@ export const DEFAULT_FEED_URL =
     'https://github.com/WhiteNightShadow/xora-code/releases/latest/download/feed-{channel}.json';
 
 export const DEFAULT_SETTINGS: Settings = {
-    language: 'zh-CN',
+    language: 'system',
     theme: 'system',
     density: 'comfortable',
     defaultModel: null,

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LanguageSettingSchema } from './language.ts';
 
 /**
  * Product domain shared by the UI and the host: projects, threads, turns and items, approvals, providers,
@@ -462,7 +463,7 @@ export type ModelOption = z.infer<typeof ModelOptionSchema>;
 // Settings
 
 export const SettingsSchema = z.object({
-    language: z.enum(['zh-CN', 'en']),
+    language: LanguageSettingSchema,
     theme: z.enum(['system', 'light', 'dark']),
     density: z.enum(['comfortable', 'compact']),
     defaultModel: ModelRefSchema.nullable(),

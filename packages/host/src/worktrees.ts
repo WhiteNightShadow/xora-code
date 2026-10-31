@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { DiffFile, HandoffResult, Project } from '@xora/protocol';
-import { RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, RpcError, RpcErrorCode } from '@xora/protocol';
 import {
     allocatePort,
     diffForReview,
@@ -21,6 +21,25 @@ import {
 } from '@xora/workspace';
 import type { Logger } from './log.ts';
 import type { ReviewService } from './review.ts';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        noGit: '没有找到git，无法使用worktree',
+        notRepo: '项目不是git仓库，无法使用worktree',
+        limit: (error: WorktreeLimitError) => `这个项目的worktree已达上限（${error.message}），先删除用不到的`,
+        dirty: 'worktree里还有未提交的改动；先应用到主目录，或者强制删除',
+        nothing: '没有未提交的改动',
+    },
+    {
+        noGit: 'Git was not found, so worktrees cannot be used',
+        notRepo: 'The project is not a git repository, so worktrees cannot be used',
+        limit: (error) =>
+            `This project has reached its limit of ${error.max} worktrees; delete the ones you no longer need`,
+        dirty: 'The worktree has uncommitted changes; apply them to the project folder first, or force the deletion',
+        nothing: 'No uncommitted changes',
+    },
+);
 
 const SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -79,10 +98,10 @@ export class WorktreeService {
 
     async #requireRepo(project: Project): Promise<void> {
         if (!(await findGit())) {
-            throw new RpcError(RpcErrorCode.Rejected, '没有找到git，无法使用worktree');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noGit);
         }
         if (!(await isGitRepo(project.path))) {
-            throw new RpcError(RpcErrorCode.Rejected, '项目不是git仓库，无法使用worktree');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).notRepo);
         }
     }
 
@@ -97,10 +116,7 @@ export class WorktreeService {
             return { path: created.path, port };
         } catch (error) {
             if (error instanceof WorktreeLimitError) {
-                throw new RpcError(
-                    RpcErrorCode.Rejected,
-                    `这个项目的worktree已达上限（${error.message}），先删除用不到的`,
-                );
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).limit(error));
             }
             throw error;
         }
@@ -152,7 +168,7 @@ export class WorktreeService {
             await this.#manager(project).remove(threadId, { force });
         } catch (error) {
             if (error instanceof WorktreeDirtyError) {
-                throw new RpcError(RpcErrorCode.Rejected, 'worktree里还有未提交的改动；先应用到主目录，或者强制删除');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).dirty);
             }
             throw error;
         }
@@ -163,7 +179,7 @@ export class WorktreeService {
         await this.#requireRepo(project);
         const result = await this.#manager(project).handoff(from, to);
         if (result.status === 'moved' && result.tracked.length === 0 && result.untracked.length === 0) {
-            return { ...toHandoff(result), status: 'nothing', message: '没有未提交的改动' };
+            return { ...toHandoff(result), status: 'nothing', message: textOf(TEXT).nothing };
         }
         return toHandoff(result);
     }

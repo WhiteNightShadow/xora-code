@@ -361,3 +361,38 @@ describe('M1 core loop', () => {
         expect(snapshot.thread.status).toBe('cancelled');
     }, 60_000);
 });
+
+describe('shell language', () => {
+    it('tells the shell the language setting when the host starts and when it changes', async () => {
+        const harness = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-e2e-data-')));
+        harnesses.push(harness);
+        expect(harness.shell.language).toBe('system');
+        await harness.ui.request('settings.update', { patch: { theme: 'dark' } });
+        expect(harness.shell.language).toBe('system');
+        await harness.ui.request('settings.update', { patch: { language: 'en' } });
+        expect(harness.shell.language).toBe('en');
+    });
+});
+
+describe('host language', () => {
+    it('answers in English once the language is en, and still titles a thread created in Chinese', async () => {
+        server.respondWith(() => openaiText('Hello.'));
+        const { harness } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: gitRepo() });
+        const created = await ui.request('thread.create', { projectId: project.id });
+        expect(created.title).toBe('新线程');
+
+        await ui.request('settings.update', { patch: { language: 'en' } });
+        await expect(ui.request('thread.create', { projectId: project.id, engine: 'nope' })).rejects.toThrow(
+            'Unknown engine: nope',
+        );
+        expect((await ui.request('thread.create', { projectId: project.id })).title).toBe('New thread');
+        // The default title is recognised in either language: the first turn replaces it.
+        await ui.request('turn.start', { threadId: created.id, text: 'say hello' });
+        await waitFor(
+            async () => (await ui.request('thread.read', { threadId: created.id })).thread.title === 'say hello',
+            'the title from the first message',
+        );
+    }, 60_000);
+});

@@ -9,7 +9,7 @@ import { WorkflowRunView, WorkflowsDialog } from './components/WorkflowView.tsx'
 import { RightPanel } from './panels/RightPanel.tsx';
 import { UsageModal } from './panels/UsageModal.tsx';
 import { SettingsModal } from './settings/SettingsModal.tsx';
-import { useApp, useStrings } from './store.ts';
+import { uiLanguage, useApp, useStrings } from './store.ts';
 
 function Toasts() {
     const toasts = useApp((state) => state.toasts);
@@ -48,7 +48,7 @@ export function App() {
         if (!settings || settings.theme === 'system') root.removeAttribute('data-theme');
         else root.setAttribute('data-theme', settings.theme);
         root.setAttribute('data-density', settings?.density ?? 'comfortable');
-        root.lang = settings?.language ?? 'zh-CN';
+        root.lang = uiLanguage(settings?.language);
     }, [settings]);
 
     if (!ready) {

@@ -46,7 +46,7 @@ import {
     safeBaseEnv,
     toAcpMcpServers,
 } from '@xora/mcp';
-import { type ExtensionsSnapshot, type Project, RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, type ExtensionsSnapshot, type Project, RpcError, RpcErrorCode } from '@xora/protocol';
 import { sanitizeEnv } from '@xora/tools';
 import { z } from 'zod';
 import type { Bus } from './bus.ts';
@@ -54,6 +54,60 @@ import type { HostToolResult } from './engines/manager.ts';
 import type { Logger } from './log.ts';
 import type { ProjectService } from './projects.ts';
 import type { ShellApi } from './shell.ts';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        inFile: (file: string, problem: string) => `${file}：${problem}`,
+        hookCommand: (value: string) => `hook命令：${value}`,
+        hookUrl: (value: string) => `hook地址：${value}`,
+        mcpCommand: (value: string) => `mcp命令：${value}`,
+        mcpUrl: (value: string) => `mcp地址：${value}`,
+        domain: (value: string) => `访问域名：${value}`,
+        skillScript: (value: string) => `skill脚本：${value}`,
+        pluginUnreadable: (name: string, error: string) => `插件${name}读不出来：${error}`,
+        duplicateMcp: (name: string, source: string) => `mcp服务器重名，已忽略：${name}（${source}）`,
+        badMcp: (name: string, reason: string) => `mcp服务器${name}配置有误：${reason}`,
+        pluginProblem: (name: string, problem: string) => `插件${name}：${problem}`,
+        noMcp: (name: string) => `没有名为${name}的mcp服务器`,
+        notInMarket: (market: string, plugin: string) => `市场${market}里没有插件${plugin}`,
+        unsupportedSource: (type: string) => `暂不支持这种插件来源：${type}`,
+        installFailed: (error: string) => `插件安装失败：${error}`,
+        noMarket: (name: string) => `没有名为${name}的插件市场`,
+        marketUnreadable: (error: string) => `读取插件市场失败：${error}`,
+        notMarket: (error: string) => `不是插件市场（没有${'.claude-plugin/marketplace.json'}）：${error}`,
+        badMarketName: (name: string) => `插件市场的名字不合规：${name}`,
+        notInstalled: (name: string) => `没有安装插件${name}`,
+        projectRequired: '项目级的mcp服务器要指定项目',
+        stdioNoAuth: '本地（stdio）mcp服务器不需要授权',
+        authFailed: (error: string) => `授权失败：${error}`,
+    },
+    {
+        inFile: (file, problem) => `${file}: ${problem}`,
+        hookCommand: (value) => `Hook command: ${value}`,
+        hookUrl: (value) => `Hook URL: ${value}`,
+        mcpCommand: (value) => `MCP command: ${value}`,
+        mcpUrl: (value) => `MCP URL: ${value}`,
+        domain: (value) => `Network access: ${value}`,
+        skillScript: (value) => `Skill script: ${value}`,
+        pluginUnreadable: (name, error) => `Plugin ${name} cannot be read: ${error}`,
+        duplicateMcp: (name, source) => `Duplicate MCP server name, ignored: ${name} (${source})`,
+        badMcp: (name, reason) => `MCP server ${name} is misconfigured: ${reason}`,
+        pluginProblem: (name, problem) => `Plugin ${name}: ${problem}`,
+        noMcp: (name) => `There is no MCP server named ${name}`,
+        notInMarket: (market, plugin) => `Marketplace ${market} has no plugin ${plugin}`,
+        unsupportedSource: (type) => `This plugin source is not supported yet: ${type}`,
+        installFailed: (error) => `Plugin installation failed: ${error}`,
+        noMarket: (name) => `There is no plugin marketplace named ${name}`,
+        marketUnreadable: (error) => `Could not read the plugin marketplace: ${error}`,
+        notMarket: (error) => `Not a plugin marketplace (no .claude-plugin/marketplace.json): ${error}`,
+        badMarketName: (name) => `Invalid plugin marketplace name: ${name}`,
+        notInstalled: (name) => `Plugin ${name} is not installed`,
+        projectRequired: 'A project-level MCP server needs a project',
+        stdioNoAuth: 'Local (stdio) MCP servers do not need authorization',
+        authFailed: (error) => `Authorization failed: ${error}`,
+    },
+);
 
 /**
  * Skills, slash commands, agent definitions, hooks, MCP servers and plugins (09): discovery, trust, the settings
@@ -326,7 +380,7 @@ const INPUT_ALIASES: ReadonlyArray<readonly [string, string]> = [
 ];
 
 function message(diagnostic: Diagnostic): string {
-    return diagnostic.file ? `${diagnostic.file}：${diagnostic.message}` : diagnostic.message;
+    return diagnostic.file ? textOf(TEXT).inFile(diagnostic.file, diagnostic.message) : diagnostic.message;
 }
 
 function errorText(error: unknown): string {
@@ -342,13 +396,14 @@ function targetOf(config: McpServerConfig): string {
 }
 
 function permissionLines(permissions: PluginPermissions): string[] {
+    const text = textOf(TEXT);
     return [
-        ...permissions.hookCommands.map((value) => `hook命令：${value}`),
-        ...permissions.hookUrls.map((value) => `hook地址：${value}`),
-        ...permissions.mcpCommands.map((value) => `mcp命令：${value}`),
-        ...permissions.mcpUrls.map((value) => `mcp地址：${value}`),
-        ...permissions.domains.map((value) => `访问域名：${value}`),
-        ...permissions.skillScripts.map((value) => `skill脚本：${value}`),
+        ...permissions.hookCommands.map((value) => text.hookCommand(value)),
+        ...permissions.hookUrls.map((value) => text.hookUrl(value)),
+        ...permissions.mcpCommands.map((value) => text.mcpCommand(value)),
+        ...permissions.mcpUrls.map((value) => text.mcpUrl(value)),
+        ...permissions.domains.map((value) => text.domain(value)),
+        ...permissions.skillScripts.map((value) => text.skillScript(value)),
     ];
 }
 
@@ -509,7 +564,7 @@ export class ExtensionService {
                 diagnostics.push(...info.diagnostics.filter((d) => d.severity !== 'info').map(message));
             } catch (error) {
                 plugins.push({ installed });
-                diagnostics.push(`插件${installed.name}读不出来：${errorText(error)}`);
+                diagnostics.push(textOf(TEXT).pluginUnreadable(installed.name, errorText(error)));
             }
         }
         const enabledPlugins = plugins.flatMap((plugin) =>
@@ -581,7 +636,7 @@ export class ExtensionService {
         const names = new Set<string>();
         const addEntry = (entry: McpEntry) => {
             if (names.has(entry.config.name)) {
-                diagnostics.push(`mcp服务器重名，已忽略：${entry.config.name}（${entry.source}）`);
+                diagnostics.push(textOf(TEXT).duplicateMcp(entry.config.name, entry.source));
                 return;
             }
             names.add(entry.config.name);
@@ -606,7 +661,7 @@ export class ExtensionService {
                       }),
             });
             if (!checked.ok) {
-                diagnostics.push(`mcp服务器${stored.name}配置有误：${checked.reason}`);
+                diagnostics.push(textOf(TEXT).badMcp(stored.name, checked.reason));
                 return;
             }
             addEntry({
@@ -626,12 +681,12 @@ export class ExtensionService {
                     const json = await readJson(file);
                     if (json === undefined) continue;
                     const { configs, problems } = repoServers(json, trusted);
-                    diagnostics.push(...problems.map((problem) => `${file}：${problem}`));
+                    diagnostics.push(...problems.map((problem) => textOf(TEXT).inFile(file, problem)));
                     for (const config of configs) {
                         addEntry({ key: `repo:${project.id}:${config.name}`, config, source: file });
                     }
                 } catch (error) {
-                    diagnostics.push(`${file}：${errorText(error)}`);
+                    diagnostics.push(textOf(TEXT).inFile(file, errorText(error)));
                 }
             }
         }
@@ -641,7 +696,9 @@ export class ExtensionService {
         for (const plugin of enabledPlugins) {
             for (const [raw, value] of Object.entries(plugin.components.mcpServers)) {
                 const { configs, problems } = repoServers({ mcpServers: { [raw]: value } }, true);
-                diagnostics.push(...problems.map((problem) => `插件${plugin.manifest.name}：${problem}`));
+                diagnostics.push(
+                    ...problems.map((problem) => textOf(TEXT).pluginProblem(plugin.manifest.name, problem)),
+                );
                 for (const config of configs) {
                     addEntry({
                         key: `plugin:${plugin.manifest.name}:${config.name}`,
@@ -779,7 +836,7 @@ export class ExtensionService {
             const loaded = await this.load(await this.#project(params.projectId));
             const entry = loaded.mcp.find((item) => item.config.name === params.name);
             if (!entry) {
-                throw new RpcError(RpcErrorCode.NotFound, `没有名为${params.name}的mcp服务器`);
+                throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noMcp(params.name));
             }
             await this.#updateState((state) => ({
                 ...state,
@@ -810,10 +867,10 @@ export class ExtensionService {
                 const market = await this.#readMarket(source.market);
                 const entry = market.plugins.find((item) => item.name === source.plugin);
                 if (!entry) {
-                    throw new Error(`市场${source.market}里没有插件${source.plugin}`);
+                    throw new Error(textOf(TEXT).notInMarket(source.market, source.plugin));
                 }
                 if (entry.source.kind === 'unsupported') {
-                    throw new Error(`暂不支持这种插件来源：${entry.source.type}`);
+                    throw new Error(textOf(TEXT).unsupportedSource(entry.source.type));
                 }
                 result = await this.plugins.install(entry.source, {
                     enable: false,
@@ -831,7 +888,7 @@ export class ExtensionService {
                 permissionsGrew: result.permissionsGrew,
             };
         } catch (error) {
-            throw new RpcError(RpcErrorCode.Rejected, `插件安装失败：${errorText(error)}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).installFailed(errorText(error)));
         }
     }
 
@@ -845,7 +902,7 @@ export class ExtensionService {
         const state = await this.#readState();
         const market = state.markets.find((item) => item.name === name);
         if (!market) {
-            throw new RpcError(RpcErrorCode.NotFound, `没有名为${name}的插件市场`);
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noMarket(name));
         }
         return readMarketplace(market.source.kind === 'dir' ? market.source.path : this.#marketDir(name));
     }
@@ -868,17 +925,14 @@ export class ExtensionService {
 
     async addMarket(source: MarketSource): Promise<{ name: string; plugins: number }> {
         const fetched = await this.#fetchMarket(source).catch((error: unknown) => {
-            throw new RpcError(RpcErrorCode.Rejected, `读取插件市场失败：${errorText(error)}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).marketUnreadable(errorText(error)));
         });
         try {
             const market = await readMarketplace(fetched.dir).catch((error: unknown) => {
-                throw new RpcError(
-                    RpcErrorCode.Rejected,
-                    `不是插件市场（没有${'.claude-plugin/marketplace.json'}）：${errorText(error)}`,
-                );
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).notMarket(errorText(error)));
             });
             if (!MARKET_NAME.test(market.name)) {
-                throw new RpcError(RpcErrorCode.Rejected, `插件市场的名字不合规：${market.name}`);
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).badMarketName(market.name));
             }
             if (fetched.temporary) {
                 await rm(this.#marketDir(market.name), { recursive: true, force: true });
@@ -905,7 +959,7 @@ export class ExtensionService {
     async refreshMarket(name: string): Promise<void> {
         const market = (await this.#readState()).markets.find((item) => item.name === name);
         if (!market) {
-            throw new RpcError(RpcErrorCode.NotFound, `没有名为${name}的插件市场`);
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noMarket(name));
         }
         await this.addMarket(market.source);
     }
@@ -946,7 +1000,7 @@ export class ExtensionService {
 
     async uninstallPlugin(name: string): Promise<void> {
         if (!(await this.plugins.uninstall(name))) {
-            throw new RpcError(RpcErrorCode.NotFound, `没有安装插件${name}`);
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).notInstalled(name));
         }
         this.#changed();
     }
@@ -1013,7 +1067,7 @@ export class ExtensionService {
             return 'global';
         }
         if (!projectId) {
-            throw new RpcError(RpcErrorCode.InvalidParams, '项目级的mcp服务器要指定项目');
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).projectRequired);
         }
         return projectId;
     }
@@ -1091,7 +1145,7 @@ export class ExtensionService {
         const loaded = await this.load(await this.#project(projectId));
         const entry = loaded.mcp.find((item) => item.config.name === name);
         if (!entry) {
-            throw new RpcError(RpcErrorCode.NotFound, `没有名为${name}的mcp服务器`);
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noMcp(name));
         }
         return entry;
     }
@@ -1157,7 +1211,7 @@ export class ExtensionService {
     async authorizeMcp(name: string, projectId?: string): Promise<void> {
         const entry = await this.#entry(name, projectId);
         if (entry.config.transport === 'stdio') {
-            throw new RpcError(RpcErrorCode.InvalidParams, '本地（stdio）mcp服务器不需要授权');
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).stdioNoAuth);
         }
         try {
             await authorize(entry.config.url, {
@@ -1166,7 +1220,7 @@ export class ExtensionService {
                 clientName: 'Xora Code',
             });
         } catch (error) {
-            throw new RpcError(RpcErrorCode.Rejected, `授权失败：${errorText(error)}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).authFailed(errorText(error)));
         }
         this.#tested.delete(entry.key);
         this.#changed();

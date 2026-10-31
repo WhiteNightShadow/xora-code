@@ -1,9 +1,22 @@
 import type { Approval, ApprovalDecision, PermissionMode, Rule } from '@xora/protocol';
-import { RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, RpcError, RpcErrorCode } from '@xora/protocol';
 import type { XoraDatabase } from '@xora/storage';
 import type { Bus } from './bus.ts';
 import { newId } from './ids.ts';
 import { type CallFacts, decide, type PolicyResult, rulePattern, sessionKey } from './policy.ts';
+import { hostLanguage, textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        gone: '这个审批已经处理过或已过期',
+        noAlways: '高风险动作、超出工作区或涉及敏感文件的操作不能设为总是允许',
+    },
+    {
+        gone: 'This approval was already answered or has expired',
+        noAlways:
+            'High-risk actions, actions outside the workspace and actions on sensitive files cannot be set to always allow',
+    },
+);
 
 /** Pending approvals expire so a forgotten card cannot be answered days later with stale context. */
 const APPROVAL_TTL_MS = 6 * 60 * 60 * 1000;
@@ -99,6 +112,7 @@ export class ApprovalService {
             projectRoot: context.projectRoot,
             rules: this.rules(),
             sessionAllows: this.#sessionAllows.get(threadId) ?? new Set(),
+            language: hostLanguage(),
         });
     }
 
@@ -137,7 +151,7 @@ export class ApprovalService {
     respond(approvalId: string, decision: ApprovalDecision, scope?: 'project' | 'global', message?: string): void {
         const pending = this.#pending.get(approvalId);
         if (!pending) {
-            throw new RpcError(RpcErrorCode.NotFound, '这个审批已经处理过或已过期');
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).gone);
         }
         const { approval, facts } = pending;
         // A high-risk action is approved one call at a time (06 §8): "for this session" counts as once.
@@ -147,7 +161,7 @@ export class ApprovalService {
             this.#sessionAllows.set(approval.threadId, keys);
         } else if (decision === 'allow_always') {
             if (approval.alwaysScopes.length === 0) {
-                throw new RpcError(RpcErrorCode.Rejected, '高风险动作、超出工作区或涉及敏感文件的操作不能设为总是允许');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noAlways);
             }
             const ruleScope = scope ?? 'project';
             this.addRule({

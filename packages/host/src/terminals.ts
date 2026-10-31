@@ -2,10 +2,20 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, RpcError, RpcErrorCode } from '@xora/protocol';
 import type { Bus } from './bus.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        noPty: '这个安装没有终端组件（node-pty）',
+    },
+    {
+        noPty: 'This installation has no terminal component (node-pty)',
+    },
+);
 
 /** The part of node-pty the host uses; node-pty itself ships with the shell because it is a native module. */
 interface PtyProcess {
@@ -110,7 +120,7 @@ export class TerminalService {
             }
         }
         if (!this.#pty) {
-            throw new RpcError(RpcErrorCode.Rejected, '这个安装没有终端组件（node-pty）');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noPty);
         }
         return this.#pty;
     }

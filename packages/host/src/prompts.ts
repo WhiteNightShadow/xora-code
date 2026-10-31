@@ -1,7 +1,27 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { PromptLayerInput } from '@xora/engine';
-import type { PromptLayer } from '@xora/protocol';
+import { bilingual, type PromptLayer } from '@xora/protocol';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        userGlobal: '用户全局',
+        org: (name: string) => `组织：${name}`,
+        projectShared: '项目·共享',
+        projectPersonal: '项目·个人',
+        agent: (name: string) => `agent：${name}`,
+        session: '会话',
+    },
+    {
+        userGlobal: 'User global',
+        org: (name) => `Organization: ${name}`,
+        projectShared: 'Project (shared)',
+        projectPersonal: 'Project (personal)',
+        agent: (name) => `Agent: ${name}`,
+        session: 'Session',
+    },
+);
 
 /** Each layer is capped so one oversized file cannot crowd out the conversation. */
 const MAX_LAYER_CHARS = 32_000;
@@ -114,6 +134,7 @@ export class PromptService {
     }
 
     layers(sources: LayerSources): PromptLayer[] {
+        const titles = textOf(TEXT);
         const layers: PromptLayer[] = [];
         const push = (id: string, title: string, source: string, raw: string | undefined, editable: boolean) => {
             if (!raw || raw.trim().length === 0) {
@@ -122,9 +143,9 @@ export class PromptService {
             const { text, truncated } = cap(raw.trim());
             layers.push({ id, title, source, text, chars: text.length, tokens: estimate(text), truncated, editable });
         };
-        push('user_global_instructions', '用户全局', this.globalFile(), this.readGlobal(), true);
+        push('user_global_instructions', titles.userGlobal, this.globalFile(), this.readGlobal(), true);
         if (sources.org) {
-            push('org_instructions', `组织：${sources.org.name}`, sources.org.source, sources.org.text, false);
+            push('org_instructions', titles.org(sources.org.name), sources.org.source, sources.org.text, false);
         }
         const files = this.projectInstructionFiles(sources.projectRoot, sources.cwd);
         if (files.length > 0) {
@@ -134,19 +155,25 @@ export class PromptService {
                         `# ${path.relative(sources.projectRoot, file) || path.basename(file)}\n${readText(file) ?? ''}`,
                 )
                 .join('\n\n');
-            push('project_instructions', '项目·共享', files.join(', '), text, false);
+            push('project_instructions', titles.projectShared, files.join(', '), text, false);
         }
         push(
             'project_private_instructions',
-            '项目·个人',
+            titles.projectPersonal,
             this.projectFile(sources.projectId),
             this.readProject(sources.projectId),
             true,
         );
         if (sources.agent) {
-            push('agent_instructions', `agent：${sources.agent.name}`, sources.agent.source, sources.agent.text, false);
+            push(
+                'agent_instructions',
+                titles.agent(sources.agent.name),
+                sources.agent.source,
+                sources.agent.text,
+                false,
+            );
         }
-        push('session_instructions', '会话', 'thread', sources.sessionPrompt, true);
+        push('session_instructions', titles.session, 'thread', sources.sessionPrompt, true);
         return layers;
     }
 

@@ -1,13 +1,14 @@
+import { bilingual, type UiLanguage } from '@xora/protocol/language';
 import type { BoardTask, TaskStatus } from './board.ts';
 import type { TaskLedgerContent } from './ledgers.ts';
 import { DEFAULT_SUPERVISION_ALERT_RATIO, ROLES, type Role } from './org.ts';
 import { TIER_ORDER } from './routing.ts';
 import type { ChangeKind, Deliverable, DeliverableStatus, Evidence, TaskCard, Tier } from './schemas.ts';
-import { money, percent, ROLE_LABELS, TIER_LABELS, zhStyle } from './style.ts';
+import { money, percent, roleLabel, tierLabel, uiStyle } from './style.ts';
 
 /**
  * The delivery report (06 §5 ⑪, §13): what was done, the evidence, cost by tier and agent, the supervision
- * overhead and open issues, as Chinese markdown in the user's style.
+ * overhead and open issues, as markdown in the run's language (Chinese in the user's style).
  */
 
 /** One usage record. `UsageEvent` of `@xora/metering` fits as is. */
@@ -33,35 +34,135 @@ export interface DeliveryReportInput {
     readonly currency?: string;
     /** Exchange rates keyed `FROM_TO`, e.g. `{ USD_CNY: 7.1 }`, as in `@xora/metering`. */
     readonly rates?: Readonly<Record<string, number>>;
+    readonly language: UiLanguage;
 }
 
-const STATUS_LABELS: Readonly<Record<TaskStatus, string>> = {
-    pending: '待开始',
-    ready: '待派工',
-    assigned: '已派工',
-    in_progress: '进行中',
-    in_review: '验收中',
-    done: '已完成',
-    failed: '失败',
-    blocked: '受阻',
-    cancelled: '已取消',
-};
+const TEXT = bilingual(
+    {
+        statuses: {
+            pending: '待开始',
+            ready: '待派工',
+            assigned: '已派工',
+            in_progress: '进行中',
+            in_review: '验收中',
+            done: '已完成',
+            failed: '失败',
+            blocked: '受阻',
+            cancelled: '已取消',
+        } as Readonly<Record<TaskStatus, string>>,
+        deliverables: {
+            done: '执行者报告完成',
+            partial: '部分完成',
+            blocked: '受阻',
+            escalate: '已升级',
+        } as Readonly<Record<DeliverableStatus, string>>,
+        changes: { added: '新增', modified: '修改', deleted: '删除', renamed: '重命名' } as Readonly<
+            Record<ChangeKind, string>
+        >,
+        unknown: '未知',
+        list: '、',
+        notDelivered: '未交付',
+        command: (command: string, exit: number | null) =>
+            `${command}（${exit === null ? '未正常结束' : `退出码${exit}`}）`,
+        screenshot: (path: string) => `截图${path}`,
+        note: (text: string) => `说明：${text}`,
+        costTitle: '## 花费明细',
+        total: (total: string, unconverted: readonly string[]) =>
+            `合计：${total}${unconverted.length > 0 ? `，另有${unconverted.join('、')}未换算` : ''}。`,
+        tierTable: '| 档位 | 花费 | 占比 |',
+        agentTable: '| agent | 角色 | 档位 | 花费 | 占比 |',
+        supervisionTitle: '## 监督开销',
+        noCost: '还没有花费记录。',
+        supervision: (cost: string, share: string, alert: string, over: boolean) =>
+            over
+                ? `主管花费${cost}，占总花费的${share}，超过提示线${alert}：任务可能拆得太碎，或者来回沟通太多。`
+                : `主管花费${cost}，占总花费的${share}，在提示线${alert}以内。`,
+        title: '# 交付报告',
+        goal: (goal: string) => `目标：${goal}`,
+        done: (done: number, total: number) => `完成${done}/${total}个任务`,
+        failed: (count: number) => `失败${count}个`,
+        cancelled: (count: number) => `取消${count}个`,
+        result: (parts: readonly string[]) => `结果：${parts.join('，')}。`,
+        workTitle: '## 做了什么',
+        task: (head: string, status: string, retries: number, summary: string | undefined) =>
+            `- **${head}**（${status}${retries > 0 ? `，退回或升级${retries}次` : ''}）${summary ? `：${summary}` : ''}`,
+        changed: (items: readonly string[]) => `  - 改动：${items.join('、')}`,
+        change: (file: string, kind: string) => `${file}（${kind}）`,
+        decisions: '关键决定：',
+        evidenceTitle: '## 证据',
+        evidence: (task: string, items: readonly string[]) =>
+            `- ${task}：${items.length > 0 ? items.join('；') : '没有证据'}`,
+        openTitle: '## 遗留问题',
+        unfinished: (task: string, status: string, note: string | undefined) =>
+            `${task}没有完成（${status}）${note ? `：${note}` : ''}`,
+        risk: (task: string, risk: string) => `${task}的风险：${risk}`,
+        question: (task: string, question: string) => `${task}待解答：${question}`,
+        planRisk: (risk: string) => `计划中的风险：${risk}`,
+        noOpen: '没有遗留问题。',
+    },
+    {
+        statuses: {
+            pending: 'pending',
+            ready: 'ready',
+            assigned: 'assigned',
+            in_progress: 'in progress',
+            in_review: 'in review',
+            done: 'done',
+            failed: 'failed',
+            blocked: 'blocked',
+            cancelled: 'cancelled',
+        },
+        deliverables: {
+            done: 'reported done by the executor',
+            partial: 'partly done',
+            blocked: 'blocked',
+            escalate: 'escalated',
+        },
+        changes: { added: 'added', modified: 'modified', deleted: 'deleted', renamed: 'renamed' },
+        unknown: 'unknown',
+        list: ', ',
+        notDelivered: 'not delivered',
+        command: (command, exit) => `${command} (${exit === null ? 'did not finish' : `exit code ${exit}`})`,
+        screenshot: (path) => `screenshot ${path}`,
+        note: (text) => `note: ${text}`,
+        costTitle: '## Cost',
+        total: (total, unconverted) =>
+            `Total: ${total}${unconverted.length > 0 ? `, plus ${unconverted.join(', ')} not converted` : ''}.`,
+        tierTable: '| Tier | Cost | Share |',
+        agentTable: '| Agent | Role | Tier | Cost | Share |',
+        supervisionTitle: '## Supervision overhead',
+        noCost: 'No costs recorded yet.',
+        supervision: (cost, share, alert, over) =>
+            over
+                ? `The supervisor spent ${cost}, ${share} of the total, above the alert line of ${alert}: the tasks may be split too finely, or there is too much back and forth.`
+                : `The supervisor spent ${cost}, ${share} of the total, within the alert line of ${alert}.`,
+        title: '# Delivery report',
+        goal: (goal) => `Goal: ${goal}`,
+        done: (done, total) => `${done} of ${total} tasks done`,
+        failed: (count) => `${count} failed`,
+        cancelled: (count) => `${count} cancelled`,
+        result: (parts) => `Result: ${parts.join(', ')}.`,
+        workTitle: '## What was done',
+        task: (head, status, retries, summary) =>
+            `- **${head}** (${status}${retries > 0 ? `, sent back or escalated ${retries} ${retries === 1 ? 'time' : 'times'}` : ''})${summary ? `: ${summary}` : ''}`,
+        changed: (items) => `  - Changes: ${items.join(', ')}`,
+        change: (file, kind) => `${file} (${kind})`,
+        decisions: 'Key decisions:',
+        evidenceTitle: '## Evidence',
+        evidence: (task, items) => `- ${task}: ${items.length > 0 ? items.join('; ') : 'no evidence'}`,
+        openTitle: '## Open issues',
+        unfinished: (task, status, note) => `${task} is not finished (${status})${note ? `: ${note}` : ''}`,
+        risk: (task, risk) => `Risk in ${task}: ${risk}`,
+        question: (task, question) => `Open question in ${task}: ${question}`,
+        planRisk: (risk) => `Risk from the plan: ${risk}`,
+        noOpen: 'No open issues.',
+    },
+);
 
-const DELIVERABLE_LABELS: Readonly<Record<DeliverableStatus, string>> = {
-    done: '执行者报告完成',
-    partial: '部分完成',
-    blocked: '受阻',
-    escalate: '已升级',
-};
+type ReportText = (typeof TEXT)['zh-CN'];
 
-const CHANGE_LABELS: Readonly<Record<ChangeKind, string>> = {
-    added: '新增',
-    modified: '修改',
-    deleted: '删除',
-    renamed: '重命名',
-};
-
-const UNKNOWN = '未知';
+/** Tier and agent of usage that names none. */
+const UNKNOWN = '';
 
 interface ReportTask {
     readonly card: TaskCard;
@@ -86,23 +187,23 @@ function cell(text: string): string {
     return oneLine(text).replaceAll('|', '\\|');
 }
 
-function statusLabel(task: ReportTask): string {
+function statusLabel(task: ReportTask, text: ReportText): string {
     if (task.status) {
-        return STATUS_LABELS[task.status];
+        return text.statuses[task.status];
     }
-    return task.deliverable ? DELIVERABLE_LABELS[task.deliverable.status] : '未交付';
+    return task.deliverable ? text.deliverables[task.deliverable.status] : text.notDelivered;
 }
 
-function describeEvidence(item: Evidence): string {
+function describeEvidence(item: Evidence, text: ReportText): string {
     switch (item.type) {
         case 'command':
-            return `${code(item.run)}（${item.exit === null ? '未正常结束' : `退出码${item.exit}`}）`;
+            return text.command(code(item.run), item.exit);
         case 'diff':
             return item.ref ? `diff ${code(item.ref)}` : 'diff';
         case 'screenshot':
-            return `截图${code(item.path)}`;
+            return text.screenshot(code(item.path));
         case 'note':
-            return `说明：${oneLine(item.text)}`;
+            return text.note(oneLine(item.text));
     }
 }
 
@@ -167,42 +268,49 @@ function summarizeCosts(input: DeliveryReportInput): CostSummary {
     return { currency, total, byTier, byAgent, supervisor, unconverted };
 }
 
-function tierLabel(tier: string): string {
-    return (TIER_LABELS as Readonly<Record<string, string>>)[tier] ?? tier;
+function tierName(tier: string, language: UiLanguage): string {
+    if (tier === UNKNOWN) {
+        return TEXT[language].unknown;
+    }
+    return (TIER_ORDER as readonly string[]).includes(tier) ? tierLabel(tier as Tier, language) : tier;
 }
 
-function roleLabel(role: string | undefined): string {
+function roleName(role: string | undefined, language: UiLanguage): string {
     if (role === undefined) {
-        return UNKNOWN;
+        return TEXT[language].unknown;
     }
-    return (ROLES as readonly string[]).includes(role) ? ROLE_LABELS[role as Role] : role;
+    return (ROLES as readonly string[]).includes(role) ? roleLabel(role as Role, language) : role;
 }
 
 function share(amount: number, total: number): string {
     return total > 0 ? percent(amount / total) : '-';
 }
 
-function costSection(costs: CostSummary): string[] {
-    const lines = ['## 花费明细', ''];
-    const extra = [...costs.unconverted].map(([currency, amount]) => money(amount, currency));
-    lines.push(
-        `合计：${money(costs.total, costs.currency)}${extra.length > 0 ? `，另有${extra.join('、')}未换算` : ''}。`,
-    );
+function costSection(costs: CostSummary, language: UiLanguage): string[] {
+    const text = TEXT[language];
+    const lines = [text.costTitle, ''];
+    const extra = [...costs.unconverted].map(([currency, amount]) => money(amount, currency, language));
+    lines.push(text.total(money(costs.total, costs.currency, language), extra));
     if (costs.byTier.size === 0) {
         return lines;
     }
     const tierRows = [...costs.byTier].sort(([a], [b]) => tierPosition(a) - tierPosition(b));
-    lines.push('', '| 档位 | 花费 | 占比 |', '|---|---|---|');
+    lines.push('', text.tierTable, '|---|---|---|');
     for (const [tier, amount] of tierRows) {
-        lines.push(`| ${cell(tierLabel(tier))} | ${money(amount, costs.currency)} | ${share(amount, costs.total)} |`);
+        lines.push(
+            `| ${cell(tierName(tier, language))} | ${money(amount, costs.currency, language)} | ${share(amount, costs.total)} |`,
+        );
     }
     const agentRows = [...costs.byAgent].sort(([, a], [, b]) => b.cost - a.cost);
-    lines.push('', '| agent | 角色 | 档位 | 花费 | 占比 |', '|---|---|---|---|---|');
+    lines.push('', text.agentTable, '|---|---|---|---|---|');
     for (const [agentId, agent] of agentRows) {
-        const tiers = [...agent.tiers].sort((a, b) => tierPosition(a) - tierPosition(b)).map(tierLabel);
+        const tiers = [...agent.tiers]
+            .sort((a, b) => tierPosition(a) - tierPosition(b))
+            .map((tier) => tierName(tier, language));
         lines.push(
-            `| ${cell(agentId)} | ${cell(roleLabel(agent.role))} | ${cell(tiers.join('、') || UNKNOWN)} | ` +
-                `${money(agent.cost, costs.currency)} | ${share(agent.cost, costs.total)} |`,
+            `| ${cell(agentId === UNKNOWN ? text.unknown : agentId)} | ${cell(roleName(agent.role, language))} | ` +
+                `${cell(tiers.join(text.list) || text.unknown)} | ` +
+                `${money(agent.cost, costs.currency, language)} | ${share(agent.cost, costs.total)} |`,
         );
     }
     return lines;
@@ -214,18 +322,21 @@ function tierPosition(tier: string): number {
     return index < 0 ? -1 : TIER_ORDER.length - index;
 }
 
-function supervisionSection(costs: CostSummary, alertRatio: number): string[] {
-    const lines = ['## 监督开销', ''];
+function supervisionSection(costs: CostSummary, alertRatio: number, language: UiLanguage): string[] {
+    const text = TEXT[language];
+    const lines = [text.supervisionTitle, ''];
     if (costs.total <= 0) {
-        lines.push('还没有花费记录。');
+        lines.push(text.noCost);
         return lines;
     }
     const ratio = costs.supervisor / costs.total;
-    const head = `主管花费${money(costs.supervisor, costs.currency)}，占总花费的${percent(ratio)}`;
     lines.push(
-        ratio > alertRatio
-            ? `${head}，超过提示线${percent(alertRatio)}：任务可能拆得太碎，或者来回沟通太多。`
-            : `${head}，在提示线${percent(alertRatio)}以内。`,
+        text.supervision(
+            money(costs.supervisor, costs.currency, language),
+            percent(ratio),
+            percent(alertRatio),
+            ratio > alertRatio,
+        ),
     );
     return lines;
 }
@@ -249,70 +360,77 @@ export function deliveryReport(input: DeliveryReportInput): string {
         return { card: item, retries: 0, deliverable: delivered.get(item.id) };
     });
 
-    const lines = ['# 交付报告', '', `目标：${oneLine(input.goal)}`, ''];
+    const { language } = input;
+    const text = TEXT[language];
+    const lines = [text.title, '', text.goal(oneLine(input.goal)), ''];
     const done = tasks.filter((task) => (task.status ? task.status === 'done' : task.deliverable?.status === 'done'));
     const counted = (status: TaskStatus): number => tasks.filter((task) => task.status === status).length;
-    const tally = [`完成${done.length}/${tasks.length}个任务`];
+    const tally = [text.done(done.length, tasks.length)];
     if (counted('failed') > 0) {
-        tally.push(`失败${counted('failed')}个`);
+        tally.push(text.failed(counted('failed')));
     }
     if (counted('cancelled') > 0) {
-        tally.push(`取消${counted('cancelled')}个`);
+        tally.push(text.cancelled(counted('cancelled')));
     }
-    lines.push(`结果：${tally.join('，')}。`, '');
+    lines.push(text.result(tally), '');
 
-    lines.push('## 做了什么', '');
+    lines.push(text.workTitle, '');
     for (const task of tasks) {
-        const retried = task.retries > 0 ? `，退回或升级${task.retries}次` : '';
-        const summary = task.deliverable ? `：${oneLine(task.deliverable.summary)}` : '';
-        lines.push(`- **${task.card.id} ${oneLine(task.card.title)}**（${statusLabel(task)}${retried}）${summary}`);
+        const summary = task.deliverable ? oneLine(task.deliverable.summary) : undefined;
+        lines.push(
+            text.task(`${task.card.id} ${oneLine(task.card.title)}`, statusLabel(task, text), task.retries, summary),
+        );
         const changes = task.deliverable?.changes ?? [];
         if (changes.length > 0) {
             lines.push(
-                `  - 改动：${changes.map((change) => `${code(change.file)}（${CHANGE_LABELS[change.kind]}）`).join('、')}`,
+                text.changed(changes.map((change) => text.change(code(change.file), text.changes[change.kind]))),
             );
         }
     }
     const decisions = input.ledger?.decisions ?? [];
     if (decisions.length > 0) {
-        lines.push('', '关键决定：', ...decisions.map((decision) => `- ${oneLine(decision)}`));
+        lines.push('', text.decisions, ...decisions.map((decision) => `- ${oneLine(decision)}`));
     }
     lines.push('');
 
-    lines.push('## 证据', '');
+    lines.push(text.evidenceTitle, '');
     for (const task of tasks) {
         const evidence = task.deliverable?.evidence ?? [];
         lines.push(
-            `- ${task.card.id}：${evidence.length > 0 ? evidence.map(describeEvidence).join('；') : '没有证据'}`,
+            text.evidence(
+                task.card.id,
+                evidence.map((item) => describeEvidence(item, text)),
+            ),
         );
     }
     lines.push('');
 
     const costs = summarizeCosts(input);
-    lines.push(...costSection(costs), '');
-    lines.push(...supervisionSection(costs, input.alertRatio ?? DEFAULT_SUPERVISION_ALERT_RATIO), '');
+    lines.push(...costSection(costs, language), '');
+    lines.push(...supervisionSection(costs, input.alertRatio ?? DEFAULT_SUPERVISION_ALERT_RATIO, language), '');
 
-    lines.push('## 遗留问题', '');
+    lines.push(text.openTitle, '');
     const open: string[] = [];
     for (const task of tasks) {
         const finished = task.status
             ? task.status === 'done' || task.status === 'cancelled'
             : task.deliverable?.status === 'done';
         if (!finished) {
-            const note = task.note ? `：${oneLine(task.note)}` : '';
-            open.push(`${task.card.id}没有完成（${statusLabel(task)}）${note}`);
+            open.push(
+                text.unfinished(task.card.id, statusLabel(task, text), task.note ? oneLine(task.note) : undefined),
+            );
         }
         for (const risk of task.deliverable?.risks ?? []) {
-            open.push(`${task.card.id}的风险：${oneLine(risk)}`);
+            open.push(text.risk(task.card.id, oneLine(risk)));
         }
         for (const question of task.deliverable?.openQuestions ?? []) {
-            open.push(`${task.card.id}待解答：${oneLine(question)}`);
+            open.push(text.question(task.card.id, oneLine(question)));
         }
     }
     for (const risk of input.ledger?.risks ?? []) {
-        open.push(`计划中的风险：${oneLine(risk)}`);
+        open.push(text.planRisk(oneLine(risk)));
     }
-    lines.push(...(open.length > 0 ? [...new Set(open)].map((item) => `- ${item}`) : ['没有遗留问题。']));
+    lines.push(...(open.length > 0 ? [...new Set(open)].map((item) => `- ${item}`) : [text.noOpen]));
 
-    return `${zhStyle(lines.join('\n'))}\n`;
+    return `${uiStyle(lines.join('\n'), language)}\n`;
 }

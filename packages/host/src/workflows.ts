@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
+    bilingual,
     type HostMethods,
     type HostNotifications,
     type ItemOf,
@@ -19,7 +20,7 @@ import {
     type WorkflowStepRun,
 } from '@xora/protocol';
 import { fromJson, type XoraDatabase } from '@xora/storage';
-import { type HighRisk, isReadOnlyCommand } from '@xora/tools';
+import { type HighRisk, type HighRiskAction, isReadOnlyCommand } from '@xora/tools';
 import {
     type AgentSpec,
     type AgentStep,
@@ -46,8 +47,8 @@ import {
     type SubWorkflowStep,
     type SuperviseStep,
     stepTiers,
-    TIER_LABELS,
     type Tier,
+    tierLabel,
     validateAutonomy,
     type WorkflowDefinition,
     type WorkflowParse,
@@ -62,11 +63,12 @@ import type { HostToolResult } from './engines/manager.ts';
 import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import { type CallFacts, HIGH_RISK_LABELS, highRiskOf } from './policy.ts';
+import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import type { TeamService } from './team.ts';
 import { disabledBuiltins, loadTeamOrganization, mcpToolsOf, shorten, systemLayers } from './team-agents.ts';
+import { hostLanguage, textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
 import type { HostToolProvider, TurnEnded, TurnService } from './turns.ts';
 import type { UsageService } from './usage.ts';
@@ -92,6 +94,244 @@ const PROJECT_DIR = path.join('.xora', 'workflows');
 type RunStatus = WorkflowRunView['status'];
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['completed', 'failed', 'cancelled']);
 const TEAM_TERMINAL: ReadonlySet<TeamRun['status']> = new Set(['done', 'failed', 'cancelled']);
+
+const TEXT = bilingual(
+    {
+        tooLarge: '文件太大（上限256kb）',
+        nameTaken: (name: string) => `另一个文件已经用了名字${name}`,
+        untrusted: '项目还没有被信任：信任后才能运行项目里的工作流',
+        notFound: (key: string) => `找不到工作流${key}`,
+        projectOnly: '只有项目里的工作流能自动运行',
+        fixFirst: '工作流有问题，先修好再启用自动运行',
+        noTriggers: '这个工作流没有定时、文件、git或webhook触发',
+        webhookOff: '这个工作流的webhook没有启用',
+        webhookNotStarted: '本机webhook还没有启动',
+        projectMissing: (dir: string) => `项目文件夹不存在：${dir}`,
+        invalid: (issue: string | undefined) => `工作流有问题：${issue ?? '无法解析'}`,
+        problems: (problems: readonly string[]) => problems.join('；'),
+        broken: '工作流有问题',
+        orgMissing: (wanted: string, used: string) => `工作流指定的组织${wanted}不存在，改用${used}`,
+        agentMissing: (org: string, agent: string, step: string) => `组织${org}里没有agent ${agent}（步骤${step}）`,
+        unpriced: (models: readonly string[]) => `无人值守运行要能计价，这些模型没有价格表：${models.join('、')}`,
+        threadTitle: (title: string) => `工作流：${title}`,
+        runMessage: (title: string, inputs: readonly string[]) =>
+            `运行工作流“${title}”${inputs.length > 0 ? `（${inputs.join('，')}）` : ''}`,
+        notStarted: (problems: readonly string[], off: boolean) =>
+            `没有开始：${problems.join('；')}${off ? '。已停用自动运行，解决后重新启用' : ''}`,
+        warning: '注意',
+        queued: '排队',
+        offPeakWait: (at: number) => `等到空闲时段再开始（${new Date(at).toLocaleString('zh-CN', { hour12: false })}）`,
+        runStarted: '开始运行',
+        stepCount: (count: number) => `${count}个步骤`,
+        offPeakNow: '到了空闲时段',
+        stoppedByUser: '用户停止了运行',
+        notPaused: '只有暂停的运行可以继续',
+        stillOverBudget: '预算还是不够：追加预算后再继续',
+        runContinued: '继续运行',
+        pausedByRestart: '应用重启时这次运行还没结束，已暂停；继续后从没做完的步骤接着做',
+        runNotFound: (runId: string) => `找不到工作流运行${runId}`,
+        stepStarted: (step: string) => `开始：${step}`,
+        stepDone: (step: string) => `完成：${step}`,
+        stepSkipped: (step: string) => `跳过：${step}`,
+        stepFailed: (step: string) => `失败：${step}`,
+        runFailedAt: (step: string, note: string) => `步骤${step}失败：${note}`,
+        parentEnded: '上层工作流结束了',
+        stepStatuses: {
+            pending: '没有开始',
+            running: '进行中',
+            waiting: '等待确认',
+            succeeded: '完成',
+            failed: '失败',
+            skipped: '跳过',
+            cancelled: '取消',
+        } as Readonly<Record<StepState['status'], string>>,
+        stepLine: (step: string, status: string, note: string | undefined) =>
+            `- ${step}：${status}${note !== undefined ? `（${note}）` : ''}`,
+        ended: { completed: '运行完成', failed: '运行失败', cancelled: '运行已停止' },
+        cost: (amount: number, currency: string) => `花费：${amount} ${currency}`,
+        budgetSpent: (spent: number, limit: number, currency: string) =>
+            `预算用完：已花${spent}/${limit} ${currency}，追加预算后继续`,
+        paused: '暂停',
+        gateMessage: (workflow: string) => `确认后继续工作流“${workflow}”`,
+        gateTitle: (step: string) => `人工关卡：${step}`,
+        approved: (message: string | undefined) => (message ? `已确认：${message}` : '已确认'),
+        gateDenied: (step: string, message: string | undefined) =>
+            `关卡“${step}”没有通过${message ? `：${message}` : ''}`,
+        commandRefused: '命令被权限规则拒绝或没有被批准',
+        exitCode: (exit: number | null) => `退出码${exit}`,
+        commandExit: (exit: number | null, expectPass: boolean) =>
+            `命令退出码${exit ?? '无'}，应为${expectPass ? '0' : '非0'}`,
+        skippedBySetting: (note: string) => `失败后按设置跳过：${note}`,
+        askSkipTitle: (step: string) => `步骤“${step}”失败：跳过它继续吗？`,
+        askSkipSummary: (note: string) => `${note}\n\n允许：跳过这一步，后面不依赖它的步骤照常运行；拒绝：结束运行。`,
+        skippedByUser: (note: string) => `失败后由用户决定跳过：${note}`,
+        noAgent: (agent: string) => `组织里没有agent ${agent}`,
+        unfinishedPrompt:
+            '上次这一步没有做完（应用重启或运行暂停）。检查当前状态，完成剩下的工作，然后调用step_result交回结果。',
+        turnCancelled: '这一轮被取消了',
+        turnFailed: '这一轮出错了（模型或引擎错误）',
+        askMissing: (missing: readonly string[]) =>
+            `还缺这些outputs：${missing.join('、')}。调用step_result补交，不要重做工作。`,
+        askResult: '你还没有调用step_result。调用它交回summary和outputs，不要重做工作。',
+        outputsMissing: (missing: readonly string[]) => `没有交出outputs：${missing.join('、')}`,
+        notPassed: (step: string) => `没有通过：${step}`,
+        retryPrompt: (failure: string) => `上一次没有通过：${failure}\n\n继续完成这一步，完成后再调用step_result。`,
+        escalated: (step: string) => `升档：${step}`,
+        escalatedTo: (tier: Tier) => `改用${tierLabel(tier, 'zh-CN')}档重做`,
+        switched: (step: string) => `换人：${step}`,
+        switchedTo: (agent: string) => `交给${agent}`,
+        triedBefore: (agent: string, tier: Tier, failure: string, summary: string) =>
+            `之前由${agent}（${tierLabel(tier, 'zh-CN')}档）做过，没有通过：${failure}${summary ? `\n它的总结：${summary}` : ''}`,
+        promptIntro: (workflow: string, step: string) => `你在执行工作流“${workflow}”的步骤“${step}”。`,
+        promptTask: '任务：',
+        promptHandIn: (outputs: readonly string[]) =>
+            outputs.length > 0
+                ? `完成后调用step_result工具交回结果：summary写清做了什么、证据在哪；outputs里给出${outputs.join('、')}。`
+                : '完成后调用step_result工具，summary写清做了什么、证据在哪。',
+        promptVerify: (command: string, expectFail: boolean) =>
+            `之后我会运行验收命令\`${command}\`（引用的outputs用你交回的值代入），${
+                expectFail ? '它应该失败（退出码非0）' : '退出码为0才算通过'
+            }。`,
+        promptScope: '只做这一步的事；做不到时说明原因，照样调用step_result。',
+        verifyLabel: '验收',
+        verifyRefused: (command: string) => `验收命令被权限规则拒绝或没有被批准：${command}`,
+        verifyFailed: (command: string, exit: number | null, expectPass: boolean, output: string) =>
+            `验收命令\`${command}\`退出码${exit ?? '无'}，应为${expectPass ? '0' : '非0'}。输出：\n${output || '（无输出）'}`,
+        retryGoal: (goal: string, feedback: string) => `${goal}\n\n上一次没有通过：${feedback}`,
+        teamNotStarted: (error: string) => `团队没能启动：${error}`,
+        teamNotDone: (status: string | undefined, note: string | undefined) =>
+            `团队运行没有完成（${status ?? '未知'}）${note ? `：${note}` : ''}`,
+        teamDone: '团队运行完成',
+        tooDeep: (depth: number) => `子工作流最多嵌套${depth}层`,
+        childMissing: (name: string) => `子工作流${name}不存在或有问题`,
+        childNotStarted: (error: string) => `子工作流没能启动：${error}`,
+        childGone: '子工作流不见了',
+        childNotDone: (name: string, note: string | undefined) => `子工作流${name}没有完成${note ? `：${note}` : ''}`,
+        childDone: (name: string) => `子工作流${name}完成`,
+        commandTitle: (label: string, highRisk: HighRiskAction | undefined) =>
+            highRisk ? `${label}：运行命令（高风险动作：${highRiskLabel(highRisk, 'zh-CN')}）` : `${label}：运行命令`,
+    },
+    {
+        tooLarge: 'File too large (256 KB at most)',
+        nameTaken: (name) => `Another file already uses the name ${name}`,
+        untrusted: 'The project is not trusted yet: trust it to run its workflows',
+        notFound: (key) => `Workflow ${key} not found`,
+        projectOnly: 'Only workflows in a project can run automatically',
+        fixFirst: 'The workflow has problems: fix them before switching on automatic runs',
+        noTriggers: 'This workflow has no schedule, file, git or webhook trigger',
+        webhookOff: "This workflow's webhook is not switched on",
+        webhookNotStarted: 'The local webhook server has not started yet',
+        projectMissing: (dir) => `The project folder does not exist: ${dir}`,
+        invalid: (issue) => `The workflow has a problem: ${issue ?? 'it cannot be parsed'}`,
+        problems: (problems) => problems.join('; '),
+        broken: 'The workflow has problems',
+        orgMissing: (wanted, used) => `The workflow's organization ${wanted} does not exist; using ${used}`,
+        agentMissing: (org, agent, step) => `Organization ${org} has no agent ${agent} (step ${step})`,
+        unpriced: (models) => `Unattended runs need prices, and these models have no price table: ${models.join(', ')}`,
+        threadTitle: (title) => `Workflow: ${title}`,
+        runMessage: (title, inputs) =>
+            `Run the workflow "${title}"${inputs.length > 0 ? ` (${inputs.join(', ')})` : ''}`,
+        notStarted: (problems, off) =>
+            `Not started: ${problems.join('; ')}${off ? '. Automatic runs are switched off: switch them on again once this is fixed' : ''}`,
+        warning: 'Warning',
+        queued: 'Queued',
+        offPeakWait: (at) =>
+            `Waiting for off-peak hours to start (${new Date(at).toLocaleString('en-US', { hour12: false })})`,
+        runStarted: 'Run started',
+        stepCount: (count) => `${count} ${count === 1 ? 'step' : 'steps'}`,
+        offPeakNow: 'Off-peak hours have started',
+        stoppedByUser: 'Stopped by the user',
+        notPaused: 'Only a paused run can continue',
+        stillOverBudget: 'The budget is still not enough: add to it, then continue',
+        runContinued: 'Run continued',
+        pausedByRestart:
+            'The app restarted before this run finished, so it was paused. Continue picks it up from the steps that were not done',
+        runNotFound: (runId) => `Workflow run ${runId} not found`,
+        stepStarted: (step) => `Started: ${step}`,
+        stepDone: (step) => `Done: ${step}`,
+        stepSkipped: (step) => `Skipped: ${step}`,
+        stepFailed: (step) => `Failed: ${step}`,
+        runFailedAt: (step, note) => `Step ${step} failed: ${note}`,
+        parentEnded: 'The parent workflow ended',
+        stepStatuses: {
+            pending: 'Not started',
+            running: 'Running',
+            waiting: 'Waiting for approval',
+            succeeded: 'Done',
+            failed: 'Failed',
+            skipped: 'Skipped',
+            cancelled: 'Cancelled',
+        },
+        stepLine: (step, status, note) => `- ${step}: ${status}${note !== undefined ? ` (${note})` : ''}`,
+        ended: { completed: 'Run completed', failed: 'Run failed', cancelled: 'Run stopped' },
+        cost: (amount, currency) => `Cost: ${amount} ${currency}`,
+        budgetSpent: (spent, limit, currency) =>
+            `Budget used up: spent ${spent}/${limit} ${currency}. Add to the budget to continue`,
+        paused: 'Paused',
+        gateMessage: (workflow) => `Approve to continue the workflow "${workflow}"`,
+        gateTitle: (step) => `Human gate: ${step}`,
+        approved: (message) => (message ? `Approved: ${message}` : 'Approved'),
+        gateDenied: (step, message) => `The gate "${step}" was denied${message ? `: ${message}` : ''}`,
+        commandRefused: 'The command was denied by a permission rule or not approved',
+        exitCode: (exit) => `Exit code ${exit}`,
+        commandExit: (exit, expectPass) =>
+            `Command exit code ${exit ?? 'none'}, expected ${expectPass ? '0' : 'non-zero'}`,
+        skippedBySetting: (note) => `Skipped after failing, as configured: ${note}`,
+        askSkipTitle: (step) => `Step "${step}" failed: skip it and continue?`,
+        askSkipSummary: (note) =>
+            `${note}\n\nAllow: skip this step; the steps that do not depend on it run as usual. Deny: end the run.`,
+        skippedByUser: (note) => `Skipped after failing, as the user chose: ${note}`,
+        noAgent: (agent) => `The organization has no agent ${agent}`,
+        unfinishedPrompt:
+            'This step was not finished last time (the app restarted or the run was paused). Check the current state, finish the remaining work, then call step_result to hand in the result.',
+        turnCancelled: 'The turn was cancelled',
+        turnFailed: 'The turn failed (a model or engine error)',
+        askMissing: (missing) =>
+            `These outputs are still missing: ${missing.join(', ')}. Call step_result to hand them in; do not redo the work.`,
+        askResult:
+            'You have not called step_result yet. Call it to hand in the summary and outputs; do not redo the work.',
+        outputsMissing: (missing) => `Outputs not handed in: ${missing.join(', ')}`,
+        notPassed: (step) => `Did not pass: ${step}`,
+        retryPrompt: (failure) =>
+            `The last attempt did not pass: ${failure}\n\nKeep working on this step, then call step_result again.`,
+        escalated: (step) => `Moved up a tier: ${step}`,
+        escalatedTo: (tier) => `Redoing it on the ${tierLabel(tier, 'en')} tier`,
+        switched: (step) => `Switched agent: ${step}`,
+        switchedTo: (agent) => `Handed to ${agent}`,
+        triedBefore: (agent, tier, failure, summary) =>
+            `${agent} on the ${tierLabel(tier, 'en')} tier worked on this before and did not pass: ${failure}${summary ? `\nIts summary: ${summary}` : ''}`,
+        promptIntro: (workflow, step) => `You are doing the step "${step}" of the workflow "${workflow}".`,
+        promptTask: 'Task:',
+        promptHandIn: (outputs) =>
+            outputs.length > 0
+                ? `When you are done, call the step_result tool to hand in the result: in summary, say what you did and where the evidence is; in outputs, give ${outputs.join(', ')}.`
+                : 'When you are done, call the step_result tool; in summary, say what you did and where the evidence is.',
+        promptVerify: (command, expectFail) =>
+            `Then I will run the verification command \`${command}\` (with the outputs it refers to filled in from what you hand in); ${
+                expectFail ? 'it should fail (a non-zero exit code)' : 'it passes only with exit code 0'
+            }.`,
+        promptScope: 'Do only what this step asks. If you cannot, say why and call step_result all the same.',
+        verifyLabel: 'Verification',
+        verifyRefused: (command) =>
+            `The verification command was denied by a permission rule or not approved: ${command}`,
+        verifyFailed: (command, exit, expectPass, output) =>
+            `Verification command \`${command}\`: exit code ${exit ?? 'none'}, expected ${expectPass ? '0' : 'non-zero'}. Output:\n${output || '(no output)'}`,
+        retryGoal: (goal, feedback) => `${goal}\n\nThe last attempt did not pass: ${feedback}`,
+        teamNotStarted: (error) => `The team could not start: ${error}`,
+        teamNotDone: (status, note) => `The team run did not finish (${status ?? 'unknown'})${note ? `: ${note}` : ''}`,
+        teamDone: 'The team run finished',
+        tooDeep: (depth) => `Sub-workflows nest ${depth} levels deep at most`,
+        childMissing: (name) => `Sub-workflow ${name} does not exist or has problems`,
+        childNotStarted: (error) => `The sub-workflow could not start: ${error}`,
+        childGone: 'The sub-workflow is gone',
+        childNotDone: (name, note) => `Sub-workflow ${name} did not finish${note ? `: ${note}` : ''}`,
+        childDone: (name) => `Sub-workflow ${name} finished`,
+        commandTitle: (label, highRisk) =>
+            highRisk
+                ? `${label}: run a command (high-risk action: ${highRiskLabel(highRisk, 'en')})`
+                : `${label}: run a command`,
+    },
+);
 
 /** Everything about a run that survives a restart, saved as `run_json`. */
 interface RunRecord {
@@ -279,6 +519,7 @@ export class WorkflowService {
     }
 
     async #definitions(project: Project): Promise<DefinitionEntry[]> {
+        const text = textOf(TEXT);
         const entries: DefinitionEntry[] = [];
         const sources: Array<['project' | 'user', string]> = [
             ['project', path.join(project.path, PROJECT_DIR)],
@@ -294,31 +535,31 @@ export class WorkflowService {
             const seen = new Set<string>();
             for (const file of files) {
                 const full = path.join(dir, file);
-                let text: string;
+                let content: string;
                 try {
-                    text = await readFile(full, 'utf8');
+                    content = await readFile(full, 'utf8');
                 } catch {
                     continue;
                 }
                 const parsed: WorkflowParse =
-                    text.length > MAX_FILE_BYTES
-                        ? { ok: false, issues: [{ path: [], message: '文件太大（上限256kb）' }] }
-                        : parseWorkflow(text);
+                    content.length > MAX_FILE_BYTES
+                        ? { ok: false, issues: [{ path: [], message: text.tooLarge }] }
+                        : parseWorkflow(content);
                 const name = parsed.ok ? parsed.definition.name : file.replace(/\.ya?ml$/i, '');
                 const problems: string[] = [];
                 if (seen.has(name)) {
-                    problems.push(`另一个文件已经用了名字${name}`);
+                    problems.push(text.nameTaken(name));
                 }
                 seen.add(name);
                 if (source === 'project' && !project.trusted) {
-                    problems.push('项目还没有被信任：信任后才能运行项目里的工作流');
+                    problems.push(text.untrusted);
                 }
                 entries.push({
                     key: `${source}:${name}`,
                     name,
                     source,
                     path: full,
-                    hash: createHash('sha256').update(text).digest('hex'),
+                    hash: createHash('sha256').update(content).digest('hex'),
                     parsed,
                     problems,
                 });
@@ -330,7 +571,7 @@ export class WorkflowService {
     async #entry(project: Project, key: string): Promise<DefinitionEntry> {
         const entry = (await this.#definitions(project)).find((candidate) => candidate.key === key);
         if (!entry) {
-            throw new RpcError(RpcErrorCode.NotFound, `找不到工作流${key}`);
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).notFound(key));
         }
         return entry;
     }
@@ -411,15 +652,16 @@ export class WorkflowService {
         const project = await this.#deps.projects.get(projectId);
         const entry = await this.#entry(project, key);
         if (enabled) {
+            const text = textOf(TEXT);
             if (entry.source !== 'project') {
-                throw new RpcError(RpcErrorCode.Rejected, '只有项目里的工作流能自动运行');
+                throw new RpcError(RpcErrorCode.Rejected, text.projectOnly);
             }
             if (!entry.parsed.ok || entry.problems.length > 0) {
-                throw new RpcError(RpcErrorCode.Rejected, '工作流有问题，先修好再启用自动运行');
+                throw new RpcError(RpcErrorCode.Rejected, text.fixFirst);
             }
             const { trigger } = entry.parsed.definition;
             if (trigger.schedule === undefined && !trigger.files && !trigger.git && !trigger.webhook) {
-                throw new RpcError(RpcErrorCode.Rejected, '这个工作流没有定时、文件、git或webhook触发');
+                throw new RpcError(RpcErrorCode.Rejected, text.noTriggers);
             }
         }
         const existing = this.#triggerRow(projectId, key);
@@ -451,11 +693,11 @@ export class WorkflowService {
     async webhook(projectId: string, key: string): Promise<{ url: string; token: string }> {
         const row = this.#triggerRow(projectId, key);
         if (row?.enabled !== 1 || !row.webhook_token) {
-            throw new RpcError(RpcErrorCode.Rejected, '这个工作流的webhook没有启用');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).webhookOff);
         }
         const url = this.#deps.webhookUrl?.(triggerKey(projectId, key));
         if (!url) {
-            throw new RpcError(RpcErrorCode.Rejected, '本机webhook还没有启动');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).webhookNotStarted);
         }
         return { url, token: row.webhook_token };
     }
@@ -578,18 +820,18 @@ export class WorkflowService {
         await this.#ready;
         const project = await this.#deps.projects.get(input.projectId);
         if (project.missing) {
-            throw new RpcError(RpcErrorCode.Rejected, `项目文件夹不存在：${project.path}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).projectMissing(project.path));
         }
         const entry = await this.#entry(project, input.key);
         if (!entry.parsed.ok) {
             const first = entry.parsed.issues[0];
             throw new RpcError(
                 RpcErrorCode.Rejected,
-                `工作流有问题：${first ? `${issuePath(first.path)} ${first.message}` : '无法解析'}`,
+                textOf(TEXT).invalid(first ? `${issuePath(first.path)} ${first.message}` : undefined),
             );
         }
         if (entry.problems.length > 0) {
-            throw new RpcError(RpcErrorCode.Rejected, entry.problems.join('；'));
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).problems(entry.problems));
         }
         return this.#begin({
             project,
@@ -617,22 +859,23 @@ export class WorkflowService {
         const { threads, settings, log } = this.#deps;
         const { project, entry } = input;
         if (!entry.parsed.ok) {
-            throw new RpcError(RpcErrorCode.Rejected, '工作流有问题');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).broken);
         }
         const definition = entry.parsed.definition;
-        const resolved = resolveInputs(definition.inputs, input.given);
+        const resolved = resolveInputs(definition.inputs, input.given, hostLanguage());
         if ('errors' in resolved) {
-            throw new RpcError(RpcErrorCode.InvalidParams, resolved.errors.join('；'));
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).problems(resolved.errors));
         }
         const loaded = await loadTeamOrganization({
             orgsDir: this.#deps.orgsDir,
             projectDir: project.path,
             trusted: project.trusted,
         });
+        const text = textOf(TEXT);
         const org = loaded.org;
         const warnings = [...loaded.warnings];
         if (definition.org && definition.org !== org.id) {
-            warnings.push(`工作流指定的组织${definition.org}不存在，改用${org.id}`);
+            warnings.push(text.orgMissing(definition.org, org.id));
         }
         const problems: string[] = [];
         const agents: AgentSpec[] = [];
@@ -642,7 +885,7 @@ export class WorkflowService {
             for (const name of names) {
                 const agent = findAgent(org, name);
                 if (agent) agents.push(agent);
-                else problems.push(`组织${org.id}里没有agent ${name}（步骤${step.id}）`);
+                else problems.push(text.agentMissing(org.id, name, step.id));
             }
         }
         const currency = settings.get().currency;
@@ -667,19 +910,17 @@ export class WorkflowService {
             // A budget only holds when every request can be priced.
             const unpriced = this.#runModels(org, project, tiers, true).filter((ref) => !this.#priced(ref));
             if (unpriced.length > 0) {
-                problems.push(
-                    `无人值守运行要能计价，这些模型没有价格表：${[...new Set(unpriced.map((ref) => ref.model))].join('、')}`,
-                );
+                problems.push(text.unpriced([...new Set(unpriced.map((ref) => ref.model))]));
             }
         }
         if (problems.length > 0 && !input.unattended && input.parentRunId === undefined) {
-            throw new RpcError(RpcErrorCode.Rejected, problems.join('；'));
+            throw new RpcError(RpcErrorCode.Rejected, text.problems(problems));
         }
         const runId = newId('wf');
         const title = definition.title ?? definition.name;
         const thread = threads.create({
             projectId: project.id,
-            title: `工作流：${shorten(title, 24)}`,
+            title: text.threadTitle(shorten(title, 24)),
             engine: 'xora',
             model: null,
             mode: 'plan',
@@ -688,9 +929,7 @@ export class WorkflowService {
         });
         const turnId = newId('turn');
         const now = Date.now();
-        const shown = Object.entries(resolved.inputs)
-            .map(([name, value]) => `${name}=${shorten(String(value), 60)}`)
-            .join('，');
+        const shown = Object.entries(resolved.inputs).map(([name, value]) => `${name}=${shorten(String(value), 60)}`);
         threads.append(
             thread.id,
             'turn.started',
@@ -701,7 +940,7 @@ export class WorkflowService {
                     turnId,
                     ts: now,
                     type: 'user_message',
-                    text: `运行工作流“${title}”${shown ? `（${shown}）` : ''}`,
+                    text: text.runMessage(title, shown),
                     attachments: [],
                 },
                 model: null,
@@ -749,25 +988,21 @@ export class WorkflowService {
                 );
                 this.#deps.onTriggersChanged?.();
             }
-            this.#finish(
-                state,
-                'failed',
-                `没有开始：${problems.join('；')}${off ? '。已停用自动运行，解决后重新启用' : ''}`,
-            );
+            this.#finish(state, 'failed', text.notStarted(problems, off));
             return this.#view(state);
         }
         if (warnings.length > 0) {
-            this.#notice(state, 'warning', '注意', warnings.join('\n'));
+            this.#notice(state, 'warning', text.warning, warnings.join('\n'));
         }
         const startsAt = input.offPeak ? this.#offPeakStart(record, project) : undefined;
         if (startsAt !== undefined && startsAt > now) {
             record.status = 'queued';
             record.startsAt = startsAt;
-            record.note = `等到空闲时段再开始（${new Date(startsAt).toLocaleString('zh-CN', { hour12: false })}）`;
-            this.#notice(state, 'info', '排队', record.note);
+            record.note = text.offPeakWait(startsAt);
+            this.#notice(state, 'info', text.queued, record.note);
             this.#armStart(state);
         } else {
-            this.#notice(state, 'info', '开始运行', `${definition.steps.length}个步骤`);
+            this.#notice(state, 'info', text.runStarted, text.stepCount(definition.steps.length));
             this.#pump(state);
         }
         this.#save(state);
@@ -814,7 +1049,8 @@ export class WorkflowService {
             record.status = 'running';
             delete record.startsAt;
             delete record.note;
-            this.#notice(state, 'info', '开始运行', '到了空闲时段');
+            const text = textOf(TEXT);
+            this.#notice(state, 'info', text.runStarted, text.offPeakNow);
             this.#pump(state);
             this.#save(state);
         }, delay);
@@ -845,7 +1081,7 @@ export class WorkflowService {
         await this.#ready;
         const state = this.#require(runId);
         if (!TERMINAL.has(state.record.status)) {
-            this.#finish(state, 'cancelled', '用户停止了运行');
+            this.#finish(state, 'cancelled', textOf(TEXT).stoppedByUser);
         }
         return this.#view(state);
     }
@@ -856,19 +1092,19 @@ export class WorkflowService {
         const state = this.#require(runId);
         const { record } = state;
         if (record.status !== 'paused') {
-            throw new RpcError(RpcErrorCode.Rejected, '只有暂停的运行可以继续');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).notPaused);
         }
         if (budget !== undefined) {
             record.budget = { limit: budget, currency: record.budget?.currency ?? this.#deps.settings.get().currency };
         }
         if (this.#overBudget(state)) {
-            throw new RpcError(RpcErrorCode.Rejected, '预算还是不够：追加预算后再继续');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stillOverBudget);
         }
         record.status = 'running';
         delete record.note;
         state.abort = new AbortController();
         this.#mute(record.id, (await this.#deps.projects.get(record.projectId)).path);
-        this.#notice(state, 'info', '继续运行');
+        this.#notice(state, 'info', textOf(TEXT).runContinued);
         this.#pump(state);
         this.#save(state);
         return this.#view(state);
@@ -945,7 +1181,7 @@ export class WorkflowService {
                 }
             }
             record.status = 'paused';
-            record.note = '应用重启时这次运行还没结束，已暂停；继续后从没做完的步骤接着做';
+            record.note = textOf(TEXT).pausedByRestart;
             this.#save(state);
         }
     }
@@ -964,7 +1200,7 @@ export class WorkflowService {
     #require(runId: string): RunState {
         const state = this.#load(runId);
         if (!state) {
-            throw new RpcError(RpcErrorCode.NotFound, `找不到工作流运行${runId}`);
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).runNotFound(runId));
         }
         return state;
     }
@@ -1045,7 +1281,7 @@ export class WorkflowService {
         const { definition } = record;
         let runnable: WorkflowStep[] = [];
         for (;;) {
-            const decisions = decideSteps(definition, this.#context(record));
+            const decisions = decideSteps(definition, this.#context(record), hostLanguage());
             const skips = decisions.filter((decision) => decision.action === 'skip');
             for (const skip of skips) {
                 this.#finishStep(state, skip.step, { status: 'skipped', note: skip.reason });
@@ -1079,7 +1315,7 @@ export class WorkflowService {
         current.startedAt = Date.now();
         delete current.note;
         state.working.add(step.id);
-        this.#notice(state, 'info', `开始：${stepTitle(step)}`);
+        this.#notice(state, 'info', textOf(TEXT).stepStarted(stepTitle(step)));
         void this.#execute(state, step)
             .catch((error): StepResult => ({ status: 'failed', note: errorText(error) }))
             .then((result) => {
@@ -1112,16 +1348,17 @@ export class WorkflowService {
         if (result.outputs) current.outputs = result.outputs;
         if (result.note !== undefined) current.note = result.note;
         const title = stepTitle(step);
+        const text = textOf(TEXT);
         switch (result.status) {
             case 'succeeded':
-                this.#notice(state, 'info', `完成：${title}`, current.summary);
+                this.#notice(state, 'info', text.stepDone(title), current.summary);
                 break;
             case 'skipped':
-                this.#notice(state, 'info', `跳过：${title}`, result.note);
+                this.#notice(state, 'info', text.stepSkipped(title), result.note);
                 break;
             case 'failed':
-                this.#notice(state, 'error', `失败：${title}`, result.note);
-                this.#finish(state, 'failed', `步骤${title}失败：${result.note ?? ''}`);
+                this.#notice(state, 'error', text.stepFailed(title), result.note);
+                this.#finish(state, 'failed', text.runFailedAt(title, result.note ?? ''));
                 break;
             case 'cancelled':
                 break;
@@ -1134,6 +1371,7 @@ export class WorkflowService {
         const { record } = state;
         if (TERMINAL.has(record.status)) return;
         const { threads, turns, approvals, team, log } = this.#deps;
+        const text = textOf(TEXT);
         record.status = status;
         record.endedAt = Date.now();
         if (note) record.note = note;
@@ -1153,21 +1391,24 @@ export class WorkflowService {
             }
             if (step.childRunId) {
                 const child = this.#runs.get(step.childRunId);
-                if (child) this.#finish(child, 'cancelled', '上层工作流结束了');
+                if (child) this.#finish(child, 'cancelled', text.parentEnded);
             }
         }
         approvals.cancelThread(record.threadId);
         const cost = this.#cost(record);
         const lines = record.definition.steps.map((step) => {
             const current = record.steps[step.id] as StepState;
-            return `- ${stepTitle(step)}：${STEP_LABELS[current.status]}${current.note ? `（${shorten(current.note, 120)}）` : ''}`;
+            return text.stepLine(
+                stepTitle(step),
+                text.stepStatuses[current.status],
+                current.note ? shorten(current.note, 120) : undefined,
+            );
         });
-        const label = status === 'completed' ? '运行完成' : status === 'failed' ? '运行失败' : '运行已停止';
         this.#notice(
             state,
             status === 'completed' ? 'info' : status === 'failed' ? 'error' : 'warning',
-            label,
-            [...(note ? [note] : []), ...lines, `花费：${round(cost.total)} ${cost.currency}`].join('\n'),
+            text.ended[status],
+            [...(note ? [note] : []), ...lines, text.cost(round(cost.total), cost.currency)].join('\n'),
         );
         threads.append(
             record.threadId,
@@ -1264,13 +1505,14 @@ export class WorkflowService {
         const { record } = state;
         if (!this.#active(record)) return;
         const cost = this.#cost(record);
+        const text = textOf(TEXT);
         record.status = 'paused';
-        record.note = `预算用完：已花${round(cost.total)}/${record.budget?.limit ?? 0} ${cost.currency}，追加预算后继续`;
+        record.note = text.budgetSpent(round(cost.total), record.budget?.limit ?? 0, cost.currency);
         for (const id of state.working) {
             const thread = record.steps[id]?.threadIds.at(-1);
             if (thread && this.#deps.turns.isRunning(thread)) this.#deps.turns.cancel(thread);
         }
-        this.#notice(state, 'warning', '暂停', record.note);
+        this.#notice(state, 'warning', text.paused, record.note);
         this.#save(state);
     }
 
@@ -1297,24 +1539,23 @@ export class WorkflowService {
         current.status = 'waiting';
         current.attempts += 1;
         this.#save(state);
-        const message = step.message
-            ? renderTemplate(step.message, this.#context(record))
-            : `确认后继续工作流“${record.definition.title ?? record.definition.name}”`;
+        const message = step.message ? renderTemplate(step.message, this.#context(record)) : undefined;
         for (;;) {
             if (!this.#live(state)) return this.#interrupted(state);
+            const text = textOf(TEXT);
             const outcome = await this.#approve(state, {
                 toolName: 'workflow_gate',
-                title: `人工关卡：${stepTitle(step)}`,
+                title: text.gateTitle(stepTitle(step)),
                 toolKind: 'other',
-                summary: message,
+                summary: message ?? text.gateMessage(record.definition.title ?? record.definition.name),
                 risks: [],
             });
             if (outcome.status === 'allowed') {
                 current.status = 'running';
-                return { status: 'succeeded', summary: outcome.message ? `已确认：${outcome.message}` : '已确认' };
+                return { status: 'succeeded', summary: textOf(TEXT).approved(outcome.message) };
             }
             if (outcome.status === 'denied') {
-                const note = `关卡“${stepTitle(step)}”没有通过${outcome.message ? `：${outcome.message}` : ''}`;
+                const note = textOf(TEXT).gateDenied(stepTitle(step), outcome.message);
                 this.#finish(state, 'cancelled', note);
                 return { status: 'cancelled', note };
             }
@@ -1336,14 +1577,15 @@ export class WorkflowService {
             const command = renderTemplate(step.run, this.#context(record), { command: true });
             const result = await this.#runCommand(state, command, stepTitle(step), mode, step.timeoutMinutes);
             if (!this.#live(state)) return this.#interrupted(state);
+            const text = textOf(TEXT);
             if (!result) {
-                return this.#lastResort(state, step, last, '命令被权限规则拒绝或没有被批准');
+                return this.#lastResort(state, step, last, text.commandRefused);
             }
             const passed = step.expect === 'pass' ? result.exit === 0 : result.exit !== 0 && result.exit !== null;
             if (passed) {
-                return { status: 'succeeded', summary: result.output || `退出码${result.exit}` };
+                return { status: 'succeeded', summary: result.output || text.exitCode(result.exit) };
             }
-            const note = `命令退出码${result.exit ?? '无'}，应为${step.expect === 'pass' ? '0' : '非0'}`;
+            const note = text.commandExit(result.exit, step.expect === 'pass');
             if (attempt < retries) continue;
             return this.#lastResort(state, step, last, `${note}\n${result.output}`);
         }
@@ -1357,19 +1599,20 @@ export class WorkflowService {
         note: string,
     ): Promise<StepResult> {
         if (last === 'skip') {
-            return { status: 'skipped', note: `失败后按设置跳过：${shorten(note, 600)}` };
+            return { status: 'skipped', note: textOf(TEXT).skippedBySetting(shorten(note, 600)) };
         }
         if (last === 'ask') {
+            const text = textOf(TEXT);
             const outcome = await this.#approve(state, {
                 toolName: 'workflow_step_failed',
-                title: `步骤“${stepTitle(step)}”失败：跳过它继续吗？`,
+                title: text.askSkipTitle(stepTitle(step)),
                 toolKind: 'other',
-                summary: `${shorten(note, 1200)}\n\n允许：跳过这一步，后面不依赖它的步骤照常运行；拒绝：结束运行。`,
+                summary: text.askSkipSummary(shorten(note, 1200)),
                 risks: [],
             });
             if (!this.#live(state)) return this.#interrupted(state);
             if (outcome.status === 'allowed') {
-                return { status: 'skipped', note: `失败后由用户决定跳过：${shorten(note, 600)}` };
+                return { status: 'skipped', note: textOf(TEXT).skippedByUser(shorten(note, 600)) };
             }
         }
         return { status: 'failed', note: shorten(note, 1200) };
@@ -1383,7 +1626,7 @@ export class WorkflowService {
         const project = await this.#deps.projects.get(record.projectId);
         let agent = findAgent(record.org, step.agent);
         if (!agent) {
-            return { status: 'failed', note: `组织里没有agent ${step.agent}` };
+            return { status: 'failed', note: textOf(TEXT).noAgent(step.agent) };
         }
         let tier: Tier = step.tier ?? agent.tier;
         let threadId: string | undefined;
@@ -1394,8 +1637,7 @@ export class WorkflowService {
             threadId = previous;
             tier = (current.tier as Tier | undefined) ?? tier;
             turns.setHostTools(threadId, this.#stepTools(state, step, agent));
-            prompt =
-                '上次这一步没有做完（应用重启或运行暂停）。检查当前状态，完成剩下的工作，然后调用step_result交回结果。';
+            prompt = textOf(TEXT).unfinishedPrompt;
         } else {
             prompt = this.#agentPrompt(state, step);
         }
@@ -1452,14 +1694,12 @@ export class WorkflowService {
             let summary = '';
             let outputs: Record<string, string> = {};
             if (ended.outcome !== 'completed') {
-                failure = ended.outcome === 'cancelled' ? '这一轮被取消了' : '这一轮出错了（模型或引擎错误）';
+                failure = ended.outcome === 'cancelled' ? textOf(TEXT).turnCancelled : textOf(TEXT).turnFailed;
             } else {
                 let result = state.results.get(step.id);
                 let missing = step.outputs.filter((name) => !result?.outputs[name]);
                 if (!result || missing.length > 0) {
-                    const ask = result
-                        ? `还缺这些outputs：${missing.join('、')}。调用step_result补交，不要重做工作。`
-                        : '你还没有调用step_result。调用它交回summary和outputs，不要重做工作。';
+                    const ask = result ? textOf(TEXT).askMissing(missing) : textOf(TEXT).askResult;
                     const repaired = await this.#turn(threadId, ask);
                     if (!this.#live(state)) return this.#interrupted(state);
                     if (repaired.outcome === 'completed') {
@@ -1470,7 +1710,7 @@ export class WorkflowService {
                 summary = result?.summary ?? shorten(ended.lastText, SUMMARY_LIMIT);
                 outputs = result?.outputs ?? {};
                 if (missing.length > 0) {
-                    failure = `没有交出outputs：${missing.join('、')}`;
+                    failure = textOf(TEXT).outputsMissing(missing);
                 } else if (step.verify) {
                     current.outputs = outputs;
                     const check = await this.#verify(state, step.verify, agent.mode);
@@ -1481,39 +1721,32 @@ export class WorkflowService {
             if (failure === undefined) {
                 return { status: 'succeeded', summary, outputs };
             }
-            this.#notice(state, 'warning', `没有通过：${stepTitle(step)}`, shorten(failure, 600));
+            const text = textOf(TEXT);
+            this.#notice(state, 'warning', text.notPassed(stepTitle(step)), shorten(failure, 600));
             if (retriesLeft > 0) {
                 retriesLeft -= 1;
-                prompt = `上一次没有通过：${failure}\n\n继续完成这一步，完成后再调用step_result。`;
+                prompt = text.retryPrompt(failure);
                 continue;
             }
             const higher = nextTier(tier);
             if (policy.escalate && !escalated && higher) {
                 escalated = true;
-                const from = `${agent.name}（${TIER_LABELS[tier]}档）`;
+                const before = text.triedBefore(agent.name, tier, failure, summary);
                 tier = higher;
                 threadId = undefined;
-                this.#notice(state, 'info', `升档：${stepTitle(step)}`, `改用${TIER_LABELS[tier]}档重做`);
-                prompt = this.#agentPrompt(
-                    state,
-                    step,
-                    `之前由${from}做过，没有通过：${failure}${summary ? `\n它的总结：${summary}` : ''}`,
-                );
+                this.#notice(state, 'info', text.escalated(stepTitle(step)), text.escalatedTo(tier));
+                prompt = this.#agentPrompt(state, step, before);
                 continue;
             }
             const fallback = policy.agent ? findAgent(record.org, policy.agent) : undefined;
             if (fallback && !switched) {
                 switched = true;
-                const from = `${agent.name}（${TIER_LABELS[tier]}档）`;
+                const before = text.triedBefore(agent.name, tier, failure, summary);
                 agent = fallback;
                 tier = step.tier ?? fallback.tier;
                 threadId = undefined;
-                this.#notice(state, 'info', `换人：${stepTitle(step)}`, `交给${fallback.name}`);
-                prompt = this.#agentPrompt(
-                    state,
-                    step,
-                    `之前由${from}做过，没有通过：${failure}${summary ? `\n它的总结：${summary}` : ''}`,
-                );
+                this.#notice(state, 'info', text.switched(stepTitle(step)), text.switchedTo(fallback.name));
+                prompt = this.#agentPrompt(state, step, before);
                 continue;
             }
             return this.#lastResort(state, step, policy.finally, failure);
@@ -1522,26 +1755,20 @@ export class WorkflowService {
 
     #agentPrompt(state: RunState, step: AgentStep, before?: string): string {
         const { record } = state;
+        const text = textOf(TEXT);
         const task = renderTemplate(step.task, this.#context(record));
-        const outputs = step.outputs.map((name) => `\`${name}\``).join('、');
         const lines = [
-            `你在执行工作流“${record.definition.title ?? record.definition.name}”的步骤“${stepTitle(step)}”。`,
+            text.promptIntro(record.definition.title ?? record.definition.name, stepTitle(step)),
             '',
-            '任务：',
+            text.promptTask,
             task,
             '',
-            outputs
-                ? `完成后调用step_result工具交回结果：summary写清做了什么、证据在哪；outputs里给出${outputs}。`
-                : '完成后调用step_result工具，summary写清做了什么、证据在哪。',
+            text.promptHandIn(step.outputs.map((name) => `\`${name}\``)),
         ];
         if (step.verify) {
-            lines.push(
-                `之后我会运行验收命令\`${step.verify.command}\`（引用的outputs用你交回的值代入），${
-                    step.verify.expect === 'fail' ? '它应该失败（退出码非0）' : '退出码为0才算通过'
-                }。`,
-            );
+            lines.push(text.promptVerify(step.verify.command, step.verify.expect === 'fail'));
         }
-        lines.push('只做这一步的事；做不到时说明原因，照样调用step_result。');
+        lines.push(text.promptScope);
         if (before) lines.push('', before);
         return lines.join('\n');
     }
@@ -1591,18 +1818,16 @@ export class WorkflowService {
 
     async #verify(state: RunState, verify: StepVerify, mode: PermissionMode): Promise<{ ok: boolean; note: string }> {
         const command = renderTemplate(verify.command, this.#context(state.record), { command: true });
-        const result = await this.#runCommand(state, command, '验收', mode, verify.timeoutMinutes);
+        const result = await this.#runCommand(state, command, textOf(TEXT).verifyLabel, mode, verify.timeoutMinutes);
+        const text = textOf(TEXT);
         if (!result) {
-            return { ok: false, note: `验收命令被权限规则拒绝或没有被批准：${command}` };
+            return { ok: false, note: text.verifyRefused(command) };
         }
         const passed = verify.expect === 'pass' ? result.exit === 0 : result.exit !== 0 && result.exit !== null;
         if (passed) {
             return { ok: true, note: '' };
         }
-        return {
-            ok: false,
-            note: `验收命令\`${command}\`退出码${result.exit ?? '无'}，应为${verify.expect === 'pass' ? '0' : '非0'}。输出：\n${result.output || '（无输出）'}`,
-        };
+        return { ok: false, note: text.verifyFailed(command, result.exit, verify.expect === 'pass', result.output) };
     }
 
     async #supervise(state: RunState, step: SuperviseStep): Promise<StepResult> {
@@ -1629,7 +1854,7 @@ export class WorkflowService {
                 try {
                     const started = await team.start({
                         projectId: record.projectId,
-                        goal: feedback ? `${goal}\n\n上一次没有通过：${feedback}` : goal,
+                        goal: feedback ? textOf(TEXT).retryGoal(goal, feedback) : goal,
                         autonomy: step.autonomy ?? record.autonomy,
                         ...(step.budget !== undefined || remaining !== undefined
                             ? {
@@ -1642,7 +1867,7 @@ export class WorkflowService {
                     });
                     runId = started.id;
                 } catch (error) {
-                    return this.#lastResort(state, step, last, `团队没能启动：${errorText(error)}`);
+                    return this.#lastResort(state, step, last, textOf(TEXT).teamNotStarted(errorText(error)));
                 }
                 current.teamRunId = runId;
                 current.attempts += 1;
@@ -1658,14 +1883,14 @@ export class WorkflowService {
             let failure: string | undefined;
             const summary = final?.report ? shorten(final.report, SUMMARY_LIMIT) : '';
             if (final?.status !== 'done') {
-                failure = `团队运行没有完成（${final?.status ?? '未知'}）${final?.note ? `：${final.note}` : ''}`;
+                failure = textOf(TEXT).teamNotDone(final?.status, final?.note);
             } else if (step.verify) {
                 const check = await this.#verify(state, step.verify, mode);
                 if (!this.#live(state)) return this.#interrupted(state);
                 if (!check.ok) failure = check.note;
             }
             if (failure === undefined) {
-                return { status: 'succeeded', summary: summary || '团队运行完成' };
+                return { status: 'succeeded', summary: summary || textOf(TEXT).teamDone };
             }
             if (attempt < retries) {
                 feedback = failure;
@@ -1699,7 +1924,7 @@ export class WorkflowService {
         const { record } = state;
         const current = record.steps[step.id] as StepState;
         if (record.depth + 1 >= MAX_DEPTH) {
-            return { status: 'failed', note: `子工作流最多嵌套${MAX_DEPTH}层` };
+            return { status: 'failed', note: textOf(TEXT).tooDeep(MAX_DEPTH) };
         }
         let child = current.childRunId ? this.#load(current.childRunId) : undefined;
         if (child?.record.status === 'paused') {
@@ -1712,7 +1937,7 @@ export class WorkflowService {
                 entries.find((item) => item.key === `${source}:${step.workflow}`) ??
                 entries.find((item) => item.name === step.workflow);
             if (!entry?.parsed.ok || entry.problems.length > 0) {
-                return { status: 'failed', note: `子工作流${step.workflow}不存在或有问题` };
+                return { status: 'failed', note: textOf(TEXT).childMissing(step.workflow) };
             }
             const given: Record<string, WorkflowScalar> = {};
             for (const [name, value] of Object.entries(step.inputs)) {
@@ -1733,7 +1958,7 @@ export class WorkflowService {
                     ...(remaining !== undefined ? { budget: remaining } : {}),
                 });
             } catch (error) {
-                return { status: 'failed', note: `子工作流没能启动：${errorText(error)}` };
+                return { status: 'failed', note: textOf(TEXT).childNotStarted(errorText(error)) };
             }
             current.childRunId = view.id;
             current.threadIds.push(view.threadId);
@@ -1742,7 +1967,7 @@ export class WorkflowService {
             child = this.#load(view.id);
         }
         if (!child) {
-            return { status: 'failed', note: '子工作流不见了' };
+            return { status: 'failed', note: textOf(TEXT).childGone };
         }
         const ended = TERMINAL.has(child.record.status)
             ? child.record
@@ -1754,17 +1979,14 @@ export class WorkflowService {
               });
         if (!this.#live(state)) {
             if (state.record.status !== 'paused' && child && !TERMINAL.has(child.record.status)) {
-                this.#finish(child, 'cancelled', '上层工作流结束了');
+                this.#finish(child, 'cancelled', textOf(TEXT).parentEnded);
             }
             return this.#interrupted(state);
         }
         if (ended?.status !== 'completed') {
-            return {
-                status: 'failed',
-                note: `子工作流${step.workflow}没有完成${ended?.note ? `：${ended.note}` : ''}`,
-            };
+            return { status: 'failed', note: textOf(TEXT).childNotDone(step.workflow, ended?.note) };
         }
-        return { status: 'succeeded', summary: `子工作流${step.workflow}完成` };
+        return { status: 'succeeded', summary: textOf(TEXT).childDone(step.workflow) };
     }
 
     // Host turns, commands and approvals -------------------------------------------------------------------
@@ -1824,9 +2046,7 @@ export class WorkflowService {
         if (policy.decision === 'ask') {
             const outcome = await this.#approve(state, {
                 toolName: 'workflow_command',
-                title: highRisk
-                    ? `${label}：运行命令（高风险动作：${HIGH_RISK_LABELS[highRisk.action]}）`
-                    : `${label}：运行命令`,
+                title: textOf(TEXT).commandTitle(label, highRisk?.action),
                 toolKind: 'execute',
                 summary: command,
                 command,
@@ -1999,16 +2219,6 @@ export class WorkflowService {
         };
     }
 }
-
-const STEP_LABELS: Readonly<Record<StepState['status'], string>> = {
-    pending: '没有开始',
-    running: '进行中',
-    waiting: '等待确认',
-    succeeded: '完成',
-    failed: '失败',
-    skipped: '跳过',
-    cancelled: '取消',
-};
 
 type UiPeer = RpcPeer<HostMethods, HostNotifications>;
 

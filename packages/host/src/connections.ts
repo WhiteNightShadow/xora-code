@@ -1,6 +1,7 @@
 import type { ConnectionConfig } from '@xora/engine';
 import { type PriceTable, priceTableFor } from '@xora/metering';
 import {
+    bilingual,
     type Connection,
     type ModelOption,
     type ModelRef,
@@ -23,6 +24,22 @@ import type { Bus } from './bus.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
 import type { ShellApi } from './shell.ts';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        notAllowed: '该通道的条款不允许xora直连',
+        disabled: (name: string) => `模型连接「${name}」已停用`,
+        noKey: (name: string) => `模型连接「${name}」还没有填写key`,
+        noModels: '这个连接还没有可用的模型，先刷新模型列表',
+    },
+    {
+        notAllowed: 'The terms of this channel do not allow direct use by Xora',
+        disabled: (name) => `The model connection "${name}" is disabled`,
+        noKey: (name) => `The model connection "${name}" has no key yet`,
+        noModels: 'This connection has no models yet; refresh the model list first',
+    },
+);
 
 interface ConnectionRow {
     id: string;
@@ -174,7 +191,7 @@ export class ConnectionService {
             throw new RpcError(RpcErrorCode.Rejected, `unknown provider preset ${input.presetId}`);
         }
         if (preset.compliance?.allowed === false) {
-            throw new RpcError(RpcErrorCode.Rejected, preset.compliance.note ?? '该通道的条款不允许xora直连');
+            throw new RpcError(RpcErrorCode.Rejected, preset.compliance.note ?? textOf(TEXT).notAllowed);
         }
         const baseUrl = input.baseUrl?.trim() || undefined;
         if (baseUrl && !/^https?:\/\//.test(baseUrl)) {
@@ -232,12 +249,12 @@ export class ConnectionService {
     async engineConfig(connectionId: string): Promise<ConnectionConfig> {
         const row = this.#row(connectionId);
         if (row.enabled !== 1) {
-            throw new RpcError(RpcErrorCode.Rejected, `模型连接「${row.name}」已停用`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).disabled(row.name));
         }
         const preset = this.#preset(row);
         const apiKey = await this.#key(connectionId);
         if (preset.auth !== 'none' && !apiKey) {
-            throw new RpcError(RpcErrorCode.Rejected, `模型连接「${row.name}」还没有填写key`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noKey(row.name));
         }
         const extraModels = this.#extraModels(row);
         return {
@@ -284,7 +301,7 @@ export class ConnectionService {
         const connection = await this.providerConnection(connectionId);
         const modelId = model ?? this.get(connectionId).models[0]?.id;
         if (!modelId) {
-            return { ok: false, message: '这个连接还没有可用的模型，先刷新模型列表' };
+            return { ok: false, message: textOf(TEXT).noModels };
         }
         const result = await testConnection(connection, modelId, { userAgent: this.#userAgent });
         const status = {

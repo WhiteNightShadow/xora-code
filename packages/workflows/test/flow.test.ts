@@ -137,6 +137,7 @@ describe('a supervisor-executor run on top of the package', () => {
             cards: board.list(),
             ledger: ledger.current,
             usage,
+            language: 'zh-CN',
         });
         expect(report).toContain('结果：完成2/2个任务。');
         expect(report).toContain('- **t1 step 1**（已完成，退回或升级1次）：implemented t1');

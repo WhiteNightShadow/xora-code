@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import {
+    bilingual,
     type HostMethods,
     type HostNotifications,
     type ItemOf,
@@ -15,7 +16,7 @@ import {
     type ToolKind,
 } from '@xora/protocol';
 import type { XoraDatabase } from '@xora/storage';
-import { type HighRisk, isReadOnlyCommand } from '@xora/tools';
+import { type HighRisk, type HighRiskAction, isReadOnlyCommand } from '@xora/tools';
 import {
     type AgentSpec,
     type AutonomyLevel,
@@ -40,6 +41,7 @@ import {
     type Judgement,
     judge,
     loadTeamState,
+    money,
     needsHuman,
     nextTier,
     type Organization,
@@ -56,20 +58,21 @@ import {
     type StructuredParseError,
     shouldEscalate,
     TaskBoard,
+    type TaskCard,
     TaskLedger,
     type TaskLedgerContent,
     type TeamRun,
     type TeamRunPhase,
     type TeamRunStatus,
     type TeamUsage,
-    TIER_LABELS,
     type Tier,
     taskGraph,
+    tierLabel,
     tierRank,
     tierUnderPressure,
     toolsOf,
+    uiStyle,
     validateAutonomy,
-    zhStyle,
 } from '@xora/workflows';
 import { headCommit, releasePort } from '@xora/workspace';
 import { type ModelPick, pickTierModel, runChannels } from './agent-models.ts';
@@ -80,7 +83,7 @@ import type { HostToolResult } from './engines/manager.ts';
 import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import { type CallFacts, HIGH_RISK_LABELS, highRiskOf } from './policy.ts';
+import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import {
@@ -113,6 +116,7 @@ import {
     wakeText,
 } from './team-agents.ts';
 import { SqliteTeamStore } from './team-store.ts';
+import { hostLanguage, textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
 import type { HostToolProvider, TurnEnded, TurnService } from './turns.ts';
 import type { UsageService } from './usage.ts';
@@ -309,6 +313,201 @@ export interface TeamDeps {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// What the user sees: errors, notes, warnings, notices, approval cards, board notes, thread titles, the report
+
+const TEXT = bilingual(
+    {
+        projectMissing: (folder: string) => `项目文件夹不存在：${folder}`,
+        emptyGoal: '目标不能为空',
+        autonomyProblems: (problems: readonly string[]) => problems.join('；'),
+        noSupervisor: '组织里没有主管',
+        uncommitted: '项目里有没提交的改动：各任务的worktree从最近一次提交开始，看不到这些改动',
+        supervisorTitle: (goal: string) => `团队：${goal}`,
+        supervisorNotStarted: (error: string) => `主管线程没能启动：${error}`,
+        stoppedByYou: '你停止了这次运行',
+        runStopped: '运行已停止',
+        onlyPaused: '只有已暂停的运行可以继续',
+        budgetSpent: '预算已用完：追加预算后再继续',
+        restarted: '应用重启了，运行已暂停；点继续接着做，已完成的任务不会重跑',
+        pausedTitle: '团队运行已暂停',
+        budgetNote: (spent: number, currency: string, limit: number, limitCurrency: string) =>
+            `预算已用完（已花${spent}${currency}，预算${limit}${limitCurrency}）；追加预算后点继续，或者缩小范围`,
+        supervisorTurnFailed: (errorClass: string) =>
+            `主管这一轮出错了（${errorClass}），详情在主管线程里；处理后点继续`,
+        supervisorModelSwitched: (errorClass: string, model: string) =>
+            `主管的模型出错（${errorClass}），换成了${model}`,
+        planAutoApproved: '计划按自主级别自动确认',
+        planApproval: '确认团队计划',
+        planApproved: '你确认了计划',
+        planApprovalLapsed: '计划确认过期或被取消了；点继续重新确认',
+        noPlanReviewer: '组织里没有计划评审，跳过了独立的计划评审',
+        planReviewNoModel: (error: string) => `计划评审没有可用的模型，跳过了：${error}`,
+        planReviewNoFamily: (family: string | undefined, tier: Tier) =>
+            `没有连接${family ?? '主管'}以外家族的${tierLabel(tier, 'zh-CN')}档模型，跳过了独立的计划评审`,
+        planReviewTitle: '评审计划',
+        planReviewing: '计划评审中',
+        planReviewUnfinished: (outcome: string) => `计划评审没有做完（${outcome}），计划直接去确认`,
+        planGoal: (goal: string) => `目标：${goal}`,
+        planTask: (card: TaskCard, tier: Tier, checks: string) =>
+            `- ${card.id} ${card.title}（${card.category}，${tierLabel(tier, 'zh-CN')}档，${card.workspace}${card.dependsOn.length > 0 ? `，依赖${card.dependsOn.join('、')}` : ''}）验收：${checks}`,
+        planBudget: (limit: number, currency: string) => `预算：${limit}${currency}`,
+        runEnded: '运行已经结束，消息不会送达',
+        noTask: (id: string) => `没有任务${id}`,
+        taskEnded: (id: string) => `任务${id}已经结束，可以发给主管`,
+        blocker: (id: string, held: boolean, status: string) => `${id}${held ? '（主管接手）' : ''}：${status}`,
+        stuck: (blockers: readonly string[]) =>
+            `没有能继续的任务（${blockers.join('，')}）；在主管线程里说明怎么处理，或者停止这次运行`,
+        stuckTitle: '团队卡住了',
+        tierLowered: (taskId: string, tier: Tier, percent: number) =>
+            `${taskId}降到${tierLabel(tier, 'zh-CN')}档执行（预算已用到${percent}%）`,
+        notGitRepo: (taskId: string) => `项目不是git仓库，${taskId}改在项目目录里执行`,
+        notSeeded: (from: string, taskId: string, reason: string) =>
+            `${from}的结果没能带进${taskId}的worktree：${reason}`,
+        dispatchTitle: (taskId: string, title: string) => `派工：${taskId} ${title}`,
+        dispatchSummary: (agent: string, tier: Tier, workspace: string, goal: string) =>
+            `交给${agent}（${tierLabel(tier, 'zh-CN')}档，${workspace}）\n目标：${goal}`,
+        dispatchDeclined: (message: string | undefined) => `你没有同意派工${message ? `：${message}` : ''}`,
+        hostError: (error: string) => `宿主出错：${error}`,
+        executorCancelled: '执行者这一轮被取消了',
+        executorFailed: (errorClass: string) => `执行者这一轮出错了（${errorClass}）`,
+        taskModelSwitched: (taskId: string, errorClass: string, model: string) =>
+            `${taskId}的模型出错（${errorClass}），换成了${model}`,
+        repairTitle: (taskId: string) => `整理${taskId}的交付单`,
+        acceptanceLabel: (taskId: string) => `验收${taskId}`,
+        finalLabel: '全量验收',
+        runAcceptance: (label: string) => `${label}：运行验收命令`,
+        runHighRisk: (label: string, action: HighRiskAction) =>
+            `${label}：运行验收命令（高风险动作：${highRiskLabel(action, 'zh-CN')}）`,
+        manualTitle: (taskId: string, title: string) => `人工检查${taskId}：${title}`,
+        acceptanceTitle: (taskId: string, title: string) => `需要你确认：${taskId} ${title}`,
+        deliverable: (summary: string) => `交付：${summary}`,
+        reviewTitle: (taskId: string, title: string) => `审查${taskId}：${title}`,
+        changed: (files: readonly string[]) => `改动：${files.join('、')}`,
+        reviewThread: (taskId: string) => `审查${taskId}`,
+        needsPerson: (why: string) => `主管接手后仍然没有通过，需要人处理：${why}`,
+        needsYou: (taskId: string) => `${taskId}需要你处理`,
+        deliveryTitle: '确认交付：把团队的改动应用到项目',
+        deliveryDeclined: (message: string | undefined) =>
+            `你没有确认交付${message ? `：${message}` : ''}；改动还在各自的worktree里，点继续重新确认`,
+        deliveryLapsed: '交付确认过期或被取消了；点继续重新确认',
+        files: (paths: readonly string[]) => paths.join('、'),
+        integrateFailed: (taskId: string, files: string, message: string | undefined) =>
+            `整合${taskId}失败（${files}）：${message ?? '改动应用不上'}；处理后点继续`,
+        integrateConflicts: (taskId: string, files: string) =>
+            `整合${taskId}时有冲突（${files}），冲突标记已经写进项目目录；解决后点继续`,
+        finalFailed: (runs: readonly string[]) => `全量验收没有通过：${runs.join('；')}`,
+        endedFailed: '团队运行结束，全量验收没有通过',
+        completed: '团队运行完成',
+        reportInView: '交付报告在团队视图里',
+        deliveryIntro: '按依赖顺序把这些任务的改动应用到项目目录：',
+        deliveryTask: (taskId: string, title: string, files: readonly string[]) =>
+            `- ${taskId} ${title}${files.length > 0 ? `：${files.join('、')}` : ''}`,
+        deliveryOutro: '应用后会在项目里把验收命令再跑一遍。',
+        finalTitle: '## 全量验收',
+        noFinalChecks: '没有可以在项目里重跑的验收命令。',
+        finalCheck: (run: string, ran: boolean, exit: number | null) =>
+            `- \`${run}\`：${!ran ? '没有运行' : exit === 0 ? '通过' : `退出码${exit ?? '无'}`}`,
+    },
+    {
+        projectMissing: (folder) => `The project folder does not exist: ${folder}`,
+        emptyGoal: 'The goal cannot be empty',
+        autonomyProblems: (problems) => problems.join('; '),
+        noSupervisor: 'The organization has no supervisor',
+        uncommitted:
+            "The project has uncommitted changes: each task's worktree starts from the latest commit and does not see them",
+        supervisorTitle: (goal) => `Team: ${goal}`,
+        supervisorNotStarted: (error) => `The supervisor thread could not start: ${error}`,
+        stoppedByYou: 'You stopped this run',
+        runStopped: 'The run was stopped',
+        onlyPaused: 'Only a paused run can continue',
+        budgetSpent: 'The budget is used up: add to it before you continue',
+        restarted:
+            'The app restarted and the run is paused; click Continue to pick it up (finished tasks are not run again)',
+        pausedTitle: 'Team run paused',
+        budgetNote: (spent, currency, limit, limitCurrency) =>
+            `The budget is used up (spent ${money(spent, currency, 'en')} of ${money(limit, limitCurrency || currency, 'en')}); add to it and click Continue, or narrow the scope`,
+        supervisorTurnFailed: (errorClass) =>
+            `The supervisor's turn failed (${errorClass}): see the supervisor thread, deal with it, then click Continue`,
+        supervisorModelSwitched: (errorClass, model) =>
+            `The supervisor's model failed (${errorClass}); switched to ${model}`,
+        planAutoApproved: 'The plan was approved automatically, as the autonomy level allows',
+        planApproval: 'Approve the team plan',
+        planApproved: 'You approved the plan',
+        planApprovalLapsed: 'The plan approval expired or was cancelled; click Continue to approve it again',
+        noPlanReviewer: 'The organization has no plan reviewer; the separate plan review was skipped',
+        planReviewNoModel: (error) => `No model is available for the plan review, so it was skipped: ${error}`,
+        planReviewNoFamily: (family, tier) =>
+            `No ${tierLabel(tier, 'en')} tier model of a family other than ${family ?? "the supervisor's"} is connected; the separate plan review was skipped`,
+        planReviewTitle: 'Review the plan',
+        planReviewing: 'Reviewing the plan',
+        planReviewUnfinished: (outcome) =>
+            `The plan review did not finish (${outcome}); the plan goes straight to approval`,
+        planGoal: (goal) => `Goal: ${goal}`,
+        planTask: (card, tier, checks) =>
+            `- ${card.id} ${card.title} (${card.category}, ${tierLabel(tier, 'en')} tier, ${card.workspace}${card.dependsOn.length > 0 ? `, depends on ${card.dependsOn.join(', ')}` : ''}). Acceptance: ${checks}`,
+        planBudget: (limit, currency) => `Budget: ${money(limit, currency, 'en')}`,
+        runEnded: 'The run has ended, so the message cannot be delivered',
+        noTask: (id) => `There is no task ${id}`,
+        taskEnded: (id) => `Task ${id} has ended; you can write to the supervisor instead`,
+        blocker: (id, held, status) => `${id}${held ? ' (held by the supervisor)' : ''}: ${status}`,
+        stuck: (blockers) =>
+            `No task can go on (${blockers.join(', ')}); tell the supervisor in its thread what to do, or stop the run`,
+        stuckTitle: 'The team is stuck',
+        tierLowered: (taskId, tier, percent) =>
+            `${taskId} runs at the ${tierLabel(tier, 'en')} tier instead (${percent}% of the budget is spent)`,
+        notGitRepo: (taskId) => `The project is not a git repository; ${taskId} runs in the project folder instead`,
+        notSeeded: (from, taskId, reason) =>
+            `The results of ${from} could not be brought into the worktree of ${taskId}: ${reason}`,
+        dispatchTitle: (taskId, title) => `Dispatch: ${taskId} ${title}`,
+        dispatchSummary: (agent, tier, workspace, goal) =>
+            `To ${agent} (${tierLabel(tier, 'en')} tier, ${workspace})\nGoal: ${goal}`,
+        dispatchDeclined: (message) => `You did not approve the dispatch${message ? `: ${message}` : ''}`,
+        hostError: (error) => `Host error: ${error}`,
+        executorCancelled: "The executor's turn was cancelled",
+        executorFailed: (errorClass) => `The executor's turn failed (${errorClass})`,
+        taskModelSwitched: (taskId, errorClass, model) =>
+            `The model of ${taskId} failed (${errorClass}); switched to ${model}`,
+        repairTitle: (taskId) => `Tidy up the deliverable of ${taskId}`,
+        acceptanceLabel: (taskId) => `Acceptance of ${taskId}`,
+        finalLabel: 'Final acceptance',
+        runAcceptance: (label) => `${label}: run the acceptance command`,
+        runHighRisk: (label, action) =>
+            `${label}: run the acceptance command (high-risk action: ${highRiskLabel(action, 'en')})`,
+        manualTitle: (taskId, title) => `Manual check of ${taskId}: ${title}`,
+        acceptanceTitle: (taskId, title) => `Needs your approval: ${taskId} ${title}`,
+        deliverable: (summary) => `Deliverable: ${summary}`,
+        reviewTitle: (taskId, title) => `Review ${taskId}: ${title}`,
+        changed: (files) => `Changes: ${files.join(', ')}`,
+        reviewThread: (taskId) => `Review ${taskId}`,
+        needsPerson: (why) => `Still not passing after the supervisor took over; a person has to deal with it: ${why}`,
+        needsYou: (taskId) => `${taskId} needs you`,
+        deliveryTitle: "Confirm the delivery: apply the team's changes to the project",
+        deliveryDeclined: (message) =>
+            `You did not confirm the delivery${message ? `: ${message}` : ''}. The changes are still in their worktrees; click Continue to confirm again`,
+        deliveryLapsed: 'The delivery confirmation expired or was cancelled; click Continue to confirm again',
+        files: (paths) => paths.join(', '),
+        integrateFailed: (taskId, files, message) =>
+            `Integrating ${taskId} failed (${files}): ${message ?? 'the changes do not apply'}; deal with it, then click Continue`,
+        integrateConflicts: (taskId, files) =>
+            `Integrating ${taskId} left conflicts (${files}), marked in the project folder; resolve them, then click Continue`,
+        finalFailed: (runs) => `Final acceptance failed: ${runs.join('; ')}`,
+        endedFailed: 'The team run ended: final acceptance failed',
+        completed: 'The team run is complete',
+        reportInView: 'The delivery report is in the team view',
+        deliveryIntro: 'Apply the changes of these tasks to the project folder, in dependency order:',
+        deliveryTask: (taskId, title, files) =>
+            `- ${taskId} ${title}${files.length > 0 ? `: ${files.join(', ')}` : ''}`,
+        deliveryOutro: 'Afterwards the acceptance commands run once more in the project.',
+        finalTitle: '## Final acceptance',
+        noFinalChecks: 'No acceptance command can be run again in the project.',
+        finalCheck: (run, ran, exit) =>
+            `- \`${run}\`: ${!ran ? 'not run' : exit === 0 ? 'passed' : `exit code ${exit ?? 'none'}`}`,
+    },
+);
+
+type TeamText = (typeof TEXT)['zh-CN'];
+
+// ---------------------------------------------------------------------------------------------------------
 // Text helpers
 
 function tail(output: string): string {
@@ -375,13 +574,14 @@ export class TeamService {
     }): Promise<TeamRunView> {
         await this.#ready;
         const { projects, settings, threads } = this.#deps;
+        const text = textOf(TEXT);
         const project = await projects.get(input.projectId);
         if (project.missing) {
-            throw new RpcError(RpcErrorCode.Rejected, `项目文件夹不存在：${project.path}`);
+            throw new RpcError(RpcErrorCode.Rejected, text.projectMissing(project.path));
         }
         const goal = input.goal.trim();
         if (!goal) {
-            throw new RpcError(RpcErrorCode.InvalidParams, '目标不能为空');
+            throw new RpcError(RpcErrorCode.InvalidParams, text.emptyGoal);
         }
         const loaded = await loadTeamOrganization({
             orgsDir: this.#deps.orgsDir,
@@ -399,11 +599,14 @@ export class TeamService {
             modes: org.roster.map((agent) => agent.mode),
         });
         if (!checked.ok) {
-            throw new RpcError(RpcErrorCode.Rejected, checked.problems.map((problem) => problem.message).join('；'));
+            throw new RpcError(
+                RpcErrorCode.Rejected,
+                text.autonomyProblems(checked.problems.map((problem) => problem.message)),
+            );
         }
         const supervisor = org.roster.find((agent) => agent.role === 'supervisor');
         if (!supervisor) {
-            throw new RpcError(RpcErrorCode.Rejected, '组织里没有主管');
+            throw new RpcError(RpcErrorCode.Rejected, text.noSupervisor);
         }
         const runId = newId('team');
         const warnings = [...loaded.warnings];
@@ -411,11 +614,11 @@ export class TeamService {
         const pick = this.#pickModel(org, autonomy, project, tier, warnings);
         const base = project.git.isRepo ? await headCommit(project.path).catch(() => undefined) : undefined;
         if (base && (await this.#deps.worktrees.changedFiles(project.path)).length > 0) {
-            warnings.push('项目里有没提交的改动：各任务的worktree从最近一次提交开始，看不到这些改动');
+            warnings.push(text.uncommitted);
         }
         const thread = threads.create({
             projectId: project.id,
-            title: `团队：${shorten(goal, 20)}`,
+            title: text.supervisorTitle(shorten(goal, 20)),
             engine: 'xora',
             model: pick.ref,
             mode: 'plan',
@@ -456,7 +659,7 @@ export class TeamService {
         try {
             await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel(), host.mode));
         } catch (error) {
-            this.#setStatus(state, 'failed', `主管线程没能启动：${errorText(error)}`);
+            this.#setStatus(state, 'failed', textOf(TEXT).supervisorNotStarted(errorText(error)));
             throw error;
         }
         this.#deps.log.info(`team ${runId} started in ${project.id}: ${shorten(goal, 60)}`);
@@ -494,7 +697,8 @@ export class TeamService {
             state.wakeTimer = undefined;
         }
         state.host.inbox = [];
-        this.#setStatus(state, 'cancelled', '你停止了这次运行');
+        const text = textOf(TEXT);
+        this.#setStatus(state, 'cancelled', text.stoppedByYou);
         for (const threadId of this.#threadsOf(state)) {
             this.#deps.turns.cancel(threadId);
         }
@@ -505,7 +709,7 @@ export class TeamService {
         state.questions.clear();
         for (const task of state.board.list()) {
             if (task.status !== 'done' && task.status !== 'cancelled') {
-                state.board.cancel(task.card.id, '运行已停止');
+                state.board.cancel(task.card.id, text.runStopped);
             }
         }
         this.#save(state);
@@ -521,7 +725,7 @@ export class TeamService {
         const state = await this.#require(runId);
         const host = state.host;
         if (host.status !== 'paused') {
-            throw new RpcError(RpcErrorCode.Rejected, '只有已暂停的运行可以继续');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).onlyPaused);
         }
         if (budget !== undefined) {
             state.run = {
@@ -530,7 +734,7 @@ export class TeamService {
             };
         }
         if (this.#pressure(state).state === 'exhausted') {
-            throw new RpcError(RpcErrorCode.Rejected, '预算已用完：追加预算后再继续');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).budgetSpent);
         }
         state.abort = new AbortController();
         const to = host.resumeTo ?? (host.planApproved ? 'running' : 'planning');
@@ -691,7 +895,7 @@ export class TeamService {
             if (state.host.status !== 'paused' && !TERMINAL.has(state.host.status)) {
                 state.host.resumeTo = state.host.status;
                 state.host.status = 'paused';
-                state.host.note = '应用重启了，运行已暂停；点继续接着做，已完成的任务不会重跑';
+                state.host.note = textOf(TEXT).restarted;
                 this.#save(state);
             }
             this.#attachTools(state);
@@ -790,7 +994,7 @@ export class TeamService {
         }
         state.host.resumeTo = state.host.status;
         this.#setStatus(state, 'paused', note);
-        this.#notice(state, 'warning', '团队运行已暂停', note);
+        this.#notice(state, 'warning', textOf(TEXT).pausedTitle, note);
     }
 
     /** Not finished: may still change. */
@@ -803,9 +1007,11 @@ export class TeamService {
         return this.#live(state) && state.host.status !== 'paused';
     }
 
-    #warn(state: RunState, warning: string): void {
-        if (!state.host.warnings.includes(warning)) {
-            state.host.warnings.push(warning);
+    /** Adds a warning once. One written before a language switch is in the other language and counts too. */
+    #warn(state: RunState, warning: (text: TeamText) => string): void {
+        const { warnings } = state.host;
+        if (!Object.values(TEXT).some((text) => warnings.includes(warning(text)))) {
+            warnings.push(warning(textOf(TEXT)));
         }
     }
 
@@ -930,7 +1136,7 @@ export class TeamService {
     #budgetNote(state: RunState): string {
         const costs = this.#costs(state);
         const budget = state.run.budget;
-        return `预算已用完（已花${round(costs.total)}${costs.currency}，预算${budget?.limit ?? 0}${budget?.currency ?? ''}）；追加预算后点继续，或者缩小范围`;
+        return textOf(TEXT).budgetNote(round(costs.total), costs.currency, budget?.limit ?? 0, budget?.currency ?? '');
     }
 
     // View -----------------------------------------------------------------------------------------------
@@ -1170,7 +1376,7 @@ export class TeamService {
             host.inbox.unshift(...lines);
             // The user started a turn in the meantime: its end pumps again.
             if (!this.#deps.turns.isRunning(host.supervisorThreadId)) {
-                this.#pause(state, `主管线程没能启动：${errorText(error)}`);
+                this.#pause(state, textOf(TEXT).supervisorNotStarted(errorText(error)));
             }
         }
         this.#save(state);
@@ -1199,12 +1405,12 @@ export class TeamService {
             const errorClass = this.#lastError(host.supervisorThreadId);
             const next = errorClass && FALLBACK_ERRORS.has(errorClass) ? host.supervisorFallbacks?.shift() : undefined;
             if (!next) {
-                this.#pause(state, `主管这一轮出错了（${errorClass ?? 'unknown'}），详情在主管线程里；处理后点继续`);
+                this.#pause(state, textOf(TEXT).supervisorTurnFailed(errorClass ?? 'unknown'));
                 return;
             }
             this.#deps.threads.update(host.supervisorThreadId, { model: next.ref });
             host.supervisorFamily = next.family;
-            this.#warn(state, `主管的模型出错（${errorClass}），换成了${next.ref.model}`);
+            this.#warn(state, (text) => text.supervisorModelSwitched(errorClass ?? 'unknown', next.ref.model));
             this.#wake(
                 state,
                 `The previous request failed (${errorClass}); you now run on ${next.ref.model}. Continue where you stopped.`,
@@ -1240,7 +1446,7 @@ export class TeamService {
             }
         }
         if (!needsHuman(state.run.autonomy, 'plan_approval')) {
-            this.#approvePlan(state, '计划按自主级别自动确认');
+            this.#approvePlan(state, textOf(TEXT).planAutoApproved);
             return;
         }
         state.approvingPlan = true;
@@ -1248,7 +1454,7 @@ export class TeamService {
         try {
             const outcome = await this.#confirm(state, {
                 toolName: 'team_plan',
-                title: '确认团队计划',
+                title: textOf(TEXT).planApproval,
                 toolKind: 'other',
                 summary: this.#planSummary(state),
                 risks: ['write'],
@@ -1258,7 +1464,7 @@ export class TeamService {
                 return;
             }
             if (outcome.status === 'allowed') {
-                this.#approvePlan(state, '你确认了计划');
+                this.#approvePlan(state, textOf(TEXT).planApproved);
             } else if (outcome.status === 'denied') {
                 this.#setStatus(state, 'planning');
                 this.#wake(
@@ -1266,7 +1472,7 @@ export class TeamService {
                     `The user did not approve the plan${outcome.message ? `: ${outcome.message}` : '.'} Revise the cards (task_update, task_create, or task_update with status "cancelled") and end your turn to submit the plan again.`,
                 );
             } else {
-                this.#pause(state, '计划确认过期或被取消了；点继续重新确认');
+                this.#pause(state, textOf(TEXT).planApprovalLapsed);
             }
         } finally {
             state.approvingPlan = false;
@@ -1281,7 +1487,7 @@ export class TeamService {
      */
     async #reviewPlan(state: RunState): Promise<boolean> {
         const { host } = state;
-        const skip = (warning: string): false => {
+        const skip = (warning: (text: TeamText) => string): false => {
             host.planReviewed = true;
             this.#warn(state, warning);
             this.#save(state);
@@ -1289,7 +1495,7 @@ export class TeamService {
         };
         const reviewer = agentsWithRole(host.org, 'plan_reviewer')[0];
         if (!reviewer) {
-            return skip('组织里没有计划评审，跳过了独立的计划评审');
+            return skip((text) => text.noPlanReviewer);
         }
         const family =
             host.supervisorFamily ?? inferFamily(this.#deps.threads.find(host.supervisorThreadId)?.model?.model ?? '');
@@ -1306,15 +1512,13 @@ export class TeamService {
                 crossFamily ? (family ?? '') : undefined,
             );
         } catch (error) {
-            return skip(`计划评审没有可用的模型，跳过了：${errorText(error)}`);
+            return skip((text) => text.planReviewNoModel(errorText(error)));
         }
         if (crossFamily && pick.crossFamily !== true) {
-            return skip(
-                `没有连接${family ?? '主管'}以外家族的${TIER_LABELS[reviewer.tier]}档模型，跳过了独立的计划评审`,
-            );
+            return skip((text) => text.planReviewNoFamily(family, reviewer.tier));
         }
         const thread = this.#createThread(state, {
-            title: '评审计划',
+            title: textOf(TEXT).planReviewTitle,
             role: reviewer.role,
             tier: reviewer.tier,
             agentId: reviewer.id,
@@ -1330,21 +1534,24 @@ export class TeamService {
             highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),
         });
-        host.note = '计划评审中';
+        const reviewing = textOf(TEXT).planReviewing;
+        host.note = reviewing;
         this.#save(state);
         const cards = state.board
             .list()
             .filter((task) => task.status !== 'cancelled')
             .map((task) => task.card);
         const ended = await this.#turn(thread.id, planReviewPrompt(state.run.goal, state.ledger?.current, cards));
-        if (host.note === '计划评审中') {
+        // Unless a pause or a stop replaced it meanwhile. Compared with the note as written: the language may have
+        // changed since.
+        if (host.note === reviewing) {
             host.note = undefined;
         }
         if (!this.#live(state)) {
             return false;
         }
         if (ended.outcome !== 'completed') {
-            return skip(`计划评审没有做完（${ended.outcome}），计划直接去确认`);
+            return skip((text) => text.planReviewUnfinished(ended.outcome));
         }
         host.planReviewed = true;
         // A paused run keeps the findings in the inbox for when it continues.
@@ -1361,16 +1568,13 @@ export class TeamService {
     }
 
     #planSummary(state: RunState): string {
-        const lines = [`目标：${shorten(state.run.goal, 200)}`];
+        const text = textOf(TEXT);
+        const lines = [text.planGoal(shorten(state.run.goal, 200))];
         for (const task of state.board.list()) {
-            const card = task.card;
-            const deps = card.dependsOn.length > 0 ? `，依赖${card.dependsOn.join('、')}` : '';
-            lines.push(
-                `- ${card.id} ${card.title}（${card.category}，${TIER_LABELS[task.tier]}档，${card.workspace}${deps}）验收：${describeChecks(card)}`,
-            );
+            lines.push(text.planTask(task.card, task.tier, describeChecks(task.card)));
         }
         if (state.run.budget) {
-            lines.push(`预算：${state.run.budget.limit}${state.run.budget.currency}`);
+            lines.push(text.planBudget(state.run.budget.limit, state.run.budget.currency));
         }
         return lines.join('\n');
     }
@@ -1784,8 +1988,9 @@ export class TeamService {
     async message(runId: string, to: string, text: string): Promise<TeamRunView> {
         await this.#ready;
         const state = await this.#require(runId);
+        const words = textOf(TEXT);
         if (TERMINAL.has(state.host.status)) {
-            throw new RpcError(RpcErrorCode.Rejected, '运行已经结束，消息不会送达');
+            throw new RpcError(RpcErrorCode.Rejected, words.runEnded);
         }
         if (to === 'supervisor') {
             this.#record(state, { from: 'user', to, text, kind: 'user' });
@@ -1795,10 +2000,10 @@ export class TeamService {
         }
         const task = state.board.get(to);
         if (!task) {
-            throw new RpcError(RpcErrorCode.NotFound, `没有任务${to}`);
+            throw new RpcError(RpcErrorCode.NotFound, words.noTask(to));
         }
         if (task.status === 'done' || task.status === 'cancelled' || task.status === 'failed') {
-            throw new RpcError(RpcErrorCode.Rejected, `任务${to}已经结束，可以发给主管`);
+            throw new RpcError(RpcErrorCode.Rejected, words.taskEnded(to));
         }
         this.#record(state, { from: 'user', to, text, kind: 'user' });
         const question = state.questions.get(to);
@@ -2019,14 +2224,15 @@ export class TeamService {
             return;
         }
         if (board.active().length === 0 && tasks.length > 0 && !host.stuck) {
+            const text = textOf(TEXT);
             const blockers = tasks
                 .filter((task) => task.status !== 'done' && task.status !== 'cancelled')
-                .map((task) => `${task.card.id}${task.handler === 'supervisor' ? '（主管接手）' : ''}：${task.status}`)
-                .join('，');
+                .map((task) => text.blocker(task.card.id, task.handler === 'supervisor', task.status));
+            // The flag marks the note as the stuck note: #dispatch clears both.
             host.stuck = true;
-            host.note = `没有能继续的任务（${blockers}）；在主管线程里说明怎么处理，或者停止这次运行`;
+            host.note = text.stuck(blockers);
             this.#save(state);
-            this.#notice(state, 'warning', '团队卡住了', host.note);
+            this.#notice(state, 'warning', text.stuckTitle, host.note);
         }
     }
 
@@ -2054,10 +2260,8 @@ export class TeamService {
                     ? tierUnderPressure(candidate.tier, candidate.card, pressure)
                     : candidate.tier;
             if (lower !== candidate.tier && board.update(taskId, { tier: lower }).ok) {
-                this.#warn(
-                    state,
-                    `${taskId}降到${TIER_LABELS[lower]}档执行（预算已用到${Math.round(pressure.ratio * 100)}%）`,
-                );
+                const percent = Math.round(pressure.ratio * 100);
+                this.#warn(state, (text) => text.tierLowered(taskId, lower, percent));
             }
             const task = board.get(taskId) as BoardTask;
             const agent = agentFor(state.host.org, task);
@@ -2067,8 +2271,9 @@ export class TeamService {
             }
             free -= 1;
             dispatched = true;
-            host.stuck = false;
-            if (host.note?.startsWith('没有能继续的任务')) {
+            // A running run that is stuck shows the stuck note (#advance); it goes with the flag.
+            if (host.stuck) {
+                host.stuck = false;
                 host.note = undefined;
             }
             void this.#work(state, taskId, 'dispatch', agent);
@@ -2095,7 +2300,7 @@ export class TeamService {
             if (project.git.isRepo) {
                 location = 'worktree';
             } else {
-                this.#warn(state, `项目不是git仓库，${taskId}改在项目目录里执行`);
+                this.#warn(state, (text) => text.notGitRepo(taskId));
             }
         }
         const owner = task.owner ?? `${agent.id}-${taskId}`;
@@ -2132,10 +2337,7 @@ export class TeamService {
                     handoff.push(
                         `The results of ${failure.label} could not be copied into your worktree (${failure.reason}); ask the supervisor if you need them.`,
                     );
-                    this.#warn(
-                        state,
-                        `${failure.label}的结果没能带进${taskId}的worktree：${shorten(failure.reason, 120)}`,
-                    );
+                    this.#warn(state, (text) => text.notSeeded(failure.label, taskId, shorten(failure.reason, 120)));
                 }
             }
         } else {
@@ -2173,17 +2375,18 @@ export class TeamService {
             return true;
         }
         const task = state.board.get(taskId) as BoardTask;
+        const text = textOf(TEXT);
         const outcome = await this.#confirm(state, {
             toolName: 'team_dispatch',
-            title: `派工：${taskId} ${shorten(task.card.title, 30)}`,
+            title: text.dispatchTitle(taskId, shorten(task.card.title, 30)),
             toolKind: 'other',
-            summary: `交给${agent.name}（${TIER_LABELS[task.tier]}档，${task.card.workspace}）\n目标：${task.card.goal}`,
+            summary: text.dispatchSummary(agent.name, task.tier, task.card.workspace, task.card.goal),
             risks: task.card.workspace === 'readonly' ? [] : ['write'],
         });
         if (outcome.status === 'allowed' || !this.#live(state)) {
             return outcome.status === 'allowed';
         }
-        state.board.fail(taskId, `你没有同意派工${outcome.message ? `：${outcome.message}` : ''}`);
+        state.board.fail(taskId, textOf(TEXT).dispatchDeclined(outcome.message));
         this.#wake(
             state,
             `The user declined to dispatch ${taskId}${outcome.message ? `: ${outcome.message}` : ''}. Change or cancel it, or put it back with task_update status "ready".`,
@@ -2293,7 +2496,7 @@ export class TeamService {
                 this.#deps.log.warn(`team ${state.run.id}: task ${taskId}: ${errorText(error)}`);
                 const task = state.board.get(taskId);
                 if (task && task.status !== 'done' && task.status !== 'cancelled' && task.status !== 'failed') {
-                    state.board.fail(taskId, `宿主出错：${errorText(error)}`);
+                    state.board.fail(taskId, textOf(TEXT).hostError(errorText(error)));
                     this.#recordProgress(state, false, `${taskId} failed: ${errorText(error)}`, `fail:${taskId}`);
                     this.#wake(
                         state,
@@ -2336,7 +2539,7 @@ export class TeamService {
                 return ended;
             }
             if (ended.outcome === 'cancelled') {
-                state.board.block(taskId, '执行者这一轮被取消了');
+                state.board.block(taskId, textOf(TEXT).executorCancelled);
                 this.#recordProgress(state, false, `${taskId}: the executor's turn was cancelled`, `cancel:${taskId}`);
                 this.#wake(
                     state,
@@ -2351,7 +2554,7 @@ export class TeamService {
                     ? info.fallbacks?.shift()
                     : undefined;
             if (!next) {
-                state.board.block(taskId, `执行者这一轮出错了（${errorClass ?? 'unknown'}）`);
+                state.board.block(taskId, textOf(TEXT).executorFailed(errorClass ?? 'unknown'));
                 this.#recordProgress(
                     state,
                     false,
@@ -2368,7 +2571,7 @@ export class TeamService {
             this.#deps.threads.update(threadId, { model: next.ref });
             info.model = next.ref;
             info.family = next.family;
-            this.#warn(state, `${taskId}的模型出错（${errorClass}），换成了${next.ref.model}`);
+            this.#warn(state, (text) => text.taskModelSwitched(taskId, errorClass ?? 'unknown', next.ref.model));
             this.#save(state);
             text = `The previous model request failed (${errorClass}); you now run on ${next.ref.model}. Continue the task from where it stopped and deliver.`;
         }
@@ -2483,7 +2686,7 @@ export class TeamService {
         const project = await this.#deps.projects.get(state.host.projectId);
         const pick = this.#pickModel(state.host.org, state.run.autonomy, project, reviewer.tier, state.host.warnings);
         const thread = this.#createThread(state, {
-            title: `整理${taskId}的交付单`,
+            title: textOf(TEXT).repairTitle(taskId),
             role: 'reviewer',
             tier: reviewer.tier,
             agentId: `${reviewer.id}-${taskId}`,
@@ -2560,11 +2763,10 @@ export class TeamService {
             return undefined;
         }
         if (policy.decision === 'ask') {
+            const text = textOf(TEXT);
             const outcome = await this.#confirm(state, {
                 toolName: 'acceptance',
-                title: highRisk
-                    ? `${label}：运行验收命令（高风险动作：${HIGH_RISK_LABELS[highRisk.action]}）`
-                    : `${label}：运行验收命令`,
+                title: highRisk ? text.runHighRisk(label, highRisk.action) : text.runAcceptance(label),
                 toolKind: 'execute',
                 summary: run,
                 command: run,
@@ -2613,7 +2815,7 @@ export class TeamService {
             if (check.type !== 'command') {
                 continue;
             }
-            const result = await this.#runCommand(state, check.run, cwd, mode, `验收${taskId}`);
+            const result = await this.#runCommand(state, check.run, cwd, mode, textOf(TEXT).acceptanceLabel(taskId));
             if (!this.#live(state)) {
                 return undefined;
             }
@@ -2643,7 +2845,7 @@ export class TeamService {
             if (manual.length > 0) {
                 const outcome = await this.#confirm(state, {
                     toolName: 'team_manual_check',
-                    title: `人工检查${taskId}：${shorten(card.title, 30)}`,
+                    title: textOf(TEXT).manualTitle(taskId, shorten(card.title, 30)),
                     toolKind: 'other',
                     summary: [
                         deliverable.summary,
@@ -2665,13 +2867,15 @@ export class TeamService {
             return undefined;
         }
         if (judgement.verdict === 'needs_human') {
+            const text = textOf(TEXT);
             const outcome = await this.#confirm(state, {
                 toolName: 'team_acceptance',
-                title: `需要你确认：${taskId} ${shorten(card.title, 30)}`,
+                title: text.acceptanceTitle(taskId, shorten(card.title, 30)),
                 toolKind: 'other',
-                summary: [`交付：${deliverable.summary}`, ...judgement.reasons.map((reason) => `- ${reason}`)].join(
-                    '\n',
-                ),
+                summary: [
+                    text.deliverable(deliverable.summary),
+                    ...judgement.reasons.map((reason) => `- ${reason}`),
+                ].join('\n'),
                 risks: [],
             });
             if (!this.#live(state)) {
@@ -2758,13 +2962,14 @@ export class TeamService {
         }
         const wanted = by.trim().toLowerCase();
         if (wanted === 'human' || wanted === 'user') {
+            const text = textOf(TEXT);
             const outcome = await this.#confirm(state, {
                 toolName: 'team_review',
-                title: `审查${taskId}：${shorten(task.card.title, 30)}`,
+                title: text.reviewTitle(taskId, shorten(task.card.title, 30)),
                 toolKind: 'other',
                 summary: [
-                    `交付：${deliverable.summary}`,
-                    ...(changed.length > 0 ? [`改动：${changed.join('、')}`] : []),
+                    text.deliverable(deliverable.summary),
+                    ...(changed.length > 0 ? [text.changed(changed)] : []),
                 ].join('\n'),
                 risks: [],
             });
@@ -2803,7 +3008,7 @@ export class TeamService {
         );
         const reviewerId = supervisorReview ? 'supervisor' : reviewer.id;
         const thread = this.#createThread(state, {
-            title: `审查${taskId}`,
+            title: textOf(TEXT).reviewThread(taskId),
             role: 'reviewer',
             tier,
             agentId: `${reviewerId}-${taskId}`,
@@ -2911,9 +3116,10 @@ export class TeamService {
                 `${taskId} failed at the flagship tier and is yours now (${shorten(why, 300)}). Rewrite or split it with task_update / task_create, cancel it, or re-dispatch it with task_assign.`,
             );
         } else if (decision.action === 'human') {
-            board.fail(taskId, `主管接手后仍然没有通过，需要人处理：${shorten(why, 200)}`);
+            const text = textOf(TEXT);
+            board.fail(taskId, text.needsPerson(shorten(why, 200)));
             this.#recordProgress(state, false, `${taskId} needs a person`, `human:${taskId}`);
-            this.#notice(state, 'warning', `${taskId}需要你处理`, why);
+            this.#notice(state, 'warning', text.needsYou(taskId), why);
             this.#wake(
                 state,
                 `${taskId} failed even under your direction; it needs the user. Explain the problem to the user in your reply.`,
@@ -2973,7 +3179,7 @@ export class TeamService {
             if (needsHuman(state.run.autonomy, 'final_delivery') && !host.deliveryApproved) {
                 const outcome = await this.#confirm(state, {
                     toolName: 'team_delivery',
-                    title: '确认交付：把团队的改动应用到项目',
+                    title: textOf(TEXT).deliveryTitle,
                     toolKind: 'edit',
                     summary: this.#deliverySummary(state),
                     risks: ['write'],
@@ -2982,11 +3188,10 @@ export class TeamService {
                     return;
                 }
                 if (outcome.status !== 'allowed') {
+                    const text = textOf(TEXT);
                     this.#pause(
                         state,
-                        outcome.status === 'denied'
-                            ? `你没有确认交付${outcome.message ? `：${outcome.message}` : ''}；改动还在各自的worktree里，点继续重新确认`
-                            : '交付确认过期或被取消了；点继续重新确认',
+                        outcome.status === 'denied' ? text.deliveryDeclined(outcome.message) : text.deliveryLapsed,
                     );
                     return;
                 }
@@ -3009,26 +3214,25 @@ export class TeamService {
                     return;
                 }
                 if (result.status === 'failed') {
-                    const files = result.conflicts.map((conflict) => conflict.path).join('、');
+                    const text = textOf(TEXT);
+                    const files = text.files(result.conflicts.map((conflict) => conflict.path));
                     this.#wake(
                         state,
                         `Integrating ${taskId} into the project failed (${files}: ${result.message ?? 'does not apply'}). The run is paused.`,
                     );
-                    this.#pause(
-                        state,
-                        `整合${taskId}失败（${files}）：${result.message ?? '改动应用不上'}；处理后点继续`,
-                    );
+                    this.#pause(state, text.integrateFailed(taskId, files, result.message));
                     return;
                 }
                 info.integrated = true;
                 this.#save(state);
                 if (result.status === 'conflicts') {
-                    const files = result.conflicts.map((conflict) => conflict.path).join('、');
+                    const text = textOf(TEXT);
+                    const files = text.files(result.conflicts.map((conflict) => conflict.path));
                     this.#wake(
                         state,
                         `Integrating ${taskId} left merge conflicts in the project (${files}). The run is paused until they are resolved.`,
                     );
-                    this.#pause(state, `整合${taskId}时有冲突（${files}），冲突标记已经写进项目目录；解决后点继续`);
+                    this.#pause(state, text.integrateConflicts(taskId, files));
                     return;
                 }
             }
@@ -3042,7 +3246,8 @@ export class TeamService {
                         continue;
                     }
                     seen.add(check.run);
-                    const result = await this.#runCommand(state, check.run, project.path, mode, '全量验收');
+                    const label = textOf(TEXT).finalLabel;
+                    const result = await this.#runCommand(state, check.run, project.path, mode, label);
                     if (!this.#live(state)) {
                         return;
                     }
@@ -3052,16 +3257,17 @@ export class TeamService {
             host.finalChecks = checks;
             const failed = checks.filter((check) => !check.ran || check.exit !== 0);
             host.report = this.#report(state);
+            const words = textOf(TEXT);
             this.#setStatus(
                 state,
                 failed.length > 0 ? 'failed' : 'done',
-                failed.length > 0 ? `全量验收没有通过：${failed.map((check) => check.run).join('；')}` : undefined,
+                failed.length > 0 ? words.finalFailed(failed.map((check) => check.run)) : undefined,
             );
             this.#notice(
                 state,
                 failed.length > 0 ? 'warning' : 'info',
-                failed.length > 0 ? '团队运行结束，全量验收没有通过' : '团队运行完成',
-                '交付报告在团队视图里',
+                failed.length > 0 ? words.endedFailed : words.completed,
+                words.reportInView,
             );
             for (const taskId of board.topologicalOrder()) {
                 const info = host.tasks[taskId];
@@ -3078,20 +3284,23 @@ export class TeamService {
     }
 
     #deliverySummary(state: RunState): string {
-        const lines = ['按依赖顺序把这些任务的改动应用到项目目录：'];
+        const text = textOf(TEXT);
+        const lines = [text.deliveryIntro];
         for (const taskId of state.board.topologicalOrder()) {
             const task = state.board.get(taskId);
             if (task?.status !== 'done') {
                 continue;
             }
             const changes = (task.deliverable?.changes ?? []).map((change) => change.file);
-            lines.push(`- ${taskId} ${task.card.title}${changes.length > 0 ? `：${changes.join('、')}` : ''}`);
+            lines.push(text.deliveryTask(taskId, task.card.title, changes));
         }
-        lines.push('应用后会在项目里把验收命令再跑一遍。');
+        lines.push(text.deliveryOutro);
         return lines.join('\n');
     }
 
     #report(state: RunState): string {
+        const language = hostLanguage();
+        const text = TEXT[language];
         const costs = this.#costs(state);
         const report = deliveryReport({
             goal: state.run.goal,
@@ -3099,18 +3308,18 @@ export class TeamService {
             ...(state.ledger ? { ledger: state.ledger.current } : {}),
             usage: costs.usage,
             alertRatio: state.host.org.supervisionAlertRatio,
+            language,
             currency: costs.currency,
         });
         const checks = state.host.finalChecks ?? [];
-        const lines = ['## 全量验收', ''];
+        const lines = [text.finalTitle, ''];
         if (checks.length === 0) {
-            lines.push('没有可以在项目里重跑的验收命令。');
+            lines.push(text.noFinalChecks);
         }
         for (const check of checks) {
-            const result = !check.ran ? '没有运行' : check.exit === 0 ? '通过' : `退出码${check.exit ?? '无'}`;
-            lines.push(`- \`${check.run}\`：${result}`);
+            lines.push(text.finalCheck(check.run, check.ran, check.exit));
         }
-        return `${report}\n${zhStyle(lines.join('\n'))}\n`;
+        return `${report}\n${uiStyle(lines.join('\n'), language)}\n`;
     }
 }
 

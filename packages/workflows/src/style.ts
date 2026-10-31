@@ -1,35 +1,63 @@
+import { bilingual, type UiLanguage } from '@xora/protocol/language';
 import type { Role } from './org.ts';
 import type { Tier } from './schemas.ts';
 
 /**
- * Chinese UI text: tier and role names, money, and the user's style rule (English in lower case, no spaces
- * between Chinese and English or digits).
+ * Text shared by reports and notes: tier and role names and money, in either UI language, and the user's style
+ * rule for Chinese (English in lower case, no spaces between Chinese and English or digits).
  */
 
-export const TIER_LABELS: Readonly<Record<Tier, string>> = {
-    flagship: '旗舰',
-    standard: '标准',
-    economy: '经济',
-    fast: '快速',
-};
+const LABELS = bilingual(
+    {
+        tiers: { flagship: '旗舰', standard: '标准', economy: '经济', fast: '快速' } as Readonly<Record<Tier, string>>,
+        roles: {
+            supervisor: '主管',
+            planner: '规划顾问',
+            plan_reviewer: '计划评审',
+            scout: '侦察',
+            executor: '执行者',
+            reviewer: '审查',
+            specialist: '专家',
+        } as Readonly<Record<Role, string>>,
+    },
+    {
+        tiers: { flagship: 'flagship', standard: 'standard', economy: 'economy', fast: 'fast' },
+        roles: {
+            supervisor: 'supervisor',
+            planner: 'planner',
+            plan_reviewer: 'plan reviewer',
+            scout: 'scout',
+            executor: 'executor',
+            reviewer: 'reviewer',
+            specialist: 'specialist',
+        },
+    },
+);
 
-export const ROLE_LABELS: Readonly<Record<Role, string>> = {
-    supervisor: '主管',
-    planner: '规划顾问',
-    plan_reviewer: '计划评审',
-    scout: '侦察',
-    executor: '执行者',
-    reviewer: '审查',
-    specialist: '专家',
-};
+/** `旗舰`, `flagship`: in Chinese followed by 档, in English by "tier". */
+export function tierLabel(tier: Tier, language: UiLanguage): string {
+    return LABELS[language].tiers[tier];
+}
 
-/** `12.30元`, `$0.50`; amounts under 0.01 keep four decimals. */
-export function money(amount: number, currency: string): string {
+export function roleLabel(role: Role, language: UiLanguage): string {
+    return LABELS[language].roles[role];
+}
+
+/** `12.30元` in Chinese, `¥12.30` in English (as the UI shows it), `$0.50` in both; under 0.01 keeps four decimals. */
+export function money(amount: number, currency: string, language: UiLanguage): string {
     const value = amount.toFixed(amount > 0 && amount < 0.01 ? 4 : 2);
-    if (currency === 'CNY') {
-        return `${value}元`;
+    if (currency === 'USD') {
+        return `$${value}`;
     }
-    return currency === 'USD' ? `$${value}` : `${value}${currency.toLowerCase()}`;
+    if (language === 'en') {
+        return currency === 'CNY' ? `¥${value}` : `${value} ${currency}`;
+    }
+    return currency === 'CNY' ? `${value}元` : `${value}${currency.toLowerCase()}`;
+}
+
+/** The user's style for Chinese text (see {@link zhStyle}); English stays as it is. */
+export function uiStyle(text: string, language: UiLanguage): string {
+    return language === 'zh-CN' ? zhStyle(text) : text;
 }
 
 export function percent(ratio: number): string {

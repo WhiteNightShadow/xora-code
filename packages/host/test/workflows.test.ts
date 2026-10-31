@@ -637,6 +637,39 @@ steps:
         expect(done.steps[0]?.note).toBe('命令被权限规则拒绝或没有被批准');
     }, 60_000);
 
+    it('writes its errors, cards and notes in English when the language setting says so', async () => {
+        const repo = gitRepo({
+            'ship.yaml': 'name: ship\nsteps:\n  - id: push\n    run: git push origin HEAD\n',
+        });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        const host = await startHost(dataDir);
+        const seen: Approval[] = [];
+        approve(host.ui, seen, new Set(['workflow_command']));
+        await host.ui.request('settings.update', { patch: { language: 'en' } });
+        const project = await host.ui.request('project.add', { path: repo });
+        const [untrusted] = await host.ui.request('workflow.list', { projectId: project.id });
+        expect(untrusted?.issues.map((issue) => issue.message)).toEqual([
+            'The project is not trusted yet: trust it to run its workflows',
+        ]);
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        await expect(
+            host.ui.request('workflow.triggers', { projectId: project.id, key: 'project:ship', enabled: true }),
+        ).rejects.toThrow('This workflow has no schedule, file, git or webhook trigger');
+        const run = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:ship' });
+        const card = await waitFor(
+            () => seen.find((approval) => approval.toolName === 'workflow_command'),
+            'push card',
+        );
+        expect(card.title).toBe('push: run a command (high-risk action: push)');
+        await host.ui.request('approval.respond', { approvalId: card.id, decision: 'deny' });
+        const done = await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run.id });
+            return current.status === 'failed' ? current : undefined;
+        }, 'failed run');
+        expect(done.steps[0]?.note).toBe('The command was denied by a permission rule or not approved');
+        expect(done.note).toBe('Step push failed: The command was denied by a permission rule or not approved');
+    }, 60_000);
+
     it('distills a thread into a workflow file that the check tool accepts', async () => {
         const repo = gitRepo({});
         const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));

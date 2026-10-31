@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LanguageSettingSchema } from './language.ts';
 
 /**
  * Bootstrap↔host channel. The host asks the bootstrap for what only the Electron main process can do:
@@ -30,6 +31,8 @@ export const ShellInfoSchema = z.object({
     packaged: z.boolean(),
     /** False when the OS keychain is unavailable and secrets would only be obfuscated. */
     secureStorage: z.boolean(),
+    /** The app locale, then the system's preferred languages: what the language setting `system` follows. */
+    languages: z.array(z.string()).optional(),
 });
 export type ShellInfo = z.infer<typeof ShellInfoSchema>;
 
@@ -56,6 +59,8 @@ export const shellMethods = {
         result: ok,
     },
     'shell.power': { params: z.object({ preventSleep: z.boolean() }).strict(), result: ok },
+    /** The language setting, which the shell's menus, tray and dialogs follow. */
+    'shell.language': { params: z.object({ language: LanguageSettingSchema }).strict(), result: ok },
     'shell.open': {
         params: z
             .object({ kind: z.enum(['external', 'path', 'reveal']), target: z.string().min(1).max(4096) })

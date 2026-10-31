@@ -19,6 +19,7 @@ import type { BootLog } from './log.ts';
 import type { DataPaths } from './paths.ts';
 import { PreviewController } from './preview.ts';
 import { attachShellServices, releasePowerBlocker, type ShellPeer } from './shell-services.ts';
+import { shellStrings } from './strings.ts';
 import { AppTray, forceQuit, trayIconPath } from './tray.ts';
 
 export type LaunchOutcome =
@@ -380,12 +381,10 @@ export class BundleRuntime {
             window.hide();
             this.#tray.setHidden(true);
             if (Notification.isSupported()) {
+                const s = shellStrings();
                 new Notification({
                     title: 'Xora Code',
-                    body:
-                        running > 0
-                            ? `${running}个任务在后台继续运行，点托盘图标可以打开窗口`
-                            : '有自动运行的工作流，应用留在托盘里，点托盘图标可以打开窗口',
+                    body: running > 0 ? s.backgroundRunning(running) : s.backgroundTriggers,
                 }).show();
             }
             return;
@@ -454,12 +453,13 @@ export class BundleRuntime {
             return;
         }
         const seconds = Math.round(this.#options.env.uiReadyTimeoutMs / 1000);
+        const s = shellStrings();
         const { response } = await dialog.showMessageBox(window, {
             type: 'warning',
             title: 'Xora Code',
-            message: '界面启动时间过长',
-            detail: `应用包${this.#options.manifest.version}在${seconds}秒内没有完成启动。可以继续等待，也可以回滚到上一个能用的版本，或者进入修复模式。`,
-            buttons: ['继续等待', '回滚到上一版', '进入修复模式'],
+            message: s.slowStart,
+            detail: s.slowStartDetail(this.#options.manifest.version, seconds),
+            buttons: [s.keepWaiting, s.rollBack, s.enterSafeMode],
             defaultId: 0,
             cancelId: 0,
             noLink: true,

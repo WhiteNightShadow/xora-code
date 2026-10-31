@@ -19,6 +19,7 @@ import { stageBundle } from './install.ts';
 import type { BootLog } from './log.ts';
 import type { DataPaths } from './paths.ts';
 import { SecretStore } from './secrets.ts';
+import { setLanguageSetting, shellStrings } from './strings.ts';
 import type { AppTray } from './tray.ts';
 
 export type ShellPeer = RpcPeer<ShellMethods, ShellNotifications>;
@@ -68,6 +69,7 @@ export function attachShellServices(host: UtilityProcess, deps: ShellServiceDeps
         arch: process.arch,
         packaged: app.isPackaged,
         secureStorage: secrets.secure,
+        languages: [app.getLocale(), ...app.getPreferredSystemLanguages()],
     }));
     peer.handle('shell.secret.get', ({ name }) => ({ value: secrets.get(name) }));
     peer.handle('shell.secret.set', ({ name, value }) => {
@@ -81,7 +83,7 @@ export function attachShellServices(host: UtilityProcess, deps: ShellServiceDeps
     peer.handle('shell.dialog.directory', async ({ title }) => {
         const window = deps.window();
         const options = {
-            title: title ?? '选择文件夹',
+            title: title ?? shellStrings().chooseFolder,
             properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,
         };
         const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
@@ -112,6 +114,10 @@ export function attachShellServices(host: UtilityProcess, deps: ShellServiceDeps
             powerSaveBlocker.stop(sleepBlocker);
             sleepBlocker = undefined;
         }
+        return ok;
+    });
+    peer.handle('shell.language', ({ language }) => {
+        setLanguageSetting(language);
         return ok;
     });
     peer.handle('shell.open', async ({ kind, target }) => {

@@ -1,10 +1,22 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { type ModelRef, type PermissionMode, type Project, RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, type ModelRef, type PermissionMode, type Project, RpcError, RpcErrorCode } from '@xora/protocol';
 import { fromJson, toJson, type XoraDatabase } from '@xora/storage';
 import { currentBranch, isGitRepo } from '@xora/workspace';
 import type { Bus } from './bus.ts';
 import { newId } from './ids.ts';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        folderMissing: (dir: string) => `文件夹不存在：${dir}`,
+        notFolder: (dir: string) => `不是文件夹：${dir}`,
+    },
+    {
+        folderMissing: (dir) => `The folder does not exist: ${dir}`,
+        notFolder: (dir) => `Not a folder: ${dir}`,
+    },
+);
 
 interface ProjectRow {
     id: string;
@@ -89,10 +101,10 @@ export class ProjectService {
         try {
             real = realpathSync(path.resolve(dir));
         } catch {
-            throw new RpcError(RpcErrorCode.Rejected, `文件夹不存在：${dir}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).folderMissing(dir));
         }
         if (!statSync(real).isDirectory()) {
-            throw new RpcError(RpcErrorCode.Rejected, `不是文件夹：${dir}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).notFolder(dir));
         }
         const existing = this.#db.get<ProjectRow>('select * from projects where path = ?', [real]);
         if (existing) {

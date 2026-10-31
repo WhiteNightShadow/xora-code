@@ -1,9 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { parseThreadEvent, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
+import { bilingual, parseThreadEvent, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
 import { issuePath, parseWorkflow } from '@xora/workflows';
 import type { Logger } from './log.ts';
 import type { ProjectService } from './projects.ts';
+import { textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
 import type { HostToolProvider, TurnService } from './turns.ts';
 
@@ -22,6 +23,85 @@ export type DistillKind = 'workflow' | 'skill';
 /** Thread role of a workflow distill thread, which gets the `workflow_check` tool. */
 const DISTILL_ROLE = 'distill';
 
+const TEXT = bilingual(
+    {
+        user: '## 用户',
+        agent: '## agent',
+        tool: (name: string, status: string, title: string, command: string | undefined) =>
+            `- 工具${name}（${status}）：${title}${command !== undefined ? `：\`${command}\`` : ''}`,
+        changed: (files: readonly string[]) => `- 改动的文件：${files.join('、')}`,
+        failed: (message: string) => `- 这一轮失败：${message}`,
+        omitted: '…（中间省略）…',
+        projectMissing: (folder: string) => `项目文件夹不存在：${folder}`,
+        empty: '这个线程还没有内容',
+        inProject: (file: string) => `${file}（项目根目录下）`,
+        title: (kind: DistillKind, source: string) => `${kind === 'workflow' ? '沉淀工作流' : '沉淀skill'}：${source}`,
+        workflowPrompt: (target: string) =>
+            [
+                '把下面这个线程里做成的事沉淀成一个可以反复运行的工作流。',
+                '',
+                '先用skill工具读extension-creator，按其中“Workflows”一节的格式起草：',
+                `- 文件：${target}，name用小写字母、数字和-，文件名和name一致`,
+                '- 线程里每次会变的东西（问题描述、文件、分支等）做成inputs',
+                '- 每一步交给合适的agent（scout侦察、coder编码、tester测试、debugger修bug、reviewer审查、writer文档）；能用命令验收的步骤加verify',
+                '- 推送、发布、删除这类动作前加人工关卡（gate）',
+                '- 不要写进密钥、token和本机的绝对路径',
+                '',
+                '写好后调用workflow_check检查，有问题就改，直到通过。最后用一两句话说明它做什么、需要哪些输入、怎么运行。',
+            ].join('\n'),
+        skillPrompt: (target: string) =>
+            [
+                '把下面这个线程里用到的做法沉淀成一个skill，以后遇到同类任务时能直接照着做。',
+                '',
+                '先用skill工具读extension-creator，按其中skill的格式写：',
+                `- 文件：${target}，文件夹名和name一致`,
+                '- description写清楚什么时候该用它（会出现的任务和关键词）',
+                '- 正文写可复用的步骤、命令和注意事项，去掉这次任务特有的细节；长的参考资料放到同一文件夹的其他文件里',
+                '- 不要写进密钥、token和本机的绝对路径',
+                '',
+                '写好后说明它会在什么情况下被用到。',
+            ].join('\n'),
+    },
+    {
+        user: '## User',
+        agent: '## Agent',
+        tool: (name, status, title, command) =>
+            `- Tool ${name} (${status}): ${title}${command !== undefined ? `: \`${command}\`` : ''}`,
+        changed: (files) => `- Changed files: ${files.join(', ')}`,
+        failed: (message) => `- This turn failed: ${message}`,
+        omitted: '… (middle omitted) …',
+        projectMissing: (folder) => `The project folder does not exist: ${folder}`,
+        empty: 'This thread has no content yet',
+        inProject: (file) => `${file} (under the project root)`,
+        title: (kind, source) => `${kind === 'workflow' ? 'Save as a workflow' : 'Save as a skill'}: ${source}`,
+        workflowPrompt: (target) =>
+            [
+                'Turn what the thread below got done into a workflow that can run again and again.',
+                '',
+                'First read extension-creator with the skill tool, then draft the workflow in the format of its "Workflows" section:',
+                `- File: ${target}; the name uses lower-case letters, digits and -, and the file name matches the name`,
+                '- What changes from one run to the next (the problem description, files, branches and so on) becomes inputs',
+                '- Give every step to a fitting agent (scout explores, coder codes, tester tests, debugger fixes bugs, reviewer reviews, writer writes docs); add verify to steps a command can check',
+                '- Put a human gate (gate) before actions such as pushing, publishing or deleting',
+                '- Do not write keys, tokens or absolute paths of this machine into it',
+                '',
+                'When it is written, check it with workflow_check and fix every problem until it passes. Finally say in a sentence or two what it does, which inputs it needs and how to run it.',
+            ].join('\n'),
+        skillPrompt: (target) =>
+            [
+                'Turn the approach used in the thread below into a skill, so that similar tasks can follow it directly from now on.',
+                '',
+                'First read extension-creator with the skill tool, then write the skill in the format described there:',
+                `- File: ${target}; the folder name matches the name`,
+                '- The description says clearly when to use it (the tasks and keywords that come up)',
+                '- The body holds reusable steps, commands and caveats, without the details of this one task; long reference material goes into other files in the same folder',
+                '- Do not write keys, tokens or absolute paths of this machine into it',
+                '',
+                'When it is written, say in which situations it will be used.',
+            ].join('\n'),
+    },
+);
+
 export interface DistillDeps {
     readonly threads: ThreadStore;
     readonly turns: TurnService;
@@ -39,33 +119,36 @@ function clip(text: string, limit: number): string {
 
 /** The thread as text: requests, answers, tool calls with their commands, changed files; long middles dropped. */
 export function transcript(threads: ThreadStore, threadId: string): string {
+    const words = textOf(TEXT);
     const parts: string[] = [];
     for (const envelope of threads.events(threadId)) {
         const event = parseThreadEvent(envelope);
         if (!event) continue;
         if (event.kind === 'turn.started') {
-            parts.push(`## 用户\n${clip(event.payload.input.text, parts.length === 0 ? FIRST_LIMIT : MESSAGE_LIMIT)}`);
+            parts.push(
+                `${words.user}\n${clip(event.payload.input.text, parts.length === 0 ? FIRST_LIMIT : MESSAGE_LIMIT)}`,
+            );
         } else if (event.kind === 'item.completed') {
             const { item } = event.payload;
             if (item.type === 'agent_message' && item.text.trim()) {
-                parts.push(`## agent\n${clip(item.text, MESSAGE_LIMIT)}`);
+                parts.push(`${words.agent}\n${clip(item.text, MESSAGE_LIMIT)}`);
             } else if (item.type === 'tool_call') {
                 const input = item.input as { command?: unknown } | undefined;
-                const command = typeof input?.command === 'string' ? `：\`${clip(input.command, 300)}\`` : '';
-                parts.push(`- 工具${item.name ?? item.kind}（${item.status}）：${clip(item.title, 200)}${command}`);
+                const command = typeof input?.command === 'string' ? clip(input.command, 300) : undefined;
+                parts.push(words.tool(item.name ?? item.kind, item.status, clip(item.title, 200), command));
             }
         } else if (event.kind === 'turn.completed' && event.payload.changes) {
             const files = event.payload.changes.files.map((file) => file.path);
-            if (files.length > 0) parts.push(`- 改动的文件：${files.slice(0, 30).join('、')}`);
+            if (files.length > 0) parts.push(words.changed(files.slice(0, 30)));
         } else if (event.kind === 'turn.failed') {
-            parts.push(`- 这一轮失败：${clip(event.payload.error.message, 300)}`);
+            parts.push(words.failed(clip(event.payload.error.message, 300)));
         }
     }
     const text = parts.join('\n\n');
     if (text.length <= TRANSCRIPT_LIMIT) return text;
     // Keep the first request and the end, where the thread got to.
     const head = parts[0] ?? '';
-    return `${head}\n\n…（中间省略）…\n\n${text.slice(-(TRANSCRIPT_LIMIT - head.length - 20))}`;
+    return `${head}\n\n${words.omitted}\n\n${text.slice(-(TRANSCRIPT_LIMIT - head.length - 20))}`;
 }
 
 const CHECK_TOOL: HostToolProvider['tools'][number] = {
@@ -91,26 +174,27 @@ export class DistillService {
 
     async start(input: { threadId: string; kind: DistillKind; scope: 'project' | 'user' }): Promise<ThreadMeta> {
         const { threads, turns, projects, log } = this.#deps;
+        const words = textOf(TEXT);
         const source = threads.get(input.threadId);
         const project = await projects.get(source.projectId);
         if (project.missing) {
-            throw new RpcError(RpcErrorCode.Rejected, `项目文件夹不存在：${project.path}`);
+            throw new RpcError(RpcErrorCode.Rejected, words.projectMissing(project.path));
         }
         const text = transcript(threads, source.id);
         if (!text.trim()) {
-            throw new RpcError(RpcErrorCode.Rejected, '这个线程还没有内容');
+            throw new RpcError(RpcErrorCode.Rejected, words.empty);
         }
         const target =
             input.kind === 'workflow'
                 ? input.scope === 'project'
-                    ? `${path.join('.xora', 'workflows')}${path.sep}<name>.yaml（项目根目录下）`
+                    ? words.inProject(`${path.join('.xora', 'workflows')}${path.sep}<name>.yaml`)
                     : path.join(this.#deps.workflowsDir, '<name>.yaml')
                 : input.scope === 'project'
-                  ? `${path.join('.xora', 'skills', '<name>')}${path.sep}SKILL.md（项目根目录下）`
+                  ? words.inProject(`${path.join('.xora', 'skills', '<name>')}${path.sep}SKILL.md`)
                   : path.join(this.#deps.extensionsDir, 'skills', '<name>', 'SKILL.md');
         const thread = threads.create({
             projectId: project.id,
-            title: `${input.kind === 'workflow' ? '沉淀工作流' : '沉淀skill'}：${clip(source.title, 20)}`,
+            title: words.title(input.kind, clip(source.title, 20)),
             engine: 'xora',
             model: source.model,
             // Every file is written through an approval card: the user reviews the draft before it exists.
@@ -121,7 +205,7 @@ export class DistillService {
         if (input.kind === 'workflow') {
             turns.setHostTools(thread.id, this.#checkTool(project.path));
         }
-        const prompt = input.kind === 'workflow' ? workflowPrompt(target) : skillPrompt(target);
+        const prompt = input.kind === 'workflow' ? words.workflowPrompt(target) : words.skillPrompt(target);
         await turns.start(
             thread.id,
             `${prompt}\n\n<thread_transcript title="${source.title.replaceAll('"', "'")}">\n${text}\n</thread_transcript>`,
@@ -184,33 +268,4 @@ export class DistillService {
             },
         };
     }
-}
-
-function workflowPrompt(target: string): string {
-    return [
-        '把下面这个线程里做成的事沉淀成一个可以反复运行的工作流。',
-        '',
-        '先用skill工具读extension-creator，按其中“Workflows”一节的格式起草：',
-        `- 文件：${target}，name用小写字母、数字和-，文件名和name一致`,
-        '- 线程里每次会变的东西（问题描述、文件、分支等）做成inputs',
-        '- 每一步交给合适的agent（scout侦察、coder编码、tester测试、debugger修bug、reviewer审查、writer文档）；能用命令验收的步骤加verify',
-        '- 推送、发布、删除这类动作前加人工关卡（gate）',
-        '- 不要写进密钥、token和本机的绝对路径',
-        '',
-        '写好后调用workflow_check检查，有问题就改，直到通过。最后用一两句话说明它做什么、需要哪些输入、怎么运行。',
-    ].join('\n');
-}
-
-function skillPrompt(target: string): string {
-    return [
-        '把下面这个线程里用到的做法沉淀成一个skill，以后遇到同类任务时能直接照着做。',
-        '',
-        '先用skill工具读extension-creator，按其中skill的格式写：',
-        `- 文件：${target}，文件夹名和name一致`,
-        '- description写清楚什么时候该用它（会出现的任务和关键词）',
-        '- 正文写可复用的步骤、命令和注意事项，去掉这次任务特有的细节；长的参考资料放到同一文件夹的其他文件里',
-        '- 不要写进密钥、token和本机的绝对路径',
-        '',
-        '写好后说明它会在什么情况下被用到。',
-    ].join('\n');
 }

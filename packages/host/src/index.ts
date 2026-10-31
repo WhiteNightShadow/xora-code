@@ -1,6 +1,7 @@
 import type { AcpPort } from '@xora/engine';
 import {
     electronPortTransport,
+    type LanguageSetting,
     type MessagePortMainLike,
     RpcPeer,
     type ShellMethods,
@@ -92,6 +93,10 @@ class RpcShell implements ShellApi {
 
     async preventSleep(on: boolean) {
         await this.#peer.request('shell.power', { preventSleep: on });
+    }
+
+    async setLanguage(language: LanguageSetting) {
+        await this.#peer.request('shell.language', { language });
     }
 
     async open(kind: 'external' | 'path' | 'reveal', target: string) {

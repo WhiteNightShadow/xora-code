@@ -1,5 +1,5 @@
 import type { AcpPort } from '@xora/engine';
-import type { ShellInfo } from '@xora/protocol';
+import type { LanguageSetting, ShellInfo } from '@xora/protocol';
 
 /**
  * What the host needs from the Electron bootstrap. In the app it is backed by an RPC channel to the main
@@ -13,6 +13,8 @@ export interface ShellApi {
     pickDirectory(title?: string): Promise<string | null>;
     notify(title: string, body: string, threadId?: string): Promise<void>;
     preventSleep(on: boolean): Promise<void>;
+    /** The language setting, for the shell's menus, tray and dialogs. */
+    setLanguage(language: LanguageSetting): Promise<void>;
     open(kind: 'external' | 'path' | 'reveal', target: string): Promise<void>;
     stageUpdate(dir: string): Promise<{ ok: boolean; version?: string; error?: string }>;
     restart(): Promise<void>;
@@ -48,6 +50,7 @@ export class MemoryShell implements ShellApi {
     readonly opened: Array<{ kind: string; target: string }> = [];
     pickAnswer: string | null = null;
     sleepPrevented = false;
+    language: LanguageSetting | undefined;
     staged: string[] = [];
     restarts = 0;
     tray: ReadonlyArray<{ threadId: string; title: string; status: string }> = [];
@@ -64,6 +67,7 @@ export class MemoryShell implements ShellApi {
             arch: process.arch,
             packaged: false,
             secureStorage: false,
+            languages: ['zh-CN'],
             ...info,
         };
     }
@@ -94,6 +98,10 @@ export class MemoryShell implements ShellApi {
 
     async preventSleep(on: boolean): Promise<void> {
         this.sleepPrevented = on;
+    }
+
+    async setLanguage(language: LanguageSetting): Promise<void> {
+        this.language = language;
     }
 
     async open(kind: 'external' | 'path' | 'reveal', target: string): Promise<void> {

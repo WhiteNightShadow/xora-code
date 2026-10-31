@@ -102,7 +102,7 @@ describe('SettingsService', () => {
     it('returns defaults and persists valid patches only', () => {
         const db = database();
         const settings = new SettingsService(db);
-        expect(settings.get().language).toBe('zh-CN');
+        expect(settings.get().language).toBe('system');
         settings.update({ theme: 'dark' });
         expect(new SettingsService(db).get().theme).toBe('dark');
         db.run('update settings set value_json = ? where key = ?', [

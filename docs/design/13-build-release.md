@@ -68,23 +68,24 @@
 | mac arm64 | 本机 | — | 8/8 | 16步 | — |
 | windows arm64 | arm64测试机（hvf） | 31秒，333mb | 8/8 | 16步 | 无残留 |
 | windows x64 | arm64测试机（prism转译） | 20秒，334mb | 8/8 | 16步 | 无残留 |
-| windows x64 | x64测试机（tcg） | 124秒（`7c8ecb3`的包） | 没跑，见下 | 没跑 | 已卸载 |
+| windows x64 | x64测试机（tcg） | 104秒，334mb | 8/8 | 16步 | 无残留 |
 | linux arm64 | xorabuild | deb，287mb | 8/8 | 16步 | 无残留 |
 | linux x64 | xorabuild（rosetta） | deb，283mb | 8/8 | 16步 | 无残留 |
 | linux arm64、x64 | xorabuild | AppImage，免安装 | 只查启动：能启动到“可用”，沙箱是关的 | — | — |
 
-表里是这一轮的包，应用代码同`ab88f69`，AppImage是换静态启动器后重出的。六个可执行文件的fuses都核对过：只开着cookie加密、asar完整性校验、只从app.asar加载。
+表里是这一轮的包，应用代码同`ab88f69`，AppImage是换静态启动器后重出的。界面语言改成跟随系统后又跑了一轮：mac arm64、windows arm64、linux arm64和x64都是演练8/8、冒烟18步（新加两步语言检查）；windows x64的新包没跑完，先把功能做完再统一验证。六个可执行文件的fuses都核对过：只开着cookie加密、asar完整性校验、只从app.asar加载。
 
 - **linux**：ubuntu 24.04限制普通程序创建用户命名空间（`apparmor_restrict_unprivileged_userns=1`）。
   - deb装了apparmor配置，`chrome-sandbox`不需要setuid，演练跑的是带沙箱的正式应用。
   - 冒烟跑的是复制出来的那份，它不在apparmor配置覆盖的路径上，所以加了`--no-sandbox`。
   - AppImage只检查能不能启动到“可用”。它没有apparmor配置，electron-builder的AppRun发现建不了用户命名空间，就自动加`--no-sandbox`，所以在ubuntu 24.04上能跑但没有沙箱。xora的预览面板会加载任意网页，这些系统上应该推荐deb。
   - x64包靠rosetta跑。rosetta在binfmt里的规则要求ELF头第8到15字节为0，AppImage在那里写了自己的标记，所以`linux.sh`在虚拟机里另加了一条规则；真的x64机器不需要这一步。
+  - lima每次启动虚拟机都会换一个cloud-init实例id，cloud-init随之重写`ubuntu.sources`，限定arm64的那行就没了，apt再去ports.ubuntu.com取amd64的索引会报404。`linux.sh`现在每次运行都把这行补回去。
 - **windows**：
   - 测试机是pabox的，这里只用`C:\xora`和计划任务`XoraSmoke`；
   - 冒烟和演练放在登录桌面会话里跑，经ssh（会话0）开不了窗口；
   - 跑完只留node和MinGit给下次用。
-  - x64测试机（tcg模拟，超时×6）这次只装好了包，没跑完：pabox要用这台机器验收它的x64包，我把机器让了出来。等空闲时再跑`build/vm/windows.sh x64`。
+  - x64测试机是tcg模拟，超时放大6倍，一轮演练加冒烟约45分钟。
   - arm64测试机上装x64包时卡死过一次：安装器是x86程序，它在安装前用powershell查应用是否在运行（electron-builder自带的检查），拉起的是x86的powershell，在prism下满负荷空转了25分钟。手动结束后重跑，同样的检查只用了几秒，原因没查清。
 - **查出并修掉的问题**：
   - AppImage换成静态启动器（`toolsets.appimage: "1.0.3"`，测试版）。默认的appimage-12.0.1要libfuse2，ubuntu 24.04默认不装；它的arm64启动器还链接了不带版本号的`libz.so`（只有zlib的开发包才有），在虚拟机里直接起不来。
@@ -92,7 +93,9 @@
   - `libasound2`在ubuntu 24.04上是虚拟包，apt挑了`liboss4-salsa-asound2`来满足它，里面缺electron要的符号。所以依赖写成`libasound2t64 | libasound2`。
   - 终端面板缺`min-width: 0`，终端的宽度把自己的容器撑开了，每次自适应都缩几像素。linux的滚动条要占宽度，暴露了这个问题；三个平台都受影响。
   - 冒烟脚本本身：`mkdir -p`换成node的mkdir，终端命令分powershell和posix两种写法，windows上删临时目录要重试（应用刚退出时子进程还占着exe）。
-- **没解决的**：界面默认语言写死为zh-CN，没装中文字体的linux（比如英文服务器版）上中文全显示成方框。要不要改成首次启动时跟随系统语言，待定。
+- **界面语言**：10-31改成默认跟随系统，见03第5节。
+  - 冒烟按中文按钮名找控件，所以用`--lang=zh-CN`把应用语言固定成中文。最后两步另起一个`--lang=en-US`的干净实例，查界面和菜单是英文，在设置里改成简体中文后两者都跟着变。
+  - 更新演练不加`--lang`。windows测试机的系统语言是en-US，修复模式页面在那里显示英文，演练照样通过。
 
 ## 3. 测试策略
 

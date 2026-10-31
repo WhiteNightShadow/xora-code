@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { bilingual } from '@xora/protocol';
 import {
     type AgentSpec,
     agentsWithRole,
@@ -28,12 +29,37 @@ import {
     toolsOf,
 } from '@xora/workflows';
 import { z } from 'zod';
+import { textOf } from './text.ts';
 import type { HostToolProvider } from './turns.ts';
 
 /**
  * What the members of a team run see (06 §4, §16): the team tools with their schemas, the prompt layers and tool
  * whitelists of each agent, the host's messages to the supervisor and executors, and the organization in force.
  */
+
+const TEXT = bilingual(
+    {
+        orgLayer: (name: string) => `组织：${name}`,
+        rosterLayer: '团队名册',
+        agentLayer: (name: string) => `agent：${name}`,
+        untrusted: '项目还没有被信任，没有用项目里的组织定义（.xora/org.md、.xora/agents）',
+        commandCheck: (run: string, shouldFail: boolean) => `\`${run}\`${shouldFail ? '（应失败）' : ''}`,
+        reviewCheck: (by: string) => `审查：${by}`,
+        manualCheck: (note: string) => `人工：${note}`,
+        checks: (items: readonly string[]) => items.join('；'),
+    },
+    {
+        orgLayer: (name) => `Organization: ${name}`,
+        rosterLayer: 'Team roster',
+        agentLayer: (name) => `Agent: ${name}`,
+        untrusted:
+            'The project is not trusted yet, so its organization files (.xora/org.md, .xora/agents) were not used',
+        commandCheck: (run, shouldFail) => `\`${run}\`${shouldFail ? ' (should fail)' : ''}`,
+        reviewCheck: (by) => `review: ${by}`,
+        manualCheck: (note) => `manual: ${note}`,
+        checks: (items) => items.join('; '),
+    },
+);
 
 /** The engine's built-in tools; a role's whitelist hides the others (06 §4: enforced by the host, not prompts). */
 const BUILTIN_TOOLS = [
@@ -275,12 +301,17 @@ function untag(text: string): string {
 
 /** Organization, roster (supervisor only) and agent layers for the system prompt (06 §4 layers 3–5). */
 export function systemLayers(org: Organization, agent: AgentSpec): NonNullable<HostToolProvider['layers']> {
+    const text = textOf(TEXT);
     return buildAgentLayers({ org, agent })
         .filter((layer) => layer.placement === 'system')
         .map((layer) => ({
             id: LAYER_IDS[layer.id] ?? layer.id,
             title:
-                layer.id === 'org' ? `组织：${org.name}` : layer.id === 'roster' ? '团队名册' : `agent：${agent.name}`,
+                layer.id === 'org'
+                    ? text.orgLayer(org.name)
+                    : layer.id === 'roster'
+                      ? text.rosterLayer
+                      : text.agentLayer(agent.name),
             text: untag(layer.text),
         }));
 }
@@ -376,10 +407,7 @@ export async function loadTeamOrganization(options: {
         existsSync(path.join(options.projectDir, '.xora', 'org.md')) ||
         existsSync(path.join(options.projectDir, '.xora', 'agents'));
     if (!options.trusted && projectFiles) {
-        return {
-            ...loaded,
-            warnings: [...loaded.warnings, '项目还没有被信任，没有用项目里的组织定义（.xora/org.md、.xora/agents）'],
-        };
+        return { ...loaded, warnings: [...loaded.warnings, textOf(TEXT).untrusted] };
     }
     return loaded;
 }
@@ -539,13 +567,14 @@ export function reviewPrompt(
 
 /** A card's acceptance checks in one line, for the plan approval card. */
 export function describeChecks(card: TaskCard): string {
-    return card.acceptance
-        .map((check) =>
+    const text = textOf(TEXT);
+    return text.checks(
+        card.acceptance.map((check) =>
             check.type === 'command'
-                ? `\`${check.run}\`${check.expect === 'fail' ? '（应失败）' : ''}`
+                ? text.commandCheck(check.run, check.expect === 'fail')
                 : check.type === 'review'
-                  ? `审查：${check.by}`
-                  : `人工：${check.note}`,
-        )
-        .join('；');
+                  ? text.reviewCheck(check.by)
+                  : text.manualCheck(check.note),
+        ),
+    );
 }

@@ -50,15 +50,17 @@ fi
 if ! dpkg --print-foreign-architectures | grep -qx amd64; then
   # ports.ubuntu.com only has arm64; amd64 libraries for x64 packages come from the main archive.
   dpkg --add-architecture amd64
-  sed -i '/^URIs: http:\/\/ports.ubuntu.com/a Architectures: arm64' /etc/apt/sources.list.d/ubuntu.sources
   printf '%s\n' 'Types: deb' 'URIs: http://archive.ubuntu.com/ubuntu' 'Suites: noble noble-updates noble-backports' \
     'Components: main universe restricted multiverse' 'Architectures: amd64' \
     'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' '' 'Types: deb' 'URIs: http://security.ubuntu.com/ubuntu' \
     'Suites: noble-security' 'Components: main universe restricted multiverse' 'Architectures: amd64' \
     'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' > /etc/apt/sources.list.d/ubuntu-amd64.sources
 fi
+# Lima gives the VM a new cloud-init instance id on every start, and cloud-init then rewrites ubuntu.sources.
+grep -q '^Architectures: arm64' /etc/apt/sources.list.d/ubuntu.sources ||
+  sed -i '/^URIs: http:\/\/ports.ubuntu.com/a Architectures: arm64' /etc/apt/sources.list.d/ubuntu.sources
 apt-get update -qq
-# CJK fonts as on a Chinese desktop: the UI is Chinese by default, and without them screenshots show boxes.
+# CJK fonts: the smoke runs the UI in Chinese (--lang=zh-CN), and without them its screenshots show boxes.
 dpkg -s xvfb xauth git fonts-noto-cjk >/dev/null 2>&1 || apt-get install -y -qq xvfb xauth git fonts-noto-cjk >/dev/null
 EOF
 

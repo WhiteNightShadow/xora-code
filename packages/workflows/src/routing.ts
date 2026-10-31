@@ -1,3 +1,4 @@
+import { bilingual, type UiLanguage } from '@xora/protocol/language';
 import { SUBSCRIPTION_CHANNEL } from './autonomy.ts';
 import {
     type AgentSpec,
@@ -10,7 +11,7 @@ import {
     type TierEffort,
 } from './org.ts';
 import type { TaskCard, Tier } from './schemas.ts';
-import { TIER_LABELS } from './style.ts';
+import { tierLabel } from './style.ts';
 
 /** Tiers from cheapest to strongest. */
 export const TIER_ORDER: readonly Tier[] = ['fast', 'economy', 'standard', 'flagship'];
@@ -281,15 +282,32 @@ export interface DowngradeSuggestion {
     readonly to: Tier;
     readonly tasks: number;
     readonly firstPassRate: number;
-    /** For the team view, in the Chinese UI style. */
+    /** For the team view. */
     readonly message: string;
+}
+
+const TEXT = bilingual(
+    {
+        downgrade: (category: string, from: Tier, rate: number, tasks: number, to: Tier) =>
+            `${category}类任务在${tierLabel(from, 'zh-CN')}档的一次通过率是${rate}%` +
+            `（共${tasks}个），可以考虑改用${tierLabel(to, 'zh-CN')}档。这只是建议，不会自动修改。`,
+    },
+    {
+        downgrade: (category, from, rate, tasks, to) =>
+            `${category} tasks pass ${rate}% of the time on the first try at the ${tierLabel(from, 'en')} tier ` +
+            `(${tasks} tasks); the ${tierLabel(to, 'en')} tier may do. Only a suggestion: nothing changes on its own.`,
+    },
+);
+
+function textOf(language: UiLanguage) {
+    return TEXT[language];
 }
 
 /**
  * A suggestion to run a category one tier cheaper when its first-pass rate at a tier is at least 90% over at
  * least 10 tasks (06 §3 rule 4). Only ever a suggestion; nothing changes automatically.
  */
-export function downgradeSuggestion(stats: CategoryTierStats): DowngradeSuggestion | undefined {
+export function downgradeSuggestion(stats: CategoryTierStats, language: UiLanguage): DowngradeSuggestion | undefined {
     const to = lowerTier(stats.tier);
     if (!to || stats.tasks < DOWNGRADE_MIN_TASKS) {
         return undefined;
@@ -305,9 +323,7 @@ export function downgradeSuggestion(stats: CategoryTierStats): DowngradeSuggesti
         to,
         tasks: stats.tasks,
         firstPassRate,
-        message:
-            `${category}类任务在${TIER_LABELS[stats.tier]}档的一次通过率是${Math.round(firstPassRate * 100)}%` +
-            `（共${stats.tasks}个），可以考虑改用${TIER_LABELS[to]}档。这只是建议，不会自动修改。`,
+        message: textOf(language).downgrade(category, stats.tier, Math.round(firstPassRate * 100), stats.tasks, to),
     };
 }
 

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import type { UpdateStatus } from '@xora/protocol';
+import { bilingual, type UpdateStatus } from '@xora/protocol';
 import {
     type BundleManifest,
     isSafeRelativePath,
@@ -15,6 +15,16 @@ import type { Bus } from './bus.ts';
 import type { Logger } from './log.ts';
 import type { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        tasksRunning: '还有任务在运行，等它们完成后再重启更新',
+    },
+    {
+        tasksRunning: 'Tasks are still running; restart to update once they finish',
+    },
+);
 
 /**
  * Feed published next to the app bundles (12 §3, §7): `feed-<channel>.json` names the newest bundle; its
@@ -230,7 +240,7 @@ export class UpdateService {
             throw new Error('no update is ready');
         }
         if (runningTurns > 0) {
-            throw new Error('还有任务在运行，等它们完成后再重启更新');
+            throw new Error(textOf(TEXT).tasksRunning);
         }
         await this.#shell.restart();
     }

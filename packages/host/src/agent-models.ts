@@ -1,4 +1,4 @@
-import { type Effort, type ModelRef, type Project, RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, type Effort, type ModelRef, type Project, RpcError, RpcErrorCode } from '@xora/protocol';
 import {
     type ConnectedModel,
     inferFamily,
@@ -6,17 +6,31 @@ import {
     type Organization,
     pickReviewerModel,
     type ResolvedModel,
-    TIER_LABELS,
     type Tier,
     type TierEffort,
+    tierLabel,
 } from '@xora/workflows';
 import type { ConnectionService } from './connections.ts';
 import type { SettingsService } from './settings.ts';
+import { textOf } from './text.ts';
 
 /**
  * Model choice for agents started by the host (team members, workflow steps): a tier's model chain over the
  * connected models (06 §3), falling back to the default model.
  */
+
+const TEXT = bilingual(
+    {
+        noModel: '还没有可用的模型：先在设置里连接一个模型',
+        defaultModel: (tier: Tier, model: string) =>
+            `${tierLabel(tier, 'zh-CN')}档的模型链里没有已连接的模型，改用默认模型${model}`,
+    },
+    {
+        noModel: 'No model is available yet: connect one in Settings',
+        defaultModel: (tier, model) =>
+            `The model chain of the ${tierLabel(tier, 'en')} tier has no connected model; using the default model ${model}`,
+    },
+);
 
 export interface ModelPick {
     readonly ref: ModelRef;
@@ -94,11 +108,12 @@ export function pickTierModel(
     }
     const fallback = defaultModel(sources, project);
     if (!fallback) {
-        throw new RpcError(RpcErrorCode.Rejected, '还没有可用的模型：先在设置里连接一个模型');
+        throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noModel);
     }
-    const warning = `${TIER_LABELS[tier]}档的模型链里没有已连接的模型，改用默认模型${fallback.model}`;
-    if (!warnings.includes(warning)) {
-        warnings.push(warning);
+    // Once per run: a warning written before a language switch is in the other language.
+    const written = Object.values(TEXT).some((text) => warnings.includes(text.defaultModel(tier, fallback.model)));
+    if (!written) {
+        warnings.push(textOf(TEXT).defaultModel(tier, fallback.model));
     }
     const family = inferFamily(fallback.model);
     const reviewerOf = input.reviewerOf?.toLowerCase();

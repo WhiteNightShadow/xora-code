@@ -1,22 +1,30 @@
 import { app, Menu, type MenuItemConstructorOptions, shell } from 'electron';
+import { onLanguageChange, shellStrings } from './strings.ts';
 
 export interface MenuActions {
     readonly restartIntoSafeMode: () => void;
     readonly logsDir: string;
 }
 
+/** The application menu, and the dock menu on macOS; both follow the shell's language. */
 export function installMenu(actions: MenuActions): void {
+    buildMenu(actions);
+    onLanguageChange(() => buildMenu(actions));
+}
+
+function buildMenu(actions: MenuActions): void {
+    const s = shellStrings();
     const help: MenuItemConstructorOptions = {
-        label: '帮助',
+        label: s.help,
         submenu: [
-            { label: '重启到修复模式', click: () => actions.restartIntoSafeMode() },
-            { label: '打开日志目录', click: () => void shell.openPath(actions.logsDir) },
+            { label: s.restartSafeMode, click: () => actions.restartIntoSafeMode() },
+            { label: s.openLogs, click: () => void shell.openPath(actions.logsDir) },
         ],
     };
     const view: MenuItemConstructorOptions = {
-        label: '视图',
+        label: s.view,
         submenu: [
-            { role: 'reload', label: '重新加载界面' },
+            { role: 'reload', label: s.reload },
             ...(app.isPackaged ? [] : [{ role: 'toggleDevTools' } as const]),
             { type: 'separator' },
             { role: 'resetZoom' },
@@ -36,7 +44,7 @@ export function installMenu(actions: MenuActions): void {
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
     if (process.platform === 'darwin') {
         app.dock?.setMenu(
-            Menu.buildFromTemplate([{ label: '重启到修复模式', click: () => actions.restartIntoSafeMode() }]),
+            Menu.buildFromTemplate([{ label: s.restartSafeMode, click: () => actions.restartIntoSafeMode() }]),
         );
     }
 }

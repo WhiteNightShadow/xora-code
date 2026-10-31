@@ -37,9 +37,9 @@ steps:
 
 describe('decideSteps', () => {
     it('starts steps whose dependencies finished, in parallel when independent', () => {
-        expect(decideSteps(DEF, context(DEF)).map((d) => [d.step.id, d.action])).toEqual([['a', 'run']]);
+        expect(decideSteps(DEF, context(DEF), 'zh-CN').map((d) => [d.step.id, d.action])).toEqual([['a', 'run']]);
         const after = context(DEF, { a: { status: 'succeeded', outputs: { file: 'x.test.ts' } } });
-        expect(decideSteps(DEF, after).map((d) => [d.step.id, d.action])).toEqual([
+        expect(decideSteps(DEF, after, 'zh-CN').map((d) => [d.step.id, d.action])).toEqual([
             ['b', 'run'],
             ['c', 'run'],
         ]);
@@ -51,12 +51,14 @@ describe('decideSteps', () => {
             b: { status: 'failed' },
             c: { status: 'succeeded' },
         });
-        expect(decideSteps(DEF, ctx).map((d) => [d.step.id, d.action, 'reason' in d ? d.reason : ''])).toEqual([
-            ['d', 'skip', '依赖的步骤b没有成功'],
-            ['e', 'run', ''],
-        ]);
+        expect(decideSteps(DEF, ctx, 'zh-CN').map((d) => [d.step.id, d.action, 'reason' in d ? d.reason : ''])).toEqual(
+            [
+                ['d', 'skip', '依赖的步骤b没有成功'],
+                ['e', 'run', ''],
+            ],
+        );
         const fine = context(DEF, { a: { status: 'succeeded' }, b: { status: 'succeeded' }, c: { status: 'running' } });
-        expect(decideSteps(DEF, fine).map((d) => [d.step.id, d.action])).toEqual([['e', 'skip']]);
+        expect(decideSteps(DEF, fine, 'zh-CN').map((d) => [d.step.id, d.action])).toEqual([['e', 'skip']]);
     });
 });
 
@@ -98,11 +100,19 @@ inputs:
   dry: { type: boolean }
 steps: [{ id: a, agent: c, task: t }]
 `).inputs;
-        expect(resolveInputs(declared, { issue: 'x', dry: 'true' })).toEqual({
+        expect(resolveInputs(declared, { issue: 'x', dry: 'true' }, 'zh-CN')).toEqual({
             inputs: { issue: 'x', count: 2, dry: true },
         });
-        expect(resolveInputs(declared, { count: 'many', other: 1 })).toEqual({
+        expect(resolveInputs(declared, { count: 'many', other: 1 }, 'zh-CN')).toEqual({
             errors: ['没有名为other的输入', '缺少输入issue', '输入count应为数字', '缺少输入dry'],
+        });
+        expect(resolveInputs(declared, { count: 'many', other: 1 }, 'en')).toEqual({
+            errors: [
+                'There is no input named other',
+                'Input issue is missing',
+                'Input count should be a number',
+                'Input dry is missing',
+            ],
         });
     });
 

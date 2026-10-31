@@ -71,6 +71,8 @@ export const SessionConfigSchema = z.object({
     layers: z.array(PromptLayerInputSchema).default([]),
     softContextWindow: z.number().int().positive().optional(),
     maxOutputTokens: z.number().int().positive().optional(),
+    /** Language of the notices and permission options the user sees. */
+    language: z.enum(['zh-CN', 'en']).default('zh-CN'),
     maxTurnRequests: z.number().int().positive().default(200),
     userAgent: z.string().default('XoraCode'),
     /** Extra environment for tools, e.g. `XORA_PORT` of a worktree. */

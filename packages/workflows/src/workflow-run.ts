@@ -1,3 +1,4 @@
+import { bilingual, type UiLanguage } from '@xora/protocol/language';
 import type { Tier } from './schemas.ts';
 import {
     type Condition,
@@ -68,6 +69,27 @@ export interface RunContext {
 
 // Inputs ------------------------------------------------------------------------------------------------------
 
+const TEXT = bilingual(
+    {
+        unknownInput: (name: string) => `没有名为${name}的输入`,
+        missingInput: (name: string) => `缺少输入${name}`,
+        wrongType: (name: string, type: WorkflowInput['type']) =>
+            `输入${name}应为${type === 'number' ? '数字' : type === 'boolean' ? '布尔值' : '文本'}`,
+        badCondition: (error: string) => `条件无法解析：${error}`,
+        conditionFalse: (condition: string) => `条件不成立：${condition}`,
+        blocked: (step: string) => `依赖的步骤${step}没有成功`,
+    },
+    {
+        unknownInput: (name) => `There is no input named ${name}`,
+        missingInput: (name) => `Input ${name} is missing`,
+        wrongType: (name, type) =>
+            `Input ${name} should be ${type === 'number' ? 'a number' : type === 'boolean' ? 'true or false' : 'text'}`,
+        badCondition: (error) => `The condition cannot be parsed: ${error}`,
+        conditionFalse: (condition) => `The condition does not hold: ${condition}`,
+        blocked: (step) => `Step ${step}, which this step needs, did not succeed`,
+    },
+);
+
 /**
  * The run's inputs: given values converted to the declared types, defaults for the rest. Every input without a
  * default must be given; unknown names are an error.
@@ -75,27 +97,27 @@ export interface RunContext {
 export function resolveInputs(
     declared: Readonly<Record<string, WorkflowInput>>,
     given: Readonly<Record<string, unknown>>,
+    language: UiLanguage,
 ): { readonly inputs: Record<string, WorkflowScalar> } | { readonly errors: string[] } {
+    const text = TEXT[language];
     const errors: string[] = [];
     const inputs: Record<string, WorkflowScalar> = {};
     for (const name of Object.keys(given)) {
         if (!(name in declared)) {
-            errors.push(`没有名为${name}的输入`);
+            errors.push(text.unknownInput(name));
         }
     }
     for (const [name, spec] of Object.entries(declared)) {
         const raw = given[name] ?? spec.default;
         if (raw === undefined || raw === '') {
             if (spec.default === undefined) {
-                errors.push(`缺少输入${name}`);
+                errors.push(text.missingInput(name));
             }
             continue;
         }
         const value = coerce(raw, spec.type);
         if (value === undefined) {
-            errors.push(
-                `输入${name}应为${spec.type === 'number' ? '数字' : spec.type === 'boolean' ? '布尔值' : '文本'}`,
-            );
+            errors.push(text.wrongType(name, spec.type));
         } else {
             inputs[name] = value;
         }
@@ -220,7 +242,8 @@ export type StepDecision =
  * Pending steps whose dependencies have all finished, in definition order, each with its fate: a step with an
  * `if` runs when the condition holds; one without runs only when every dependency succeeded.
  */
-export function decideSteps(definition: WorkflowDefinition, context: RunContext): StepDecision[] {
+export function decideSteps(definition: WorkflowDefinition, context: RunContext, language: UiLanguage): StepDecision[] {
+    const text = TEXT[language];
     const decisions: StepDecision[] = [];
     for (const step of definition.steps) {
         const state = context.steps[step.id];
@@ -230,17 +253,17 @@ export function decideSteps(definition: WorkflowDefinition, context: RunContext)
         if (step.if !== undefined) {
             const condition = parseCondition(step.if);
             if ('error' in condition) {
-                decisions.push({ step, action: 'skip', reason: `条件无法解析：${condition.error}` });
+                decisions.push({ step, action: 'skip', reason: text.badCondition(condition.error) });
             } else if (evaluateCondition(condition, context)) {
                 decisions.push({ step, action: 'run' });
             } else {
-                decisions.push({ step, action: 'skip', reason: `条件不成立：${step.if}` });
+                decisions.push({ step, action: 'skip', reason: text.conditionFalse(step.if) });
             }
             continue;
         }
         const blocked = needs.find((need) => need.status !== 'succeeded');
         if (blocked) {
-            decisions.push({ step, action: 'skip', reason: `依赖的步骤${blocked.id}没有成功` });
+            decisions.push({ step, action: 'skip', reason: text.blocked(blocked.id) });
         } else {
             decisions.push({ step, action: 'run' });
         }

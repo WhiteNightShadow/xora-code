@@ -1,15 +1,45 @@
 import { spawn } from 'node:child_process';
 import type { Goal, ThreadMeta } from '@xora/protocol';
-import { RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, RpcError, RpcErrorCode } from '@xora/protocol';
 import { sanitizeEnv } from '@xora/tools';
 import type { Logger } from './log.ts';
 import type { ProjectService } from './projects.ts';
+import { textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
 import type { TurnEnded, TurnService } from './turns.ts';
 
 const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 const OUTPUT_LIMIT = 12_000;
 const DONE_MARKER = /^\s*GOAL:\s*DONE\s*$/im;
+
+const TEXT = bilingual(
+    {
+        running: '线程正在运行，先停止再设定目标',
+        checkCommand: (command: string) => `验收方式：每轮结束后我会运行\`${command}\`，退出码为0才算完成。`,
+        checkMarker: '验收方式：你确认目标已经完成时，在回复最后单独一行写`GOAL: DONE`；还没完成就不要写。',
+        first: (objective: string, check: string) =>
+            `目标：${objective}\n\n${check}\n先弄清现状并列出计划（用todo工具），然后逐步完成。每一轮结束前说明做了什么、还差什么。`,
+        checkFailed: (exitCode: number | null, output: string) =>
+            `验收没有通过（退出码${exitCode ?? '无'}）。输出：\n\`\`\`\n${output || '（无输出）'}\n\`\`\``,
+        notConfirmed: '你还没有确认目标完成。',
+        retry: (failure: string, objective: string, round: number, maxRounds: number) =>
+            `${failure}\n\n继续推进目标：${objective}\n这是第${round}轮，最多${maxRounds}轮。`,
+    },
+    {
+        running: 'The thread is running; stop it before setting a goal',
+        checkCommand: (command) =>
+            `Acceptance: after every round I run \`${command}\`; the goal is done only when it exits with code 0.`,
+        checkMarker:
+            'Acceptance: once you are sure the goal is done, write `GOAL: DONE` alone on the last line of your reply; do not write it before then.',
+        first: (objective, check) =>
+            `Goal: ${objective}\n\n${check}\nFirst find out where things stand and list a plan (with the todo tool), then work through it step by step. Before each round ends, say what you did and what is left.`,
+        checkFailed: (exitCode, output) =>
+            `The acceptance check failed (exit code ${exitCode ?? 'none'}). Output:\n\`\`\`\n${output || '(no output)'}\n\`\`\``,
+        notConfirmed: 'You have not confirmed that the goal is done yet.',
+        retry: (failure, objective, round, maxRounds) =>
+            `${failure}\n\nKeep working on the goal: ${objective}\nThis is round ${round} of at most ${maxRounds}.`,
+    },
+);
 
 export interface CheckResult {
     readonly passed: boolean;
@@ -64,17 +94,15 @@ export function runCheck(
 }
 
 function firstPrompt(goal: Goal): string {
-    const check = goal.acceptCommand
-        ? `验收方式：每轮结束后我会运行\`${goal.acceptCommand}\`，退出码为0才算完成。`
-        : '验收方式：你确认目标已经完成时，在回复最后单独一行写`GOAL: DONE`；还没完成就不要写。';
-    return `目标：${goal.objective}\n\n${check}\n先弄清现状并列出计划（用todo工具），然后逐步完成。每一轮结束前说明做了什么、还差什么。`;
+    const text = textOf(TEXT);
+    const check = goal.acceptCommand ? text.checkCommand(goal.acceptCommand) : text.checkMarker;
+    return text.first(goal.objective, check);
 }
 
 function retryPrompt(goal: Goal, check: CheckResult | undefined): string {
-    const failure = check
-        ? `验收没有通过（退出码${check.exitCode ?? '无'}）。输出：\n\`\`\`\n${check.output.trim() || '（无输出）'}\n\`\`\``
-        : '你还没有确认目标完成。';
-    return `${failure}\n\n继续推进目标：${goal.objective}\n这是第${goal.rounds + 1}轮，最多${goal.maxRounds}轮。`;
+    const text = textOf(TEXT);
+    const failure = check ? text.checkFailed(check.exitCode, check.output.trim()) : text.notConfirmed;
+    return text.retry(failure, goal.objective, goal.rounds + 1, goal.maxRounds);
 }
 
 /**
@@ -106,7 +134,7 @@ export class GoalService {
     ): Promise<ThreadMeta> {
         const thread = this.#threads.get(threadId);
         if (this.#turns().isRunning(threadId)) {
-            throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再设定目标');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).running);
         }
         const goal: Goal = {
             objective: input.objective.trim(),

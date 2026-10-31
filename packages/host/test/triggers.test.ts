@@ -6,6 +6,7 @@ import path from 'node:path';
 import { type TriggerSpec, TriggerSpecSchema } from '@xora/workflows';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '../src/log.ts';
+import { setLanguageSource } from '../src/text.ts';
 import { defaultTreeWatch, type WatchTree, walkingTreeWatch } from '../src/tree-watch.ts';
 import {
     newWebhookToken,
@@ -715,6 +716,22 @@ describe('TriggerService webhook', () => {
         expect(invalid.status).toBe(400);
         expect(JSON.parse(invalid.body).error).toBe('请求体不是合法的json');
         expect(fires).toEqual([]);
+    });
+
+    it('answers in the host language', async () => {
+        setLanguageSource(() => 'en');
+        try {
+            const { url } = await serve();
+            const unauthorized = await send(url, { headers: auth('wrong-token') });
+            expect(JSON.parse(unauthorized.body).error).toBe('The token is missing or wrong');
+            const invalid = await send(url, {
+                headers: { ...auth(), 'content-type': 'application/json' },
+                body: '{nope',
+            });
+            expect(JSON.parse(invalid.body).error).toBe('The request body is not valid JSON');
+        } finally {
+            setLanguageSource(() => 'zh-CN');
+        }
     });
 
     it('refuses bodies over 64 KB, announced or streamed', async () => {

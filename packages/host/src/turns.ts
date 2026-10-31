@@ -7,6 +7,7 @@ import type { HooksOutcome } from '@xora/extensions';
 import { matchesToolPattern } from '@xora/mcp';
 import {
     type Attachment,
+    bilingual,
     type ErrorClass,
     type FileChange,
     type Item,
@@ -21,7 +22,7 @@ import {
     ToolDisplaySchema,
     type ToolKind,
 } from '@xora/protocol';
-import { checkPathAccess, isReadOnlyCommand, isSensitivePath } from '@xora/tools';
+import { checkPathAccess, type HighRiskAction, isReadOnlyCommand, isSensitivePath } from '@xora/tools';
 import type { ApprovalService } from './approvals.ts';
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
@@ -31,14 +32,81 @@ import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import { type CallFacts, HIGH_RISK_LABELS, highRiskOf } from './policy.ts';
+import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { PromptService } from './prompts.ts';
 import type { ReviewService } from './review.ts';
 import type { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
+import { hostLanguage, textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
 import type { UsageService } from './usage.ts';
+
+const TEXT = bilingual(
+    {
+        busy: '这个线程正在运行，等它完成或先停止',
+        emptyMessage: '消息不能为空',
+        projectMissing: (dir: string) => `项目文件夹不存在：${dir}`,
+        worktreeGone: '这个线程的worktree已经删除，不能继续运行',
+        unknownEngine: (id: string) => `未知的引擎：${id}`,
+        connectModel: '还没有选择模型：先在设置里连接一个模型',
+        noModel: '还没有选择模型',
+        dailyBudget: '今日花费已到预算上限，可以在设置→用量与预算里调整',
+        monthlyBudget: '本月花费已到预算上限，可以在设置→用量与预算里调整',
+        mcpNotStarted: (name: string) => `mcp服务器${name}没有启动`,
+        hookBlocked: 'hook拦截了这条消息',
+        hookFailed: 'hook运行失败',
+        hookLimit: (times: number) => `hook还要agent继续，这一轮已经继续了${times}次，停在这里`,
+        hookContinue: 'hook让agent继续工作',
+        mcpToolNotGranted: '这个agent的工具白名单里没有这个mcp工具',
+        highRisk: (action: HighRiskAction, title: string) =>
+            `高风险动作（${highRiskLabel(action, 'zh-CN')}）：${title}`,
+        needsApproval: '需要你确认',
+        completed: '任务完成',
+        failed: '任务失败',
+        inThread: (thread: string, detail: string) => `${thread}：${detail}`,
+        newThread: '新线程',
+        sessionBusy: '引擎里这个会话还在运行',
+        engineExited: (detail: string) => `引擎进程退出：${detail}`,
+    },
+    {
+        busy: 'This thread is running; wait for it to finish or stop it first',
+        emptyMessage: 'The message cannot be empty',
+        projectMissing: (dir) => `The project folder does not exist: ${dir}`,
+        worktreeGone: "This thread's worktree was deleted, so it cannot run anymore",
+        unknownEngine: (id) => `Unknown engine: ${id}`,
+        connectModel: 'No model selected yet: connect a model in Settings first',
+        noModel: 'No model selected yet',
+        dailyBudget: "Today's spending reached the daily budget; you can change it in Settings → Usage & budgets",
+        monthlyBudget:
+            "This month's spending reached the monthly budget; you can change it in Settings → Usage & budgets",
+        mcpNotStarted: (name) => `MCP server ${name} did not start`,
+        hookBlocked: 'A hook blocked this message',
+        hookFailed: 'A hook failed',
+        hookLimit: (times) =>
+            `A hook still wants the agent to continue, but this turn already continued ${times} times; stopping here`,
+        hookContinue: 'A hook asked the agent to keep working',
+        mcpToolNotGranted: "This MCP tool is not in this agent's tool allowlist",
+        highRisk: (action, title) => `High-risk action (${highRiskLabel(action, 'en')}): ${title}`,
+        needsApproval: 'Needs your approval',
+        completed: 'Task completed',
+        failed: 'Task failed',
+        inThread: (thread, detail) => `${thread}: ${detail}`,
+        newThread: 'New thread',
+        sessionBusy: 'This session is still running in the engine',
+        engineExited: (detail) => `The engine process exited: ${detail}`,
+    },
+);
+
+/** The title of a thread nobody has named yet; its first turn replaces it with the start of the message. */
+export function defaultThreadTitle(): string {
+    return textOf(TEXT).newThread;
+}
+
+/** The default title in either language: the language may have changed since the thread was created. */
+function hasDefaultTitle(title: string): boolean {
+    return Object.values(TEXT).some((text) => text.newThread === title);
+}
 
 /** JSON-RPC codes the xora engine uses for classified failures. */
 const MODEL_ERROR_CODE = -32050;
@@ -135,7 +203,7 @@ function money(total: Money | null, add: Money | null): Money | null {
     return { amount: Math.round((total.amount + add.amount) * 1e6) / 1e6, currency: total.currency };
 }
 
-function textOf(content: readonly acp.ToolCallContent[] | null | undefined): string | undefined {
+function contentText(content: readonly acp.ToolCallContent[] | null | undefined): string | undefined {
     if (!content) return undefined;
     const parts = content
         .map((entry) => (entry.type === 'content' && entry.content.type === 'text' ? entry.content.text : ''))
@@ -301,26 +369,26 @@ export class TurnService {
         const { threads, projects, connections, settings } = this.#deps;
         const thread = threads.get(threadId);
         if (this.#running.has(threadId)) {
-            throw new RpcError(RpcErrorCode.Rejected, '这个线程正在运行，等它完成或先停止');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).busy);
         }
         if (text.trim().length === 0 && attachments.length === 0) {
-            throw new RpcError(RpcErrorCode.InvalidParams, '消息不能为空');
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).emptyMessage);
         }
         const project = await projects.get(thread.projectId);
         if (project.missing) {
-            throw new RpcError(RpcErrorCode.Rejected, `项目文件夹不存在：${project.path}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).projectMissing(project.path));
         }
         if (thread.location.kind === 'worktree' && !existsSync(thread.location.path)) {
-            throw new RpcError(RpcErrorCode.Rejected, '这个线程的worktree已经删除，不能继续运行');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).worktreeGone);
         }
         const engine = engineById(thread.engine);
         if (!engine) {
-            throw new RpcError(RpcErrorCode.Rejected, `未知的引擎：${thread.engine}`);
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).unknownEngine(thread.engine));
         }
         const modelRef = thread.model ?? project.defaults?.model ?? settings.get().defaultModel;
         if (engine.kind === 'builtin') {
             if (!modelRef) {
-                throw new RpcError(RpcErrorCode.Rejected, '还没有选择模型：先在设置里连接一个模型');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).connectModel);
             }
             await connections.engineConfig(modelRef.connectionId);
         }
@@ -382,10 +450,10 @@ export class TurnService {
         const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
         if (budgets.dailyLimit !== null && this.#deps.usage.spentSince(dayStart) >= budgets.dailyLimit) {
-            throw new RpcError(RpcErrorCode.Rejected, '今日花费已到预算上限，可以在设置→用量与预算里调整');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).dailyBudget);
         }
         if (budgets.monthlyLimit !== null && this.#deps.usage.spentSince(monthStart) >= budgets.monthlyLimit) {
-            throw new RpcError(RpcErrorCode.Rejected, '本月花费已到预算上限，可以在设置→用量与预算里调整');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).monthlyBudget);
         }
     }
 
@@ -412,7 +480,7 @@ export class TurnService {
         const current = settings.get();
         const modelRef = thread.model ?? project.defaults?.model ?? current.defaultModel;
         if (!modelRef) {
-            throw new RpcError(RpcErrorCode.Rejected, '还没有选择模型');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noModel);
         }
         const provider = this.#hostTools.get(thread.id);
         const baseLayers = prompts.engineLayers({
@@ -446,6 +514,7 @@ export class TurnService {
             mode: thread.mode,
             layers,
             softContextWindow: current.softContextWindow,
+            language: hostLanguage(),
             maxTurnRequests: Math.max(
                 1,
                 Math.min(MAX_TURN_REQUESTS, provider?.maxTurnRequests?.() ?? MAX_TURN_REQUESTS),
@@ -581,7 +650,7 @@ export class TurnService {
             warned ??= new Set();
             if (warned.has(key)) continue;
             warned.add(key);
-            this.#notice(running, 'warning', `mcp服务器${status.name}没有启动`, status.error);
+            this.#notice(running, 'warning', textOf(TEXT).mcpNotStarted(status.name), status.error);
         }
         if (warned) this.#mcpWarned.set(running.threadId, warned);
     }
@@ -632,14 +701,19 @@ export class TurnService {
                 this.#notice(
                     running,
                     'warning',
-                    'hook拦截了这条消息',
+                    textOf(TEXT).hookBlocked,
                     submitted.reason ?? submitted.messages.join('\n'),
                 );
                 return undefined;
             }
             if (submitted?.additionalContext) note('UserPromptSubmit', submitted.additionalContext);
         } catch (error) {
-            this.#notice(running, 'warning', 'hook运行失败', error instanceof Error ? error.message : String(error));
+            this.#notice(
+                running,
+                'warning',
+                textOf(TEXT).hookFailed,
+                error instanceof Error ? error.message : String(error),
+            );
         }
         return context;
     }
@@ -730,7 +804,7 @@ export class TurnService {
                 this.#notice(
                     running,
                     'warning',
-                    'hook运行失败',
+                    textOf(TEXT).hookFailed,
                     error instanceof Error ? error.message : String(error),
                 );
             }
@@ -740,15 +814,10 @@ export class TurnService {
             }
             const reason = outcome.reason?.trim() || 'A stop hook asked you to keep working.';
             if (continued >= MAX_STOP_CONTINUATIONS) {
-                this.#notice(
-                    running,
-                    'warning',
-                    `hook还要agent继续，这一轮已经继续了${MAX_STOP_CONTINUATIONS}次，停在这里`,
-                    reason,
-                );
+                this.#notice(running, 'warning', textOf(TEXT).hookLimit(MAX_STOP_CONTINUATIONS), reason);
                 return stopReason;
             }
-            this.#notice(running, 'info', 'hook让agent继续工作', reason);
+            this.#notice(running, 'info', textOf(TEXT).hookContinue, reason);
             const response = await process.agent.request('session/prompt', {
                 sessionId,
                 prompt: [{ type: 'text', text: `<hook_feedback event="${event}">\n${reason}\n</hook_feedback>` }],
@@ -1138,7 +1207,10 @@ export class TurnService {
         };
         running.toolItems.set(update.toolCallId, item.id);
         if (item.status === 'completed' || item.status === 'failed') {
-            this.#persist(running, { ...item, ...(textOf(update.content) ? { output: textOf(update.content) } : {}) });
+            this.#persist(running, {
+                ...item,
+                ...(contentText(update.content) ? { output: contentText(update.content) } : {}),
+            });
         } else {
             this.#persist(running, item, 'item.started');
         }
@@ -1156,7 +1228,7 @@ export class TurnService {
         let status: ToolCallStatus = (update.status as ToolCallStatus | null | undefined) ?? current.status;
         if (meta?.denied === true) status = 'denied';
         if (meta?.cancelled === true) status = 'cancelled';
-        const output = typeof meta?.liveOutput === 'string' ? meta.liveOutput : textOf(update.content);
+        const output = typeof meta?.liveOutput === 'string' ? meta.liveOutput : contentText(update.content);
         const next: ItemOf<'tool_call'> = {
             ...current,
             status,
@@ -1358,7 +1430,7 @@ export class TurnService {
             !granted.some((pattern) => matchesToolPattern(pattern, facts.toolName))
         ) {
             this.#deps.log.info(`denied ${facts.toolName} in ${running.threadId}: not in the agent's tools`);
-            return select(false, '这个agent的工具白名单里没有这个mcp工具');
+            return select(false, textOf(TEXT).mcpToolNotGranted);
         }
         const policy = approvals.evaluate(running.threadId, facts, {
             mode: thread.mode,
@@ -1408,9 +1480,7 @@ export class TurnService {
                         projectId: running.projectId,
                         toolCallId: request.toolCall.toolCallId,
                         toolName: facts.toolName,
-                        title: facts.highRisk
-                            ? `高风险动作（${HIGH_RISK_LABELS[facts.highRisk.action]}）：${title}`
-                            : title,
+                        title: facts.highRisk ? textOf(TEXT).highRisk(facts.highRisk.action, title) : title,
                         toolKind: facts.kind,
                         summary,
                         ...(facts.command ? { command: facts.command } : {}),
@@ -1441,8 +1511,13 @@ export class TurnService {
                         });
                         const prefs = settings.get().notifications;
                         if (prefs.onApproval && !bus.focused) {
+                            const text = textOf(TEXT);
                             shell
-                                .notify('需要你确认', `${thread.title}：${approval.title}`, running.threadId)
+                                .notify(
+                                    text.needsApproval,
+                                    text.inThread(thread.title, approval.title),
+                                    running.threadId,
+                                )
                                 .catch(() => undefined);
                         }
                     },
@@ -1545,10 +1620,10 @@ export class TurnService {
             status: stopReason === 'cancelled' ? 'cancelled' : 'idle',
             needsReview: Boolean(changes),
             unread: !bus.focused,
-            ...(thread.turns <= 1 && thread.title === '新线程' ? { title: this.#title(running) } : {}),
+            ...(thread.turns <= 1 && hasDefaultTitle(thread.title) ? { title: this.#title(running) } : {}),
         });
         if (stopReason !== 'cancelled' && settings.get().notifications.onComplete && !bus.focused) {
-            shell.notify('任务完成', thread.title, running.threadId).catch(() => undefined);
+            shell.notify(textOf(TEXT).completed, thread.title, running.threadId).catch(() => undefined);
         }
         this.#ended(
             running,
@@ -1593,7 +1668,7 @@ export class TurnService {
             text
                 .split('\n')
                 .find((candidate) => candidate.trim().length > 0)
-                ?.trim() ?? '新线程';
+                ?.trim() ?? textOf(TEXT).newThread;
         return line.length > 40 ? `${line.slice(0, 40)}…` : line;
     }
 
@@ -1628,7 +1703,7 @@ export class TurnService {
                 };
             }
             if (rpc.code === BUSY_ERROR_CODE) {
-                return { errorClass: 'engine', message: '引擎里这个会话还在运行', retryable: true };
+                return { errorClass: 'engine', message: textOf(TEXT).sessionBusy, retryable: true };
             }
             if (rpc.code === RpcErrorCode.Rejected) {
                 return { errorClass: 'invalid_request', message: String(rpc.message), retryable: false };
@@ -1645,7 +1720,7 @@ export class TurnService {
         const { threads, bus, settings, shell, approvals, log } = this.#deps;
         approvals.cancelThread(running.threadId);
         const classified = running.exited
-            ? { errorClass: 'engine' as const, message: `引擎进程退出：${running.exited}`, retryable: true }
+            ? { errorClass: 'engine' as const, message: textOf(TEXT).engineExited(running.exited), retryable: true }
             : this.#classify(error);
         log.warn(`turn ${running.turnId} failed: ${classified.errorClass}: ${classified.message}`);
         this.#closeLive(running, 'failed');
@@ -1666,7 +1741,10 @@ export class TurnService {
         );
         const thread = threads.update(running.threadId, { status: 'failed', unread: !bus.focused });
         if (settings.get().notifications.onFailure && !bus.focused) {
-            shell.notify('任务失败', `${thread.title}：${classified.message}`, running.threadId).catch(() => undefined);
+            const text = textOf(TEXT);
+            shell
+                .notify(text.failed, text.inThread(thread.title, classified.message), running.threadId)
+                .catch(() => undefined);
         }
         this.#ended(running, 'failed', undefined, []);
     }

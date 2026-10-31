@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
+import { bilingual } from '@xora/protocol';
 import {
     type CronSchedule,
     lastCronTime,
@@ -16,6 +17,7 @@ import {
 import { GitError, runGit } from '@xora/workspace';
 import picomatch from 'picomatch/posix';
 import type { Logger } from './log.ts';
+import { textOf } from './text.ts';
 import { defaultTreeWatch, inSkippedDir, type TreeWatcher, type WatchTree } from './tree-watch.ts';
 
 /**
@@ -38,6 +40,30 @@ const MAX_FIRE_FILES = 200;
 export const WEBHOOK_MAX_BYTES = 64 * 1024;
 export const DEFAULT_WEBHOOK_INTERVAL_MS = 5_000;
 export const DEFAULT_MUTE_GRACE_MS = 2_000;
+
+/** The webhook's error answers. */
+const TEXT = bilingual(
+    {
+        localOnly: '只接受本机地址的请求',
+        noPath: '没有这个地址',
+        postOnly: 'webhook只接受post请求',
+        noWebhook: '没有这个webhook，或者工作流没有打开webhook触发',
+        badToken: '缺少token或者token不对',
+        tooOften: (seconds: number) => `触发太频繁，${seconds}秒后再试`,
+        tooLarge: '请求体超过64kb',
+        badJson: '请求体不是合法的json',
+    },
+    {
+        localOnly: 'Only requests addressed to this machine are accepted',
+        noPath: 'No such address',
+        postOnly: 'The webhook only accepts POST requests',
+        noWebhook: 'No such webhook, or its workflow does not have the webhook trigger switched on',
+        badToken: 'The token is missing or wrong',
+        tooOften: (seconds) => `Triggered too often: try again in ${seconds} ${seconds === 1 ? 'second' : 'seconds'}`,
+        tooLarge: 'The request body is over 64 KB',
+        badJson: 'The request body is not valid JSON',
+    },
+);
 
 export interface TriggerTarget {
     /** Names the workflow in fires and in the webhook path, e.g. the project and workflow name. */
@@ -720,36 +746,37 @@ export class TriggerService {
             response.end(text);
         };
         request.on('error', () => undefined);
+        const text = textOf(TEXT);
         // Another host name means a page in a browser reached us through DNS rebinding.
         if (!isLoopbackHost(request.headers.host)) {
-            reply(403, { error: '只接受本机地址的请求' });
+            reply(403, { error: text.localOnly });
             return;
         }
         const key = hookKey(request.url);
         if (key === undefined) {
-            reply(404, { error: '没有这个地址' });
+            reply(404, { error: text.noPath });
             return;
         }
         if (request.method !== 'POST') {
-            reply(405, { error: 'webhook只接受post请求' }, { allow: 'POST' });
+            reply(405, { error: text.postOnly }, { allow: 'POST' });
             return;
         }
         const token = this.#webhooks.get(key);
         if (token === undefined) {
-            reply(404, { error: '没有这个webhook，或者工作流没有打开webhook触发' });
+            reply(404, { error: text.noWebhook });
             return;
         }
         if (!sameToken(bearerToken(request.headers.authorization), token)) {
-            reply(401, { error: '缺少token或者token不对' }, { 'www-authenticate': 'Bearer' });
+            reply(401, { error: text.badToken }, { 'www-authenticate': 'Bearer' });
             return;
         }
         const wait = this.#webhookWait(key);
         if (wait > 0) {
-            reply(429, { error: `触发太频繁，${wait}秒后再试` }, { 'retry-after': String(wait) });
+            reply(429, { error: text.tooOften(wait) }, { 'retry-after': String(wait) });
             return;
         }
         if (Number(request.headers['content-length'] ?? 0) > WEBHOOK_MAX_BYTES) {
-            reply(413, { error: '请求体超过64kb' }, { connection: 'close' });
+            reply(413, { error: text.tooLarge }, { connection: 'close' });
             return;
         }
         const chunks: Buffer[] = [];
@@ -762,7 +789,7 @@ export class TriggerService {
             size += chunk.length;
             if (size > WEBHOOK_MAX_BYTES) {
                 rejected = true;
-                reply(413, { error: '请求体超过64kb' }, { connection: 'close' });
+                reply(413, { error: text.tooLarge }, { connection: 'close' });
                 return;
             }
             chunks.push(chunk);
@@ -773,17 +800,17 @@ export class TriggerService {
             }
             const body = parseBody(Buffer.concat(chunks), request.headers['content-type']);
             if (!body.ok) {
-                reply(400, { error: '请求体不是合法的json' });
+                reply(400, { error: text.badJson });
                 return;
             }
             // Checked again: the webhook may have been switched off, or another request accepted, meanwhile.
             if (this.#webhooks.get(key) !== token) {
-                reply(404, { error: '没有这个webhook，或者工作流没有打开webhook触发' });
+                reply(404, { error: text.noWebhook });
                 return;
             }
             const late = this.#webhookWait(key);
             if (late > 0) {
-                reply(429, { error: `触发太频繁，${late}秒后再试` }, { 'retry-after': String(late) });
+                reply(429, { error: text.tooOften(late) }, { 'retry-after': String(late) });
                 return;
             }
             const at = this.#now();

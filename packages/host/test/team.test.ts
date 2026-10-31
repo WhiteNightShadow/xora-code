@@ -521,8 +521,14 @@ describe('agent team limits', () => {
         ]);
         await expect(ui.request('team.resume', { runId: run.id })).rejects.toThrow(/预算已用完/);
 
+        // Once the language setting says en, errors and notes are English.
+        await ui.request('settings.update', { patch: { language: 'en' } });
+        await expect(ui.request('team.resume', { runId: run.id })).rejects.toThrow(
+            'The budget is used up: add to it before you continue',
+        );
         const stopped = await ui.request('team.stop', { runId: run.id });
         expect(stopped.status).toBe('cancelled');
+        expect(stopped.note).toBe('You stopped this run');
         expect(stopped.tasks.map((task) => task.status)).toEqual(['cancelled']);
     }, 60_000);
 

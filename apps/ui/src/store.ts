@@ -1,16 +1,19 @@
-import type {
-    Approval,
-    Attachment,
-    Connection,
-    ModelOption,
-    PresetSummary,
-    Project,
-    Settings,
-    SystemInfo,
-    TeamRun,
-    ThreadMeta,
-    UpdateStatus,
-    WorkflowRun,
+import {
+    type Approval,
+    type Attachment,
+    type Connection,
+    type LanguageSetting,
+    type ModelOption,
+    type PresetSummary,
+    type Project,
+    resolveLanguage,
+    type Settings,
+    type SystemInfo,
+    type TeamRun,
+    type ThreadMeta,
+    type UiLanguage,
+    type UpdateStatus,
+    type WorkflowRun,
 } from '@xora/protocol';
 import { create } from 'zustand';
 import { errorMessage, host } from './host.ts';
@@ -120,12 +123,17 @@ export const useApp = create<AppState>(() => ({
 const set = useApp.setState;
 const get = useApp.getState;
 
+/** The language the UI shows: the setting, or the system's when it is `system` or not loaded yet. */
+export function uiLanguage(setting: LanguageSetting | undefined): UiLanguage {
+    return resolveLanguage(setting ?? 'system', navigator.languages);
+}
+
 export function useStrings(): Strings {
-    return useApp((state) => STRINGS[state.settings?.language ?? 'zh-CN']);
+    return useApp((state) => STRINGS[uiLanguage(state.settings?.language)]);
 }
 
 export function strings(): Strings {
-    return STRINGS[get().settings?.language ?? 'zh-CN'];
+    return STRINGS[uiLanguage(get().settings?.language)];
 }
 
 let toastId = 0;

@@ -202,19 +202,36 @@ describe('escalation', () => {
 
 describe('downgradeSuggestion', () => {
     it('suggests one tier cheaper from 90% first-pass over 10 tasks', () => {
-        const suggestion = downgradeSuggestion({ category: 'Docs', tier: 'standard', tasks: 20, firstPass: 19 });
+        const suggestion = downgradeSuggestion(
+            { category: 'Docs', tier: 'standard', tasks: 20, firstPass: 19 },
+            'zh-CN',
+        );
         expect(suggestion).toMatchObject({ category: 'docs', from: 'standard', to: 'economy', firstPassRate: 0.95 });
         expect(suggestion?.message).toBe(
             'docs类任务在标准档的一次通过率是95%（共20个），可以考虑改用经济档。这只是建议，不会自动修改。',
         );
         expect(followsChineseStyle(suggestion?.message ?? '')).toBe(true);
-        expect(downgradeSuggestion({ category: 'docs', tier: 'standard', tasks: 10, firstPass: 9 })).toBeDefined();
+        expect(
+            downgradeSuggestion({ category: 'Docs', tier: 'standard', tasks: 20, firstPass: 19 }, 'en')?.message,
+        ).toBe(
+            'docs tasks pass 95% of the time on the first try at the standard tier (20 tasks); the economy tier may do. ' +
+                'Only a suggestion: nothing changes on its own.',
+        );
+        expect(
+            downgradeSuggestion({ category: 'docs', tier: 'standard', tasks: 10, firstPass: 9 }, 'zh-CN'),
+        ).toBeDefined();
     });
 
     it('stays quiet below the thresholds or at the cheapest tier', () => {
-        expect(downgradeSuggestion({ category: 'docs', tier: 'standard', tasks: 9, firstPass: 9 })).toBeUndefined();
-        expect(downgradeSuggestion({ category: 'docs', tier: 'standard', tasks: 20, firstPass: 17 })).toBeUndefined();
-        expect(downgradeSuggestion({ category: 'docs', tier: 'fast', tasks: 50, firstPass: 50 })).toBeUndefined();
+        expect(
+            downgradeSuggestion({ category: 'docs', tier: 'standard', tasks: 9, firstPass: 9 }, 'zh-CN'),
+        ).toBeUndefined();
+        expect(
+            downgradeSuggestion({ category: 'docs', tier: 'standard', tasks: 20, firstPass: 17 }, 'zh-CN'),
+        ).toBeUndefined();
+        expect(
+            downgradeSuggestion({ category: 'docs', tier: 'fast', tasks: 50, firstPass: 50 }, 'zh-CN'),
+        ).toBeUndefined();
     });
 
     it('counts first passes per category and starting tier', () => {

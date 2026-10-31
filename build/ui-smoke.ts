@@ -9,14 +9,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { FuseV1Options, FuseVersion, flipFuses, getCurrentFuseWire } from '@electron/fuses';
-import { _electron as electron, type Page } from 'playwright-core';
+import { type ElectronApplication, _electron as electron, type Page } from 'playwright-core';
 import { openaiText, openaiToolCalls, startMockModelServer } from '../packages/test-kit/src/index.ts';
 import { secretStoreSwitches } from './app-switches.ts';
 
 /**
  * UI smoke test in the real app (M1 acceptance): connect a model, open a project, ask for a change, approve it,
  * review the diff and undo it — all through the UI, against a scripted model server and throwaway data. Then the
- * M4 extensions: a project command shows up in the composer and on the settings page.
+ * M4 extensions: a project command shows up in the composer and on the settings page. Last, a fresh start with an
+ * English app locale: the UI and the menus follow the system's language until one is picked in the settings.
  *
  *   node build/ui-smoke.ts                 unpackaged shell with dist/app-bundle (run `pnpm build && pnpm bundle`)
  *   node build/ui-smoke.ts --app <exe>     a packaged build
@@ -153,29 +154,84 @@ async function hostCall(page: Page, method: string, params: unknown): Promise<un
     );
 }
 
-const app = await electron.launch({
-    executablePath,
-    args: [
-        ...(values.app ? [] : [desktopDir]),
-        ...secretStoreSwitches(),
-        // On Linux the copy has neither the setuid sandbox helper nor the AppArmor profile that lets the installed
-        // app create its sandbox (Ubuntu 24.04); the update drill checks the installed app with its sandbox.
-        ...(process.platform === 'linux' && values.app && executablePath !== path.resolve(values.app)
-            ? ['--no-sandbox']
-            : []),
-    ],
-    env: {
-        ...process.env,
-        XORA_DATA_DIR: dataDir,
-        XORA_TEST_PLAIN_SECRETS: '1',
-        ...(values.show ? {} : { XORA_TEST_HIDE_WINDOWS: '1' }),
-        ELECTRON_RUN_AS_NODE: '',
-    } as Record<string, string>,
-    timeout: ms(60_000),
-});
-
 let failed = false;
 let current: Page | undefined;
+
+/** Starts the app on a data folder, with `lang` as the app locale: Chromium's --lang works on every platform. */
+function launch(data: string, lang: string): Promise<ElectronApplication> {
+    return electron.launch({
+        executablePath,
+        args: [
+            ...(values.app ? [] : [desktopDir]),
+            ...secretStoreSwitches(),
+            // On Linux the copy has neither the setuid sandbox helper nor the AppArmor profile that lets the
+            // installed app create its sandbox (Ubuntu 24.04); the update drill checks the installed app with it.
+            ...(process.platform === 'linux' && values.app && executablePath !== path.resolve(values.app)
+                ? ['--no-sandbox']
+                : []),
+            `--lang=${lang}`,
+        ],
+        env: {
+            ...process.env,
+            XORA_DATA_DIR: data,
+            XORA_TEST_PLAIN_SECRETS: '1',
+            ...(values.show ? {} : { XORA_TEST_HIDE_WINDOWS: '1' }),
+            ELECTRON_RUN_AS_NODE: '',
+        } as Record<string, string>,
+        timeout: ms(60_000),
+    });
+}
+
+/** Closes the windows the way a user does; false when the app did not quit on its own and had to be killed. */
+async function closeApp(instance: ElectronApplication): Promise<boolean> {
+    const exited = new Promise<boolean>((resolve) => instance.process().once('exit', () => resolve(true)));
+    await instance
+        .evaluate(({ BrowserWindow }) => {
+            for (const window of BrowserWindow.getAllWindows()) window.close();
+        })
+        .catch(() => undefined);
+    const quit = await Promise.race([
+        exited,
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms(20_000))),
+    ]);
+    if (!quit) {
+        instance.process().kill('SIGKILL');
+    }
+    return quit;
+}
+
+/** Waits until the application menu has a top-level item with this label. */
+async function menuShows(instance: ElectronApplication, label: string): Promise<void> {
+    const deadline = Date.now() + ms(10_000);
+    let labels: string[] = [];
+    while (Date.now() < deadline) {
+        labels = await instance.evaluate(
+            ({ Menu }) => Menu.getApplicationMenu()?.items.map((item) => item.label) ?? [],
+        );
+        if (labels.includes(label)) {
+            return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error(`菜单里没有“${label}”：${labels.join('、')}`);
+}
+
+function reportFailure(error: unknown): void {
+    failed = true;
+    console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
+}
+
+async function failureShot(): Promise<void> {
+    if (current) {
+        const file = path.join(values.shots ?? work, 'failure.png');
+        await current.screenshot({ path: file }).catch(() => undefined);
+        console.error(`  失败截图：${file}`);
+    }
+}
+
+// The steps find controls by their Chinese names, and the UI follows the system's language by default.
+const app = await launch(dataDir, 'zh-CN');
+
 try {
     const page = await app.firstWindow({ timeout: ms(60_000) });
     current = page;
@@ -349,36 +405,45 @@ try {
     await page.locator('.team__goal .badge', { hasText: '完成' }).waitFor();
     await step(page, '工作流运行到人工关卡，确认后完成');
 } catch (error) {
-    failed = true;
-    console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
+    reportFailure(error);
     console.error(
         `  模型服务收到：${server.requests.map((request) => `${request.method} ${request.path}`).join(', ') || '（无）'}`,
     );
-    if (current) {
-        const file = path.join(values.shots ?? work, 'failure.png');
-        await current.screenshot({ path: file }).catch(() => undefined);
-        console.error(`  失败截图：${file}`);
-    }
+    await failureShot();
 } finally {
-    // Close the window the way a user does and wait for the app to quit on its own.
-    const exited = new Promise<boolean>((resolve) => app.process().once('exit', () => resolve(true)));
-    await app
-        .evaluate(({ BrowserWindow }) => {
-            for (const window of BrowserWindow.getAllWindows()) window.close();
-        })
-        .catch(() => undefined);
-    const quit = await Promise.race([
-        exited,
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms(20_000))),
-    ]);
-    if (!quit) {
+    if (!(await closeApp(app))) {
         failed = true;
         console.error('✗ 关闭窗口后应用20秒内没有退出，已强制结束');
-        app.process().kill('SIGKILL');
     }
     await server.close();
     site.close();
     site.closeAllConnections();
+}
+
+// A fresh start on an English system: the UI and the shell's menus are English until the user picks a language.
+if (!failed) {
+    const english = await launch(path.join(work, 'data-en'), 'en-US');
+    try {
+        const page = await english.firstWindow({ timeout: ms(60_000) });
+        current = page;
+        page.setDefaultTimeout(ms(30_000));
+        await page.getByRole('button', { name: /Connect a model/ }).waitFor();
+        await menuShows(english, 'Help');
+        await step(page, '系统是英文时界面和菜单显示英文');
+        await page.getByRole('button', { name: 'Settings', exact: true }).click();
+        await page.getByRole('combobox', { name: 'Language' }).selectOption('zh-CN');
+        await page.getByRole('combobox', { name: '语言' }).waitFor();
+        await menuShows(english, '帮助');
+        await step(page, '设置里选中文后界面和菜单都换成中文');
+    } catch (error) {
+        reportFailure(error);
+        await failureShot();
+    } finally {
+        if (!(await closeApp(english))) {
+            failed = true;
+            console.error('✗ 关闭窗口后应用20秒内没有退出，已强制结束');
+        }
+    }
 }
 
 console.log(`\n${steps.length}步通过${failed ? '，有失败' : ''}`);

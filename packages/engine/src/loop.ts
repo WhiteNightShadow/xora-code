@@ -98,6 +98,30 @@ const MAX_ATTEMPTS = 3;
 const LIVE_OUTPUT_INTERVAL_MS = 250;
 const LIVE_OUTPUT_TAIL = 4000;
 
+/** What the user sees from the loop: notices and permission options, in the session's language. */
+const ZH_TEXT = {
+    fallback: (model: string) => `切换到备用模型${model}`,
+    retry: (rateLimited: boolean, seconds: number) =>
+        `${rateLimited ? '触发限速' : '模型服务暂时不可用'}，${seconds}秒后重试`,
+    allowOnce: '允许一次',
+    allowAlways: '总是允许',
+    reject: '拒绝',
+    hookBlocked: (tool: string) => `hook拦截了${tool}`,
+};
+
+const TEXT: Readonly<Record<'zh-CN' | 'en', typeof ZH_TEXT>> = {
+    'zh-CN': ZH_TEXT,
+    en: {
+        fallback: (model) => `Switched to the fallback model ${model}`,
+        retry: (rateLimited, seconds) =>
+            `${rateLimited ? 'Rate limited' : 'The model service is unavailable'}; retrying in ${seconds}s`,
+        allowOnce: 'Allow once',
+        allowAlways: 'Always allow',
+        reject: 'Reject',
+        hookBlocked: (tool) => `A hook blocked ${tool}`,
+    },
+};
+
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
         const timer = setTimeout(resolve, ms);
@@ -266,6 +290,10 @@ export class TurnRunner {
         return this.#signal.aborted || this.#cancelled;
     }
 
+    get #text(): typeof ZH_TEXT {
+        return TEXT[this.#session.config.language];
+    }
+
     constructor(session: EngineSession, io: TurnIO, signal: AbortSignal, tools: readonly AnyTool[], lsp?: LspManager) {
         this.#session = session;
         this.#io = io;
@@ -421,7 +449,7 @@ export class TurnRunner {
             if (index > 0) {
                 this.#notice(
                     'warning',
-                    `切换到备用模型${target.model.name}`,
+                    this.#text.fallback(target.model.name),
                     lastError instanceof Error ? lastError.message : undefined,
                 );
                 if (this.#crossesProvider(target)) {
@@ -448,7 +476,7 @@ export class TurnRunner {
                 const wait = Math.min(60_000, error.retryAfterMs ?? 2000 * 2 ** (attempt - 1));
                 this.#notice(
                     'warning',
-                    `${error.errorClass === 'rate_limit' ? '触发限速' : '模型服务暂时不可用'}，${Math.round(wait / 1000)}秒后重试`,
+                    this.#text.retry(error.errorClass === 'rate_limit', Math.round(wait / 1000)),
                     error.message,
                 );
                 await sleep(wait, this.#signal);
@@ -675,9 +703,9 @@ export class TurnRunner {
                 locations: call.targets.map((target) => ({ path: target })),
             },
             options: [
-                { optionId: 'allow_once', name: '允许一次', kind: 'allow_once' },
-                { optionId: 'allow_always', name: '总是允许', kind: 'allow_always' },
-                { optionId: 'reject_once', name: '拒绝', kind: 'reject_once' },
+                { optionId: 'allow_once', name: this.#text.allowOnce, kind: 'allow_once' },
+                { optionId: 'allow_always', name: this.#text.allowAlways, kind: 'allow_always' },
+                { optionId: 'reject_once', name: this.#text.reject, kind: 'reject_once' },
             ],
             _meta: {
                 xora: {
@@ -899,7 +927,7 @@ export class TurnRunner {
             }
             const blocked = hooks[index]?.blocked;
             if (blocked) {
-                this.#notice('warning', `hook拦截了${call.name}`, blocked);
+                this.#notice('warning', this.#text.hookBlocked(call.name), blocked);
                 this.#finish(
                     call,
                     { content: `A PreToolUse hook blocked this call: ${blocked}`, isError: true },

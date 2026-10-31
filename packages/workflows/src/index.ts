@@ -251,7 +251,7 @@ export {
     type TeamState,
     type TeamStore,
 } from './store.ts';
-export { money, percent, ROLE_LABELS, TIER_LABELS, zhStyle } from './style.ts';
+export { money, percent, roleLabel, tierLabel, uiStyle, zhStyle } from './style.ts';
 export {
     type AgentStep,
     AgentStepSchema,

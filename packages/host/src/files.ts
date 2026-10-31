@@ -1,7 +1,19 @@
 import { readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { RpcError, RpcErrorCode } from '@xora/protocol';
+import { bilingual, RpcError, RpcErrorCode } from '@xora/protocol';
 import { checkPathAccess, walk } from '@xora/tools';
+import { textOf } from './text.ts';
+
+const TEXT = bilingual(
+    {
+        outsideWorkspace: (target: string) => `只能查看工作区里的文件：${target}`,
+        changedSince: '文件在生成修改之后又被改过，请重新生成',
+    },
+    {
+        outsideWorkspace: (target) => `Only files inside the workspace can be viewed: ${target}`,
+        changedSince: 'The file changed after the edit was generated; generate it again',
+    },
+);
 
 const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
 const IMAGE_TYPES: Record<string, string> = {
@@ -19,7 +31,7 @@ export async function resolveInside(root: string, target: string): Promise<strin
     const absolute = path.isAbsolute(target) ? target : path.join(root, target);
     const access = await checkPathAccess([root], absolute);
     if (!access.ok) {
-        throw new RpcError(RpcErrorCode.Rejected, `只能查看工作区里的文件：${target}`);
+        throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).outsideWorkspace(target));
     }
     return access.realPath;
 }
@@ -72,7 +84,7 @@ export async function applyInlineEdit(
     const file = await resolveInside(root, target);
     const current = await readFile(file, 'utf8');
     if (current !== expectedOld) {
-        throw new RpcError(RpcErrorCode.Rejected, '文件在生成修改之后又被改过，请重新生成');
+        throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).changedSince);
     }
     const temp = `${file}.xora-${process.pid}.tmp`;
     await writeFile(temp, newText, 'utf8');

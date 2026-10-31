@@ -11,6 +11,14 @@ export {
     TurnUsageSchema,
 } from './events.ts';
 export {
+    bilingual,
+    type LanguageSetting,
+    LanguageSettingSchema,
+    type Mirror,
+    resolveLanguage,
+    type UiLanguage,
+} from './language.ts';
+export {
     ConnectionTestSchema,
     type HostMethods,
     type HostNotifications,

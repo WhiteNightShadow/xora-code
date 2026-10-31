@@ -2,7 +2,7 @@ import type { Connection, PresetSummary, Rule, Settings } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { Badge, Field, Modal, type Option, Select, Spinner, Toggle } from '../components/primitives.tsx';
 import { errorMessage, host } from '../host.ts';
-import { attempt, refreshConnections, type SettingsSection, toast, useApp, useStrings } from '../store.ts';
+import { attempt, refreshConnections, type SettingsSection, toast, uiLanguage, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { ExtensionsSection } from './ExtensionsSection.tsx';
 
@@ -15,6 +15,9 @@ function useSettings(): [Settings | undefined, (patch: Partial<Settings>) => voi
         });
     return [settings, update];
 }
+
+/** Each language by its own name. */
+const LANGUAGE_NAMES = { 'zh-CN': '简体中文', en: 'English' } as const;
 
 /** Choices for the team concurrency setting (protocol: 1–8). */
 const TEAM_PARALLEL = ['1', '2', '3', '4', '5', '6', '7', '8'];
@@ -30,8 +33,14 @@ function General() {
                     label={s.settings.language}
                     value={settings.language}
                     options={[
-                        { value: 'zh-CN', label: '简体中文' },
-                        { value: 'en', label: 'English' },
+                        {
+                            value: 'system',
+                            label: format(s.settings.languageSystem, {
+                                language: LANGUAGE_NAMES[uiLanguage('system')],
+                            }),
+                        },
+                        { value: 'zh-CN', label: LANGUAGE_NAMES['zh-CN'] },
+                        { value: 'en', label: LANGUAGE_NAMES.en },
                     ]}
                     onChange={(language) => update({ language })}
                 />

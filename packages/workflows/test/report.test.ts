@@ -55,6 +55,7 @@ describe('deliveryReport', () => {
         cards: finishedBoard().list(),
         ledger: ledger.current,
         usage,
+        language: 'zh-CN',
     });
 
     it('has the five sections of 06 §13', () => {
@@ -94,9 +95,9 @@ describe('deliveryReport', () => {
 
     it('warns when supervision exceeds the alert line', () => {
         expect(report).toContain('主管花费4.00元，占总花费的44%，超过提示线25%：任务可能拆得太碎，或者来回沟通太多。');
-        const relaxed = deliveryReport({ goal: 'g', cards: [], usage, alertRatio: 0.5 });
+        const relaxed = deliveryReport({ goal: 'g', cards: [], usage, alertRatio: 0.5, language: 'zh-CN' });
         expect(relaxed).toContain('主管花费4.00元，占总花费的44%，在提示线50%以内。');
-        expect(deliveryReport({ goal: 'g', cards: [], usage: [] })).toContain('还没有花费记录。');
+        expect(deliveryReport({ goal: 'g', cards: [], usage: [], language: 'zh-CN' })).toContain('还没有花费记录。');
     });
 
     it('collects open issues', () => {
@@ -123,10 +124,41 @@ describe('deliveryReport', () => {
             ],
             currency: 'CNY',
             rates: { USD_CNY: 7 },
+            language: 'zh-CN',
         });
         expect(text).toContain('（执行者报告完成）');
         expect(text).toContain('合计：9.00元，另有3.00eur未换算。');
         expect(followsChineseStyle(text)).toBe(true);
+    });
+
+    it('is in English for an English UI, without the Chinese style rule', () => {
+        const english = deliveryReport({
+            goal: 'Add SMS login',
+            cards: finishedBoard().list(),
+            ledger: ledger.current,
+            usage,
+            language: 'en',
+        });
+        for (const heading of ['# Delivery report', '## What was done', '## Evidence', '## Cost', '## Open issues']) {
+            expect(english).toContain(heading);
+        }
+        expect(english).toContain('Goal: Add SMS login');
+        expect(english).toContain('above the alert line of 25%');
+        expect(english).toContain('Risk from the plan: Vendor quota');
+        // Task titles and risks are the agents' own words; the report's own text is all English.
+        for (const chinese of [
+            '交付报告',
+            '目标',
+            '花费',
+            '主管',
+            '没有完成',
+            '的风险',
+            '待解答',
+            '退回或升级',
+            '元',
+        ]) {
+            expect(english).not.toContain(chinese);
+        }
     });
 });
 
@@ -146,8 +178,10 @@ describe('zhStyle', () => {
     });
 
     it('formats money', () => {
-        expect(money(12.3, 'CNY')).toBe('12.30元');
-        expect(money(0.5, 'USD')).toBe('$0.50');
-        expect(money(0.004, 'CNY')).toBe('0.0040元');
+        expect(money(12.3, 'CNY', 'zh-CN')).toBe('12.30元');
+        expect(money(0.5, 'USD', 'zh-CN')).toBe('$0.50');
+        expect(money(0.004, 'CNY', 'zh-CN')).toBe('0.0040元');
+        expect(money(12.3, 'CNY', 'en')).toBe('¥12.30');
+        expect(money(3, 'EUR', 'en')).toBe('3.00 EUR');
     });
 });

@@ -1,11 +1,28 @@
-import { type RevertResult, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
+import { bilingual, type RevertResult, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
 import type { EngineManager } from './engines/manager.ts';
 import { engineById } from './engines/registry.ts';
 import type { Logger } from './log.ts';
 import type { ProjectService } from './projects.ts';
 import type { ReviewService } from './review.ts';
+import { textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
 import type { TurnService } from './turns.ts';
+
+const TEXT = bilingual(
+    {
+        externalEngine: '外部引擎的线程不能回退或分叉对话；要恢复文件可以用每一轮的“撤销这一轮”',
+        running: '线程正在运行，先停止再操作',
+        noTurn: '找不到这一轮，或者它已经回退过了',
+        forkTitle: (title: string) => `${title}（分叉）`,
+    },
+    {
+        externalEngine:
+            'Threads on an external engine cannot rewind or fork the conversation; to restore files, use "Undo this turn" on each turn',
+        running: 'The thread is running; stop it first',
+        noTurn: 'This turn was not found, or it was already rewound',
+        forkTitle: (title) => `${title} (fork)`,
+    },
+);
 
 /** JSON-RPC "invalid params": the engine does not know the turn (it never reached the engine). */
 const UNKNOWN_TURN = -32602;
@@ -64,13 +81,10 @@ export class HistoryService {
         const thread = this.#deps.threads.get(threadId);
         const engine = engineById(thread.engine);
         if (engine?.kind !== 'builtin') {
-            throw new RpcError(
-                RpcErrorCode.Rejected,
-                '外部引擎的线程不能回退或分叉对话；要恢复文件可以用每一轮的“撤销这一轮”',
-            );
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).externalEngine);
         }
         if (this.#deps.turns.isRunning(threadId)) {
-            throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再操作');
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).running);
         }
         return { thread, engine };
     }
@@ -81,7 +95,7 @@ export class HistoryService {
         const live = this.liveTurns(threadId);
         const index = live.indexOf(turnId);
         if (index < 0) {
-            throw new RpcError(RpcErrorCode.NotFound, '找不到这一轮，或者它已经回退过了');
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noTurn);
         }
         const later = live.slice(index);
 
@@ -135,7 +149,7 @@ export class HistoryService {
         if (afterTurnId !== undefined) {
             const index = live.indexOf(afterTurnId);
             if (index < 0) {
-                throw new RpcError(RpcErrorCode.NotFound, '找不到这一轮，或者它已经回退过了');
+                throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noTurn);
             }
             keep = live.slice(0, index + 1);
         }
@@ -163,7 +177,7 @@ export class HistoryService {
         const sessionPrompt = threads.sessionPrompt(threadId);
         const created = await this.#deps.createThread({
             projectId: thread.projectId,
-            title: `${thread.title}（分叉）`,
+            title: textOf(TEXT).forkTitle(thread.title),
             ...(thread.model ? { model: thread.model } : {}),
             mode: thread.mode,
             effort: thread.effort,

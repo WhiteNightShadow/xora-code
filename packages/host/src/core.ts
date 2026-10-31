@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { SYSTEM_PROMPT } from '@xora/engine';
 import {
+    bilingual,
     type HostMethods,
     type HostNotifications,
     methods,
@@ -11,6 +12,7 @@ import {
     RpcErrorCode,
     RpcPeer,
     type RpcTransport,
+    resolveLanguage,
     type ThreadMeta,
 } from '@xora/protocol';
 import { completeModel } from '@xora/providers';
@@ -45,14 +47,66 @@ import type { ShellApi } from './shell.ts';
 import { mergePath, resolveLoginPath } from './shell-env.ts';
 import { registerTeamHandlers, TeamService } from './team.ts';
 import { TerminalService } from './terminals.ts';
+import { setLanguageSource, textOf } from './text.ts';
 import { ThreadStore } from './threads.ts';
 import { type TriggerFire, TriggerService } from './triggers.ts';
-import { TurnService } from './turns.ts';
+import { defaultThreadTitle, TurnService } from './turns.ts';
 import { UpdateService } from './updates.ts';
 import { UsageService } from './usage.ts';
 import { which } from './which.ts';
 import { registerWorkflowHandlers, triggerKey, WorkflowService } from './workflows.ts';
 import { WorktreeService } from './worktrees.ts';
+
+const TEXT = bilingual(
+    {
+        interrupted: '应用在这一轮运行时退出了，这一轮没有完成',
+        systemLayer: '系统（xora统一）',
+        builtIn: '内置',
+        team: '团队',
+        extensions: '扩展',
+        projectBusy: '这个项目里还有线程在运行',
+        unknownEngine: (id: string) => `未知的引擎：${id}`,
+        stopToMove: '线程正在运行，先停止再迁移',
+        inWorktree: '线程已经在worktree里',
+        inProjectFolder: '线程已经在主目录',
+        modelUnavailable: (model: string) => `模型不可用：${model}`,
+        candidate: (number: number, model: string) => `候选${number}·${model}`,
+        stopToApply: '线程正在运行，先停止再应用',
+        notInWorktree: '这个线程不在worktree里',
+        stopToRemoveWorktree: '线程正在运行，先停止再删除worktree',
+        modelNotConnected: '这个模型不在已连接的模型里',
+        stopToDelete: '线程正在运行，先停止再删除',
+        noModel: '还没有选择模型',
+        textOnly: '只能编辑文本文件',
+        noCheckpoint: '这一轮没有检查点',
+        stopToRevert: '线程正在运行，先停止再撤销',
+        noCheckpointToRevert: '这一轮没有检查点，无法撤销',
+    },
+    {
+        interrupted: 'The app quit while this turn was running, so the turn did not finish',
+        systemLayer: 'System (unified by Xora)',
+        builtIn: 'Built-in',
+        team: 'Team',
+        extensions: 'Extensions',
+        projectBusy: 'Threads in this project are still running',
+        unknownEngine: (id) => `Unknown engine: ${id}`,
+        stopToMove: 'The thread is running; stop it before moving it',
+        inWorktree: 'The thread is already in a worktree',
+        inProjectFolder: 'The thread is already in the project folder',
+        modelUnavailable: (model) => `Model not available: ${model}`,
+        candidate: (number, model) => `Candidate ${number} · ${model}`,
+        stopToApply: 'The thread is running; stop it before applying its changes',
+        notInWorktree: 'This thread is not in a worktree',
+        stopToRemoveWorktree: 'The thread is running; stop it before deleting its worktree',
+        modelNotConnected: 'This model is not one of the connected models',
+        stopToDelete: 'The thread is running; stop it before deleting it',
+        noModel: 'No model selected yet',
+        textOnly: 'Only text files can be edited',
+        noCheckpoint: 'This turn has no checkpoint',
+        stopToRevert: 'The thread is running; stop it before undoing the turn',
+        noCheckpointToRevert: 'This turn has no checkpoint, so it cannot be undone',
+    },
+);
 
 export interface HostOptions {
     readonly dataDir: string;
@@ -103,7 +157,7 @@ export class HostCore {
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
 
-    private constructor(options: HostOptions, bundleDir: string) {
+    private constructor(options: HostOptions, bundleDir: string, systemLanguages: readonly string[]) {
         this.#options = options;
         this.paths = hostPaths(options.dataDir);
         this.log = options.log ?? new HostLog(this.paths.logsDir);
@@ -111,6 +165,8 @@ export class HostCore {
         this.db.migrate();
         const userAgent = `XoraCode/${options.bundleVersion}`;
         this.settings = new SettingsService(this.db);
+        // Before the services below: some write notes as soon as they recover, e.g. a run paused by the restart.
+        setLanguageSource(() => resolveLanguage(this.settings.get().language, systemLanguages));
         this.projects = new ProjectService(this.db, this.bus);
         this.threads = new ThreadStore(this.db, this.bus, this.paths.threadsDir);
         this.connections = new ConnectionService(this.db, options.shell, this.bus, this.log, userAgent);
@@ -263,7 +319,8 @@ export class HostCore {
 
     static async create(options: HostOptions): Promise<HostCore> {
         const info = await options.shell.info();
-        const core = new HostCore(options, info.bundleDir);
+        // An older shell does not report the system's languages; its UI showed Chinese.
+        const core = new HostCore(options, info.bundleDir, info.languages ?? ['zh-CN']);
         core.#recover();
         if (!options.skipShellEnv) {
             const login = await resolveLoginPath();
@@ -272,6 +329,7 @@ export class HostCore {
                 process.env.PATH = merged;
             }
         }
+        core.#tellShellLanguage();
         await core.distill.restore().catch((error) => core.log.warn(`distill: ${String(error)}`));
         core.#syncTriggers();
         // Also catches what no event reports: a project that lost its trust, a workflow file edited by hand.
@@ -364,7 +422,7 @@ export class HostCore {
                         ts: now,
                         type: 'error',
                         errorClass: 'engine',
-                        message: '应用在这一轮运行时退出了，这一轮没有完成',
+                        message: textOf(TEXT).interrupted,
                         retryable: true,
                     },
                 },
@@ -392,10 +450,11 @@ export class HostCore {
             cwd,
             sessionPrompt: this.threads.sessionPrompt(thread.id),
         });
+        const text = textOf(TEXT);
         const system: PromptLayer = {
             id: 'system',
-            title: '系统（xora统一）',
-            source: '内置',
+            title: text.systemLayer,
+            source: text.builtIn,
             text: SYSTEM_PROMPT,
             chars: SYSTEM_PROMPT.length,
             tokens: Math.ceil(SYSTEM_PROMPT.length / 4),
@@ -413,12 +472,12 @@ export class HostCore {
             editable: false,
         });
         // The same order the engine gets (see TurnService): team layers after the user's global layer, skills last.
-        const team = this.turns.hostLayers(thread.id).map((layer) => extra(layer, '团队'));
+        const team = this.turns.hostLayers(thread.id).map((layer) => extra(layer, text.team));
         const globalIndex = layers.findIndex((layer) => layer.id === 'user_global_instructions');
         let skills: PromptLayer[] = [];
         try {
             const project = await this.projects.get(thread.projectId);
-            skills = (await this.extensions.promptLayers(project)).map((layer) => extra(layer, '扩展'));
+            skills = (await this.extensions.promptLayers(project)).map((layer) => extra(layer, text.extensions));
         } catch (error) {
             this.log.warn(`effective prompt: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -478,13 +537,13 @@ export class HostCore {
         peer.handle('project.list', () => projects.list());
         peer.handle('project.add', ({ path: dir }) => projects.add(dir));
         peer.handle('project.pick', async () => {
-            const picked = await shell.pickDirectory('打开项目文件夹');
+            const picked = await shell.pickDirectory();
             return picked ? projects.add(picked) : null;
         });
         peer.handle('project.update', ({ projectId, ...patch }) => projects.update(projectId, patch));
         peer.handle('project.remove', ({ projectId }) => {
             if (threads.list({ projectId, includeArchived: true }).some((thread) => turns.isRunning(thread.id))) {
-                throw new RpcError(RpcErrorCode.Rejected, '这个项目里还有线程在运行');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).projectBusy);
             }
             projects.remove(projectId);
             return ok;
@@ -506,11 +565,11 @@ export class HostCore {
             const current = settings.get();
             const engineId = params.engine ?? 'xora';
             if (!this.engine(engineId)) {
-                throw new RpcError(RpcErrorCode.InvalidParams, `未知的引擎：${engineId}`);
+                throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).unknownEngine(engineId));
             }
             let thread = threads.create({
                 projectId: project.id,
-                title: params.title?.trim() || '新线程',
+                title: params.title?.trim() || defaultThreadTitle(),
                 engine: engineId,
                 model: params.model ?? project.defaults?.model ?? current.defaultModel,
                 mode: params.mode ?? project.defaults?.mode ?? current.defaultMode,
@@ -552,13 +611,13 @@ export class HostCore {
         peer.handle('thread.fork', ({ threadId, afterTurnId }) => history.fork(threadId, afterTurnId));
         peer.handle('thread.handoff', async ({ threadId, to }) => {
             if (turns.isRunning(threadId)) {
-                throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再迁移');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stopToMove);
             }
             const thread = threads.get(threadId);
             const project = await projects.get(thread.projectId);
             if (to === 'worktree') {
                 if (thread.location.kind === 'worktree') {
-                    throw new RpcError(RpcErrorCode.Rejected, '线程已经在worktree里');
+                    throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).inWorktree);
                 }
                 const created = await this.worktrees.create(project, thread.id);
                 const result = await this.worktrees.handoff(project, project.path, created.path);
@@ -568,7 +627,7 @@ export class HostCore {
                 return { thread: updated, result };
             }
             if (thread.location.kind !== 'worktree') {
-                throw new RpcError(RpcErrorCode.Rejected, '线程已经在主目录');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).inProjectFolder);
             }
             const result = await this.worktrees.handoff(project, thread.location.path, project.path);
             if (result.status === 'failed') {
@@ -583,11 +642,11 @@ export class HostCore {
             for (const [index, model] of models.entries()) {
                 const summary = connections.model(model);
                 if (!summary) {
-                    throw new RpcError(RpcErrorCode.InvalidParams, `模型不可用：${model.model}`);
+                    throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).modelUnavailable(model.model));
                 }
                 const thread = await createThread({
                     projectId,
-                    title: `候选${index + 1}·${summary.name}`,
+                    title: textOf(TEXT).candidate(index + 1, summary.name),
                     model,
                     location: 'worktree',
                     group,
@@ -602,22 +661,22 @@ export class HostCore {
         });
         peer.handle('worktree.apply', async ({ threadId }) => {
             if (turns.isRunning(threadId)) {
-                throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再应用');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stopToApply);
             }
             const thread = threads.get(threadId);
             if (thread.location.kind !== 'worktree') {
-                throw new RpcError(RpcErrorCode.Rejected, '这个线程不在worktree里');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).notInWorktree);
             }
             const project = await projects.get(thread.projectId);
             return this.worktrees.handoff(project, thread.location.path, project.path);
         });
         peer.handle('worktree.remove', async ({ threadId, force }) => {
             if (turns.isRunning(threadId)) {
-                throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再删除worktree');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stopToRemoveWorktree);
             }
             const thread = threads.get(threadId);
             if (thread.location.kind !== 'worktree') {
-                throw new RpcError(RpcErrorCode.Rejected, '这个线程不在worktree里');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).notInWorktree);
             }
             const project = await projects.get(thread.projectId);
             await this.worktrees.remove(project, threadId, thread.location.path, force ?? false);
@@ -662,7 +721,7 @@ export class HostCore {
         peer.handle('thread.update', ({ threadId, title, model, mode, effort, pinned, archived }) => {
             const before = threads.get(threadId);
             if (model && !connections.model(model)) {
-                throw new RpcError(RpcErrorCode.InvalidParams, '这个模型不在已连接的模型里');
+                throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).modelNotConnected);
             }
             const thread = threads.update(threadId, {
                 ...(title !== undefined ? { title } : {}),
@@ -698,7 +757,7 @@ export class HostCore {
         });
         peer.handle('thread.delete', ({ threadId }) => {
             if (turns.isRunning(threadId)) {
-                throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再删除');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stopToDelete);
             }
             approvals.clearSession(threadId);
             void turns.endSession(threads.get(threadId), 'delete');
@@ -717,12 +776,12 @@ export class HostCore {
             const thread = threads.get(threadId);
             const ref = thread.model ?? settings.get().defaultModel;
             if (!ref) {
-                throw new RpcError(RpcErrorCode.Rejected, '还没有选择模型');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noModel);
             }
             const root = await dirOf(threadId);
             const preview = await readForPreview(root, file);
             if (preview.kind !== 'text' || preview.text === undefined) {
-                throw new RpcError(RpcErrorCode.Rejected, '只能编辑文本文件');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).textOnly);
             }
             const content = preview.text;
             if (end > content.length || start > end) {
@@ -873,18 +932,18 @@ export class HostCore {
         peer.handle('review.file', async ({ threadId, turnId, path: file }) => {
             const { cwd, turn } = await turnContext(threadId, turnId);
             if (!turn?.before || !turn.after) {
-                throw new RpcError(RpcErrorCode.NotFound, '这一轮没有检查点');
+                throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noCheckpoint);
             }
             const versions = await review.file(cwd, turn.before, turn.after, file);
             return { oldText: versions.oldText, newText: versions.newText, binary: versions.binary };
         });
         peer.handle('review.revert', async ({ threadId, turnId, paths, force }) => {
             if (turns.isRunning(threadId)) {
-                throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再撤销');
+                throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stopToRevert);
             }
             const { cwd, turn } = await turnContext(threadId, turnId);
             if (!turn?.before || !turn.after) {
-                throw new RpcError(RpcErrorCode.NotFound, '这一轮没有检查点，无法撤销');
+                throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noCheckpointToRevert);
             }
             const targets =
                 paths ??
@@ -1020,7 +1079,15 @@ export class HostCore {
     #applySettings(patch: Parameters<SettingsService['update']>[0]) {
         const next = this.settings.update(patch);
         this.bus.broadcast('settings.changed', { settings: next });
+        if (patch.language !== undefined) {
+            this.#tellShellLanguage();
+        }
         return next;
+    }
+
+    /** The shell's menus, tray and dialogs follow the language setting; an older shell keeps the system's. */
+    #tellShellLanguage(): void {
+        this.#options.shell.setLanguage(this.settings.get().language).catch(() => undefined);
     }
 
     /** Engine lookup for threads; external engines arrive in M2. */

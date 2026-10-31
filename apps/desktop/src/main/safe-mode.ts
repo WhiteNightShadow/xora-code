@@ -8,6 +8,7 @@ import type { ShellEnv } from './env.ts';
 import { type InventorySources, readInventory, verifyCandidate } from './inventory.ts';
 import type { BootLog } from './log.ts';
 import type { DataPaths, ShellFiles } from './paths.ts';
+import { shellStrings } from './strings.ts';
 
 export interface SafeModeDeps {
     readonly env: ShellEnv;
@@ -105,7 +106,7 @@ export async function openSafeMode(deps: SafeModeDeps): Promise<void> {
         minWidth: 640,
         minHeight: 480,
         show: false,
-        title: 'Xora Code 修复模式',
+        title: shellStrings().safeModeTitle,
         webPreferences: {
             preload: files.preloadSafe,
             sandbox: true,
@@ -141,7 +142,7 @@ export async function openSafeMode(deps: SafeModeDeps): Promise<void> {
         const candidate: Candidate = { id: target as string, ...parsed };
         const check = await verifyCandidate(deps.sources, candidate);
         if (!check.ok) {
-            throw new Error(`该版本无法启动：${check.reason}`);
+            throw new Error(shellStrings().cannotLaunch(check.reason));
         }
         const { state } = await loadState(paths.stateFile);
         await saveState(paths.stateFile, rollbackTo(state, candidate));
@@ -156,7 +157,7 @@ export async function openSafeMode(deps: SafeModeDeps): Promise<void> {
     handle('safe:export-diagnostics', async () => {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
         const result = await dialog.showSaveDialog(window, {
-            title: '导出诊断信息',
+            title: shellStrings().exportDiagnostics,
             defaultPath: path.join(app.getPath('downloads'), `xora-diagnostics-${stamp}.json`),
             filters: [{ name: 'JSON', extensions: ['json'] }],
         });

@@ -9,6 +9,7 @@ import { installMenu } from './menu.ts';
 import { dataPaths, resolveDataDir, resolveFactoryDir, shellFiles } from './paths.ts';
 import { safeModeWindow } from './safe-mode.ts';
 import { KEYCHAIN_APP_NAME } from './secrets.ts';
+import { shellStrings } from './strings.ts';
 
 /**
  * The bootstrap: the only code that ships frozen inside the installer. Everything else (UI, host, engine)
@@ -87,7 +88,7 @@ if (!app.requestSingleInstanceLock()) {
         .catch((error: unknown) => {
             const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
             log.error(`fatal: ${message}`);
-            dialog.showErrorBox('Xora Code无法启动', message);
+            dialog.showErrorBox(shellStrings().cannotStart, message);
             app.exit(1);
         });
 }
