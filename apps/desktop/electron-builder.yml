@@ -61,6 +61,11 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+# The default AppImage runtime (appimage-12.0.1) needs libfuse2, which Ubuntu 24.04 no longer installs, and its arm64
+# build links the unversioned libz.so of zlib's development package: it did not start in the Ubuntu 24.04 VM. 1.0.3 is
+# the static runtime 20251108.
+toolsets:
+  appimage: "1.0.3"
 linux:
   icon: build-resources/icon.png
   executableName: xora-code
