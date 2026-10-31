@@ -357,6 +357,9 @@ class RunningTurn {
 export class TurnService {
     readonly #deps: TurnDeps;
     readonly #running = new Map<string, RunningTurn>();
+    /** Turns being run, so that dispose can let cancelled ones record their end before the database closes. */
+    readonly #runs = new Set<Promise<void>>();
+    #disposed = false;
     readonly #hostTools = new Map<string, HostToolProvider>();
     readonly #mcpWarned = new Map<string, Set<string>>();
     /** Threads whose engine session was used since the app started, with their folder, for SessionEnd. */
@@ -476,7 +479,7 @@ export class TurnService {
         });
         projects.touch(thread.projectId);
         this.#updateSleep();
-        void this.#run(running, thread, project, async (extras) => {
+        const run = this.#run(running, thread, project, async (extras) => {
             const blocks = await promptBlocks(
                 (extras && this.#deps.extensions?.expandSlash(extras, text)) ?? text,
                 attachments,
@@ -489,6 +492,11 @@ export class TurnService {
                     : undefined;
             return note ? [...blocks, { type: 'text', text: note }] : blocks;
         });
+        this.#runs.add(run);
+        void run.then(
+            () => this.#runs.delete(run),
+            () => this.#runs.delete(run),
+        );
         return turnId;
     }
 
@@ -1694,6 +1702,9 @@ export class TurnService {
     ): Promise<{ files: FileChange[]; additions: number; deletions: number } | undefined> {
         const { review, threads } = this.#deps;
         const after = await review.snapshot(running.cwd, `thread-${running.threadId}`);
+        if (this.#disposed) {
+            return undefined;
+        }
         threads.endTurn(running.threadId, running.turnId, 'ended', after);
         if (!running.before || !after || running.before === after) {
             return undefined;
@@ -1723,9 +1734,15 @@ export class TurnService {
     }
 
     async #finish(running: RunningTurn, stopReason: acp.StopReason): Promise<void> {
+        if (this.#disposed) {
+            return;
+        }
         const { threads, bus, settings, shell } = this.#deps;
         this.#closeLive(running, stopReason === 'cancelled' ? 'cancelled' : 'completed');
         const changes = await this.#changes(running);
+        if (this.#disposed) {
+            return;
+        }
         threads.append(
             running.threadId,
             'turn.completed',
@@ -1886,5 +1903,8 @@ export class TurnService {
         for (const threadId of [...this.#running.keys()]) {
             this.cancel(threadId);
         }
+        // Cancelled turns record their end; one that takes longer writes nothing once the database is closed.
+        await Promise.race([Promise.allSettled([...this.#runs]), new Promise((resolve) => setTimeout(resolve, 3000))]);
+        this.#disposed = true;
     }
 }
