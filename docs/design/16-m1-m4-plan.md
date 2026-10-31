@@ -109,7 +109,7 @@
 ## 5. 本轮不做
 
 - 真实厂商端点的抽样测试：需要用户自己的key，留作手动触发。
-- windows、linux实机冒烟：测试机和pabox共用，等用户确认空闲。
+- windows、linux实机冒烟：测试机和pabox共用，等用户确认空闲。推送`next`后CI已在windows-2025和ubuntu-24.04上跑全部测试（含host和engine的端到端测试），10-30修掉windows上的几处问题后三个系统全绿；修的是：事件日志用追加句柄截断报EPERM、powershell的进度记录以CLIXML混进命令输出、mcp找不到命令时报成connect-failed。electron应用本身（冒烟、演练）在windows、linux上还没跑过。
 - 推送和合并回`main`：等用户确认。
 - 1.0之后的项（见14第2节）。
 
