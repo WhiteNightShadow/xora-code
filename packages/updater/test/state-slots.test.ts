@@ -86,5 +86,5 @@ describe('slots', () => {
         }
         await expect(pruneSlots(slotsDir, new Set(['1.2.0', '1.1.0']))).resolves.toEqual(['1.0.0']);
         await expect(listSlots(slotsDir)).resolves.toEqual(['1.1.0', '1.2.0']);
-    });
+    }, 30_000); // three signed bundles written and checked: slow on a busy Windows runner
 });

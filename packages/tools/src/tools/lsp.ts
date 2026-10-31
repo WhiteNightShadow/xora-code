@@ -20,7 +20,7 @@ import {
 import { readyBy } from '../lsp/manager.ts';
 import type { DocumentSymbol, Hover, Location, LocationLink, Position, SymbolInformation } from '../lsp/protocol.ts';
 import type { ServerSpec } from '../lsp/servers.ts';
-import { checkPathAccess, isPathInside, resolveToolPath } from '../path.ts';
+import { checkPathAccess, isPathInside, realpathLoose, resolveToolPath } from '../path.ts';
 import { readTextFile } from '../text.ts';
 import { truncateLine, truncateMiddle } from '../truncate.ts';
 import type { LspAccess, ToolContext, ToolDefinition, ToolLocation, ToolResult } from '../types.ts';
@@ -453,7 +453,10 @@ async function diagnose(target: Target, lsp: LspAccess, ctx: ToolContext): Promi
     };
 }
 
-async function runLsp(input: LspInput, ctx: ToolContext): Promise<ToolResult> {
+async function runLsp(input: LspInput, given: ToolContext): Promise<ToolResult> {
+    // Files are real paths (resolved here, or from the server): show them relative to the real working directory,
+    // which differs on Windows (8.3 names) and macOS (/var → /private/var).
+    const ctx: ToolContext = { ...given, cwd: await realpathLoose(given.cwd).catch(() => given.cwd) };
     const lsp = ctx.lsp;
     if (!lsp) {
         return errorResult('Language servers are not available in this session.');

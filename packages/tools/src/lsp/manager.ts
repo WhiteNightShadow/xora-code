@@ -282,8 +282,9 @@ export class LspManager {
         const reports = await Promise.all(
             written.slice(0, MAX_EDIT_FILES).map((change) => this.#afterEdit(change, deadline, options)),
         );
+        // The reports name real paths: relative to the real working directory, they read as the agent wrote them.
         return formatEditNote(
-            options.cwd,
+            await realpathLoose(options.cwd).catch(() => path.resolve(options.cwd)),
             reports.filter((report): report is EditReport => report !== undefined),
         );
     }

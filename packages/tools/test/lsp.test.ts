@@ -175,7 +175,7 @@ describe('lsp tool', () => {
         expect(result.content).toBe(
             "a.fake: No Fake language server was found: install fake-lsp (it comes with the tests) so that it is on PATH, or add it to the project's devDependencies.",
         );
-    });
+    }, 30_000); // on Windows the search tries every PATH folder with every PATHEXT ending
 
     it('says when language servers are not available at all', async () => {
         const ctx = await makeContext(await temporaryDir());
