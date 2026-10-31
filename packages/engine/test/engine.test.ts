@@ -431,6 +431,39 @@ describe('tool hooks', () => {
         h.close();
     });
 
+    it('runs PreCompact before compacting on its own, but leaves /compact to the host', async () => {
+        server.reset();
+        server.respondWith((request) => {
+            const body = request.body as { messages: Array<{ role: string; content: unknown }> };
+            return JSON.stringify(body.messages[0]?.content ?? '').includes('compress the earlier part')
+                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.')
+                : openaiText('x'.repeat(4000));
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace(), {
+            softContextWindow: 12_000,
+            maxOutputTokens: 1000,
+            hookEvents: ['PreCompact'],
+        });
+        for (let turn = 0; turn < 8; turn++) {
+            await h.client.request('session/prompt', {
+                sessionId,
+                prompt: [{ type: 'text', text: `turn ${turn} ${'y'.repeat(4000)}` }],
+            });
+        }
+        const automatic = h.hookCalls.filter((call) => call.event === 'PreCompact');
+        expect(automatic.length).toBeGreaterThan(0);
+        expect(automatic[0]?.payload).toEqual({ trigger: 'auto', custom_instructions: '' });
+        const compactions = h.updates.filter(
+            (update) => update.sessionUpdate === 'compaction_update' && update.status === 'started',
+        ).length;
+        expect(compactions).toBeGreaterThanOrEqual(automatic.length);
+
+        await h.client.request('_xora/session/compact', { sessionId, focus: 'keep the numbers' });
+        expect(h.hookCalls.filter((call) => call.event === 'PreCompact')).toHaveLength(automatic.length);
+        h.close();
+    }, 30_000);
+
     it('does not call the host when no hook events are configured', async () => {
         const cwd = workspace();
         writeFileSync(path.join(cwd, 'x.txt'), 'x\n');

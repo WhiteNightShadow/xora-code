@@ -62,6 +62,8 @@ import type { ShellApi } from './shell.ts';
  */
 
 export type ToolHookEvent = 'PreToolUse' | 'PostToolUse';
+/** Hook events the xora engine raises itself: around tool calls, and before it compacts the context on its own. */
+export type EngineHookEvent = ToolHookEvent | 'PreCompact';
 
 export interface ExtensionDeps {
     readonly dir: string;
@@ -155,7 +157,7 @@ export interface SessionExtras {
     }>;
     /** Enabled, trusted MCP servers with their secrets; see {@link ExtensionService.mcpServersFor}. */
     readonly mcpConfigs: readonly McpServerConfig[];
-    readonly hookEvents: readonly ToolHookEvent[];
+    readonly hookEvents: readonly EngineHookEvent[];
 }
 
 /** What the engine gets back from the tool hooks (see the engine's `HookReply`). */
@@ -1185,7 +1187,7 @@ export class ExtensionService {
                       ]
                     : [],
             mcpConfigs: configs,
-            hookEvents: (['PreToolUse', 'PostToolUse'] as const).filter((event) =>
+            hookEvents: (['PreToolUse', 'PostToolUse', 'PreCompact'] as const).filter((event) =>
                 hooks.some((config) => config.groups.some((group) => group.event === event)),
             ),
         };
@@ -1288,7 +1290,7 @@ export class ExtensionService {
 
     /** Runs the trusted hooks for an event; `undefined` when none matched. */
     async runHook(
-        extras: SessionExtras,
+        extras: Pick<SessionExtras, 'loaded'>,
         event: HookEvent,
         context: {
             readonly sessionId: string;

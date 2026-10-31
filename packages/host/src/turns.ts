@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import type { SessionConfig } from '@xora/engine';
+import type { HooksOutcome } from '@xora/extensions';
 import {
     type Attachment,
     type ErrorClass,
@@ -23,7 +24,7 @@ import { checkPathAccess, isReadOnlyCommand, isSensitivePath } from '@xora/tools
 import type { ApprovalService } from './approvals.ts';
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
-import type { EngineManager, EngineProcess, HostToolResult, ToolHookRequest } from './engines/manager.ts';
+import type { EngineManager, EngineProcess, HookRequest, HostToolResult } from './engines/manager.ts';
 import { type EngineDefinition, engineById } from './engines/registry.ts';
 import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
@@ -43,6 +44,20 @@ const MODEL_ERROR_CODE = -32050;
 const BUSY_ERROR_CODE = -32051;
 
 const READ_KINDS: ReadonlySet<string> = new Set(['read', 'search', 'think']);
+
+/** Times a Stop or SubagentStop hook may send the agent back to work within one turn (09 §4). */
+export const MAX_STOP_CONTINUATIONS = 3;
+/** How long SessionEnd hooks may take: closing a thread or quitting does not wait longer (09 §4). */
+export const SESSION_END_TIMEOUT_MS = 1500;
+
+/** Why a session ends, the SessionEnd matcher's target: the thread was deleted or archived, or the app quits. */
+export type SessionEndReason = 'delete' | 'archive' | 'app_exit';
+
+/** The roster agent a team member was started from: `coder` for `coder-T1`. */
+function agentTypeOf(thread: ThreadMeta): string {
+    const id = thread.agentId ?? thread.role ?? 'agent';
+    return thread.taskId && id.endsWith(`-${thread.taskId}`) ? id.slice(0, -thread.taskId.length - 1) : id;
+}
 
 export interface TurnDeps {
     readonly threads: ThreadStore;
@@ -226,6 +241,8 @@ export class TurnService {
     readonly #running = new Map<string, RunningTurn>();
     readonly #hostTools = new Map<string, HostToolProvider>();
     readonly #mcpWarned = new Map<string, Set<string>>();
+    /** Threads whose engine session was used since the app started, with their folder, for SessionEnd. */
+    readonly #sessions = new Map<string, string>();
     #sleepBlocked = false;
 
     constructor(deps: TurnDeps) {
@@ -596,13 +613,8 @@ export class TurnService {
         return context;
     }
 
-    /** Fire-and-forget hooks (Stop, Notification); failures are only logged. */
-    #sideHook(
-        running: RunningTurn,
-        event: 'Stop' | 'Notification',
-        targets: string[],
-        payload: Record<string, unknown>,
-    ): void {
+    /** Fire-and-forget hooks (Notification); failures are only logged. */
+    #sideHook(running: RunningTurn, event: 'Notification', targets: string[], payload: Record<string, unknown>): void {
         const extensions = this.#deps.extensions;
         const extras = running.extras;
         if (!extensions || !extras) {
@@ -611,6 +623,159 @@ export class TurnService {
         void extensions
             .runHook(extras, event, { sessionId: running.threadId, cwd: running.cwd, targets, payload })
             .catch((error: unknown) => this.#deps.log.warn(`${event} hook: ${String(error)}`));
+    }
+
+    /** PreCompact (09 §4): before `/compact` (`manual`) and before the engine compacts on its own (`auto`). */
+    async #preCompact(
+        running: RunningTurn,
+        trigger: 'auto' | 'manual',
+        instructions: string,
+        signal: AbortSignal,
+    ): Promise<void> {
+        const extensions = this.#deps.extensions;
+        if (!extensions || !running.extras) {
+            return;
+        }
+        await extensions
+            .runHook(running.extras, 'PreCompact', {
+                sessionId: running.threadId,
+                cwd: running.cwd,
+                targets: [trigger],
+                payload: { trigger, custom_instructions: instructions },
+                signal,
+            })
+            .catch((error: unknown) => this.#deps.log.warn(`PreCompact hook: ${String(error)}`));
+    }
+
+    /**
+     * Stop hooks once the agent ends its turn (09 §4): Stop, or SubagentStop for a member of a team run, matched on
+     * its agent type (`coder`) or role (`executor`). A hook that blocks (`{"decision": "block", "reason": "…"}`, or
+     * exit code 2) sends the agent back to work with the reason, within the same turn, at most
+     * {@link MAX_STOP_CONTINUATIONS} times; it then runs again with `stop_hook_active: true`. Turns that end for
+     * another reason (output limit, request cap) run the hooks without continuing. Returns the final stop reason.
+     */
+    async #stopHooks(
+        running: RunningTurn,
+        process: EngineProcess,
+        sessionId: string,
+        first: acp.StopReason,
+    ): Promise<acp.StopReason> {
+        const extensions = this.#deps.extensions;
+        const extras = running.extras;
+        if (!extensions || !extras) {
+            return first;
+        }
+        const thread = this.#deps.threads.find(running.threadId);
+        const member = thread?.teamRunId !== undefined && thread.role !== undefined && thread.role !== 'supervisor';
+        const event = member ? 'SubagentStop' : 'Stop';
+        const agentType = member && thread ? agentTypeOf(thread) : undefined;
+        let stopReason = first;
+        for (let continued = 0; ; continued++) {
+            if (stopReason === 'cancelled' || stopReason === 'refusal' || running.abort.signal.aborted) {
+                return stopReason;
+            }
+            // The final message is part of what the hook gets.
+            this.#closeText(running);
+            let outcome: HooksOutcome | undefined;
+            try {
+                outcome = await extensions.runHook(extras, event, {
+                    sessionId: running.threadId,
+                    cwd: running.cwd,
+                    ...(agentType && thread?.role ? { targets: [...new Set([agentType, thread.role])] } : {}),
+                    payload: {
+                        stop_hook_active: continued > 0,
+                        last_assistant_message: running.lastText,
+                        ...(agentType
+                            ? {
+                                  agent_id: thread?.agentId ?? agentType,
+                                  agent_type: agentType,
+                                  ...(thread?.taskId ? { task_id: thread.taskId } : {}),
+                              }
+                            : {}),
+                    },
+                    signal: running.abort.signal,
+                });
+            } catch (error) {
+                this.#notice(
+                    running,
+                    'warning',
+                    'hook运行失败',
+                    error instanceof Error ? error.message : String(error),
+                );
+            }
+            // `continue: false` ends the agent whatever else the hooks said.
+            if (stopReason !== 'end_turn' || !outcome?.blocked || outcome.stop || running.abort.signal.aborted) {
+                return stopReason;
+            }
+            const reason = outcome.reason?.trim() || 'A stop hook asked you to keep working.';
+            if (continued >= MAX_STOP_CONTINUATIONS) {
+                this.#notice(
+                    running,
+                    'warning',
+                    `hook还要agent继续，这一轮已经继续了${MAX_STOP_CONTINUATIONS}次，停在这里`,
+                    reason,
+                );
+                return stopReason;
+            }
+            this.#notice(running, 'info', 'hook让agent继续工作', reason);
+            const response = await process.agent.request('session/prompt', {
+                sessionId,
+                prompt: [{ type: 'text', text: `<hook_feedback event="${event}">\n${reason}\n</hook_feedback>` }],
+            });
+            stopReason = response.stopReason;
+        }
+    }
+
+    /**
+     * SessionEnd hooks when a thread's session ends (09 §4): the thread is deleted or archived, or the app quits.
+     * Best effort: the hooks get {@link SESSION_END_TIMEOUT_MS} and failures are only logged. A thread without an
+     * engine session has nothing to end. Call it before the thread is deleted.
+     */
+    async endSession(thread: ThreadMeta, reason: SessionEndReason, timeoutMs = SESSION_END_TIMEOUT_MS): Promise<void> {
+        const cwd = this.#sessions.get(thread.id);
+        this.#sessions.delete(thread.id);
+        const extensions = this.#deps.extensions;
+        // Read before the first await: the caller may delete the thread right after calling.
+        const started =
+            cwd !== undefined ||
+            (this.#deps.threads.find(thread.id) !== undefined && this.#deps.threads.sessionId(thread.id) !== undefined);
+        if (!extensions || !started) {
+            return;
+        }
+        try {
+            const project = await this.#deps.projects.get(thread.projectId);
+            const folder = cwd ?? this.cwdOf(thread, project);
+            await extensions.runHook({ loaded: await extensions.load(project) }, 'SessionEnd', {
+                sessionId: thread.id,
+                cwd: existsSync(folder) ? folder : project.path,
+                targets: [reason],
+                payload: { reason },
+                signal: AbortSignal.timeout(timeoutMs),
+            });
+        } catch (error) {
+            this.#deps.log.warn(
+                `SessionEnd hook of ${thread.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }
+
+    /** SessionEnd for every session used since the app started, all at once, for quitting (bounded by the timeout). */
+    async endSessions(reason: SessionEndReason, timeoutMs = SESSION_END_TIMEOUT_MS): Promise<void> {
+        const threads = [...this.#sessions.keys()].flatMap((threadId) => {
+            const thread = this.#deps.threads.find(threadId);
+            return thread ? [thread] : [];
+        });
+        if (threads.length === 0) {
+            return;
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+            Promise.allSettled(threads.map((thread) => this.endSession(thread, reason, timeoutMs))),
+            new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, timeoutMs + 500);
+            }),
+        ]);
+        clearTimeout(timer);
     }
 
     #notice(running: RunningTurn, severity: 'info' | 'warning' | 'error', title: string, description?: string): void {
@@ -639,6 +804,7 @@ export class TurnService {
                 return;
             }
             await this.#openSession(running, thread, project);
+            this.#sessions.set(running.threadId, running.cwd);
             const sessionId = running.sessionId;
             if (!sessionId || !running.process) {
                 throw new Error('no engine session');
@@ -654,16 +820,7 @@ export class TurnService {
             if (command && running.process.isXora) {
                 // `/compact [focus]`: summarise older turns now instead of prompting (08 §3).
                 const focus = command[1]?.trim();
-                if (running.extras && this.#deps.extensions) {
-                    await this.#deps.extensions
-                        .runHook(running.extras, 'PreCompact', {
-                            sessionId: running.threadId,
-                            cwd: running.cwd,
-                            targets: ['manual'],
-                            payload: { trigger: 'manual', custom_instructions: focus ?? '' },
-                        })
-                        .catch((error: unknown) => this.#deps.log.warn(`PreCompact hook: ${String(error)}`));
-                }
+                await this.#preCompact(running, 'manual', focus ?? '', running.abort.signal);
                 await running.process.agent.request('_xora/session/compact', {
                     sessionId,
                     ...(focus ? { focus } : {}),
@@ -689,7 +846,10 @@ export class TurnService {
                 // The xora engine marks where each host turn starts, for rewind and fork (M3-3).
                 ...(running.process.isXora ? { _meta: { xora: { turnId: running.turnId } } } : {}),
             });
-            await this.#finish(running, response.stopReason);
+            await this.#finish(
+                running,
+                await this.#stopHooks(running, running.process, sessionId, response.stopReason),
+            );
         } catch (error) {
             if (running.abort.signal.aborted && !running.exited) {
                 await this.#finish(running, 'cancelled');
@@ -726,16 +886,23 @@ export class TurnService {
             onExit: (reason: string) => {
                 running.exited = reason;
             },
-            onHook: (request: ToolHookRequest, signal: AbortSignal) => {
+            onHook: async (request: HookRequest, signal: AbortSignal): Promise<Record<string, unknown>> => {
                 const extensions = this.#deps.extensions;
                 if (!extensions || !running.extras) {
-                    return Promise.resolve({});
+                    return {};
                 }
-                return extensions.runToolHook(running.extras, request.event, request.payload, {
-                    sessionId: running.threadId,
-                    cwd: running.cwd,
-                    signal,
-                });
+                if (request.event === 'PreCompact') {
+                    const { trigger, custom_instructions } = request.payload;
+                    await this.#preCompact(running, trigger, custom_instructions ?? '', signal);
+                    return {};
+                }
+                return {
+                    ...(await extensions.runToolHook(running.extras, request.event, request.payload, {
+                        sessionId: running.threadId,
+                        cwd: running.cwd,
+                        signal,
+                    })),
+                };
             },
             onHostTool: async (name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult> => {
                 const provider = this.#hostTools.get(running.threadId);
@@ -1307,9 +1474,6 @@ export class TurnService {
 
     async #finish(running: RunningTurn, stopReason: acp.StopReason): Promise<void> {
         const { threads, bus, settings, shell } = this.#deps;
-        if (stopReason !== 'cancelled' && stopReason !== 'refusal') {
-            this.#sideHook(running, 'Stop', [], { stop_hook_active: false });
-        }
         this.#closeLive(running, stopReason === 'cancelled' ? 'cancelled' : 'completed');
         const changes = await this.#changes(running);
         threads.append(

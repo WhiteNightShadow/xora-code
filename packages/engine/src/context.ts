@@ -149,6 +149,16 @@ function transcript(messages: readonly Message[]): string {
         .join('\n\n');
 }
 
+/** Where the verbatim context would start after summarising, keeping `keepTurns` turns; `undefined`: nothing to summarise. */
+export function summaryCut(session: EngineSession, keepTurns: number): number | undefined {
+    const starts = turnStarts(session);
+    if (starts.length <= keepTurns && !session.summary) {
+        return undefined;
+    }
+    const keepFrom = starts[Math.max(0, starts.length - keepTurns)] ?? session.history.length;
+    return keepFrom > session.contextStart ? keepFrom : undefined;
+}
+
 /**
  * Level 3: summarise everything before the latest turns and start the context from the summary. `keepTurns`
  * recent turns stay verbatim; the turn in progress is always kept.
@@ -163,13 +173,8 @@ export async function summarise(
         readonly userAgent?: string;
     },
 ): Promise<CompactionResult | undefined> {
-    const starts = turnStarts(session);
-    const keepTurns = Math.max(1, options.keepTurns ?? 2);
-    if (starts.length <= keepTurns && !session.summary) {
-        return undefined;
-    }
-    const keepFrom = starts[Math.max(0, starts.length - keepTurns)] ?? session.history.length;
-    if (keepFrom <= session.contextStart) {
+    const keepFrom = summaryCut(session, Math.max(1, options.keepTurns ?? 2));
+    if (keepFrom === undefined) {
         return undefined;
     }
     const older = session.history.slice(session.contextStart, keepFrom);
