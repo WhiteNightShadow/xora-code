@@ -13,6 +13,8 @@
   - 只剩node-pty，它自带darwin、linux、win32的x64和arm64预编译。
   - sqlite优先用node内置的`node:sqlite`，不行再用better-sqlite3（有预编译）。
 - **出包**：在mac上一次出六个目标：`electron-builder --mac --win --linux --x64 --arm64`。pabox已经在本机这样交叉打过windows安装包。
+- **语言包**：`electronLanguages`只留en-US、zh-CN、zh-TW。这些只用于chromium自带的文案，界面语言用的是自己的词典。mac arm64的dmg从128mb降到117mb，装好后从317mb降到270mb。
+- **fuses**：打包时翻转，见10第6节。打包后的冒烟（`node build/ui-smoke.ts --app <exe>`）会复制一份应用，只把调试参数那根fuse打开再跑，因为playwright要经node调试端口驱动electron；更新演练直接跑正式包。
 - **冒烟**：
   - **mac**：本机安装运行。
   - **linux x64**：lima虚拟机里的amd64容器（rosetta），在xvfb下跑playwright冒烟。

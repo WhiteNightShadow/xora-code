@@ -110,12 +110,12 @@
 
 - 真实厂商端点的抽样测试：需要用户自己的key，留作手动触发。
 - windows、linux实机冒烟：测试机和pabox共用，等用户确认空闲。推送`next`后CI已在windows-2025和ubuntu-24.04上跑全部测试（含host和engine的端到端测试），10-30修掉windows上的几处问题后三个系统全绿；修的是：事件日志用追加句柄截断报EPERM、powershell的进度记录以CLIXML混进命令输出、mcp找不到命令时报成connect-failed。electron应用本身（冒烟、演练）在windows、linux上还没跑过。
-- 推送和合并回`main`：等用户确认。
+- 合并回`main`：等用户确认（`next`已于10-30推送）。
 - 1.0之后的项（见14第2节）。
 
 ## 6. 进度（2026-10-30）
 
-全部在`next`本地提交，没有推送。验证方式：全仓单测和端到端测试（1026个通过、3个按平台跳过）、类型检查、biome；开发构建和mac arm64安装包各跑一遍界面冒烟（14步）和更新演练（开发构建9项、安装包8项）。
+全部在`next`上提交，10-30已推送到origin。验证方式：全仓单测和端到端测试（1026个通过、3个按平台跳过）、类型检查、biome；开发构建和mac arm64安装包各跑一遍界面冒烟（14步）和更新演练（开发构建9项、安装包8项）。
 
 | 工作包 | 状态 | 说明 |
 |---|---|---|
@@ -138,3 +138,11 @@
 
 **钥匙串**：1.0用自己的钥匙串项“xora-code Safe Storage”，不碰旧版0.2.x的“Xora Code Safe Storage”，从0.2.x升级不会再弹授权框。electron按主脚本加载完时的`app.name`给这一项取名，所以shell一启动就把`app.name`设成`xora-code`，到`will-finish-launching`再改回“Xora Code”，菜单和窗口用的是改回后的名字。这个时机依赖electron的`PostCreateMainMessageLoop`，升级electron时要复查。已在开发构建上用注入的探测库核对过：启动加一次加密，只请求了“xora-code Safe Storage”，调用被探测库拦下，真实钥匙串里没有生成这一项。冒烟和演练仍带Chromium的`--use-mock-keychain`，不碰真实钥匙串；冒烟还会检查启动后`app.name`已经改回。
 
+**安装包加固（10-30）**：
+- `electronLanguages`只留中英文语言包，mac arm64的dmg从128mb降到117mb，装好后从317mb降到270mb。
+- 打开electron fuses（见10第6节），`RunAsNode`暂时保留。
+- 修复模式页面从`file://`改走`xora://safe-mode/`：关掉`file://`的额外权限后，chromium读不到app.asar里的文件，演练时发现修复模式页面打不开。
+- host和引擎启动时加载系统证书库，代替不再生效的`NODE_EXTRA_CA_CERTS`。
+- 在mac arm64安装包上核对过：fuses状态、ad-hoc签名、Info.plist里的asar完整性；更新演练8项、界面冒烟14步都通过；主进程不再接受`--inspect`。
+
+**发布前要做**：把xora engine改成由shell用utility process启动、经MessagePort和host通信，然后关掉`RunAsNode`。

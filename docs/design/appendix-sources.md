@@ -68,3 +68,18 @@ star数来自github api（2026-10-30）。
 | openai agents sdk："agent作为工具"和"交接"的区别；链式、并行、评审循环 | [multi-agent](https://openai.github.io/openai-agents-python/multi_agent/) |
 | crewai：hierarchical流程由manager负责规划、分派、验收，任务不预先分配 | [crewai processes](https://docs.crewai.com/en/concepts/processes) |
 | task master：从prd拆任务、复杂度分析、展开子任务；模型分main、research、fallback | [claude-task-master](https://github.com/eyaltoledano/claude-task-master) |
+
+## 桌面框架与安装包加固（2026-10-30）
+
+| 事实 | 来源 |
+|---|---|
+| opencode桌面版04-19从tauri迁到electron：webkit渲染慢、样式不一致，内置cli偶发启动失败 | [迁移说明](https://dev.to/brendonovich/moving-opencode-desktop-to-electron-4hip) |
+| codex桌面版基于electron，openai称选它是为了以后支持windows和linux；linux预览版仍是electron | [devclass](https://www.devclass.com/development/2026/02/05/openai-codex-app-looks-beyond-the-ide-devs-ask-why-mac-only/4090132)、[codex linux预览](https://codex.danielvaughan.com/2026/08/17/codex-linux-desktop-preview-cli-developer-guide-chatgpt-work-electron-wayland-project-integration/) |
+| tauri官方的cef运行时还没发布，社区的tauri-runtime-cef是alpha | [tauri-runtime-cef](https://github.com/SableClient/tauri-runtime-cef) |
+| linux上webkitgtk的cpu占用问题；有项目从tauri换回electron | [agentglass v0.2.1](https://github.com/SirAllap/agentglass/releases/tag/v0.2.1)、[uaclaunchcontrol v0.2.1](https://github.com/mikkelrask/uaclaunchcontrol/releases/tag/v0.2.1) |
+| electrobun 2026年2月发布1.0；跨平台指南建议linux版打包cef | [electrobun博客](https://blackboard.sh/blog/rss.xml)、[跨平台指南](https://blackboard.sh/electrobun/docs/guides/cross-platform-development) |
+| wails v3仍是beta（v3.0.0-beta.26） | [wails releases](https://github.com/wailsapp/wails/releases/tag/v3.0.0-beta.26) |
+| 本仓库实测：mac arm64的electron framework占287mb；node 24二进制116mb（压缩后37mb）；220个语言目录共49mb，只留中英文约1mb | 本机测量 |
+| electron fuses：各开关的作用，`runAsNode`关掉后`ELECTRON_RUN_AS_NODE`失效，`nodeOptions`同时管`NODE_EXTRA_CA_CERTS` | [electron fuses](https://www.electronjs.org/docs/latest/tutorial/fuses) |
+| electron 44.10.0：主进程在fuse关掉时忽略`--inspect`、不响应SIGUSR1；`ELECTRON_RUN_AS_NODE`模式不检查这根fuse；mac上由别的应用以node模式启动时会清掉`NODE_OPTIONS` | electron源码`shell/common/node_bindings.cc`、`shell/app/node_main.cc`，并用安装包实测 |
+| electron 44自带的node 24.22.1有`tls.getCACertificates('system')`和`tls.setDefaultCACertificates` | [node tls文档](https://nodejs.org/api/tls.html)，本机实测 |

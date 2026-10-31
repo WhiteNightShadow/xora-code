@@ -48,6 +48,12 @@
 - key经环境变量或初始化消息交给引擎进程。shell工具派生子进程前，会剔除`*_API_KEY`、`*_TOKEN`等变量，agent执行的命令看不到这些key。
 - 订阅key单独标注用途，只给对应的编程端点用。
 - 日志、事件、诊断包里一律不出现密钥。
+- **安装包的electron fuses**（打包时写进electron二进制，配置在`apps/desktop/electron-builder.yml`）：
+  - 关掉：主进程的`--inspect`等调试参数和SIGUSR1（不让别的进程挂上调试器、借主进程调`safeStorage`解密）；`NODE_OPTIONS`和`NODE_EXTRA_CA_CERTS`；`file://`页面的额外权限（修复模式页面因此改走`xora://safe-mode/`）。
+  - 打开：cookie加密；app.asar完整性校验（mac、windows）；只从app.asar加载代码。
+  - `RunAsNode`暂时保留，因为xora engine就是用`ELECTRON_RUN_AS_NODE=1`跑在这个二进制上的。它的代价是谁都能把这个二进制当node用，包括开调试器（已核对：这种模式下调试参数那根fuse管不到）。发布前把引擎改成utility process，再关掉它。
+  - 关掉`NODE_OPTIONS`后，`NODE_EXTRA_CA_CERTS`也不再生效。host和引擎启动时把系统证书库里受信任的证书加进来，企业代理的根证书装进系统证书库就能用。
+  - mac上不签名的包，翻转fuses后要重新做ad-hoc签名（`resetAdHocDarwinSignature`），否则apple silicon拒绝启动。
 
 ## 7. 隐私
 
