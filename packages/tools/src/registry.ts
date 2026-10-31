@@ -5,6 +5,7 @@ import { editTool, multiEditTool } from './tools/edit.ts';
 import { globTool } from './tools/glob.ts';
 import { createGrepTool, type GrepToolOptions } from './tools/grep.ts';
 import { listTool } from './tools/list.ts';
+import { lspTool } from './tools/lsp.ts';
 import { readTool } from './tools/read.ts';
 import { todoTool } from './tools/todo.ts';
 import { writeTool } from './tools/write.ts';
@@ -22,6 +23,7 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): AnyTool[]
         listTool,
         globTool,
         createGrepTool(options.ripgrep === undefined ? {} : { ripgrep: options.ripgrep }),
+        lspTool,
         editTool,
         multiEditTool,
         writeTool,

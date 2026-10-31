@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { LspManager } from './lsp/manager.ts';
 
 /**
  * Contract between the xora engine and its built-in tools. Tools only do the work; whether a call may run is
@@ -31,6 +32,17 @@ export interface BackgroundJob {
     kill(): void;
 }
 
+/** Language servers as one session may use them (the `lsp` tool). */
+export interface LspAccess {
+    /** Shared by the sessions of an engine process. */
+    readonly manager: LspManager;
+    /**
+     * Whether the project is trusted: only then do servers come from its `node_modules/.bin`, and servers that would
+     * load code from the project start at all.
+     */
+    readonly trusted: boolean;
+}
+
 /** Background shell jobs started by `bash` with `background: true`, scoped to one session. */
 export interface JobRegistry {
     add(job: BackgroundJob): void;
@@ -54,6 +66,8 @@ export interface ToolContext {
     readonly onOutput?: (chunk: string) => void;
     /** Shell used by `bash`. Defaults to `$SHELL` or `/bin/bash` on unix and `powershell.exe` on windows. */
     readonly shell?: string;
+    /** Language servers for `lsp`; without them the tool says they are not available. */
+    readonly lsp?: LspAccess;
 }
 
 export interface FileDiff {
