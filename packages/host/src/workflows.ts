@@ -190,6 +190,8 @@ export interface WorkflowDeps {
     readonly onTriggersChanged?: () => void;
     /** The local webhook address of a workflow, once the trigger service runs one. */
     readonly webhookUrl?: (triggerKey: string) => string | undefined;
+    /** Stops file triggers of a project while a run works in it, so its own edits start nothing; returns the undo. */
+    readonly muteFiles?: (projectDir: string) => () => void;
 }
 
 function errorText(error: unknown): string {
@@ -251,6 +253,8 @@ export class WorkflowService {
     readonly #idle = new Map<string, Array<() => void>>();
     /** Parents waiting for a sub-workflow, by child run id. */
     readonly #ends = new Map<string, Array<(record: RunRecord) => void>>();
+    /** Undoes the file-trigger mute of each run that is not over. */
+    readonly #unmute = new Map<string, () => void>();
     readonly #ready: Promise<void>;
     #disposed = false;
 
@@ -712,6 +716,7 @@ export class WorkflowService {
         };
         const state = this.#state(record);
         this.#runs.set(runId, state);
+        this.#mute(record.id, project.path);
         log.info(`workflow ${runId} (${entry.key}) started in ${project.id}: ${input.trigger.reason}`);
         if (problems.length > 0) {
             this.#finish(state, 'failed', `没有开始：${problems.join('；')}`);
@@ -833,6 +838,7 @@ export class WorkflowService {
         record.status = 'running';
         delete record.note;
         state.abort = new AbortController();
+        this.#mute(record.id, (await this.#deps.projects.get(record.projectId)).path);
         this.#notice(state, 'info', '继续运行');
         this.#pump(state);
         this.#save(state);
@@ -870,6 +876,12 @@ export class WorkflowService {
 
     // State and persistence ------------------------------------------------------------------------------------
 
+    #mute(runId: string, projectDir: string): void {
+        if (this.#deps.muteFiles && !this.#unmute.has(runId)) {
+            this.#unmute.set(runId, this.#deps.muteFiles(projectDir));
+        }
+    }
+
     #state(record: RunRecord): RunState {
         return {
             record,
@@ -893,6 +905,8 @@ export class WorkflowService {
             if (!state) continue;
             const { record } = state;
             if (record.status === 'queued') {
+                const project = await this.#deps.projects.get(record.projectId).catch(() => undefined);
+                if (project) this.#mute(record.id, project.path);
                 this.#armStart(state);
                 continue;
             }
@@ -1146,6 +1160,8 @@ export class WorkflowService {
         threads.update(record.threadId, { status: status === 'failed' ? 'failed' : 'idle' });
         log.info(`workflow ${record.id}: ${status}${note ? ` (${note})` : ''}`);
         this.#save(state);
+        this.#unmute.get(record.id)?.();
+        this.#unmute.delete(record.id);
         for (const resolve of this.#ends.get(record.id)?.splice(0) ?? []) {
             resolve(record);
         }
