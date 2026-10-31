@@ -308,6 +308,12 @@ try {
     await page.locator('.modal').getByRole('button', { name: '开始', exact: true }).click();
     await page.locator('.team__goal', { hasText: '把hello.txt整理一下' }).waitFor();
     await step(page, '交给团队后显示团队视图');
+    // The team conversation: a message to the supervisor shows up in it.
+    await page.locator('.team__tabs').getByRole('button', { name: '对话', exact: true }).click();
+    await page.locator('.conversation__composer textarea').fill('先看日志');
+    await page.locator('.conversation__composer').getByRole('button', { name: '发送', exact: true }).click();
+    await page.locator('.conversation__entry', { hasText: '先看日志' }).waitFor();
+    await step(page, '团队对话里能给主管发消息');
     const stop = page.locator('.team').getByRole('button', { name: '停止', exact: true });
     if (await stop.isVisible()) {
         await stop.click();
