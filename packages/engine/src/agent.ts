@@ -4,7 +4,7 @@ import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
 import { z } from 'zod';
 import { readSessionConfig } from './config.ts';
-import { type AnyTool, createDefaultTools } from './deps.ts';
+import { type AnyTool, createDefaultTools, LspManager } from './deps.ts';
 import { type HookReply, ModelError, type TurnIO, TurnRunner } from './loop.ts';
 import { createMcpManager, readMcpServers } from './mcp.ts';
 import { EngineSession, SessionBusyError } from './session.ts';
@@ -16,6 +16,8 @@ export interface XoraAgentOptions {
     readonly version: string;
     /** Tools offered to the model; defaults to the built-in set. */
     readonly tools?: readonly AnyTool[];
+    /** Language servers, shared by all sessions; servers start on first use and are killed when the process exits. */
+    readonly lsp?: LspManager;
     readonly log?: (message: string) => void;
 }
 
@@ -87,6 +89,7 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
     const sessionsDir = path.join(options.dataDir, 'sessions');
     const tools = options.tools ?? createDefaultTools();
     const log = options.log ?? (() => undefined);
+    const lsp = options.lsp ?? new LspManager({ clientInfo: { name: 'xora-engine', version: options.version }, log });
 
     function open(
         sessionId: string,
@@ -268,7 +271,7 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
                 session.beginTurn(turnId);
             }
             try {
-                const runner = new TurnRunner(session, io(client, session.id), controller.signal, tools);
+                const runner = new TurnRunner(session, io(client, session.id), controller.signal, tools, lsp);
                 const stopReason = await runner.run(params.prompt);
                 return { stopReason };
             } catch (error) {

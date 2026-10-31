@@ -81,6 +81,15 @@ export const SessionConfigSchema = z.object({
     disabledTools: z.array(z.string()).default([]),
     /** Tool hook events the host has handlers for (09 §4); the engine asks the host before and after tool calls. */
     hookEvents: z.array(z.enum(['PreToolUse', 'PostToolUse'])).default([]),
+    /** Language servers (04 §3). */
+    lsp: z
+        .object({
+            /** Append new errors the server reports to the results of edits, when a server for the file is available. */
+            diagnostics: z.boolean().default(true),
+            /** The project is trusted: servers may come from its node_modules and may load its code. */
+            trusted: z.boolean().default(false),
+        })
+        .prefault({}),
 });
 export type SessionConfig = z.infer<typeof SessionConfigSchema>;
 

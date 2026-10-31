@@ -9,6 +9,7 @@ import {
     checkPathAccess,
     isReadOnlyCommand,
     isSensitivePath,
+    type LspManager,
     ProviderError,
     sanitizeEnv,
     streamModel,
@@ -16,6 +17,7 @@ import {
     type ToolResult,
     toolSpecs,
 } from './deps.ts';
+import { withEditDiagnostics } from './diagnostics.ts';
 import { mcpTools } from './mcp.ts';
 import { environmentBlock, modeNote, systemSegments } from './prompt.ts';
 import { type EngineSession, type ResolvedTarget, resolveTarget } from './session.ts';
@@ -235,16 +237,19 @@ export class TurnRunner {
     readonly #signal: AbortSignal;
     readonly #tools: Map<string, AnyTool>;
     readonly #home = os.homedir();
+    /** Language servers for the `lsp` tool and for diagnostics after edits. */
+    readonly #lsp: LspManager | undefined;
     #cancelled = false;
 
     get #stopped(): boolean {
         return this.#signal.aborted || this.#cancelled;
     }
 
-    constructor(session: EngineSession, io: TurnIO, signal: AbortSignal, tools: readonly AnyTool[]) {
+    constructor(session: EngineSession, io: TurnIO, signal: AbortSignal, tools: readonly AnyTool[], lsp?: LspManager) {
         this.#session = session;
         this.#io = io;
         this.#signal = signal;
+        this.#lsp = lsp;
         const disabled = new Set(session.config.disabledTools);
         const all = [
             ...tools.filter((tool) => !disabled.has(tool.name)),
@@ -615,6 +620,7 @@ export class TurnRunner {
                     setTimeout(flush, LIVE_OUTPUT_INTERVAL_MS);
                 }
             },
+            ...(this.#lsp ? { lsp: { manager: this.#lsp, trusted: session.config.lsp.trusted } } : {}),
         };
     }
 
@@ -671,7 +677,8 @@ export class TurnRunner {
         }
         this.#io.update({ sessionUpdate: 'tool_call_update', toolCallId: call.id, status: 'in_progress' });
         try {
-            return await call.tool.run(call.input, this.#toolContext(call));
+            const result = await call.tool.run(call.input, this.#toolContext(call));
+            return await withEditDiagnostics(this.#lsp, this.#session, call.tool, result, this.#signal);
         } catch (error) {
             return {
                 content: `Tool ${call.name} failed: ${error instanceof Error ? error.message : String(error)}`,

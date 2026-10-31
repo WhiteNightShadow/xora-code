@@ -232,6 +232,9 @@ const zh = {
         defaultEffort: '默认思考强度',
         softWindow: '上下文上限（token）',
         softWindowHint: '超过模型窗口的部分会先压缩，避免长上下文费用失控',
+        lspDiagnostics: '改完文件后附上语言服务器报的新错误',
+        lspDiagnosticsHint:
+            '只对xora engine生效；需要本机装有对应的语言服务器，比如typescript-language-server、pyright、gopls、rust-analyzer、clangd',
         globalPrompt: '全局提示词',
         globalPromptHint: '对本机所有项目和agent生效，比如"始终用简体中文回复"。',
         projectPrompt: '个人项目提示词',
@@ -767,6 +770,9 @@ const en: Widen<Strings> = {
         defaultEffort: 'Default thinking effort',
         softWindow: 'Context cap (tokens)',
         softWindowHint: 'Context beyond this is compacted first, to keep long-context costs in check',
+        lspDiagnostics: 'Add new language server errors to the results of edits',
+        lspDiagnosticsHint:
+            'Xora engine only. Needs the language server installed, e.g. typescript-language-server, pyright, gopls, rust-analyzer or clangd',
         globalPrompt: 'Global prompt',
         globalPromptHint: 'Applies to every project and agent on this computer.',
         projectPrompt: 'Personal project prompt',
