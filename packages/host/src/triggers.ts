@@ -188,7 +188,7 @@ export class TriggerService {
 
     constructor(options: TriggerServiceOptions) {
         this.#log = options.log;
-        this.#now = options.now ?? Date.now;
+        this.#now = options.now ?? (() => Date.now());
         this.#gitPollMs = options.gitPollMs ?? DEFAULT_GIT_POLL_MS;
         this.#webhookPort = options.webhookPort ?? 0;
         this.#webhookIntervalMs = options.webhookIntervalMs ?? DEFAULT_WEBHOOK_INTERVAL_MS;
