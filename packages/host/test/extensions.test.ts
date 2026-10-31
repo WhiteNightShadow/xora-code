@@ -13,6 +13,7 @@ import {
 } from '@xora/protocol';
 import { XoraDatabase } from '@xora/storage';
 import { openaiText, openaiToolCalls, startMockModelServer } from '@xora/test-kit';
+import { type AgentSpec, DEFAULT_ORG, findAgent } from '@xora/workflows';
 import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { Bus } from '../src/bus.ts';
@@ -21,6 +22,7 @@ import { ExtensionService } from '../src/extensions.ts';
 import type { Logger } from '../src/log.ts';
 import { ProjectService } from '../src/projects.ts';
 import { MemoryShell } from '../src/shell.ts';
+import { mcpToolsOf } from '../src/team-agents.ts';
 
 /** Extensions (09): discovery, trust, the skill tool, slash commands, hooks, MCP servers and plugins. */
 
@@ -585,4 +587,243 @@ describe('extensions in a thread', () => {
         },
         60_000,
     );
+});
+
+// Lifecycle hooks: Stop and SubagentStop, SessionEnd, PreCompact ----------------------------------------------
+
+/** A hook command that logs every event it gets; `stop` also asks the agent to keep working. */
+function hookScript(dir: string): string {
+    const script = path.join(dir, 'hook.cjs');
+    write(
+        script,
+        `const fs = require('node:fs');
+const [, , name, log] = process.argv;
+let input = '';
+process.stdin.on('data', (chunk) => (input += chunk));
+process.stdin.on('end', () => {
+    fs.appendFileSync(log, JSON.stringify({ name, event: JSON.parse(input) }) + '\\n');
+    if (name === 'stop') process.stdout.write(JSON.stringify({ decision: 'block', reason: 'run the tests first' }));
+});
+`,
+    );
+    return script;
+}
+
+interface Logged {
+    readonly name: string;
+    readonly event: Record<string, unknown>;
+}
+
+function logged(file: string): Logged[] {
+    return existsSync(file)
+        ? readFileSync(file, 'utf8')
+              .split('\n')
+              .filter((line) => line.trim() !== '')
+              .map((line) => JSON.parse(line) as Logged)
+        : [];
+}
+
+function hooksFile(dir: string, script: string, log: string, events: Record<string, [string, string?]>): void {
+    const hooks: Record<string, unknown> = {};
+    for (const [event, [name, matcher]] of Object.entries(events)) {
+        hooks[event] = [
+            {
+                ...(matcher ? { matcher } : {}),
+                hooks: [{ type: 'command', command: process.execPath, args: [script, name, log] }],
+            },
+        ];
+    }
+    write(path.join(dir, 'hooks.json'), JSON.stringify({ hooks }));
+}
+
+async function waitUntil<T>(probe: () => T | undefined, what: string): Promise<T> {
+    const started = Date.now();
+    for (;;) {
+        const value = probe();
+        if (value !== undefined) return value;
+        if (Date.now() - started > 30_000) throw new Error(`timed out waiting for ${what}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+}
+
+function notices(events: ReadonlyArray<{ kind: string; payload: unknown }>): string[] {
+    return events
+        .filter((event) => event.kind === 'item.completed')
+        .map((event) => (event.payload as { item?: { type: string; title?: string } }).item)
+        .filter((item) => item?.type === 'notice')
+        .map((item) => item?.title ?? '');
+}
+
+describe('MCP tools and the agent tool list', () => {
+    it.skipIf(isWindows)(
+        'offers a thread only the MCP tools its agent may use',
+        async () => {
+            const repo = gitRepo();
+            const { ui, core, home } = await host();
+            await ui.request('mcp.save', {
+                name: 'echo',
+                scope: 'global',
+                transport: 'stdio',
+                command: process.execPath,
+                args: [echoServer(home)],
+            });
+            server.reset();
+            server.respondWith((request) => (request.method === 'POST' ? openaiText('ok') : undefined));
+            const project = await ui.request('project.add', { path: repo });
+            const offered = async (mcpTools: readonly string[]): Promise<string[]> => {
+                const thread = await ui.request('thread.create', { projectId: project.id });
+                core.turns.setHostTools(thread.id, { tools: [], mcpTools, handle: async () => ({ content: '' }) });
+                const before = server.requests.length;
+                await ui.request('turn.start', { threadId: thread.id, text: 'hi' });
+                await finished(ui, thread.id);
+                const body = server.requests.slice(before).find((request) => request.method === 'POST')?.body as
+                    | Body
+                    | undefined;
+                return (body?.tools ?? []).map((tool) => tool.function.name).filter((name) => name.startsWith('mcp__'));
+            };
+            const agent = (id: string) => findAgent(DEFAULT_ORG, id) as AgentSpec;
+            expect(await offered(mcpToolsOf(agent('coder')))).toEqual(['mcp__echo__echo']);
+            expect(await offered(mcpToolsOf(agent('scout')))).toEqual([]);
+            expect(await offered(mcpToolsOf({ ...agent('reviewer'), tools: ['read', 'mcp__echo'] }))).toEqual([
+                'mcp__echo__echo',
+            ]);
+            expect(await offered(['mcp__github__*'])).toEqual([]);
+        },
+        60_000,
+    );
+});
+
+describe('lifecycle hooks', () => {
+    it('lets a Stop hook send the agent back to work, three times at most', async () => {
+        const repo = gitRepo();
+        const { ui, core, home } = await host();
+        const log = path.join(home, 'hooks.log');
+        hooksFile(core.paths.extensionsDir, hookScript(home), log, { Stop: ['stop'] });
+        server.reset();
+        let answers = 0;
+        server.respondWith((request) => (request.method === 'POST' ? openaiText(`answer ${++answers}`) : undefined));
+        const project = await ui.request('project.add', { path: repo });
+        const thread = await ui.request('thread.create', { projectId: project.id });
+        await ui.request('turn.start', { threadId: thread.id, text: 'finish the task' });
+        const read = await finished(ui, thread.id);
+
+        // One prompt and three continuations, each with the hook's reason as the next message.
+        const posts = server.requests.filter((request) => request.method === 'POST');
+        expect(posts).toHaveLength(4);
+        const second = (posts[1]?.body as Body | undefined)?.messages?.at(-1);
+        expect(text(second?.content)).toMatch(/<hook_feedback event=\\?"Stop\\?">/);
+        expect(text(second?.content)).toContain('run the tests first');
+        const stops = logged(log).filter((entry) => entry.name === 'stop');
+        expect(stops.map((entry) => entry.event.stop_hook_active)).toEqual([false, true, true, true]);
+        expect(stops.map((entry) => entry.event.last_assistant_message)).toEqual([
+            'answer 1',
+            'answer 2',
+            'answer 3',
+            'answer 4',
+        ]);
+        const shown = notices(read.events);
+        expect(shown.filter((title) => title === 'hook让agent继续工作')).toHaveLength(3);
+        expect(shown.some((title) => title.includes('已经继续了3次'))).toBe(true);
+        expect(read.events.filter((event) => event.kind === 'turn.completed')).toHaveLength(1);
+    }, 60_000);
+
+    it('runs SubagentStop for team members and SessionEnd when a session ends', async () => {
+        const repo = gitRepo();
+        const { ui, core, home } = await host();
+        const log = path.join(home, 'hooks.log');
+        hooksFile(core.paths.extensionsDir, hookScript(home), log, {
+            Stop: ['stop-log'],
+            SubagentStop: ['subagent', 'coder'],
+            SessionEnd: ['end'],
+        });
+        server.reset();
+        server.respondWith((request) => (request.method === 'POST' ? openaiText('done') : undefined));
+        const project = await ui.request('project.add', { path: repo });
+        const model = core.settings.get().defaultModel;
+        const member = core.threads.create({
+            projectId: project.id,
+            title: 'T1',
+            engine: 'xora',
+            model,
+            mode: 'auto_edit',
+            effort: 'medium',
+            extra: { teamRunId: 'team-test', role: 'executor', agentId: 'coder-T1', taskId: 'T1' },
+        });
+        const reviewer = core.threads.create({
+            projectId: project.id,
+            title: 'review T1',
+            engine: 'xora',
+            model,
+            mode: 'plan',
+            effort: 'medium',
+            extra: { teamRunId: 'team-test', role: 'reviewer', agentId: 'reviewer-T1', taskId: 'T1' },
+        });
+        const plain = await ui.request('thread.create', { projectId: project.id });
+        const idle = await ui.request('thread.create', { projectId: project.id });
+        for (const thread of [member, reviewer, plain]) {
+            await ui.request('turn.start', { threadId: thread.id, text: 'go' });
+            await finished(ui, thread.id);
+        }
+        const entries = logged(log);
+        // Members get SubagentStop, matched on their agent type; the reviewer's type is not matched.
+        expect(entries.filter((entry) => entry.name === 'subagent').map((entry) => entry.event)).toEqual([
+            expect.objectContaining({
+                hook_event_name: 'SubagentStop',
+                session_id: member.id,
+                agent_id: 'coder-T1',
+                agent_type: 'coder',
+                task_id: 'T1',
+                stop_hook_active: false,
+                last_assistant_message: 'done',
+            }),
+        ]);
+        expect(entries.filter((entry) => entry.name === 'stop-log').map((entry) => entry.event.session_id)).toEqual([
+            plain.id,
+        ]);
+
+        await ui.request('thread.delete', { threadId: plain.id });
+        await ui.request('thread.update', { threadId: member.id, archived: true });
+        await ui.request('thread.delete', { threadId: idle.id });
+        const ended = await waitUntil(() => {
+            const ends = logged(log).filter((entry) => entry.name === 'end');
+            return ends.length >= 2 ? ends : undefined;
+        }, 'SessionEnd');
+        expect(ended.map((entry) => `${String(entry.event.session_id)}:${String(entry.event.reason)}`).sort()).toEqual(
+            [`${plain.id}:delete`, `${member.id}:archive`].sort(),
+        );
+
+        // Quitting ends the sessions still open; a thread that never ran has none.
+        await core.dispose();
+        const atExit = logged(log).filter((entry) => entry.name === 'end' && entry.event.reason === 'app_exit');
+        expect(atExit.map((entry) => entry.event.session_id)).toEqual([reviewer.id]);
+    }, 60_000);
+
+    it('runs PreCompact before the engine compacts on its own', async () => {
+        const repo = gitRepo();
+        const { ui, core, home } = await host();
+        const log = path.join(home, 'hooks.log');
+        hooksFile(core.paths.extensionsDir, hookScript(home), log, { PreCompact: ['compact', 'auto'] });
+        await ui.request('settings.update', { patch: { softContextWindow: 12_000 } });
+        server.reset();
+        server.respondWith((request) => {
+            if (request.method !== 'POST') return undefined;
+            const body = request.body as { messages?: Array<{ role: string; content: unknown }> };
+            return text(body.messages?.[0]?.content).includes('compress the earlier part')
+                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.')
+                : openaiText('x'.repeat(4000));
+        });
+        const project = await ui.request('project.add', { path: repo });
+        const thread = await ui.request('thread.create', { projectId: project.id });
+        for (let turn = 1; turn <= 8; turn++) {
+            await ui.request('turn.start', { threadId: thread.id, text: `turn ${turn} ${'y'.repeat(4000)}` });
+            await finished(ui, thread.id, turn);
+        }
+        const compactions = logged(log).filter((entry) => entry.name === 'compact');
+        expect(compactions.length).toBeGreaterThan(0);
+        expect(compactions[0]?.event).toMatchObject({
+            hook_event_name: 'PreCompact',
+            trigger: 'auto',
+            session_id: thread.id,
+        });
+    }, 90_000);
 });

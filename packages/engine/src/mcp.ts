@@ -1,4 +1,11 @@
-import { fromAcpMcpServer, McpManager, type McpServerConfig, type McpTool, safeBaseEnv } from '@xora/mcp';
+import {
+    fromAcpMcpServer,
+    McpManager,
+    type McpServerConfig,
+    type McpTool,
+    matchesToolPattern,
+    safeBaseEnv,
+} from '@xora/mcp';
 import { z } from 'zod';
 import type { AnyTool, ToolResult } from './deps.ts';
 
@@ -34,32 +41,38 @@ function textOf(result: { content: ReadonlyArray<{ type: string; text?: string }
 }
 
 /**
- * MCP tools as engine tools. They are never treated as read-only here (server hints are not trusted for
- * permissions), so every call goes through the host's policy, which classifies them as network actions.
+ * MCP tools as engine tools, limited to `allow` (patterns over qualified names) when given. They are never treated
+ * as read-only here (server hints are not trusted for permissions), so every call goes through the host's policy,
+ * which classifies them as network actions.
  */
-export function mcpTools(manager: McpManager): AnyTool[] {
-    return manager.tools().map(
-        (tool: McpTool) =>
-            ({
-                name: tool.qualifiedName,
-                description: `${tool.description || tool.title || tool.name} (MCP server ${tool.server})`,
-                kind: 'fetch',
-                schema: z.record(z.string(), z.unknown()),
-                jsonSchema: tool.inputSchema,
-                readOnly: false,
-                targets: () => [],
-                title: () => `${tool.server}: ${tool.title ?? tool.name}`,
-                run: async (input: Record<string, unknown>, ctx: { signal: AbortSignal }): Promise<ToolResult> => {
-                    try {
-                        const result = await manager.callTool(tool.qualifiedName, input, { signal: ctx.signal });
-                        return { content: textOf(result), ...(result.isError ? { isError: true } : {}) };
-                    } catch (error) {
-                        return {
-                            content: `MCP call failed: ${error instanceof Error ? error.message : String(error)}`,
-                            isError: true,
-                        };
-                    }
-                },
-            }) as unknown as AnyTool,
-    );
+export function mcpTools(manager: McpManager, allow?: readonly string[]): AnyTool[] {
+    const allowed = (tool: McpTool) =>
+        allow === undefined || allow.some((pattern) => matchesToolPattern(pattern, tool.qualifiedName));
+    return manager
+        .tools()
+        .filter(allowed)
+        .map(
+            (tool: McpTool) =>
+                ({
+                    name: tool.qualifiedName,
+                    description: `${tool.description || tool.title || tool.name} (MCP server ${tool.server})`,
+                    kind: 'fetch',
+                    schema: z.record(z.string(), z.unknown()),
+                    jsonSchema: tool.inputSchema,
+                    readOnly: false,
+                    targets: () => [],
+                    title: () => `${tool.server}: ${tool.title ?? tool.name}`,
+                    run: async (input: Record<string, unknown>, ctx: { signal: AbortSignal }): Promise<ToolResult> => {
+                        try {
+                            const result = await manager.callTool(tool.qualifiedName, input, { signal: ctx.signal });
+                            return { content: textOf(result), ...(result.isError ? { isError: true } : {}) };
+                        } catch (error) {
+                            return {
+                                content: `MCP call failed: ${error instanceof Error ? error.message : String(error)}`,
+                                isError: true,
+                            };
+                        }
+                    },
+                }) as unknown as AnyTool,
+        );
 }

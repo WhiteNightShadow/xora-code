@@ -3,6 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type * as acp from '@agentclientprotocol/sdk';
 import type { SessionConfig } from '@xora/engine';
+import type { HooksOutcome } from '@xora/extensions';
+import { matchesToolPattern } from '@xora/mcp';
 import {
     type Attachment,
     type ErrorClass,
@@ -23,13 +25,13 @@ import { checkPathAccess, isReadOnlyCommand, isSensitivePath } from '@xora/tools
 import type { ApprovalService } from './approvals.ts';
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
-import type { EngineManager, EngineProcess, HostToolResult, ToolHookRequest } from './engines/manager.ts';
+import type { EngineManager, EngineProcess, HookRequest, HostToolResult } from './engines/manager.ts';
 import { type EngineDefinition, engineById } from './engines/registry.ts';
 import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import type { CallFacts } from './policy.ts';
+import { type CallFacts, HIGH_RISK_LABELS, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { PromptService } from './prompts.ts';
 import type { ReviewService } from './review.ts';
@@ -43,6 +45,28 @@ const MODEL_ERROR_CODE = -32050;
 const BUSY_ERROR_CODE = -32051;
 
 const READ_KINDS: ReadonlySet<string> = new Set(['read', 'search', 'think']);
+
+/** Model requests the engine makes in one turn at most. */
+const MAX_TURN_REQUESTS = 200;
+/** Times a Stop or SubagentStop hook may send the agent back to work within one turn (09 §4). */
+export const MAX_STOP_CONTINUATIONS = 3;
+/** How long SessionEnd hooks may take: closing a thread or quitting does not wait longer (09 §4). */
+export const SESSION_END_TIMEOUT_MS = 1500;
+
+/** Why a session ends, the SessionEnd matcher's target: the thread was deleted or archived, or the app quits. */
+export type SessionEndReason = 'delete' | 'archive' | 'app_exit';
+
+/** Whether a pattern over `mcp__<server>__<tool>` names can match a tool of `server`. */
+function grantsServer(pattern: string, server: string): boolean {
+    const part = pattern.startsWith('mcp__') ? (pattern.slice('mcp__'.length).split('__')[0] ?? '') : '';
+    return part !== '' && matchesToolPattern(part, server);
+}
+
+/** The roster agent a team member was started from: `coder` for `coder-T1`. */
+function agentTypeOf(thread: ThreadMeta): string {
+    const id = thread.agentId ?? thread.role ?? 'agent';
+    return thread.taskId && id.endsWith(`-${thread.taskId}`) ? id.slice(0, -thread.taskId.length - 1) : id;
+}
 
 export interface TurnDeps {
     readonly threads: ThreadStore;
@@ -78,6 +102,18 @@ export interface HostToolProvider {
     readonly disabledTools?: readonly string[];
     /** Extra prompt layers for the thread (organisation and agent, 06 §4). */
     readonly layers?: ReadonlyArray<{ id: string; title: string; text: string }>;
+    /**
+     * A person approves every high-risk action of the thread (06 §8: push, publish, delete, external messages,
+     * payments), whatever its mode, rules or hooks say. Threads of a team run always get this.
+     */
+    readonly highRiskApproval?: boolean;
+    /** Model requests the next turn may make at most, e.g. what is left of a task card's `budget.maxTurns`. */
+    maxTurnRequests?(): number | undefined;
+    /**
+     * MCP tools the thread may use, as `mcp__<server>__<tool>` names with `*` globs (a team role's allowlist);
+     * absent means every tool of the project's servers. Servers none of them can match are not started.
+     */
+    readonly mcpTools?: readonly string[];
     handle(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
 }
 
@@ -89,6 +125,8 @@ export interface TurnEnded {
     /** The last agent message of the turn. */
     readonly lastText: string;
     readonly changedFiles: readonly string[];
+    /** Model requests that completed in the turn. */
+    readonly requests: number;
 }
 
 function money(total: Money | null, add: Money | null): Money | null {
@@ -190,6 +228,8 @@ class RunningTurn {
     text: ItemOf<'agent_message'> | undefined;
     reasoning: ItemOf<'reasoning'> | undefined;
     requests = 0;
+    /** Model requests that completed, with or without reported usage; see {@link TurnEnded.requests}. */
+    modelCalls = 0;
     inputTokens = 0;
     cachedTokens = 0;
     outputTokens = 0;
@@ -221,6 +261,8 @@ export class TurnService {
     readonly #running = new Map<string, RunningTurn>();
     readonly #hostTools = new Map<string, HostToolProvider>();
     readonly #mcpWarned = new Map<string, Set<string>>();
+    /** Threads whose engine session was used since the app started, with their folder, for SessionEnd. */
+    readonly #sessions = new Map<string, string>();
     #sleepBlocked = false;
 
     constructor(deps: TurnDeps) {
@@ -404,7 +446,10 @@ export class TurnService {
             mode: thread.mode,
             layers,
             softContextWindow: current.softContextWindow,
-            maxTurnRequests: 200,
+            maxTurnRequests: Math.max(
+                1,
+                Math.min(MAX_TURN_REQUESTS, provider?.maxTurnRequests?.() ?? MAX_TURN_REQUESTS),
+            ),
             userAgent: this.#deps.userAgent,
             env:
                 thread.location.kind === 'worktree' && this.#deps.portFor
@@ -412,6 +457,7 @@ export class TurnService {
                     : {},
             hostTools: tools.map((tool) => ({ ...tool, kind: tool.kind ?? 'other' })),
             disabledTools: [...(provider?.disabledTools ?? [])],
+            ...(provider?.mcpTools ? { mcpTools: [...provider.mcpTools] } : {}),
             hookEvents: [...(extras?.hookEvents ?? [])],
             lsp: { diagnostics: current.lspDiagnostics, trusted: project.trusted },
         };
@@ -447,10 +493,16 @@ export class TurnService {
         const meta = process.isXora
             ? { xora: await this.#sessionConfig(thread, project, running.cwd, running.extras) }
             : undefined;
-        const mcpServers = (this.#deps.extensions?.mcpServersFor(
-            running.extras,
-            process.isXora ? { http: true, sse: true } : (process.capabilities.mcpCapabilities ?? {}),
-        ) ?? []) as acp.McpServer[];
+        // A thread with an MCP allowlist (team roles, 06 §4) only starts the servers it may use.
+        const granted = this.#hostTools.get(thread.id)?.mcpTools;
+        const mcpServers = (
+            this.#deps.extensions?.mcpServersFor(
+                running.extras,
+                process.isXora ? { http: true, sse: true } : (process.capabilities.mcpCapabilities ?? {}),
+            ) ?? []
+        ).filter(
+            (server) => granted === undefined || granted.some((pattern) => grantsServer(pattern, server.name)),
+        ) as acp.McpServer[];
         const existing = threads.sessionId(thread.id);
         let sessionId: string | undefined;
         let opened: unknown;
@@ -592,13 +644,8 @@ export class TurnService {
         return context;
     }
 
-    /** Fire-and-forget hooks (Stop, Notification); failures are only logged. */
-    #sideHook(
-        running: RunningTurn,
-        event: 'Stop' | 'Notification',
-        targets: string[],
-        payload: Record<string, unknown>,
-    ): void {
+    /** Fire-and-forget hooks (Notification); failures are only logged. */
+    #sideHook(running: RunningTurn, event: 'Notification', targets: string[], payload: Record<string, unknown>): void {
         const extensions = this.#deps.extensions;
         const extras = running.extras;
         if (!extensions || !extras) {
@@ -607,6 +654,159 @@ export class TurnService {
         void extensions
             .runHook(extras, event, { sessionId: running.threadId, cwd: running.cwd, targets, payload })
             .catch((error: unknown) => this.#deps.log.warn(`${event} hook: ${String(error)}`));
+    }
+
+    /** PreCompact (09 §4): before `/compact` (`manual`) and before the engine compacts on its own (`auto`). */
+    async #preCompact(
+        running: RunningTurn,
+        trigger: 'auto' | 'manual',
+        instructions: string,
+        signal: AbortSignal,
+    ): Promise<void> {
+        const extensions = this.#deps.extensions;
+        if (!extensions || !running.extras) {
+            return;
+        }
+        await extensions
+            .runHook(running.extras, 'PreCompact', {
+                sessionId: running.threadId,
+                cwd: running.cwd,
+                targets: [trigger],
+                payload: { trigger, custom_instructions: instructions },
+                signal,
+            })
+            .catch((error: unknown) => this.#deps.log.warn(`PreCompact hook: ${String(error)}`));
+    }
+
+    /**
+     * Stop hooks once the agent ends its turn (09 §4): Stop, or SubagentStop for a member of a team run, matched on
+     * its agent type (`coder`) or role (`executor`). A hook that blocks (`{"decision": "block", "reason": "…"}`, or
+     * exit code 2) sends the agent back to work with the reason, within the same turn, at most
+     * {@link MAX_STOP_CONTINUATIONS} times; it then runs again with `stop_hook_active: true`. Turns that end for
+     * another reason (output limit, request cap) run the hooks without continuing. Returns the final stop reason.
+     */
+    async #stopHooks(
+        running: RunningTurn,
+        process: EngineProcess,
+        sessionId: string,
+        first: acp.StopReason,
+    ): Promise<acp.StopReason> {
+        const extensions = this.#deps.extensions;
+        const extras = running.extras;
+        if (!extensions || !extras) {
+            return first;
+        }
+        const thread = this.#deps.threads.find(running.threadId);
+        const member = thread?.teamRunId !== undefined && thread.role !== undefined && thread.role !== 'supervisor';
+        const event = member ? 'SubagentStop' : 'Stop';
+        const agentType = member && thread ? agentTypeOf(thread) : undefined;
+        let stopReason = first;
+        for (let continued = 0; ; continued++) {
+            if (stopReason === 'cancelled' || stopReason === 'refusal' || running.abort.signal.aborted) {
+                return stopReason;
+            }
+            // The final message is part of what the hook gets.
+            this.#closeText(running);
+            let outcome: HooksOutcome | undefined;
+            try {
+                outcome = await extensions.runHook(extras, event, {
+                    sessionId: running.threadId,
+                    cwd: running.cwd,
+                    ...(agentType && thread?.role ? { targets: [...new Set([agentType, thread.role])] } : {}),
+                    payload: {
+                        stop_hook_active: continued > 0,
+                        last_assistant_message: running.lastText,
+                        ...(agentType
+                            ? {
+                                  agent_id: thread?.agentId ?? agentType,
+                                  agent_type: agentType,
+                                  ...(thread?.taskId ? { task_id: thread.taskId } : {}),
+                              }
+                            : {}),
+                    },
+                    signal: running.abort.signal,
+                });
+            } catch (error) {
+                this.#notice(
+                    running,
+                    'warning',
+                    'hook运行失败',
+                    error instanceof Error ? error.message : String(error),
+                );
+            }
+            // `continue: false` ends the agent whatever else the hooks said.
+            if (stopReason !== 'end_turn' || !outcome?.blocked || outcome.stop || running.abort.signal.aborted) {
+                return stopReason;
+            }
+            const reason = outcome.reason?.trim() || 'A stop hook asked you to keep working.';
+            if (continued >= MAX_STOP_CONTINUATIONS) {
+                this.#notice(
+                    running,
+                    'warning',
+                    `hook还要agent继续，这一轮已经继续了${MAX_STOP_CONTINUATIONS}次，停在这里`,
+                    reason,
+                );
+                return stopReason;
+            }
+            this.#notice(running, 'info', 'hook让agent继续工作', reason);
+            const response = await process.agent.request('session/prompt', {
+                sessionId,
+                prompt: [{ type: 'text', text: `<hook_feedback event="${event}">\n${reason}\n</hook_feedback>` }],
+            });
+            stopReason = response.stopReason;
+        }
+    }
+
+    /**
+     * SessionEnd hooks when a thread's session ends (09 §4): the thread is deleted or archived, or the app quits.
+     * Best effort: the hooks get {@link SESSION_END_TIMEOUT_MS} and failures are only logged. A thread without an
+     * engine session has nothing to end. Call it before the thread is deleted.
+     */
+    async endSession(thread: ThreadMeta, reason: SessionEndReason, timeoutMs = SESSION_END_TIMEOUT_MS): Promise<void> {
+        const cwd = this.#sessions.get(thread.id);
+        this.#sessions.delete(thread.id);
+        const extensions = this.#deps.extensions;
+        // Read before the first await: the caller may delete the thread right after calling.
+        const started =
+            cwd !== undefined ||
+            (this.#deps.threads.find(thread.id) !== undefined && this.#deps.threads.sessionId(thread.id) !== undefined);
+        if (!extensions || !started) {
+            return;
+        }
+        try {
+            const project = await this.#deps.projects.get(thread.projectId);
+            const folder = cwd ?? this.cwdOf(thread, project);
+            await extensions.runHook({ loaded: await extensions.load(project) }, 'SessionEnd', {
+                sessionId: thread.id,
+                cwd: existsSync(folder) ? folder : project.path,
+                targets: [reason],
+                payload: { reason },
+                signal: AbortSignal.timeout(timeoutMs),
+            });
+        } catch (error) {
+            this.#deps.log.warn(
+                `SessionEnd hook of ${thread.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }
+
+    /** SessionEnd for every session used since the app started, all at once, for quitting (bounded by the timeout). */
+    async endSessions(reason: SessionEndReason, timeoutMs = SESSION_END_TIMEOUT_MS): Promise<void> {
+        const threads = [...this.#sessions.keys()].flatMap((threadId) => {
+            const thread = this.#deps.threads.find(threadId);
+            return thread ? [thread] : [];
+        });
+        if (threads.length === 0) {
+            return;
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+            Promise.allSettled(threads.map((thread) => this.endSession(thread, reason, timeoutMs))),
+            new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, timeoutMs + 500);
+            }),
+        ]);
+        clearTimeout(timer);
     }
 
     #notice(running: RunningTurn, severity: 'info' | 'warning' | 'error', title: string, description?: string): void {
@@ -635,6 +835,7 @@ export class TurnService {
                 return;
             }
             await this.#openSession(running, thread, project);
+            this.#sessions.set(running.threadId, running.cwd);
             const sessionId = running.sessionId;
             if (!sessionId || !running.process) {
                 throw new Error('no engine session');
@@ -650,16 +851,7 @@ export class TurnService {
             if (command && running.process.isXora) {
                 // `/compact [focus]`: summarise older turns now instead of prompting (08 §3).
                 const focus = command[1]?.trim();
-                if (running.extras && this.#deps.extensions) {
-                    await this.#deps.extensions
-                        .runHook(running.extras, 'PreCompact', {
-                            sessionId: running.threadId,
-                            cwd: running.cwd,
-                            targets: ['manual'],
-                            payload: { trigger: 'manual', custom_instructions: focus ?? '' },
-                        })
-                        .catch((error: unknown) => this.#deps.log.warn(`PreCompact hook: ${String(error)}`));
-                }
+                await this.#preCompact(running, 'manual', focus ?? '', running.abort.signal);
                 await running.process.agent.request('_xora/session/compact', {
                     sessionId,
                     ...(focus ? { focus } : {}),
@@ -685,7 +877,10 @@ export class TurnService {
                 // The xora engine marks where each host turn starts, for rewind and fork (M3-3).
                 ...(running.process.isXora ? { _meta: { xora: { turnId: running.turnId } } } : {}),
             });
-            await this.#finish(running, response.stopReason);
+            await this.#finish(
+                running,
+                await this.#stopHooks(running, running.process, sessionId, response.stopReason),
+            );
         } catch (error) {
             if (running.abort.signal.aborted && !running.exited) {
                 await this.#finish(running, 'cancelled');
@@ -722,16 +917,23 @@ export class TurnService {
             onExit: (reason: string) => {
                 running.exited = reason;
             },
-            onHook: (request: ToolHookRequest, signal: AbortSignal) => {
+            onHook: async (request: HookRequest, signal: AbortSignal): Promise<Record<string, unknown>> => {
                 const extensions = this.#deps.extensions;
                 if (!extensions || !running.extras) {
-                    return Promise.resolve({});
+                    return {};
                 }
-                return extensions.runToolHook(running.extras, request.event, request.payload, {
-                    sessionId: running.threadId,
-                    cwd: running.cwd,
-                    signal,
-                });
+                if (request.event === 'PreCompact') {
+                    const { trigger, custom_instructions } = request.payload;
+                    await this.#preCompact(running, trigger, custom_instructions ?? '', signal);
+                    return {};
+                }
+                return {
+                    ...(await extensions.runToolHook(running.extras, request.event, request.payload, {
+                        sessionId: running.threadId,
+                        cwd: running.cwd,
+                        signal,
+                    })),
+                };
             },
             onHostTool: async (name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult> => {
                 const provider = this.#hostTools.get(running.threadId);
@@ -1032,6 +1234,9 @@ export class TurnService {
                 source: request.usage ? 'vendor' : 'estimate',
             });
             cost = recorded.cost;
+            if (request.status === 'ok') {
+                running.modelCalls++;
+            }
             if (request.usage) {
                 running.requests++;
                 running.inputTokens += request.usage.inputTokens;
@@ -1055,6 +1260,14 @@ export class TurnService {
     }
 
     // Permissions -----------------------------------------------------------------------------------------
+
+    /** Whether a person approves every high-risk action of the thread (06 §8): team runs and opted-in threads. */
+    #guardsHighRisk(threadId: string): boolean {
+        return (
+            this.#deps.threads.find(threadId)?.teamRunId !== undefined ||
+            this.#hostTools.get(threadId)?.highRiskApproval === true
+        );
+    }
 
     async #facts(running: RunningTurn, request: acp.RequestPermissionRequest): Promise<CallFacts> {
         const meta = xoraMeta(request._meta);
@@ -1090,8 +1303,12 @@ export class TurnService {
                 }
             }
         }
+        const toolName = typeof meta?.toolName === 'string' ? meta.toolName : (request.toolCall.title ?? 'tool');
+        const highRisk = this.#guardsHighRisk(running.threadId)
+            ? highRiskOf({ toolName, command }, { cwd: running.cwd })
+            : undefined;
         return {
-            toolName: typeof meta?.toolName === 'string' ? meta.toolName : (request.toolCall.title ?? 'tool'),
+            toolName,
             kind,
             readOnly: typeof meta?.readOnly === 'boolean' ? meta.readOnly : READ_KINDS.has(kind),
             ...(command !== undefined ? { command } : {}),
@@ -1107,6 +1324,7 @@ export class TurnService {
             outside,
             sensitive,
             external: running.engine.kind === 'external',
+            ...(highRisk ? { highRisk } : {}),
         };
     }
 
@@ -1132,13 +1350,23 @@ export class TurnService {
         };
         const thread = threads.get(running.threadId);
         const facts = await this.#facts(running, request);
+        // The engine only offers allowed MCP tools; a call to another one is refused all the same (06 §4).
+        const granted = this.#hostTools.get(running.threadId)?.mcpTools;
+        if (
+            granted &&
+            facts.toolName.startsWith('mcp__') &&
+            !granted.some((pattern) => matchesToolPattern(pattern, facts.toolName))
+        ) {
+            this.#deps.log.info(`denied ${facts.toolName} in ${running.threadId}: not in the agent's tools`);
+            return select(false, '这个agent的工具白名单里没有这个mcp工具');
+        }
         const policy = approvals.evaluate(running.threadId, facts, {
             mode: thread.mode,
             projectId: running.projectId,
             projectRoot: running.cwd,
         });
         // A trusted PreToolUse hook may ask for a confirmation the policy would skip, or waive one it would ask
-        // for; it never overrides a deny, a path outside the workspace or a secret file (09 §4).
+        // for; it never overrides a deny, a path outside the workspace, a secret file or a high-risk action (09 §4).
         const hookDecision = (request._meta as { xora?: { hookDecision?: unknown } } | null | undefined)?.xora
             ?.hookDecision;
         let decision = policy.decision;
@@ -1148,7 +1376,8 @@ export class TurnService {
             hookDecision === 'allow' &&
             decision === 'ask' &&
             facts.outside.length === 0 &&
-            facts.sensitive.length === 0
+            facts.sensitive.length === 0 &&
+            !facts.highRisk
         ) {
             decision = 'allow';
         }
@@ -1165,6 +1394,7 @@ export class TurnService {
         });
         const summary =
             facts.command ?? (shown.length > 0 ? shown.join('\n') : (request.toolCall.title ?? facts.toolName));
+        const title = request.toolCall.title ?? facts.toolName;
         let approvalItem: ItemOf<'approval'> | undefined;
         const outcome = await new Promise<Awaited<ReturnType<ApprovalService['request']>>>((resolve) => {
             const onAbort = () => approvals.cancelThread(running.threadId);
@@ -1178,7 +1408,9 @@ export class TurnService {
                         projectId: running.projectId,
                         toolCallId: request.toolCall.toolCallId,
                         toolName: facts.toolName,
-                        title: request.toolCall.title ?? facts.toolName,
+                        title: facts.highRisk
+                            ? `高风险动作（${HIGH_RISK_LABELS[facts.highRisk.action]}）：${title}`
+                            : title,
                         toolKind: facts.kind,
                         summary,
                         ...(facts.command ? { command: facts.command } : {}),
@@ -1288,9 +1520,6 @@ export class TurnService {
 
     async #finish(running: RunningTurn, stopReason: acp.StopReason): Promise<void> {
         const { threads, bus, settings, shell } = this.#deps;
-        if (stopReason !== 'cancelled' && stopReason !== 'refusal') {
-            this.#sideHook(running, 'Stop', [], { stop_hook_active: false });
-        }
         this.#closeLive(running, stopReason === 'cancelled' ? 'cancelled' : 'completed');
         const changes = await this.#changes(running);
         threads.append(
@@ -1347,6 +1576,7 @@ export class TurnService {
                     ...(stopReason ? { stopReason } : {}),
                     lastText: running.lastText,
                     changedFiles,
+                    requests: running.modelCalls,
                 });
             } catch (error) {
                 this.#deps.log.warn(`turn hook failed: ${error instanceof Error ? error.message : String(error)}`);

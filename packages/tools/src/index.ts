@@ -7,6 +7,13 @@ export {
     splitShellCommand,
 } from './command.ts';
 export { isSecretEnvName, KEPT_ENV_NAMES, sanitizeEnv } from './env.ts';
+export {
+    type HighRisk,
+    type HighRiskAction,
+    type HighRiskOptions,
+    highRiskOfCommand,
+    highRiskOfTool,
+} from './high-risk.ts';
 export { createJobRegistry, type ManagedJobRegistry, ShellJob } from './jobs.ts';
 export { type DiagnosticsReport, LspClient } from './lsp/client.ts';
 export { type EditReport, formatEditNote, LSP_EDIT_NOTE, newDiagnostics } from './lsp/format.ts';

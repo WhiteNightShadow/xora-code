@@ -21,13 +21,13 @@ import {
     openaiToolCalls,
     startMockModelServer,
 } from '@xora/test-kit';
-import { createTeamRun, findAgent, loadTeamState, TaskBoard } from '@xora/workflows';
+import { type AgentSpec, createTeamRun, DEFAULT_ORG, findAgent, loadTeamState, TaskBoard } from '@xora/workflows';
 import { build } from 'esbuild';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { HostCore } from '../src/core.ts';
 import type { Logger } from '../src/log.ts';
 import { MemoryShell } from '../src/shell.ts';
-import { loadTeamOrganization } from '../src/team-agents.ts';
+import { loadTeamOrganization, mcpToolsOf } from '../src/team-agents.ts';
 import { SqliteTeamStore } from '../src/team-store.ts';
 
 /**
@@ -372,6 +372,8 @@ describe('agent team run', () => {
         expect(planning).toBeDefined();
         expect((waiting.ledger as { plan?: string } | undefined)?.plan).toBe('a.txt first, then b.txt next to it');
         expect(waiting.progress.length).toBeGreaterThanOrEqual(4);
+        // Only glm serves the flagship tier here: no other family for the plan review, which is skipped.
+        expect(waiting.warnings?.some((warning) => warning.includes('跳过了独立的计划评审'))).toBe(true);
 
         // Threads: the supervisor plans read-only, T2 ran at economy and then a tier up, the reviewer is cross-family.
         const threads = await first.ui.request('thread.list', { includeArchived: true });
@@ -523,6 +525,245 @@ describe('agent team limits', () => {
         expect(stopped.status).toBe('cancelled');
         expect(stopped.tasks.map((task) => task.status)).toEqual(['cancelled']);
     }, 60_000);
+
+    it('works no more cards at once than the team concurrency setting allows', async () => {
+        const repo = gitRepo();
+        const cards = ['T1', 'T2', 'T3'].map((id) => ({
+            id,
+            title: `Write ${id}`,
+            goal: `${id}.txt exists`,
+            category: 'coding',
+            tier: 'economy',
+            ownership: [`${id}.txt`],
+            acceptance: [{ type: 'command', run: 'node -e "process.exit(0)"' }],
+            deliverable: { kind: 'code-change' },
+            budget: { cost: 2 },
+            workspace: 'worktree',
+        }));
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) {
+                return undefined;
+            }
+            const last = body.messages.at(-1);
+            if (agentOf(body) === 'Supervisor') {
+                if (last?.role === 'tool') return say('Planned.');
+                return textOf(last?.content).includes('<team_goal>')
+                    ? call({ name: 'task_create', arguments: { tasks: cards } })
+                    : say('Noted.');
+            }
+            const first = textOf(body.messages.find((message) => message.role === 'user')?.content);
+            const taskId = /<task_card id="([^"]+)"/.exec(first)?.[1] ?? 'T?';
+            if (last?.role !== 'tool') {
+                return {
+                    ...call({ name: 'write', arguments: { path: `${taskId}.txt`, content: 'x\n' } }),
+                    delayMs: 150,
+                };
+            }
+            return lastCall(body) === 'write'
+                ? call({
+                      name: 'deliver',
+                      arguments: {
+                          status: 'done',
+                          summary: `wrote ${taskId}.txt`,
+                          changes: [{ file: `${taskId}.txt`, kind: 'added' }],
+                          evidence: [{ type: 'diff' }],
+                      },
+                  })
+                : say(`Handed in ${taskId}.`);
+        });
+        const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+        approve(ui, [], new Set());
+        await connect(ui);
+        await ui.request('settings.update', { patch: { team: { maxParallel: 1 } } });
+        const project = await ui.request('project.add', { path: repo });
+        const before = server.requests.length;
+        const run = await ui.request('team.start', { projectId: project.id, goal: '写三个文件', autonomy: 'L2' });
+        let most = 0;
+        const done = await waitFor(async () => {
+            const current = await ui.request('team.get', { runId: run.id });
+            const working = current.tasks.filter((task) => task.status === 'assigned' || task.status === 'in_progress');
+            most = Math.max(most, working.length);
+            return current.status === 'done' || current.status === 'failed' ? current : undefined;
+        }, 'run done');
+        expect(done.status).toBe('done');
+        expect(done.tasks.map((task) => task.status)).toEqual(['done', 'done', 'done']);
+        expect(most).toBe(1);
+        const brief = server.requests
+            .slice(before)
+            .find((request) => agentOf(request.body as ChatBody | undefined) === 'Supervisor')?.body as ChatBody;
+        expect(textOf(brief.messages.at(-1)?.content)).toContain('at most 1 at a time');
+        for (const id of ['T1', 'T2', 'T3']) {
+            expect(readFileSync(path.join(repo, `${id}.txt`), 'utf8')).toBe('x\n');
+        }
+    }, 90_000);
+
+    it('fails an attempt that uses up the card turn budget and sends the card a tier up', async () => {
+        const repo = gitRepo();
+        const card = {
+            id: 'T1',
+            title: 'Write a.txt',
+            goal: 'a.txt exists',
+            category: 'coding',
+            tier: 'economy',
+            ownership: ['a.txt'],
+            acceptance: [{ type: 'command', run: 'node -e "process.exit(0)"' }],
+            deliverable: { kind: 'code-change' },
+            budget: { cost: 2, maxTurns: 3 },
+            workspace: 'worktree',
+        };
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) {
+                return undefined;
+            }
+            const last = body.messages.at(-1);
+            if (agentOf(body) === 'Supervisor') {
+                if (last?.role === 'tool') return say('Planned.');
+                return textOf(last?.content).includes('<team_goal>')
+                    ? call({ name: 'task_create', arguments: { tasks: [card] } })
+                    : say('Noted.');
+            }
+            // The economy model keeps reading and never delivers; the standard one does the work.
+            if (body.model === 'deepseek-flash') {
+                return call({ name: 'read', arguments: { path: 'README.md' } });
+            }
+            if (last?.role !== 'tool') {
+                return call({ name: 'write', arguments: { path: 'a.txt', content: 'done\n' } });
+            }
+            return lastCall(body) === 'write'
+                ? call({
+                      name: 'deliver',
+                      arguments: {
+                          status: 'done',
+                          summary: 'wrote a.txt',
+                          changes: [{ file: 'a.txt', kind: 'added' }],
+                          evidence: [{ type: 'diff' }],
+                      },
+                  })
+                : say('Handed in T1.');
+        });
+        const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+        approve(ui, [], new Set());
+        await connect(ui);
+        const project = await ui.request('project.add', { path: repo });
+        const before = server.requests.length;
+        const run = await ui.request('team.start', { projectId: project.id, goal: '写a.txt', autonomy: 'L2' });
+        const done = await waitFor(async () => {
+            const current = await ui.request('team.get', { runId: run.id });
+            return current.status === 'done' || current.status === 'failed' ? current : undefined;
+        }, 'run done');
+        expect(done.status).toBe('done');
+        expect(done.tasks[0]).toMatchObject({ id: 'T1', status: 'done', tier: 'standard', attempts: 2 });
+        const economy = server.requests
+            .slice(before)
+            .map((request) => request.body as ChatBody | undefined)
+            .filter((body) => agentOf(body) === 'Coder' && body?.model === 'deepseek-flash');
+        expect(economy).toHaveLength(3);
+        const first = textOf(economy[0]?.messages.find((message) => message.role === 'user')?.content);
+        expect(first).toContain('You have 3 model turns for this card');
+        const progress = done.progress as Array<{ reason: string }>;
+        expect(progress.some((entry) => entry.reason.includes('used up its turn budget (3 of 3'))).toBe(true);
+        expect(readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('done\n');
+    }, 90_000);
+});
+
+describe('plan review', () => {
+    it('has another model family review the plan once before it is confirmed', async () => {
+        const repo = gitRepo();
+        const check = `node -e "process.exit(require('fs').readFileSync('a.txt','utf8').trim()==='hello'?0:1)"`;
+        const card = {
+            id: 'T1',
+            title: 'Write a.txt',
+            goal: 'a.txt says hello',
+            category: 'coding',
+            tier: 'economy',
+            ownership: ['a.txt'],
+            acceptance: [{ type: 'command', run: 'node -e "process.exit(0)"' }],
+            deliverable: { kind: 'code-change' },
+            budget: { cost: 2 },
+            workspace: 'worktree',
+        };
+        // deepseek and glm both serve the flagship tier: the supervisor runs on deepseek, the review on glm.
+        server.setModels([{ id: 'deepseek-v4-pro' }, { id: 'glm-5.3' }, { id: 'deepseek-flash' }]);
+        try {
+            server.respondWith((request) => {
+                const body = request.body as ChatBody | undefined;
+                if (!body?.messages) {
+                    return undefined;
+                }
+                const last = body.messages.at(-1);
+                const agent = agentOf(body);
+                if (agent === 'Plan reviewer') {
+                    return say(
+                        'Read the plan.\n\n```json\n{"verdict": "fail", "summary": "T1 cannot prove its goal", "issues": [{"problem": "T1 checks nothing about a.txt", "fix": "check that a.txt says hello", "blocking": true}]}\n```',
+                    );
+                }
+                if (agent !== 'Supervisor') {
+                    return say('ok');
+                }
+                if (last?.role === 'tool') {
+                    return say('Done.');
+                }
+                const input = textOf(last?.content);
+                if (input.includes('<team_goal>')) {
+                    return call({ name: 'task_create', arguments: { tasks: [card] } });
+                }
+                if (input.includes('Plan review by')) {
+                    return call({
+                        name: 'task_update',
+                        arguments: {
+                            taskId: 'T1',
+                            changes: { acceptance: [{ type: 'command', run: check }] },
+                            reason: 'the plan review was right',
+                        },
+                    });
+                }
+                return say('Noted.');
+            });
+            const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+            const seen: Approval[] = [];
+            approve(ui, seen, new Set(['team_plan']));
+            await connect(ui);
+            const project = await ui.request('project.add', { path: repo });
+            const before = server.requests.length;
+            const run = await ui.request('team.start', { projectId: project.id, goal: '写a.txt', autonomy: 'L1' });
+            const plan = await waitFor(() => seen.find((approval) => approval.toolName === 'team_plan'), 'plan card');
+
+            // The supervisor plans, the plan reviewer audits once, the supervisor revises, then the user confirms.
+            const bodies = server.requests
+                .slice(before)
+                .map((request) => request.body as ChatBody | undefined)
+                .filter((body) => body?.messages !== undefined) as ChatBody[];
+            const agents = bodies.map(agentOf);
+            const reviewAt = agents.indexOf('Plan reviewer');
+            expect(reviewAt).toBeGreaterThan(0);
+            expect(agents.filter((agent) => agent === 'Plan reviewer')).toHaveLength(1);
+            expect(agents.slice(0, reviewAt).every((agent) => agent === 'Supervisor')).toBe(true);
+            const review = bodies[reviewAt] as ChatBody;
+            expect(review.model).toBe('glm-5.3');
+            const audited = textOf(review.messages.find((message) => message.role === 'user')?.content);
+            expect(audited).toContain('<task_card id="T1"');
+            expect(audited).toContain('Audit this plan once');
+            const revision = bodies
+                .slice(reviewAt + 1)
+                .find((body) => textOf(body.messages.at(-1)?.content).includes('Plan review by glm-5.3'));
+            expect(textOf(revision?.messages.at(-1)?.content)).toContain('T1 checks nothing about a.txt');
+            expect(revision?.model).toBe('deepseek-v4-pro');
+            expect(plan.summary).toContain('readFileSync');
+
+            const view = await ui.request('team.get', { runId: run.id });
+            expect(view.status).toBe('awaiting_plan_approval');
+            expect(view.warnings ?? []).toEqual([]);
+            const threads = await ui.request('thread.list', { includeArchived: true });
+            expect(
+                threads.find((thread) => thread.teamRunId === run.id && thread.role === 'plan_reviewer'),
+            ).toMatchObject({ tier: 'flagship', model: { model: 'glm-5.3' } });
+            await ui.request('team.stop', { runId: run.id });
+        } finally {
+            server.setModels([{ id: 'glm-5.3' }, { id: 'kimi-k3' }, { id: 'deepseek-flash' }]);
+        }
+    }, 90_000);
 });
 
 describe('team persistence and organizations', () => {
@@ -575,5 +816,19 @@ describe('team persistence and organizations', () => {
 
         const trusted = await loadTeamOrganization({ orgsDir, projectDir: project, trusted: true });
         expect(findAgent(trusted.org, 'coder')).toMatchObject({ tier: 'standard', mode: 'full' });
+    });
+
+    it('grants MCP tools through the agent tool list', () => {
+        const agent = (id: string) => findAgent(DEFAULT_ORG, id) as AgentSpec;
+        expect(mcpToolsOf(agent('coder'))).toEqual(['mcp__*']);
+        expect(mcpToolsOf(agent('specialist'))).toEqual(['mcp__*']);
+        for (const id of ['supervisor', 'planner', 'plan-reviewer', 'scout', 'reviewer']) {
+            expect(mcpToolsOf(agent(id))).toEqual([]);
+        }
+        expect(mcpToolsOf({ ...agent('scout'), tools: ['read', 'mcp'] })).toEqual(['mcp__*']);
+        expect(
+            mcpToolsOf({ ...agent('reviewer'), tools: ['read', 'mcp__github', 'mcp__slack__post_message'] }),
+        ).toEqual(['mcp__github__*', 'mcp__slack__post_message']);
+        expect(mcpToolsOf({ ...agent('coder'), tools: ['read', 'edit'] })).toEqual([]);
     });
 });

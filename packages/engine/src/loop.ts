@@ -3,7 +3,14 @@ import type * as acp from '@agentclientprotocol/sdk';
 import type { AssistantMessage, AssistantPart, Message, ModelEvent, ModelRequest, UserPart } from '@xora/providers';
 import { z } from 'zod';
 import type { HostTool } from './config.ts';
-import { contextBudget, contextMessages, currentContextTokens, pruneToolResults, summarise } from './context.ts';
+import {
+    contextBudget,
+    contextMessages,
+    currentContextTokens,
+    pruneToolResults,
+    summarise,
+    summaryCut,
+} from './context.ts';
 import {
     type AnyTool,
     checkPathAccess,
@@ -32,11 +39,13 @@ export interface TurnIO {
     requestPermission(request: Omit<acp.RequestPermissionRequest, 'sessionId'>): Promise<acp.RequestPermissionResponse>;
     /** Runs a host-implemented tool (`_xora/tool/call`). */
     callHostTool(name: string, input: unknown, signal: AbortSignal): Promise<ToolResult>;
-    /** Runs the host's hooks for a tool event (`_xora/hook/run`); only called for events in `hookEvents`. */
-    runHook?(event: ToolHookEvent, payload: ToolHookPayload, signal: AbortSignal): Promise<HookReply>;
+    /** Runs the host's hooks for an event (`_xora/hook/run`); only called for events in `hookEvents`. */
+    runHook?(event: HookEvent, payload: HookPayload, signal: AbortSignal): Promise<HookReply>;
 }
 
 export type ToolHookEvent = 'PreToolUse' | 'PostToolUse';
+/** Events the engine raises itself: around tool calls, and before it compacts on its own (09 §4). */
+export type HookEvent = ToolHookEvent | 'PreCompact';
 
 export interface ToolHookPayload {
     readonly tool_name: string;
@@ -44,6 +53,14 @@ export interface ToolHookPayload {
     readonly tool_use_id: string;
     readonly tool_response?: { readonly content: string; readonly isError: boolean };
 }
+
+/** PreCompact: `manual` for `/compact`, `auto` when the context runs full or the model changes vendor. */
+export interface CompactHookPayload {
+    readonly trigger: 'auto' | 'manual';
+    readonly custom_instructions: string;
+}
+
+export type HookPayload = ToolHookPayload | CompactHookPayload;
 
 /** What the host's hooks decided; every field is optional. */
 export interface HookReply {
@@ -258,7 +275,7 @@ export class TurnRunner {
         const all = [
             ...tools.filter((tool) => !disabled.has(tool.name)),
             ...session.config.hostTools.map((spec) => hostTool(spec, io)),
-            ...(session.mcp ? mcpTools(session.mcp) : []),
+            ...(session.mcp ? mcpTools(session.mcp, session.config.mcpTools) : []),
         ];
         this.#tools = new Map(all.map((tool) => [tool.name, tool]));
     }
@@ -325,8 +342,19 @@ export class TurnRunner {
         await this.compact(3);
     }
 
-    async compact(level: 3 | 4, focus?: string): Promise<boolean> {
+    /**
+     * Summarises older turns. Before a compaction of its own (`auto`) the engine runs the host's PreCompact hooks;
+     * for `/compact` the host has run them already.
+     */
+    async compact(level: 3 | 4, focus?: string, trigger: 'auto' | 'manual' = 'auto'): Promise<boolean> {
         const session = this.#session;
+        if (
+            trigger === 'auto' &&
+            this.#hookEnabled('PreCompact') &&
+            summaryCut(session, level === 4 ? 1 : 2) !== undefined
+        ) {
+            await this.#runHook('PreCompact', { trigger: 'auto', custom_instructions: '' });
+        }
         const id = `compaction-${Date.now()}`;
         this.#io.update({
             sessionUpdate: 'compaction_update',
@@ -716,11 +744,11 @@ export class TurnRunner {
         });
     }
 
-    #hookEnabled(event: ToolHookEvent): boolean {
+    #hookEnabled(event: HookEvent): boolean {
         return this.#io.runHook !== undefined && this.#session.config.hookEvents.includes(event);
     }
 
-    async #runHook(event: ToolHookEvent, payload: ToolHookPayload): Promise<HookReply> {
+    async #runHook(event: HookEvent, payload: HookPayload): Promise<HookReply> {
         try {
             return (await this.#io.runHook?.(event, payload, this.#signal)) ?? {};
         } catch (error) {

@@ -488,6 +488,8 @@ export const SettingsSchema = z.object({
         monthlyLimit: z.number().nonnegative().nullable(),
         turnLimit: z.number().nonnegative().nullable(),
     }),
+    /** Agent teams (06): members of one run that work at the same time. */
+    team: z.object({ maxParallel: z.number().int().min(1).max(8) }),
 });
 export type Settings = z.infer<typeof SettingsSchema>;
 

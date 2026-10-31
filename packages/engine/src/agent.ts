@@ -354,7 +354,7 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
             const controller = session.begin();
             try {
                 const runner = new TurnRunner(session, io(client, session.id), controller.signal, tools);
-                const compacted = await runner.compact(3, params.focus);
+                const compacted = await runner.compact(3, params.focus, 'manual');
                 return { compacted };
             } finally {
                 session.end();

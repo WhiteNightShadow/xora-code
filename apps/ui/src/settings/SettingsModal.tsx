@@ -16,6 +16,9 @@ function useSettings(): [Settings | undefined, (patch: Partial<Settings>) => voi
     return [settings, update];
 }
 
+/** Choices for the team concurrency setting (protocol: 1–8). */
+const TEAM_PARALLEL = ['1', '2', '3', '4', '5', '6', '7', '8'];
+
 function General() {
     const s = useStrings();
     const [settings, update] = useSettings();
@@ -78,6 +81,14 @@ function General() {
                     checked={settings.preventSleep}
                     label={s.settings.preventSleep}
                     onChange={(preventSleep) => update({ preventSleep })}
+                />
+            </Field>
+            <Field label={s.settings.teamParallel} hint={s.settings.teamParallelHint}>
+                <Select
+                    label={s.settings.teamParallel}
+                    value={String(settings.team.maxParallel)}
+                    options={TEAM_PARALLEL.map((count) => ({ value: count, label: count }))}
+                    onChange={(count) => update({ team: { ...settings.team, maxParallel: Number(count) } })}
                 />
             </Field>
         </div>

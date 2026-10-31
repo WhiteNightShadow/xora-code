@@ -180,6 +180,14 @@ parentPort.on('message', (message) => {
     }
 });
 
+// The bootstrap stops the host with SIGTERM when the app quits. SessionEnd hooks get a moment (09 §4), best effort:
+// nothing else is shut down here, so a host started next never races with this one over the threads.
+process.once('SIGTERM', () => {
+    const exit = () => process.exit(0);
+    setTimeout(exit, 3_000).unref();
+    void (core?.turns.endSessions('app_exit') ?? Promise.resolve()).catch(() => undefined).finally(exit);
+});
+
 process.on('uncaughtException', (error) => {
     log.error(`uncaught: ${error.stack ?? error.message}`);
 });

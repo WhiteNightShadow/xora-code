@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS: Settings = {
     usdToCny: 7.1,
     update: { channel: 'stable', feedUrl: DEFAULT_FEED_URL, autoCheck: true },
     budgets: { dailyLimit: null, monthlyLimit: null, turnLimit: null },
+    team: { maxParallel: 3 },
 };
 
 const KEY = 'settings';

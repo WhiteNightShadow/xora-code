@@ -24,6 +24,8 @@ export interface ModelPick {
     readonly effort: Effort;
     /** The rest of the tier's chain, for model errors. */
     readonly fallbacks: Array<{ ref: ModelRef; family?: string }>;
+    /** For a reviewer pick: whether the model is of another family than `reviewerOf`. */
+    readonly crossFamily?: boolean;
 }
 
 export interface ModelSources {
@@ -76,7 +78,8 @@ export function pickTierModel(
 ): ModelPick {
     const { org, project, tier, warnings } = input;
     const chain = modelChain(tier, org, connectedModels(sources.connections), { unattended: input.unattended });
-    const picked = input.reviewerOf !== undefined ? pickReviewerModel(input.reviewerOf, chain)?.model : chain[0];
+    const reviewer = input.reviewerOf !== undefined ? pickReviewerModel(input.reviewerOf, chain) : undefined;
+    const picked = input.reviewerOf !== undefined ? reviewer?.model : chain[0];
     const toRef = (model: ResolvedModel) => ({
         ref: { connectionId: model.connectionId, model: model.model },
         ...(model.family ? { family: model.family } : {}),
@@ -86,6 +89,7 @@ export function pickTierModel(
             ...toRef(picked),
             effort: effortOf(picked.effort),
             fallbacks: chain.filter((model) => model !== picked).map(toRef),
+            ...(reviewer ? { crossFamily: reviewer.crossFamily } : {}),
         };
     }
     const fallback = defaultModel(sources, project);
@@ -97,11 +101,13 @@ export function pickTierModel(
         warnings.push(warning);
     }
     const family = inferFamily(fallback.model);
+    const reviewerOf = input.reviewerOf?.toLowerCase();
     return {
         ref: fallback,
         ...(family ? { family } : {}),
         effort: effortOf(org.tiers[tier].effort),
         fallbacks: [],
+        ...(reviewerOf !== undefined ? { crossFamily: family !== undefined && family !== reviewerOf } : {}),
     };
 }
 

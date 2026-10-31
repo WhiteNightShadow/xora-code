@@ -621,6 +621,9 @@ export class HostCore {
             }
             const project = await projects.get(thread.projectId);
             await this.worktrees.remove(project, threadId, thread.location.path, force ?? false);
+            if (!thread.archived) {
+                void turns.endSession(thread, 'archive');
+            }
             threads.update(threadId, { archived: true });
             return ok;
         });
@@ -672,6 +675,9 @@ export class HostCore {
             if (title !== undefined && title !== before.title) {
                 threads.append(threadId, 'thread.renamed', { title });
             }
+            if (archived === true && !before.archived && !turns.isRunning(threadId)) {
+                void turns.endSession(thread, 'archive');
+            }
             const config = {
                 ...(model !== undefined && JSON.stringify(model) !== JSON.stringify(before.model) ? { model } : {}),
                 ...(mode !== undefined && mode !== before.mode ? { mode } : {}),
@@ -695,6 +701,7 @@ export class HostCore {
                 throw new RpcError(RpcErrorCode.Rejected, '线程正在运行，先停止再删除');
             }
             approvals.clearSession(threadId);
+            void turns.endSession(threads.get(threadId), 'delete');
             threads.delete(threadId);
             return ok;
         });
@@ -1034,6 +1041,7 @@ export class HostCore {
     async dispose(): Promise<void> {
         clearInterval(this.#triggerSync);
         await this.triggers.close().catch(() => undefined);
+        await this.turns.endSessions('app_exit');
         this.terminals.dispose();
         this.updates.dispose();
         this.workflows.dispose();

@@ -100,10 +100,14 @@
 - **skills**：会话的提示词末尾放一层skills索引（id和一句描述），模型用`skill`工具读全文和附带文件；未受信项目的skill标注“只读，不运行脚本”。
 - **命令**：`/名字 参数`在host里展开成命令文件的内容再发给模型，时间线里保留用户原来输入的文字；`/compact`是内置命令，不会被覆盖。
 - **hooks**：
-  - 已接：SessionStart（新会话）、UserPromptSubmit（可拦截、可补充上下文）、PreToolUse（可拦截、改参数、要求确认或免确认）、PostToolUse（反馈追加到工具结果）、PreCompact（手动`/compact`）、Stop、Notification（出现审批卡片时）。
+  - 九个事件都已接：SessionStart（新会话）、UserPromptSubmit（可拦截、可补充上下文）、PreToolUse（可拦截、改参数、要求确认或免确认）、PostToolUse（反馈追加到工具结果）、PreCompact、Stop、SubagentStop、Notification（出现审批卡片时）、SessionEnd。
+  - PreCompact在手动`/compact`之前和引擎自己压缩之前（上下文快满、换到别家模型）运行，`trigger`是`manual`或`auto`，匹配器按它匹配。
+  - Stop在agent结束这一轮时运行，host等它跑完再结束这一轮。hook返回`{"decision":"block","reason":"…"}`或退出码2时，reason作为下一条消息让agent在同一轮里接着做，再运行时`stop_hook_active`是true，一轮最多接着做3次；`continue: false`优先。payload带`last_assistant_message`。因为输出上限、请求上限结束的轮次也运行Stop，但不会接着做。
+  - SubagentStop代替Stop用在团队成员（执行者、审查等）的线程上，匹配器按agent类型（如`coder`）或角色（如`executor`）匹配，payload带`agent_id`、`agent_type`、`task_id`，同样可以让成员接着做。
+  - SessionEnd在线程删除、归档和应用退出时运行，`reason`是`delete`、`archive`或`app_exit`，匹配器按它匹配；尽力而为，最多等1.5秒。应用退出时靠host进程收到`SIGTERM`后再跑，windows上进程被直接结束时不保证。
   - 匹配用claude code的工具名（`Bash`、`Edit|Write`等），也认xora自己的工具名；`tool_input`里同时给出`file_path`这类claude的字段名。
-  - hook的“免确认”不越过拒绝规则、工作区外路径和敏感文件。
-  - 还没接：SubagentStop、SessionEnd；Stop的“继续工作”；自动压缩前的PreCompact。
+  - hook的“免确认”不越过拒绝规则、工作区外路径、敏感文件和高风险动作（见06第18节）。
+  - 外部acp agent自己压缩上下文时不触发PreCompact，它们的工具调用也不经过PreToolUse和PostToolUse。
 - **市场**：兼容claude插件市场（`.claude-plugin/marketplace.json`），可以添加git地址（克隆到`<数据目录>/extensions/markets/`）或本地目录，在设置里浏览并安装；npm、压缩包等来源暂不支持，内置的官方市场还没有。
 - **用对话创建**：内置skill `extension-creator`（启动时写到`<数据目录>/extensions/builtin/skills/`）告诉agent各类扩展的格式和存放位置；agent起草后用普通的write工具保存，写入前审批卡片会展示每个文件的内容。目前覆盖skill、命令和agent定义，插件和工作流还没做。
 - **mcp**：xora engine按会话启动mcp服务器（工具名`mcp__服务器__工具`，每次调用都走权限策略）；外部acp agent经`session/new`的`mcpServers`拿到同一份配置。引擎在建立或恢复会话时把各服务器的状态带回host：启动失败的在时间线上提示一次，设置页显示引擎报告和手动测试里较新的那个结果。

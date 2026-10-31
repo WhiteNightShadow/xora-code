@@ -136,15 +136,18 @@ const READ_TOOLS = ['read', 'list', 'glob', 'grep'];
 const EDIT_TOOLS = ['write', 'edit', 'apply_patch'];
 const WEB_TOOLS = ['web_fetch', 'web_search'];
 
-/** Default tool whitelist of each role. The supervisor reads and delegates; it never writes (06 §2). */
+/**
+ * Default tool whitelist of each role. The supervisor reads and delegates; it never writes (06 §2). `mcp` grants
+ * every MCP tool; `mcp__<server>` and `mcp__<server>__<tool>` grant fewer. Read-only roles get none by default.
+ */
 export const ROLE_TOOLS: Readonly<Record<Role, readonly string[]>> = deepFreeze({
     supervisor: [...READ_TOOLS, 'todo', ...TEAM_TOOLS.supervisor],
     planner: [...READ_TOOLS, 'bash', ...WEB_TOOLS, ...TEAM_TOOLS.member],
     plan_reviewer: [...READ_TOOLS, ...TEAM_TOOLS.member],
     scout: [...READ_TOOLS, 'bash', ...WEB_TOOLS, ...TEAM_TOOLS.member],
-    executor: [...READ_TOOLS, ...EDIT_TOOLS, 'bash', 'todo', ...TEAM_TOOLS.member],
+    executor: [...READ_TOOLS, ...EDIT_TOOLS, 'bash', 'todo', 'mcp', ...TEAM_TOOLS.member],
     reviewer: [...READ_TOOLS, 'bash', ...TEAM_TOOLS.member],
-    specialist: [...READ_TOOLS, ...EDIT_TOOLS, 'bash', 'todo', ...WEB_TOOLS, ...TEAM_TOOLS.member],
+    specialist: [...READ_TOOLS, ...EDIT_TOOLS, 'bash', 'todo', ...WEB_TOOLS, 'mcp', ...TEAM_TOOLS.member],
 });
 
 const kimi = (model: string): ModelChainEntry => ({ model, family: 'kimi' });

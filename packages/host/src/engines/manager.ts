@@ -12,21 +12,28 @@ export interface SessionHandlers {
     onExit(reason: string): void;
     /** A host-implemented tool call from the xora engine (`_xora/tool/call`). */
     onHostTool?(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
-    /** PreToolUse and PostToolUse hooks for the xora engine (`_xora/hook/run`). */
-    onHook?(request: ToolHookRequest, signal: AbortSignal): Promise<Record<string, unknown>>;
+    /** Hooks the xora engine raises (`_xora/hook/run`): PreToolUse, PostToolUse and PreCompact. */
+    onHook?(request: HookRequest, signal: AbortSignal): Promise<Record<string, unknown>>;
 }
 
-const ToolHookRequestSchema = z.object({
-    sessionId: z.string(),
-    event: z.enum(['PreToolUse', 'PostToolUse']),
-    payload: z.object({
-        tool_name: z.string(),
-        tool_input: z.unknown(),
-        tool_use_id: z.string(),
-        tool_response: z.unknown().optional(),
+const HookRequestSchema = z.union([
+    z.object({
+        sessionId: z.string(),
+        event: z.enum(['PreToolUse', 'PostToolUse']),
+        payload: z.object({
+            tool_name: z.string(),
+            tool_input: z.unknown(),
+            tool_use_id: z.string(),
+            tool_response: z.unknown().optional(),
+        }),
     }),
-});
-export type ToolHookRequest = z.infer<typeof ToolHookRequestSchema>;
+    z.object({
+        sessionId: z.string(),
+        event: z.literal('PreCompact'),
+        payload: z.object({ trigger: z.enum(['auto', 'manual']), custom_instructions: z.string().optional() }),
+    }),
+]);
+export type HookRequest = z.infer<typeof HookRequestSchema>;
 
 export interface HostToolResult {
     readonly content: string;
@@ -186,7 +193,7 @@ export class EngineManager {
                 }
                 return handler(params.name, params.input, signal);
             })
-            .onRequest('_xora/hook/run', ToolHookRequestSchema, async ({ params, signal }) => {
+            .onRequest('_xora/hook/run', HookRequestSchema, async ({ params, signal }) => {
                 const handler = this.#sessions.get(params.sessionId)?.handlers.onHook;
                 return handler ? handler(params, signal) : {};
             });
