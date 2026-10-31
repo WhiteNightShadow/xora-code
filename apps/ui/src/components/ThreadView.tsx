@@ -15,6 +15,7 @@ import {
 } from '../store.ts';
 import { format } from '../strings.ts';
 import { type TurnView, visibleItems } from '../timeline.ts';
+import { ConversationArt } from './Art.tsx';
 import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
 import { Icon } from './Icon.tsx';
 import {
@@ -200,64 +201,66 @@ function Header({ thread }: { thread: ThreadMeta }) {
                         ? formatMoney(thread.cost)
                         : `${formatTokens(thread.tokens.input + thread.tokens.output)} token`}
                 </span>
-                <IconButton
-                    icon="diff"
-                    label={s.panel.changes}
-                    active={rightPanel === 'changes'}
-                    onClick={() => toggle('changes')}
-                />
-                {project?.git.isRepo && (
+                <div className="thread-header__panels">
                     <IconButton
-                        icon="pencil"
-                        label={s.panel.worktree}
-                        active={rightPanel === 'worktree'}
-                        onClick={() => toggle('worktree')}
+                        icon="diff"
+                        label={s.panel.changes}
+                        active={rightPanel === 'changes'}
+                        onClick={() => toggle('changes')}
                     />
-                )}
-                {thread.group && (
+                    {project?.git.isRepo && (
+                        <IconButton
+                            icon="pencil"
+                            label={s.panel.worktree}
+                            active={rightPanel === 'worktree'}
+                            onClick={() => toggle('worktree')}
+                        />
+                    )}
+                    {thread.group && (
+                        <IconButton
+                            icon="chart"
+                            label={s.panel.compare}
+                            active={rightPanel === 'compare'}
+                            onClick={() => toggle('compare')}
+                        />
+                    )}
                     <IconButton
-                        icon="chart"
-                        label={s.panel.compare}
-                        active={rightPanel === 'compare'}
-                        onClick={() => toggle('compare')}
+                        icon="list"
+                        label={s.panel.plan}
+                        active={rightPanel === 'plan'}
+                        onClick={() => toggle('plan')}
                     />
-                )}
-                <IconButton
-                    icon="list"
-                    label={s.panel.plan}
-                    active={rightPanel === 'plan'}
-                    onClick={() => toggle('plan')}
-                />
-                <IconButton
-                    icon="route"
-                    label={s.panel.trajectory}
-                    active={rightPanel === 'trajectory'}
-                    onClick={() => toggle('trajectory')}
-                />
-                <IconButton
-                    icon="brain"
-                    label={s.panel.prompt}
-                    active={rightPanel === 'prompt'}
-                    onClick={() => toggle('prompt')}
-                />
-                <IconButton
-                    icon="terminal"
-                    label={s.panel.terminal}
-                    active={rightPanel === 'terminal'}
-                    onClick={() => toggle('terminal')}
-                />
-                <IconButton
-                    icon="globe"
-                    label={s.panel.preview}
-                    active={rightPanel === 'preview'}
-                    onClick={() => toggle('preview')}
-                />
-                <IconButton
-                    icon="file"
-                    label={s.panel.file}
-                    active={rightPanel === 'file'}
-                    onClick={() => toggle('file')}
-                />
+                    <IconButton
+                        icon="route"
+                        label={s.panel.trajectory}
+                        active={rightPanel === 'trajectory'}
+                        onClick={() => toggle('trajectory')}
+                    />
+                    <IconButton
+                        icon="brain"
+                        label={s.panel.prompt}
+                        active={rightPanel === 'prompt'}
+                        onClick={() => toggle('prompt')}
+                    />
+                    <IconButton
+                        icon="terminal"
+                        label={s.panel.terminal}
+                        active={rightPanel === 'terminal'}
+                        onClick={() => toggle('terminal')}
+                    />
+                    <IconButton
+                        icon="globe"
+                        label={s.panel.preview}
+                        active={rightPanel === 'preview'}
+                        onClick={() => toggle('preview')}
+                    />
+                    <IconButton
+                        icon="file"
+                        label={s.panel.file}
+                        active={rightPanel === 'file'}
+                        onClick={() => toggle('file')}
+                    />
+                </div>
                 <span className="thread-header__menu">
                     <IconButton icon="more" label={s.common.more} onClick={() => setMenu(!menu)} />
                     {menu && (
@@ -695,137 +698,140 @@ function Composer({ thread }: { thread: ThreadMeta }) {
     };
     return (
         <div className="composer">
-            {attachments.length > 0 && (
-                <div className="composer__attachments">
-                    {attachments.map((attachment, index) => (
-                        // biome-ignore lint/suspicious/noArrayIndexKey: two attachments may share a name
-                        <span key={`${attachment.name}-${index}`} className="chip">
-                            <Icon name="clip" size={11} /> {attachment.name}
-                            <button
-                                type="button"
-                                aria-label={s.common.close}
-                                onClick={() => setAttachments(attachments.filter((_, other) => other !== index))}
-                            >
-                                <Icon name="x" size={10} />
-                            </button>
-                        </span>
-                    ))}
-                </div>
-            )}
-            {mention && mention.items.length > 0 && (
-                <div
-                    className="mention"
-                    role="listbox"
-                    aria-label={
-                        mention.kind === 'command'
-                            ? s.thread.commandList
-                            : mention.items.some((item) => item.kind === 'agent')
-                              ? s.thread.mention
-                              : s.thread.mentionFiles
-                    }
-                >
-                    {mention.items.map((item, index) => (
-                        <button
-                            key={`${item.kind}:${item.value}`}
-                            type="button"
-                            role="option"
-                            aria-selected={index === mention.index}
-                            className={index === mention.index ? 'is-active' : ''}
-                            onMouseDown={(event) => {
-                                event.preventDefault();
-                                pickMention(item);
-                            }}
-                        >
-                            {item.kind === 'command'
-                                ? `/${item.value}`
-                                : item.kind === 'agent'
-                                  ? `@${item.value}`
-                                  : item.value}
-                            {item.hint && <span className="mention__hint">{item.hint}</span>}
-                        </button>
-                    ))}
-                </div>
-            )}
-            <textarea
-                ref={area}
-                className="composer__input"
-                value={text}
-                rows={2}
-                placeholder={s.thread.placeholder}
-                onChange={(event) => {
-                    setText(event.target.value);
-                    updateMention(event.target.value, event.target.selectionStart);
-                }}
-                onKeyDown={(event) => {
-                    if (mention && mention.items.length > 0) {
-                        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-                            event.preventDefault();
-                            const step = event.key === 'ArrowDown' ? 1 : -1;
-                            setMention({
-                                ...mention,
-                                index: (mention.index + step + mention.items.length) % mention.items.length,
-                            });
-                            return;
-                        }
-                        if (event.key === 'Enter' || event.key === 'Tab') {
-                            event.preventDefault();
-                            const item = mention.items[mention.index];
-                            if (item) pickMention(item);
-                            return;
-                        }
-                    }
-                    if (event.key === 'Escape' && mention) {
-                        setMention(undefined);
-                        return;
-                    }
-                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                        event.preventDefault();
-                        void send();
-                    }
-                }}
-                onPaste={(event) => {
-                    const files = [...event.clipboardData.files];
-                    if (files.length > 0) {
-                        event.preventDefault();
-                        void addFiles(files);
-                    }
-                }}
-                onDrop={(event) => {
-                    if (event.dataTransfer.files.length > 0) {
-                        event.preventDefault();
-                        void addFiles(event.dataTransfer.files);
-                    }
-                }}
-            />
-            <div className="composer__bar">
-                <label className="icon-button" title={s.thread.attach}>
-                    <Icon name="clip" size={15} />
-                    <input
-                        type="file"
-                        multiple
-                        hidden
-                        onChange={(event) => event.target.files && void addFiles(event.target.files)}
-                    />
-                </label>
-                <span className="composer__hint">{s.modes[thread.mode]}</span>
-                {running ? (
-                    <button
-                        type="button"
-                        className="button button--danger"
-                        onClick={() => void attempt(() => host.call('turn.cancel', { threadId: thread.id }))}
-                    >
-                        <Icon name="stop" size={13} /> {s.thread.stop}
-                    </button>
-                ) : (
-                    <button
-                        type="button"
-                        className="button button--primary"
-                        disabled={sending || (!text.trim() && attachments.length === 0)}
-                        onClick={() => void send()}
-                    >
-                        {sending ? <Spinner /> : <Icon name="send" size={13} />} {s.thread.send}
-                    </button>
+            {/* The box is not positioned, so the suggestion list still hangs off the composer above it. */}
+            <div className="composer__box">
+                {attachments.length > 0 && (
+                    <div className="composer__attachments">
+                        {attachments.map((attachment, index) => (
+                            // biome-ignore lint/suspicious/noArrayIndexKey: two attachments may share a name
+                            <span key={`${attachment.name}-${index}`} className="chip">
+                                <Icon name="clip" size={11} /> {attachment.name}
+                                <button
+                                    type="button"
+                                    aria-label={s.common.close}
+                                    onClick={() => setAttachments(attachments.filter((_, other) => other !== index))}
+                                >
+                                    <Icon name="x" size={10} />
+                                </button>
+                            </span>
+                        ))}
+                    </div>
                 )}
+                {mention && mention.items.length > 0 && (
+                    <div
+                        className="mention"
+                        role="listbox"
+                        aria-label={
+                            mention.kind === 'command'
+                                ? s.thread.commandList
+                                : mention.items.some((item) => item.kind === 'agent')
+                                  ? s.thread.mention
+                                  : s.thread.mentionFiles
+                        }
+                    >
+                        {mention.items.map((item, index) => (
+                            <button
+                                key={`${item.kind}:${item.value}`}
+                                type="button"
+                                role="option"
+                                aria-selected={index === mention.index}
+                                className={index === mention.index ? 'is-active' : ''}
+                                onMouseDown={(event) => {
+                                    event.preventDefault();
+                                    pickMention(item);
+                                }}
+                            >
+                                {item.kind === 'command'
+                                    ? `/${item.value}`
+                                    : item.kind === 'agent'
+                                      ? `@${item.value}`
+                                      : item.value}
+                                {item.hint && <span className="mention__hint">{item.hint}</span>}
+                            </button>
+                        ))}
+                    </div>
+                )}
+                <textarea
+                    ref={area}
+                    className="composer__input"
+                    value={text}
+                    rows={2}
+                    placeholder={s.thread.placeholder}
+                    onChange={(event) => {
+                        setText(event.target.value);
+                        updateMention(event.target.value, event.target.selectionStart);
+                    }}
+                    onKeyDown={(event) => {
+                        if (mention && mention.items.length > 0) {
+                            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                                event.preventDefault();
+                                const step = event.key === 'ArrowDown' ? 1 : -1;
+                                setMention({
+                                    ...mention,
+                                    index: (mention.index + step + mention.items.length) % mention.items.length,
+                                });
+                                return;
+                            }
+                            if (event.key === 'Enter' || event.key === 'Tab') {
+                                event.preventDefault();
+                                const item = mention.items[mention.index];
+                                if (item) pickMention(item);
+                                return;
+                            }
+                        }
+                        if (event.key === 'Escape' && mention) {
+                            setMention(undefined);
+                            return;
+                        }
+                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                            event.preventDefault();
+                            void send();
+                        }
+                    }}
+                    onPaste={(event) => {
+                        const files = [...event.clipboardData.files];
+                        if (files.length > 0) {
+                            event.preventDefault();
+                            void addFiles(files);
+                        }
+                    }}
+                    onDrop={(event) => {
+                        if (event.dataTransfer.files.length > 0) {
+                            event.preventDefault();
+                            void addFiles(event.dataTransfer.files);
+                        }
+                    }}
+                />
+                <div className="composer__bar">
+                    <label className="icon-button" title={s.thread.attach}>
+                        <Icon name="clip" size={15} />
+                        <input
+                            type="file"
+                            multiple
+                            hidden
+                            onChange={(event) => event.target.files && void addFiles(event.target.files)}
+                        />
+                    </label>
+                    <span className="composer__hint">{s.modes[thread.mode]}</span>
+                    {running ? (
+                        <button
+                            type="button"
+                            className="button button--danger"
+                            onClick={() => void attempt(() => host.call('turn.cancel', { threadId: thread.id }))}
+                        >
+                            <Icon name="stop" size={13} /> {s.thread.stop}
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            className="button button--primary"
+                            disabled={sending || (!text.trim() && attachments.length === 0)}
+                            onClick={() => void send()}
+                        >
+                            {sending ? <Spinner /> : <Icon name="send" size={13} />} {s.thread.send}
+                        </button>
+                    )}
+                </div>
             </div>
         </div>
     );
@@ -876,7 +882,12 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
                         <Spinner /> {s.common.loading}
                     </div>
                 )}
-                {view && turns.length === 0 && <div className="timeline__empty">{s.thread.noMessages}</div>}
+                {view && turns.length === 0 && (
+                    <div className="timeline__empty">
+                        <ConversationArt className="timeline__art" />
+                        <span>{s.thread.noMessages}</span>
+                    </div>
+                )}
                 {turns.map((turn, index) => (
                     <TurnBlock key={turn.turnId} turn={turn} isLast={index === turns.length - 1} thread={thread} />
                 ))}

@@ -1,4 +1,5 @@
 import { openProject, openSettings, useApp, useStrings } from '../store.ts';
+import { WelcomeArt } from './Art.tsx';
 import { Icon } from './Icon.tsx';
 
 export function Welcome() {
@@ -10,6 +11,7 @@ export function Welcome() {
     const project = projects.find((item) => item.id === selectedProjectId) ?? projects[0];
     return (
         <div className="welcome">
+            <WelcomeArt className="welcome__art" />
             <h1>{s.welcome.title}</h1>
             <p className="welcome__subtitle">{s.welcome.subtitle}</p>
             <div className="welcome__steps">

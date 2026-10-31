@@ -1,4 +1,5 @@
 import { type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes, useEffect, useRef } from 'react';
+import { EmptyArt } from './Art.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 
 export function IconButton({
@@ -170,7 +171,13 @@ export function Badge({
 }
 
 export function Empty({ children }: { children: ReactNode }) {
-    return <div className="empty">{children}</div>;
+    // The picture is hidden by the stylesheet when the empty state only holds a spinner.
+    return (
+        <div className="empty">
+            <EmptyArt className="empty__art" />
+            {children}
+        </div>
+    );
 }
 
 /** Formats a money amount: ¥0.42, $1.20; tiny amounts keep more digits. */

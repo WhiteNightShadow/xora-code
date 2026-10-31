@@ -1,105 +1,327 @@
-:root {
-    --xk-font-sans:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
-        "Noto Sans CJK SC", sans-serif;
-    --xk-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+/*
+ * Xora design tokens: type, space, radius, depth, motion and colour, light and dark.
+ *
+ * Colour roles
+ *   --xk-bg*            surfaces: canvas, subtle (cards' second tone), sunken (wells, code), sidebar, elevated (menus, modals)
+ *   --xk-border*        hairlines: subtle < default < strong
+ *   --xk-text*          text: default, muted (secondary), faint (meta; still >= 4.5:1), disabled, placeholder
+ *   --xk-accent         the one accent, as a fill (buttons, indicators, focus);
+ *   --xk-accent-text    accent-coloured text on the surfaces (links, active tabs), >= 4.5:1;
+ *   --xk-on-accent      text and icons on an accent fill
+ *   --xk-ok / --xk-pending (= warn) / --xk-error / --xk-info   semantic text colours, each with -subtle (tint) and
+ *                       -border; --xk-warn-solid is the amber for dots and bars
+ */
 
+:root {
+    color-scheme: light;
+
+    /* Type ---------------------------------------------------------------------------------------------- */
+    --xk-font-sans:
+        -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC",
+        "Source Han Sans SC", "WenQuanYi Micro Hei", system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    --xk-font-mono:
+        ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Cascadia Mono", "JetBrains Mono", Menlo, Monaco,
+        Consolas, "Liberation Mono", "DejaVu Sans Mono", "Noto Sans Mono CJK SC", monospace;
+
+    --xk-text-2xs: 11px;
+    --xk-text-xs: 12px;
+    --xk-text-sm: 13px;
+    --xk-text-md: 14px;
+    --xk-text-lg: 16px;
+    --xk-text-xl: 20px;
+    --xk-text-2xl: 24px;
+    --xk-text-3xl: 32px;
+    --xk-text-code: 12.5px;
+
+    --xk-leading-none: 1;
+    --xk-leading-tight: 1.25;
+    --xk-leading-snug: 1.4;
+    --xk-leading-normal: 1.55;
+    --xk-leading-relaxed: 1.7;
+
+    --xk-weight-regular: 400;
+    --xk-weight-medium: 500;
+    --xk-weight-semibold: 600;
+    --xk-weight-bold: 700;
+    --xk-tracking-tight: -0.015em;
+
+    /* Space: a 4px grid -------------------------------------------------------------------------------- */
+    --xk-space-half: 2px;
     --xk-space-1: 4px;
     --xk-space-2: 8px;
     --xk-space-3: 12px;
     --xk-space-4: 16px;
+    --xk-space-5: 20px;
     --xk-space-6: 24px;
-    --xk-radius-sm: 6px;
-    --xk-radius-md: 10px;
-    --xk-radius-lg: 14px;
-    --xk-shadow: 0 8px 28px rgb(15 20 30 / 14%);
-    --xk-motion: 120ms;
+    --xk-space-8: 32px;
+    --xk-space-10: 40px;
+    --xk-space-12: 48px;
 
+    /* Shape -------------------------------------------------------------------------------------------- */
+    --xk-radius-xs: 4px;
+    --xk-radius-sm: 6px;
+    --xk-radius-md: 8px;
+    --xk-radius-lg: 12px;
+    --xk-radius-xl: 16px;
+    --xk-radius-full: 999px;
+
+    --xk-control-h-sm: 26px;
+    --xk-control-h: 32px;
+    --xk-control-h-lg: 36px;
+    --xk-row-h: 30px;
+
+    --xk-sidebar-width: 264px;
+    --xk-content-width: 860px;
+
+    /* Motion: short and ease-out; all of it goes under prefers-reduced-motion ----------------------- */
+    --xk-duration-instant: 80ms;
+    --xk-duration-fast: 120ms;
+    --xk-duration-base: 180ms;
+    --xk-duration-slow: 240ms;
+    --xk-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --xk-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+    --xk-ease-spring: cubic-bezier(0.34, 1.36, 0.64, 1);
+    --xk-motion: var(--xk-duration-fast);
+
+    --xk-z-dropdown: 20;
+    --xk-z-banner: 30;
+    --xk-z-modal: 40;
+    --xk-z-toast: 50;
+
+    /* Colour: light ------------------------------------------------------------------------------------ */
     --xk-bg: #ffffff;
-    --xk-bg-subtle: #f6f7f9;
-    --xk-bg-sunken: #eef0f3;
-    --xk-bg-sidebar: #f3f4f6;
-    --xk-border: #e3e6eb;
-    --xk-border-strong: #cdd2da;
-    --xk-text: #1b1f24;
-    --xk-text-muted: #5d6673;
-    --xk-text-faint: #8b93a0;
-    --xk-accent: #3d5afe;
-    --xk-accent-subtle: #e9edff;
-    --xk-accent-text: #ffffff;
-    --xk-ok: #1a7f37;
-    --xk-ok-subtle: #e6f4ea;
-    --xk-pending: #b07800;
-    --xk-warn-subtle: #fff4d6;
-    --xk-error: #cf222e;
-    --xk-error-subtle: #ffebe9;
-    --xk-diff-add: #e6ffec;
-    --xk-diff-add-text: #116329;
-    --xk-diff-del: #ffebe9;
-    --xk-diff-del-text: #a40e26;
-    --xk-diff-hunk: #ddf4ff;
+    --xk-bg-subtle: #f7f7f9;
+    --xk-bg-sunken: #f0f1f3;
+    --xk-bg-sidebar: #f4f4f6;
+    --xk-bg-elevated: #ffffff;
+    --xk-bg-hover: rgb(24 26 36 / 5%);
+    --xk-bg-active: rgb(24 26 36 / 9%);
+    --xk-bubble: #f0f0fb;
+    --xk-border-subtle: #ececf0;
+    --xk-border: #e3e4e8;
+    --xk-border-strong: #cfd1d8;
+    --xk-text: #17181c;
+    --xk-text-muted: #565b67;
+    --xk-text-faint: #686d79;
+    --xk-text-disabled: #a3a6af;
+    --xk-placeholder: #868b96;
+
+    --xk-accent: #5856de;
+    --xk-accent-hover: #4b49d1;
+    --xk-accent-active: #403ec2;
+    --xk-accent-text: #4744c8;
+    --xk-accent-subtle: #efeffd;
+    --xk-accent-muted: #d3d3f8;
+    --xk-on-accent: #ffffff;
+    --xk-brand-from: #7b7cf6;
+    --xk-brand-to: #4a45d6;
+    --xk-focus-ring: 0 0 0 3px rgb(88 86 222 / 24%);
+    --xk-selection: rgb(88 86 222 / 18%);
+
+    --xk-ok: #1a7f45;
+    --xk-ok-subtle: #e8f6ee;
+    --xk-ok-border: #b7e1c6;
+    --xk-pending: #9a5b00;
+    --xk-warn: var(--xk-pending);
+    --xk-warn-solid: #c97800;
+    --xk-warn-subtle: #fff5e0;
+    --xk-warn-border: #f2d49b;
+    --xk-error: #cc2936;
+    --xk-error-subtle: #fdedef;
+    --xk-error-border: #f3c3c8;
+    --xk-info: #0a6fb8;
+    --xk-info-subtle: #e8f3fc;
+    --xk-info-border: #bcdaf2;
+
+    --xk-diff-add: #e9f7ee;
+    --xk-diff-add-gutter: #d5f0de;
+    --xk-diff-add-text: #11692f;
+    --xk-diff-del: #fdeeef;
+    --xk-diff-del-gutter: #f9dadd;
+    --xk-diff-del-text: #b1222e;
+    --xk-diff-hunk: #f0f0fc;
+    --xk-diff-gutter: #f7f7f9;
+
+    --xk-input-bg: #ffffff;
+    --xk-switch-off: #b0b4bd;
+    --xk-backdrop: rgb(17 18 24 / 38%);
+    --xk-scrollbar: rgb(24 26 36 / 20%);
+    --xk-select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23686d79' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+
+    /* Small glyphs drawn with `mask` and `background: currentColor`, so they take any colour. */
+    --xk-icon-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M13 6l6 6-6 6'/%3E%3C/svg%3E");
+    --xk-icon-branch: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='2.5'/%3E%3Ccircle cx='6' cy='18' r='2.5'/%3E%3Ccircle cx='18' cy='7' r='2.5'/%3E%3Cpath d='M6 8.5v7M18 9.5c0 4-4 5-9.5 6.5'/%3E%3C/svg%3E");
+    --xk-icon-shield: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z'/%3E%3C/svg%3E");
+    --xk-icon-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v5M12 7.8h.01'/%3E%3C/svg%3E");
+    --xk-icon-check-circle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M8 12.4l2.8 2.8L16 10'/%3E%3C/svg%3E");
+    --xk-icon-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7.5v5.5M12 16.3h.01'/%3E%3C/svg%3E");
+
+    /* Depth -------------------------------------------------------------------------------------------- */
+    --xk-highlight: inset 0 0 0 0 transparent;
+    --xk-elevated-ring: 0 0 0 1px rgb(16 18 27 / 5%);
+    --xk-shadow-xs: 0 1px 2px rgb(16 18 27 / 5%);
+    --xk-shadow-sm: 0 1px 2px rgb(16 18 27 / 5%), 0 2px 6px -1px rgb(16 18 27 / 7%);
+    --xk-shadow-md: 0 2px 4px -1px rgb(16 18 27 / 6%), 0 8px 18px -6px rgb(16 18 27 / 14%);
+    --xk-shadow-lg: 0 4px 8px -2px rgb(16 18 27 / 8%), 0 16px 36px -10px rgb(16 18 27 / 22%);
+    --xk-shadow-xl: 0 8px 16px -6px rgb(16 18 27 / 12%), 0 28px 64px -16px rgb(16 18 27 / 34%);
+    --xk-shadow: var(--xk-shadow-md);
 }
 
 :root[data-theme="dark"] {
-    --xk-bg: #121418;
-    --xk-bg-subtle: #1a1d23;
-    --xk-bg-sunken: #0d0f12;
-    --xk-bg-sidebar: #16181d;
-    --xk-border: #2c313a;
-    --xk-border-strong: #3a414d;
-    --xk-text: #e6e8eb;
-    --xk-text-muted: #9aa3ae;
-    --xk-text-faint: #6b7380;
-    --xk-accent: #7c8cff;
-    --xk-accent-subtle: #222a52;
-    --xk-accent-text: #0d0f14;
-    --xk-ok: #4ac26b;
-    --xk-ok-subtle: #12301c;
-    --xk-pending: #e3b341;
-    --xk-warn-subtle: #33280c;
-    --xk-error: #ff7b72;
-    --xk-error-subtle: #3d1418;
-    --xk-diff-add: #12301c;
+    color-scheme: dark;
+    --xk-bg: #141518;
+    --xk-bg-subtle: #1a1b1f;
+    --xk-bg-sunken: #0f1013;
+    --xk-bg-sidebar: #111215;
+    --xk-bg-elevated: #1d1e23;
+    --xk-bg-hover: rgb(255 255 255 / 5%);
+    --xk-bg-active: rgb(255 255 255 / 9%);
+    --xk-bubble: #22233a;
+    --xk-border-subtle: #222328;
+    --xk-border: #2b2c32;
+    --xk-border-strong: #3b3d45;
+    --xk-text: #ececf0;
+    --xk-text-muted: #a2a5af;
+    --xk-text-faint: #858994;
+    --xk-text-disabled: #5d616b;
+    --xk-placeholder: #6f7480;
+    --xk-accent: #5d5fef;
+    --xk-accent-hover: #6163f2;
+    --xk-accent-active: #5254e0;
+    --xk-accent-text: #a9acff;
+    --xk-accent-subtle: #212245;
+    --xk-accent-muted: #3a3c80;
+    --xk-on-accent: #ffffff;
+    --xk-focus-ring: 0 0 0 3px rgb(125 128 255 / 34%);
+    --xk-selection: rgb(125 128 255 / 30%);
+    --xk-ok: #4fd18b;
+    --xk-ok-subtle: #13261c;
+    --xk-ok-border: #234d36;
+    --xk-pending: #f0b44c;
+    --xk-warn-solid: #f0b44c;
+    --xk-warn-subtle: #2a2113;
+    --xk-warn-border: #574219;
+    --xk-error: #ff7a85;
+    --xk-error-subtle: #2d1619;
+    --xk-error-border: #5c2a30;
+    --xk-info: #5fb3f6;
+    --xk-info-subtle: #122230;
+    --xk-info-border: #24445e;
+    --xk-diff-add: #12261a;
+    --xk-diff-add-gutter: #183421;
     --xk-diff-add-text: #7ee2a0;
-    --xk-diff-del: #3d1418;
-    --xk-diff-del-text: #ffa198;
-    --xk-diff-hunk: #10283d;
-    --xk-shadow: 0 8px 28px rgb(0 0 0 / 45%);
+    --xk-diff-del: #2b1518;
+    --xk-diff-del-gutter: #3d1c20;
+    --xk-diff-del-text: #ff9da4;
+    --xk-diff-hunk: #1b1c38;
+    --xk-diff-gutter: #18191d;
+    --xk-switch-off: #4a4d57;
+    --xk-input-bg: #17181c;
+    --xk-backdrop: rgb(0 0 0 / 55%);
+    --xk-scrollbar: rgb(255 255 255 / 16%);
+    --xk-select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23858994' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    --xk-highlight: inset 0 1px 0 rgb(255 255 255 / 5%);
+    --xk-elevated-ring: 0 0 0 1px rgb(255 255 255 / 7%);
+    --xk-shadow-xs: 0 1px 2px rgb(0 0 0 / 30%);
+    --xk-shadow-sm: 0 1px 2px rgb(0 0 0 / 30%), 0 2px 6px -1px rgb(0 0 0 / 30%);
+    --xk-shadow-md: 0 2px 4px -1px rgb(0 0 0 / 30%), 0 8px 18px -6px rgb(0 0 0 / 45%);
+    --xk-shadow-lg: 0 4px 8px -2px rgb(0 0 0 / 35%), 0 16px 36px -10px rgb(0 0 0 / 60%);
+    --xk-shadow-xl: 0 8px 16px -6px rgb(0 0 0 / 40%), 0 28px 64px -16px rgb(0 0 0 / 70%);
 }
 
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-        --xk-bg: #121418;
-        --xk-bg-subtle: #1a1d23;
-        --xk-bg-sunken: #0d0f12;
-        --xk-bg-sidebar: #16181d;
-        --xk-border: #2c313a;
-        --xk-border-strong: #3a414d;
-        --xk-text: #e6e8eb;
-        --xk-text-muted: #9aa3ae;
-        --xk-text-faint: #6b7380;
-        --xk-accent: #7c8cff;
-        --xk-accent-subtle: #222a52;
-        --xk-accent-text: #0d0f14;
-        --xk-ok: #4ac26b;
-        --xk-ok-subtle: #12301c;
-        --xk-pending: #e3b341;
-        --xk-warn-subtle: #33280c;
-        --xk-error: #ff7b72;
-        --xk-error-subtle: #3d1418;
-        --xk-diff-add: #12301c;
+        color-scheme: dark;
+        --xk-bg: #141518;
+        --xk-bg-subtle: #1a1b1f;
+        --xk-bg-sunken: #0f1013;
+        --xk-bg-sidebar: #111215;
+        --xk-bg-elevated: #1d1e23;
+        --xk-bg-hover: rgb(255 255 255 / 5%);
+        --xk-bg-active: rgb(255 255 255 / 9%);
+        --xk-bubble: #22233a;
+        --xk-border-subtle: #222328;
+        --xk-border: #2b2c32;
+        --xk-border-strong: #3b3d45;
+        --xk-text: #ececf0;
+        --xk-text-muted: #a2a5af;
+        --xk-text-faint: #858994;
+        --xk-text-disabled: #5d616b;
+        --xk-placeholder: #6f7480;
+        --xk-accent: #5d5fef;
+        --xk-accent-hover: #6163f2;
+        --xk-accent-active: #5254e0;
+        --xk-accent-text: #a9acff;
+        --xk-accent-subtle: #212245;
+        --xk-accent-muted: #3a3c80;
+        --xk-on-accent: #ffffff;
+        --xk-focus-ring: 0 0 0 3px rgb(125 128 255 / 34%);
+        --xk-selection: rgb(125 128 255 / 30%);
+        --xk-ok: #4fd18b;
+        --xk-ok-subtle: #13261c;
+        --xk-ok-border: #234d36;
+        --xk-pending: #f0b44c;
+        --xk-warn-solid: #f0b44c;
+        --xk-warn-subtle: #2a2113;
+        --xk-warn-border: #574219;
+        --xk-error: #ff7a85;
+        --xk-error-subtle: #2d1619;
+        --xk-error-border: #5c2a30;
+        --xk-info: #5fb3f6;
+        --xk-info-subtle: #122230;
+        --xk-info-border: #24445e;
+        --xk-diff-add: #12261a;
+        --xk-diff-add-gutter: #183421;
         --xk-diff-add-text: #7ee2a0;
-        --xk-diff-del: #3d1418;
-        --xk-diff-del-text: #ffa198;
-        --xk-diff-hunk: #10283d;
-        --xk-shadow: 0 8px 28px rgb(0 0 0 / 45%);
+        --xk-diff-del: #2b1518;
+        --xk-diff-del-gutter: #3d1c20;
+        --xk-diff-del-text: #ff9da4;
+        --xk-diff-hunk: #1b1c38;
+        --xk-diff-gutter: #18191d;
+        --xk-switch-off: #4a4d57;
+        --xk-input-bg: #17181c;
+        --xk-backdrop: rgb(0 0 0 / 55%);
+        --xk-scrollbar: rgb(255 255 255 / 16%);
+        --xk-select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23858994' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+        --xk-highlight: inset 0 1px 0 rgb(255 255 255 / 5%);
+        --xk-elevated-ring: 0 0 0 1px rgb(255 255 255 / 7%);
+        --xk-shadow-xs: 0 1px 2px rgb(0 0 0 / 30%);
+        --xk-shadow-sm: 0 1px 2px rgb(0 0 0 / 30%), 0 2px 6px -1px rgb(0 0 0 / 30%);
+        --xk-shadow-md: 0 2px 4px -1px rgb(0 0 0 / 30%), 0 8px 18px -6px rgb(0 0 0 / 45%);
+        --xk-shadow-lg: 0 4px 8px -2px rgb(0 0 0 / 35%), 0 16px 36px -10px rgb(0 0 0 / 60%);
+        --xk-shadow-xl: 0 8px 16px -6px rgb(0 0 0 / 40%), 0 28px 64px -16px rgb(0 0 0 / 70%);
     }
 }
+
+/* Compact density: one step smaller type and controls. */
+:root[data-density="compact"] {
+    --xk-text-xs: 11.5px;
+    --xk-text-sm: 12.5px;
+    --xk-text-md: 13px;
+    --xk-text-lg: 15px;
+    --xk-control-h-sm: 24px;
+    --xk-control-h: 28px;
+    --xk-control-h-lg: 32px;
+    --xk-row-h: 26px;
+}
+
+/* Base ------------------------------------------------------------------------------------------------ */
 
 *,
 *::before,
 *::after {
     box-sizing: border-box;
+}
+
+* {
+    scrollbar-width: thin;
+}
+
+html {
+    scrollbar-color: var(--xk-scrollbar) transparent;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
 }
 
 html,
@@ -109,25 +331,80 @@ body {
     background: var(--xk-bg);
     color: var(--xk-text);
     font-family: var(--xk-font-sans);
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: var(--xk-text-md);
+    line-height: var(--xk-leading-normal);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
-:root[data-density="compact"] body {
-    font-size: 13px;
+::selection {
+    background: var(--xk-selection);
 }
+
+::placeholder {
+    color: var(--xk-placeholder);
+    opacity: 1;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+    accent-color: var(--xk-accent);
+}
+
+/* Motion off for those who asked; spinners keep turning, they are the only sign that something is still going. */
+@media (prefers-reduced-motion: reduce) {
+    :root {
+        --xk-duration-instant: 0ms;
+        --xk-duration-fast: 0ms;
+        --xk-duration-base: 0ms;
+        --xk-duration-slow: 0ms;
+    }
+
+    /* biome-ignore-start lint/complexity/noImportantStyles: this has to win over every animation, whatever its selector */
+    *:not(.spinner),
+    *::before,
+    *::after {
+        animation-duration: 1ms !important;
+        animation-delay: 0ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 1ms !important;
+        transition-delay: 0ms !important;
+        scroll-behavior: auto !important;
+    }
+    /* biome-ignore-end lint/complexity/noImportantStyles: this has to win over every animation, whatever its selector */
+}
+
+/* Base components (@xora/ui-kit) ---------------------------------------------------------------------- */
 
 .xk-button {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: var(--xk-space-2);
-    padding: 6px 14px;
-    border-radius: var(--xk-radius-sm);
+    height: var(--xk-control-h);
+    padding: 0 var(--xk-space-3);
+    border-radius: var(--xk-radius-md);
     border: 1px solid var(--xk-border);
-    background: var(--xk-bg-subtle);
+    background: var(--xk-bg);
     color: var(--xk-text);
     font: inherit;
+    font-size: var(--xk-text-sm);
+    font-weight: var(--xk-weight-medium);
+    box-shadow: var(--xk-shadow-xs);
     cursor: pointer;
+    transition:
+        background-color var(--xk-duration-fast) var(--xk-ease-out),
+        border-color var(--xk-duration-fast) var(--xk-ease-out),
+        transform var(--xk-duration-instant) var(--xk-ease-out);
+}
+
+.xk-button:hover:not(:disabled) {
+    background: var(--xk-bg-subtle);
+    border-color: var(--xk-border-strong);
+}
+
+.xk-button:active:not(:disabled) {
+    transform: translateY(0.5px) scale(0.98);
 }
 
 .xk-button:focus-visible {
@@ -143,11 +420,17 @@ body {
 .xk-button--primary {
     background: var(--xk-accent);
     border-color: var(--xk-accent);
-    color: var(--xk-accent-text);
+    color: var(--xk-on-accent);
+}
+
+.xk-button--primary:hover:not(:disabled) {
+    background: var(--xk-accent-hover);
+    border-color: var(--xk-accent-hover);
 }
 
 .xk-button--danger {
     color: var(--xk-error);
+    border-color: var(--xk-error-border);
 }
 
 .xk-status {

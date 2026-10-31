@@ -2,6 +2,7 @@ import type { Project, ThreadMeta } from '@xora/protocol';
 import { useMemo, useState } from 'react';
 import { host } from '../host.ts';
 import { attempt, openProject, openSettings, selectThread, useApp, useStrings } from '../store.ts';
+import { LogoMark } from './Art.tsx';
 import { Icon } from './Icon.tsx';
 import { formatMoney, IconButton, relativeTime, Spinner } from './primitives.tsx';
 
@@ -128,7 +129,7 @@ function ProjectGroup({
         <div className={`project${selectedProjectId === project.id ? ' is-current' : ''}`}>
             <div className="project__header">
                 <button type="button" className="project__toggle" onClick={onToggle} title={project.path}>
-                    <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+                    <Icon name="chevronRight" size={12} className={`project__chevron${open ? ' is-open' : ''}`} />
                     <span className="project__name">{project.name}</span>
                     {project.git.branch && <span className="project__branch">{project.git.branch}</span>}
                     {project.missing && <span className="project__missing">!</span>}
@@ -251,7 +252,10 @@ export function Sidebar() {
     return (
         <nav className="sidebar" aria-label={s.sidebar.projects}>
             <div className="sidebar__top">
-                <span className="sidebar__brand">Xora</span>
+                <span className="sidebar__brand">
+                    <LogoMark size={24} className="sidebar__logo" />
+                    Xora
+                </span>
                 <IconButton icon="folder" label={s.sidebar.openProject} onClick={() => void openProject()} />
             </div>
             <div className="sidebar__search">

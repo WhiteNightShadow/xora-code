@@ -94,7 +94,9 @@ function ToolCallView({ item }: { item: ItemOf<'tool_call'> }) {
     return (
         <div className={`tool tool--${item.status}`}>
             <button type="button" className="tool__header" onClick={() => setOpen(!open)} aria-expanded={expanded}>
-                <Icon name={KIND_ICON[item.kind] ?? 'list'} size={14} />
+                <span className="tool__icon">
+                    <Icon name={KIND_ICON[item.kind] ?? 'list'} size={14} />
+                </span>
                 <span className="tool__title">{command ? <code>{command}</code> : item.title}</span>
                 {running ? (
                     <Spinner size={10} />
@@ -106,7 +108,7 @@ function ToolCallView({ item }: { item: ItemOf<'tool_call'> }) {
                 {item.durationMs !== undefined && !running && (
                     <span className="tool__time">{(item.durationMs / 1000).toFixed(1)}s</span>
                 )}
-                <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={12} />
+                <Icon name="chevronRight" size={12} className={`tool__chevron${expanded ? ' is-open' : ''}`} />
             </button>
             {expanded && (
                 <div className="tool__body">
@@ -221,7 +223,9 @@ function ApprovalView({ item }: { item: ItemOf<'approval'> }) {
     return (
         <section className={`approval approval--${item.status}`} aria-label={s.approval.title}>
             <div className="approval__header">
-                <Icon name="shield" size={14} />
+                <span className="approval__icon">
+                    <Icon name="shield" size={14} />
+                </span>
                 <strong>{pending ? s.approval.title : item.title}</strong>
                 {!pending && (
                     <Badge tone={item.status === 'allowed' ? 'ok' : 'muted'}>
@@ -239,10 +243,11 @@ function ReasoningView({ item, live }: { item: ItemOf<'reasoning'>; live: boolea
     const s = useStrings();
     const [open, setOpen] = useState(false);
     return (
-        <div className="reasoning">
+        <div className={`reasoning${live ? ' is-live' : ''}`}>
             <button type="button" className="reasoning__toggle" onClick={() => setOpen(!open)}>
-                <Icon name="brain" size={13} /> {live ? s.thread.thinking : s.thread.reasoning}
-                <Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} />
+                <Icon name="brain" size={13} />{' '}
+                <span className="reasoning__label">{live ? s.thread.thinking : s.thread.reasoning}</span>
+                <Icon name="chevronRight" size={11} className={`reasoning__chevron${open ? ' is-open' : ''}`} />
             </button>
             {(open || live) && (
                 <div className={`reasoning__text${live && !open ? ' is-clamped' : ''}`}>{item.text}</div>
@@ -261,7 +266,9 @@ function SubagentView({ item, turnRunning }: { item: ItemOf<'subagent'>; turnRun
     return (
         <div className={`tool subagent subagent--${status}`}>
             <div className="tool__header subagent__header">
-                <Icon name="route" size={14} />
+                <span className="tool__icon">
+                    <Icon name="route" size={14} />
+                </span>
                 <span className="subagent__agent">{item.agent || s.subagent.general}</span>
                 <span className="tool__title">{item.title}</span>
                 {status === 'running' ? (
@@ -314,7 +321,9 @@ export function ItemView({ item, live, turnRunning = true }: { item: Item; live:
         case 'file_changes':
             return (
                 <button type="button" className="changes-card" onClick={() => openReview(item.turnId)}>
-                    <Icon name="diff" size={14} />
+                    <span className="changes-card__icon">
+                        <Icon name="diff" size={14} />
+                    </span>
                     <span>{format(s.thread.changes, { files: item.files.length })}</span>
                     <span className="changes-card__stat">
                         <span className="add">+{item.additions}</span> <span className="del">−{item.deletions}</span>
