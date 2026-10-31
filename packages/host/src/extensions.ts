@@ -175,10 +175,11 @@ export const SKILL_TOOL = 'skill';
  * reviews every file in an approval card first.
  */
 function builtinSkills(userDir: string): Record<string, string> {
+    const workflowsDir = path.join(path.dirname(userDir), 'workflows');
     return {
         'extension-creator': `---
 name: extension-creator
-description: Create Xora Code extensions from a conversation - skills, slash commands and agent definitions. Use when the user asks to make, add or change a skill, a /command or a custom agent.
+description: Create Xora Code extensions from a conversation - skills, slash commands, agent definitions and workflows. Use when the user asks to make, add or change a skill, a /command, a custom agent or a workflow.
 ---
 
 # Creating extensions
@@ -237,6 +238,53 @@ role: <optional: planner, scout, executor, reviewer or expert>
 ---
 <The agent's instructions.>
 \`\`\`
+
+## Workflows
+
+Fixed multi-step runs with checks and human gates. Project: \`.xora/workflows/<name>.yaml\`; user (any project): \`${workflowsDir}/<name>.yaml\`. The file name equals \`name\`.
+
+\`\`\`yaml
+name: <name>
+title: <shown in the workflow list>
+inputs:
+  issue: { type: string, description: <what to fill in> }   # string, number or boolean; a default makes it optional
+budget: { perRun: 20 }                  # optional, in the display currency
+steps:
+  - id: reproduce                       # agent step: a roster agent does the task in a thread of its own
+    agent: debugger                     # scout, coder, tester, debugger, reviewer, writer, planner
+    tier: economy                       # optional: flagship, standard, economy, fast
+    task: "Reproduce {{inputs.issue}} with a failing test"
+    outputs: [testFile]                 # values the agent hands back with the step_result tool
+    verify: { command: "pnpm test -- {{steps.reproduce.outputs.testFile}}", expect: fail }
+    onFailure: { retries: 1, escalate: true, finally: abort }   # finally: abort, skip or ask
+  - id: fix
+    type: supervise                     # a supervisor splits the goal and runs a team
+    needs: [reproduce]
+    goal: "Make {{steps.reproduce.outputs.testFile}} pass without breaking other tests"
+    verify: { command: "pnpm test" }
+  - id: review
+    agent: reviewer
+    needs: [fix]
+    task: Review every change of the fix step
+  - id: approve
+    needs: [review]
+    gate: human                         # waits for the user
+    message: "Commit the fix?"
+  - id: commit
+    needs: [approve]
+    run: "git commit -am 'Fix {{inputs.issue}}'"   # a shell command, through the permission policy
+trigger:                                # optional; the user switches triggers on per workflow
+  schedule: "0 2 * * *"                 # cron: minute hour day-of-month month day-of-week
+  files: { paths: ["src/**"] }
+  git: { on: [commit], branches: [main] }
+  webhook: true
+  offPeakOnly: true                     # wait for the cheaper off-peak hours
+\`\`\`
+
+- A step starts when every step in its \`needs\` succeeded; independent steps run at the same time. \`if: "steps.<id>.outcome == 'failed'"\` runs a step on other outcomes instead.
+- References: \`{{inputs.<name>}}\`, \`{{steps.<id>.outputs.<name>}}\`, \`{{steps.<id>.summary}}\`, \`{{steps.<id>.outcome}}\`, \`{{trigger.files}}\`. A step may only use steps it waits for (its own outputs in its \`verify\`). Values in commands are quoted for the shell.
+- Other step types: \`workflow: <name>\` with \`inputs:\` runs another workflow.
+- When the workflow_check tool is available, check the file with it after writing and fix every problem it reports.
 
 ## Steps
 

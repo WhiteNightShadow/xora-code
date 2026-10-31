@@ -47,6 +47,8 @@ const zh = {
         ready: '准备好了：选一个项目，新建线程，描述你要做的事。',
     },
     thread: {
+        distillWorkflow: '沉淀为工作流',
+        distillSkill: '沉淀为skill',
         placeholder: '描述要做的事，回车发送，shift+回车换行',
         send: '发送',
         stop: '停止',
@@ -659,6 +661,8 @@ const en: Widen<Strings> = {
         ready: 'Ready: pick a project, start a thread and describe the task.',
     },
     thread: {
+        distillWorkflow: 'Save as a workflow',
+        distillSkill: 'Save as a skill',
         placeholder: 'Describe the task. Enter to send, Shift+Enter for a new line',
         send: 'Send',
         stop: 'Stop',

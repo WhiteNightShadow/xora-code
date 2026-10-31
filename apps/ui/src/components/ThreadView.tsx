@@ -278,6 +278,27 @@ function Header({ thread }: { thread: ThreadMeta }) {
                             >
                                 {s.goal.setGoal}
                             </button>
+                            {(['workflow', 'skill'] as const).map((kind) => (
+                                <button
+                                    key={kind}
+                                    type="button"
+                                    disabled={thread.turns === 0}
+                                    onClick={() => {
+                                        setMenu(false);
+                                        void attempt(() =>
+                                            host.call('thread.distill', { threadId: thread.id, kind }),
+                                        ).then((created) => {
+                                            if (!created) return;
+                                            useApp.setState((state) => ({
+                                                threads: { ...state.threads, [created.id]: created },
+                                            }));
+                                            void selectThread(created.id);
+                                        });
+                                    }}
+                                >
+                                    {kind === 'workflow' ? s.thread.distillWorkflow : s.thread.distillSkill}
+                                </button>
+                            ))}
                             <button
                                 type="button"
                                 onClick={() => {

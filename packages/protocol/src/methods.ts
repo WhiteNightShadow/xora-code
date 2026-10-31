@@ -122,6 +122,17 @@ export const methods = {
         params: z.object({ projectId: IdSchema.optional(), includeArchived: z.boolean().optional() }).strict(),
         result: z.array(ThreadMetaSchema),
     },
+    /** Starts a thread that turns this one into a reusable workflow or skill (06 §11); the user reviews the file. */
+    'thread.distill': {
+        params: z
+            .object({
+                threadId: IdSchema,
+                kind: z.enum(['workflow', 'skill']),
+                scope: z.enum(['project', 'user']).optional(),
+            })
+            .strict(),
+        result: ThreadMetaSchema,
+    },
     'thread.create': {
         params: z
             .object({

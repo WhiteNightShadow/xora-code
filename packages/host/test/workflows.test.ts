@@ -453,4 +453,53 @@ describe('workflow runs', () => {
             }),
         ).toBeUndefined();
     }, 120_000);
+
+    it('distills a thread into a workflow file that the check tool accepts', async () => {
+        const repo = gitRepo({});
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        const draft = 'name: greet\nsteps:\n  - id: hello\n    agent: writer\n    task: say hello\n';
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            const first = textOf(body.messages.find((message) => message.role === 'user')?.content);
+            if (!first.includes('<thread_transcript')) return say('hello there');
+            const last = body.messages.at(-1);
+            if (last?.role !== 'tool') {
+                return call({ name: 'write', arguments: { path: '.xora/workflows/greet.yaml', content: draft } });
+            }
+            return lastCall(body) === 'write'
+                ? call({ name: 'workflow_check', arguments: { path: '.xora/workflows/greet.yaml' } })
+                : say(`checked: ${textOf(last.content)}`);
+        });
+        const host = await startHost(dataDir);
+        approve(host.ui, [], new Set());
+        await connectCustom(host.ui);
+        const project = await host.ui.request('project.add', { path: repo });
+        const thread = await host.ui.request('thread.create', { projectId: project.id });
+        await host.ui.request('turn.start', { threadId: thread.id, text: '打个招呼' });
+        await waitFor(async () => {
+            const snapshot = await host.ui.request('thread.read', { threadId: thread.id });
+            return snapshot.events.some((event) => event.kind === 'turn.completed') || undefined;
+        }, 'first turn');
+
+        const distilled = await host.ui.request('thread.distill', { threadId: thread.id, kind: 'workflow' });
+        expect(distilled.title).toBe('沉淀工作流：打个招呼');
+        expect(distilled.mode).toBe('ask');
+        const done = await waitFor(async () => {
+            const snapshot = await host.ui.request('thread.read', { threadId: distilled.id });
+            return snapshot.events.some((event) => event.kind === 'turn.completed') ? snapshot : undefined;
+        }, 'distill turn');
+        expect(readFileSync(path.join(repo, '.xora', 'workflows', 'greet.yaml'), 'utf8')).toBe(draft);
+        const prompt = server.requests
+            .map((request) => request.body as ChatBody | undefined)
+            .find((body) => textOf(body?.messages.at(-1)?.content).includes('<thread_transcript'));
+        expect(textOf(prompt?.messages.at(-1)?.content)).toContain('## 用户\n打个招呼');
+        const messages = done.events
+            .filter((event) => event.kind === 'item.completed')
+            .map((event) => (event.payload as { item: { type: string; text?: string } }).item)
+            .filter((item) => item.type === 'agent_message');
+        expect(messages.at(-1)?.text).toBe('checked: OK: hello(agent)');
+        const [info] = await host.ui.request('workflow.list', { projectId: project.id });
+        expect(info).toMatchObject({ key: 'project:greet', steps: [{ id: 'hello', type: 'agent' }] });
+    }, 120_000);
 });

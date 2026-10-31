@@ -18,6 +18,7 @@ import { XoraDatabase } from '@xora/storage';
 import { ApprovalService } from './approvals.ts';
 import { Bus } from './bus.ts';
 import { ConnectionService } from './connections.ts';
+import { DistillService } from './distill.ts';
 import { EngineManager } from './engines/manager.ts';
 import { EXTERNAL_ENGINES, engineById, XORA_ENGINE } from './engines/registry.ts';
 import { ExtensionService } from './extensions.ts';
@@ -94,6 +95,7 @@ export class HostCore {
     readonly extensions: ExtensionService;
     readonly team: TeamService;
     readonly workflows: WorkflowService;
+    readonly distill: DistillService;
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
 
@@ -209,6 +211,14 @@ export class HostCore {
             team: this.team,
             orgsDir: this.paths.orgsDir,
             workflowsDir: this.paths.workflowsDir,
+        });
+        this.distill = new DistillService({
+            threads: this.threads,
+            turns: this.turns,
+            projects: this.projects,
+            log: this.log,
+            workflowsDir: this.paths.workflowsDir,
+            extensionsDir: this.paths.extensionsDir,
         });
         this.updates = new UpdateService({
             settings: this.settings,
@@ -435,6 +445,9 @@ export class HostCore {
             return thread;
         };
         peer.handle('thread.create', (params) => createThread(params));
+        peer.handle('thread.distill', ({ threadId, kind, scope }) =>
+            this.distill.start({ threadId, kind, scope: scope ?? 'project' }),
+        );
         const history = new HistoryService({
             threads,
             projects,
