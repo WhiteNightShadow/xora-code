@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: Settings = {
     defaultMode: 'ask',
     defaultEffort: 'high',
     softContextWindow: 256_000,
+    lspDiagnostics: true,
     notifications: { onComplete: true, onApproval: true, onFailure: true },
     preventSleep: true,
     currency: 'CNY',

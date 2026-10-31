@@ -472,6 +472,8 @@ export const SettingsSchema = z.object({
     defaultEffort: EffortSchema,
     /** Cap on the context the engine keeps, regardless of the model window (08 §2). */
     softContextWindow: z.number().int().positive(),
+    /** Xora engine: add language server errors to the results of edits when a server is installed (04 §3). */
+    lspDiagnostics: z.boolean(),
     notifications: z.object({ onComplete: z.boolean(), onApproval: z.boolean(), onFailure: z.boolean() }),
     preventSleep: z.boolean(),
     currency: z.enum(['CNY', 'USD']),

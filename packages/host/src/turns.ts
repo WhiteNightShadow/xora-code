@@ -413,6 +413,7 @@ export class TurnService {
             hostTools: tools.map((tool) => ({ ...tool, kind: tool.kind ?? 'other' })),
             disabledTools: [...(provider?.disabledTools ?? [])],
             hookEvents: [...(extras?.hookEvents ?? [])],
+            lsp: { diagnostics: current.lspDiagnostics, trusted: project.trusted },
         };
     }
 

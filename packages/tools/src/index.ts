@@ -8,6 +8,29 @@ export {
 } from './command.ts';
 export { isSecretEnvName, KEPT_ENV_NAMES, sanitizeEnv } from './env.ts';
 export { createJobRegistry, type ManagedJobRegistry, ShellJob } from './jobs.ts';
+export { type DiagnosticsReport, LspClient } from './lsp/client.ts';
+export { type EditReport, formatEditNote, newDiagnostics } from './lsp/format.ts';
+export {
+    ConnectionClosedError,
+    encodeMessage,
+    FramingError,
+    JsonRpcConnection,
+    MessageReader,
+    RequestTimeoutError,
+    ResponseError,
+} from './lsp/jsonrpc.ts';
+export {
+    DIAGNOSTICS_SETTLE_MS,
+    EDIT_DIAGNOSTICS_WAIT_MS,
+    type EditDiagnosticsOptions,
+    type EditedFile,
+    LSP_IDLE_MS,
+    LspManager,
+    type LspManagerOptions,
+    type ServerLookup,
+} from './lsp/manager.ts';
+export type { Diagnostic } from './lsp/protocol.ts';
+export { DEFAULT_SERVERS, type ServerCommand, type ServerSpec } from './lsp/servers.ts';
 export {
     checkPathAccess,
     checkPathSyntax,
@@ -63,6 +86,7 @@ export {
     grepTool,
 } from './tools/grep.ts';
 export { LIST_MAX_ENTRIES, type ListInput, listTool } from './tools/list.ts';
+export { LSP_MAX_FILES, type LspInput, lspTool } from './tools/lsp.ts';
 export { READ_DEFAULT_LIMIT, READ_MAX_LINE_CHARS, type ReadInput, readTool } from './tools/read.ts';
 export { renderTodos, type TodoInput, todoTool } from './tools/todo.ts';
 export { type WriteInput, writeTool } from './tools/write.ts';

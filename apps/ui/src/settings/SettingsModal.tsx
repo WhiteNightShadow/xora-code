@@ -424,6 +424,13 @@ function Models() {
                     }}
                 />
             </Field>
+            <Field label="" hint={s.settings.lspDiagnosticsHint}>
+                <Toggle
+                    checked={settings.lspDiagnostics}
+                    label={s.settings.lspDiagnostics}
+                    onChange={(lspDiagnostics) => update({ lspDiagnostics })}
+                />
+            </Field>
         </div>
     );
 }

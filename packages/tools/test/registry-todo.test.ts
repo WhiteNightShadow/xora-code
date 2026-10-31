@@ -38,6 +38,7 @@ describe('createDefaultTools', () => {
             'list',
             'glob',
             'grep',
+            'lsp',
             'edit',
             'multi_edit',
             'write',
@@ -51,7 +52,7 @@ describe('createDefaultTools', () => {
 
     it('marks exactly the tools that change nothing as read-only', () => {
         const readOnly = tools.filter((tool) => tool.readOnly).map((tool) => tool.name);
-        expect(readOnly).toEqual(['read', 'list', 'glob', 'grep', 'bash_output', 'todo']);
+        expect(readOnly).toEqual(['read', 'list', 'glob', 'grep', 'lsp', 'bash_output', 'todo']);
         expect(byName.get('apply_patch')?.kind).toBe('edit');
         expect(byName.get('bash')?.kind).toBe('execute');
         expect(byName.get('grep')?.kind).toBe('search');
