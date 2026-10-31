@@ -5,6 +5,7 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { TeamStartDialog, TeamView } from './components/TeamView.tsx';
 import { ThreadView } from './components/ThreadView.tsx';
 import { Welcome } from './components/Welcome.tsx';
+import { WorkflowRunView, WorkflowsDialog } from './components/WorkflowView.tsx';
 import { RightPanel } from './panels/RightPanel.tsx';
 import { UsageModal } from './panels/UsageModal.tsx';
 import { SettingsModal } from './settings/SettingsModal.tsx';
@@ -35,6 +36,9 @@ export function App() {
     const newThreadFor = useApp((state) => state.newThreadFor);
     const teamRunId = useApp((state) => state.teamRunId);
     const teamStartFor = useApp((state) => state.teamStartFor);
+    const workflowRunId = useApp((state) => state.workflowRunId);
+    const workflowsFor = useApp((state) => state.workflowsFor);
+    const runShown = Boolean(teamRunId || workflowRunId);
     const splitIds = useApp((state) => state.split);
     const threads = useApp((state) => state.threads);
     const split = splitIds.map((id) => threads[id]).filter((item) => item !== undefined);
@@ -55,11 +59,13 @@ export function App() {
         );
     }
     return (
-        <div className={`app${rightPanel && thread && !teamRunId ? ' has-panel' : ''}`}>
+        <div className={`app${rightPanel && thread && !runShown ? ' has-panel' : ''}`}>
             <Sidebar />
             <main className={`main${split.length > 1 ? ' main--split' : ''}`}>
                 {teamRunId ? (
                     <TeamView runId={teamRunId} />
+                ) : workflowRunId ? (
+                    <WorkflowRunView key={workflowRunId} runId={workflowRunId} />
                 ) : split.length > 1 ? (
                     split.map((item) => (
                         <div key={item.id} className="split-pane">
@@ -72,11 +78,12 @@ export function App() {
                     <Welcome />
                 )}
             </main>
-            {rightPanel && thread && !teamRunId && <RightPanel thread={thread} panel={rightPanel} />}
+            {rightPanel && thread && !runShown && <RightPanel thread={thread} panel={rightPanel} />}
             {settingsOpen && <SettingsModal section={settingsOpen} />}
             {usageOpen && <UsageModal />}
             {newThreadFor && <NewThreadDialog projectId={newThreadFor} />}
             {teamStartFor && <TeamStartDialog projectId={teamStartFor} />}
+            {workflowsFor && <WorkflowsDialog projectId={workflowsFor} />}
             {!connected && <div className="banner">{s.app.disconnected}</div>}
             <Toasts />
         </div>

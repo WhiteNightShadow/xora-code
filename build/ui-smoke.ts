@@ -78,6 +78,12 @@ git('config', 'user.name', 'Smoke');
 await writeFile(path.join(repo, 'hello.txt'), 'hello\n');
 git('add', '.');
 git('commit', '-q', '-m', 'init');
+// A user workflow (any project, no trust needed): a read-only command, then a human gate.
+await mkdir(path.join(dataDir, 'workflows'), { recursive: true });
+await writeFile(
+    path.join(dataDir, 'workflows', 'smoke.yaml'),
+    'name: smoke\ntitle: 冒烟工作流\nsteps:\n  - id: status\n    run: git status --short\n  - id: confirm\n    needs: [status]\n    gate: human\n    message: 冒烟确认\n',
+);
 
 const server = await startMockModelServer();
 // A page for the preview panel, served on loopback only.
@@ -307,6 +313,18 @@ try {
         await stop.click();
         await page.locator('.team .badge', { hasText: /已停止|已暂停|失败/ }).waitFor();
     }
+
+    // M5: run a workflow from the list; its command and its human gate are answered in the run view.
+    await page.getByRole('button', { name: '工作流', exact: true }).first().click();
+    const card = page.locator('.workflow-card', { hasText: '冒烟工作流' });
+    await card.getByRole('button', { name: '运行', exact: true }).click();
+    await card.getByRole('button', { name: '开始运行', exact: true }).click();
+    const command = page.locator('.workflow__approval', { hasText: 'git status --short' });
+    await command.getByRole('button', { name: '允许', exact: true }).click();
+    const gate = page.locator('.workflow__approval', { hasText: '冒烟确认' });
+    await gate.getByRole('button', { name: '允许', exact: true }).click();
+    await page.locator('.team__goal .badge', { hasText: '完成' }).waitFor();
+    await step(page, '工作流运行到人工关卡，确认后完成');
 } catch (error) {
     failed = true;
     console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);

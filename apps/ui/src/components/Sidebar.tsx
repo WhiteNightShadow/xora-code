@@ -101,13 +101,20 @@ function ProjectGroup({
     const selectedProjectId = useApp((state) => state.selectedProjectId);
     const [showArchived, setShowArchived] = useState(false);
     const teamRunId = useApp((state) => state.teamRunId);
+    const workflowRunId = useApp((state) => state.workflowRunId);
     const allRuns = useApp((state) => state.teamRuns);
+    const allWorkflowRuns = useApp((state) => state.workflowRuns);
     const runs = Object.values(allRuns)
         .filter((run) => run.projectId === project.id)
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .slice(0, 5);
-    // Team members' threads are reached through the team view, not listed one by one.
-    const active = threads.filter((thread) => !thread.archived && !thread.teamRunId);
+    // Sub-workflows are reached through their parent run.
+    const workflowRuns = Object.values(allWorkflowRuns)
+        .filter((run) => run.projectId === project.id && !run.parentRunId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 5);
+    // Team members' and workflow steps' threads are reached through their run, not listed one by one.
+    const active = threads.filter((thread) => !thread.archived && !thread.teamRunId && !thread.workflowRunId);
     const archived = threads.filter((thread) => thread.archived);
     return (
         <div className={`project${selectedProjectId === project.id ? ' is-current' : ''}`}>
@@ -118,6 +125,12 @@ function ProjectGroup({
                     {project.git.branch && <span className="project__branch">{project.git.branch}</span>}
                     {project.missing && <span className="project__missing">!</span>}
                 </button>
+                <IconButton
+                    icon="list"
+                    label={s.workflow.open}
+                    size={14}
+                    onClick={() => useApp.setState({ workflowsFor: project.id })}
+                />
                 <IconButton
                     icon="route"
                     label={s.team.start}
@@ -131,6 +144,22 @@ function ProjectGroup({
                     onClick={() => useApp.setState({ newThreadFor: project.id })}
                 />
             </div>
+            {open && workflowRuns.length > 0 && (
+                <div className="project__runs">
+                    {workflowRuns.map((run) => (
+                        <button
+                            key={run.id}
+                            type="button"
+                            className={`run-row${workflowRunId === run.id ? ' is-selected' : ''}`}
+                            onClick={() => useApp.setState({ workflowRunId: run.id, teamRunId: undefined })}
+                        >
+                            <Icon name="list" size={11} />
+                            <span className="thread-row__title">{run.title}</span>
+                            <span className="thread-row__meta">{s.workflow.statuses[run.status]}</span>
+                        </button>
+                    ))}
+                </div>
+            )}
             {open && runs.length > 0 && (
                 <div className="project__runs">
                     {runs.map((run) => (
@@ -138,7 +167,7 @@ function ProjectGroup({
                             key={run.id}
                             type="button"
                             className={`run-row${teamRunId === run.id ? ' is-selected' : ''}`}
-                            onClick={() => useApp.setState({ teamRunId: run.id })}
+                            onClick={() => useApp.setState({ teamRunId: run.id, workflowRunId: undefined })}
                         >
                             <Icon name="route" size={11} />
                             <span className="thread-row__title">{run.goal}</span>

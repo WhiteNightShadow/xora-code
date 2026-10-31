@@ -10,6 +10,7 @@ import type {
     TeamRun,
     ThreadMeta,
     UpdateStatus,
+    WorkflowRun,
 } from '@xora/protocol';
 import { create } from 'zustand';
 import { errorMessage, host } from './host.ts';
@@ -73,6 +74,11 @@ interface AppState {
     /** Team run shown in the main area instead of a thread. */
     teamRunId: string | undefined;
     teamStartFor: string | undefined;
+    workflowRuns: Record<string, WorkflowRun>;
+    /** Workflow run shown in the main area instead of a thread. */
+    workflowRunId: string | undefined;
+    /** Project the workflow list is open for. */
+    workflowsFor: string | undefined;
     toasts: Toast[];
     /** Bumps when usage changes, so open usage views refetch. */
     usageVersion: number;
@@ -104,6 +110,9 @@ export const useApp = create<AppState>(() => ({
     teamRuns: {},
     teamRunId: undefined,
     teamStartFor: undefined,
+    workflowRuns: {},
+    workflowRunId: undefined,
+    workflowsFor: undefined,
     toasts: [],
     usageVersion: 0,
 }));
@@ -163,7 +172,7 @@ export async function refreshConnections(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-    const [info, settings, projects, threads, approvals, presets, update, runs] = await Promise.all([
+    const [info, settings, projects, threads, approvals, presets, update, runs, workflowRuns] = await Promise.all([
         host.call('system.info', {}),
         host.call('settings.get', {}),
         host.call('project.list', {}),
@@ -172,6 +181,7 @@ async function loadAll(): Promise<void> {
         host.call('provider.presets', {}),
         host.call('update.status', {}),
         host.call('team.list', {}),
+        host.call('workflow.runs', {}),
     ]);
     await refreshConnections();
     const selectedThreadId = get().selectedThreadId;
@@ -184,6 +194,7 @@ async function loadAll(): Promise<void> {
         presets,
         update,
         teamRuns: Object.fromEntries(runs.map((run) => [run.id, run])),
+        workflowRuns: Object.fromEntries(workflowRuns.map((run) => [run.id, run])),
         ready: true,
         selectedProjectId: state.selectedProjectId ?? projects[0]?.id,
     }));
@@ -282,6 +293,9 @@ function listen(): void {
     host.on('usage.changed', () => set((state) => ({ usageVersion: state.usageVersion + 1 })));
     host.on('ui.focusThread', ({ threadId }) => void selectThread(threadId));
     host.on('team.changed', ({ run }) => set((state) => ({ teamRuns: { ...state.teamRuns, [run.id]: run } })));
+    host.on('workflow.changed', ({ run }) =>
+        set((state) => ({ workflowRuns: { ...state.workflowRuns, [run.id]: run } })),
+    );
 }
 
 /** Connects, loads the initial state and resolves once the UI has data to show. */
@@ -314,6 +328,7 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
     set({
         selectedThreadId: threadId,
         teamRunId: undefined,
+        workflowRunId: undefined,
         reviewTurnId: undefined,
         ...(thread ? { selectedProjectId: thread.projectId } : {}),
     });

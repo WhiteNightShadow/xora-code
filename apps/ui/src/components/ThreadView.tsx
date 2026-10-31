@@ -774,7 +774,8 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
                     <TurnBlock key={turn.turnId} turn={turn} isLast={index === turns.length - 1} thread={thread} />
                 ))}
             </div>
-            <Composer thread={thread} />
+            {/* A workflow run's own thread is its log: notices and approval cards, nobody to talk to. */}
+            {thread.role !== 'workflow' && <Composer thread={thread} />}
         </div>
     );
 }
