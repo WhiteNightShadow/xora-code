@@ -24,6 +24,8 @@ function openThread(threadId: string): void {
 function StepRow({ step }: { step: WorkflowStepRun }) {
     const s = useStrings();
     const thread = step.threadIds.at(-1);
+    // Tool calls of a step are approved in its thread, where the card shows the diff or the command.
+    const asking = useApp((state) => state.approvals.some((approval) => step.threadIds.includes(approval.threadId)));
     return (
         <li className={`workflow-step is-${step.status}`}>
             <div className="workflow-step__head">
@@ -36,6 +38,7 @@ function StepRow({ step }: { step: WorkflowStepRun }) {
                     {step.attempts > 1 ? ` · ${format(s.workflow.attempts, { count: step.attempts })}` : ''}
                     {step.cost ? ` · ${formatMoney(step.cost)}` : ''}
                 </span>
+                {asking && <Badge tone="accent">{s.workflow.stepAsking}</Badge>}
                 <span className="workflow-step__actions">
                     {step.teamRunId ? (
                         <button

@@ -472,6 +472,7 @@ const zh = {
         approve: '允许',
         deny: '拒绝',
         pending: '等你处理',
+        stepAsking: '等你审批',
         reasons: {
             manual: '手动',
             schedule: '定时',
@@ -1077,6 +1078,7 @@ const en: Widen<Strings> = {
         approve: 'Allow',
         deny: 'Deny',
         pending: 'Waiting for you',
+        stepAsking: 'Needs your approval',
         reasons: {
             manual: 'Manual',
             schedule: 'Schedule',
