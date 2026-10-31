@@ -40,11 +40,19 @@
 | web_fetch、web_search | 抓网页并转成markdown；搜索走厂商的服务端工具或配置好的搜索api | 按域名询问 |
 | browser | 驱动内置预览：打开、截图、点击、读dom、看控制台 | 询问 |
 | git | status、diff、log、commit、branch；危险操作单独询问 | 只读部分放行 |
-| lsp | 诊断、符号、引用（M4） | 放行 |
+| lsp | 诊断、定义、引用、悬停、符号（见下面的“语言服务器”） | 放行 |
 | todo、plan | 待办与计划 | 放行 |
 | task | 委派子agent（见06） | 放行，受并发和预算限制 |
 | ask_user | 中途向用户提问（elicitation） | — |
 | mcp工具 | 按服务器和工具配置 | 按规则 |
+
+### 语言服务器
+
+- **支持的语言**：typescript/javascript用typescript-language-server，python用pyright（或basedpyright），go用gopls，rust用rust-analyzer，c/c++用clangd。xora不自带，按扩展名选服务器：受信项目先找项目里的`node_modules/.bin`，再找`PATH`；都没有时，结果里说明该装哪个。
+- **生命周期**：按（根目录，语言）懒启动，同一根目录下的会话共用；10分钟没人用就停掉；引擎退出时连子进程一起杀（posix杀进程组，windows用`taskkill /T`）。5分钟内崩溃3次就先不再重启。
+- **lsp工具**：`diagnostics`（一次最多10个文件）、`definition`、`references`、`hover`、`symbols`（文件大纲；带`query`时搜整个工作区）。行列号从1开始，也可以用`symbol`代替列号。只看工作区里的文件，路径相对工作区显示，输出有长度上限。
+- **改完文件后的诊断**：edit、multi_edit、write、apply_patch成功后，把新内容同步给对应的服务器（装了但没在跑就启动），最多等1.5秒，把这次改动新增的错误和少量警告附在工具结果后面（以`LSP diagnostics after the edit`开头）；服务器第一次见到这个文件时列出它的全部错误。默认开，设置→模型与供应商里可以关；没装服务器时什么都不做。
+- **安全**：会执行项目代码的情况要求项目受信：项目`node_modules/.bin`里的服务器只在受信项目里用；项目里有自己的typescript时（typescript-language-server会加载它），不受信的项目不启动；不受信的项目里rust-analyzer关掉build script和过程宏。
 
 ## 4. 审阅、检查点与回滚
 
