@@ -609,7 +609,8 @@ function TaskOverview({ run, onReport }: { run: TeamRun; onReport: () => void })
                                     <header>
                                         <span className="conclusion-card__title">{task.title}</span>
                                         <span className={`status-pill status--${task.status}`}>
-                                            {(s.team.statuses as Record<string, string>)[task.status] ?? task.status}
+                                            {(s.team.taskStatuses as Record<string, string>)[task.status] ??
+                                                task.status}
                                         </span>
                                     </header>
                                     <div className="conclusion-card__meta">

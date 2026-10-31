@@ -29,7 +29,7 @@ import {
     toolsOf,
 } from '@xora/workflows';
 import { z } from 'zod';
-import { textOf } from './text.ts';
+import { hostLanguage, textOf } from './text.ts';
 import type { HostToolProvider } from './turns.ts';
 
 /**
@@ -561,6 +561,12 @@ export function executorNote(card: TaskCard, location: 'worktree' | 'local', tur
         where,
         'When the work is done, call deliver with the deliverable and end your turn. If the card needs a stronger tier, call escalate with your findings. Use ask_supervisor only for what the card and the code cannot answer.',
         `You have ${turns} model turns for this card, rework after a failed acceptance included. When they run out the attempt fails and the card goes to a stronger tier, so deliver or escalate in time.`,
+        // The user reads members' conclusions in the team overview: in the UI's language.
+        ...(hostLanguage() === 'zh-CN'
+            ? [
+                  "Write the deliverable (summary, risks, open questions) in simplified Chinese, the user's language; keep code, paths and identifiers as they are.",
+              ]
+            : []),
         '</team_host>',
     ].join('\n');
 }

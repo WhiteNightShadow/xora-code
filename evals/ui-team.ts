@@ -149,7 +149,7 @@ try {
     await page.locator('.team__goal').waitFor();
     log('team run started');
 
-    const tabs = ['看板', '账本', '对话', '花费', '交付报告'];
+    const tabs = ['概览', '看板', '账本', '对话', '花费', '交付报告'];
     let lastTabs = 0;
     for (;;) {
         const runs = await hostCall<Array<{ id: string; status: string; note?: string }>>(page, 'team.list', {
@@ -181,7 +181,7 @@ try {
                 await sleep(500);
                 await snap(page, `${status}-${tab}`);
             }
-            await page.locator('.team__tabs').getByRole('button', { name: '看板', exact: true }).click().catch(() => undefined);
+            await page.locator('.team__tabs').getByRole('button', { name: '概览', exact: true }).click().catch(() => undefined);
         }
         if (['done', 'failed', 'cancelled'].includes(status)) {
             log(`run ${status}${run?.note ? `: ${run.note}` : ''}`);
