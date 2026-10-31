@@ -272,6 +272,7 @@ export class HostCore {
                 process.env.PATH = merged;
             }
         }
+        await core.distill.restore().catch((error) => core.log.warn(`distill: ${String(error)}`));
         core.#syncTriggers();
         // Also catches what no event reports: a project that lost its trust, a workflow file edited by hand.
         core.#triggerSync = setInterval(() => core.#syncTriggers(), 60_000);

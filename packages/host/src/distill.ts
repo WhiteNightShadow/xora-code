@@ -19,6 +19,9 @@ const FIRST_LIMIT = 4_000;
 
 export type DistillKind = 'workflow' | 'skill';
 
+/** Thread role of a workflow distill thread, which gets the `workflow_check` tool. */
+const DISTILL_ROLE = 'distill';
+
 export interface DistillDeps {
     readonly threads: ThreadStore;
     readonly turns: TurnService;
@@ -113,6 +116,7 @@ export class DistillService {
             // Every file is written through an approval card: the user reviews the draft before it exists.
             mode: 'ask',
             effort: source.effort,
+            ...(input.kind === 'workflow' ? { extra: { role: DISTILL_ROLE } } : {}),
         });
         if (input.kind === 'workflow') {
             turns.setHostTools(thread.id, this.#checkTool(project.path));
@@ -124,6 +128,17 @@ export class DistillService {
         );
         log.info(`distill ${input.kind} from ${source.id} in ${thread.id}`);
         return threads.get(thread.id);
+    }
+
+    /** Host tools live in memory: a restart gives the open distill threads their check tool back. */
+    async restore(): Promise<void> {
+        for (const thread of this.#deps.threads.list({ includeArchived: false })) {
+            if (thread.role !== DISTILL_ROLE) continue;
+            const project = await this.#deps.projects.get(thread.projectId).catch(() => undefined);
+            if (project && !project.missing) {
+                this.#deps.turns.setHostTools(thread.id, this.#checkTool(project.path));
+            }
+        }
     }
 
     #checkTool(projectRoot: string): HostToolProvider {

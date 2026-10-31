@@ -599,8 +599,7 @@ steps:
         }, 'first turn');
 
         const distilled = await host.ui.request('thread.distill', { threadId: thread.id, kind: 'workflow' });
-        expect(distilled.title).toBe('沉淀工作流：打个招呼');
-        expect(distilled.mode).toBe('ask');
+        expect(distilled).toMatchObject({ title: '沉淀工作流：打个招呼', mode: 'ask', role: 'distill' });
         const done = await waitFor(async () => {
             const snapshot = await host.ui.request('thread.read', { threadId: distilled.id });
             return snapshot.events.some((event) => event.kind === 'turn.completed') ? snapshot : undefined;
