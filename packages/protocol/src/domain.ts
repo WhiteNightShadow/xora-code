@@ -657,6 +657,19 @@ export const TeamRunSchema = z.object({
     /** Things the user should know, e.g. a tier that fell back to the default model. */
     warnings: z.array(z.string()).optional(),
     supervisorThreadId: z.string().optional(),
+    mode: z.enum(['standard', 'hypotheses']).optional(),
+    /** Messages between the user, the supervisor and the members (06 §7), oldest first. */
+    conversation: z
+        .array(
+            z.object({
+                ts: z.number(),
+                from: z.string(),
+                to: z.string(),
+                text: z.string(),
+                kind: z.enum(['message', 'question', 'answer', 'user', 'challenge']),
+            }),
+        )
+        .optional(),
     tasks: z.array(TeamTaskSchema),
     ledger: z.unknown().optional(),
     progress: z.array(z.unknown()),

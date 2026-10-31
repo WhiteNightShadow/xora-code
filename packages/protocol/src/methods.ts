@@ -354,8 +354,15 @@ export const methods = {
                 goal: z.string().min(1).max(50_000),
                 autonomy: z.enum(['L0', 'L1', 'L2', 'L3']).optional(),
                 budget: z.number().positive().optional(),
+                /** `hypotheses`: rival explanations investigated in parallel and challenged (06 §7). */
+                mode: z.enum(['standard', 'hypotheses']).optional(),
             })
             .strict(),
+        result: TeamRunSchema,
+    },
+    /** The user writes to the supervisor (`supervisor`) or to a member (a task id) of a running team. */
+    'team.message': {
+        params: z.object({ runId: z.string(), to: z.string().min(1), text: z.string().min(1).max(20_000) }).strict(),
         result: TeamRunSchema,
     },
     'team.list': { params: z.object({ projectId: IdSchema.optional() }).strict(), result: z.array(TeamRunSchema) },

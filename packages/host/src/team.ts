@@ -86,6 +86,7 @@ import type { SettingsService } from './settings.ts';
 import {
     AskInput,
     agentFor,
+    ChallengeInput,
     cardProblem,
     describeChecks,
     disabledBuiltins,
@@ -108,6 +109,7 @@ import {
     TaskAssignInput,
     TaskListInput,
     TaskUpdateInput,
+    type TeamMode,
     wakeText,
 } from './team-agents.ts';
 import { SqliteTeamStore } from './team-store.ts';
@@ -136,6 +138,10 @@ const OUTPUT_TAIL = 4_000;
 const BROADCAST_MS = 200;
 const WAKE_DELAY_MS = 300;
 const QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+/** Conversation entries kept with a run (06 §7). */
+const CONVERSATION_LIMIT = 400;
+/** Challenges one investigation card may send in a competing-hypotheses run. */
+const MAX_CHALLENGES = 3;
 const RECENT_ACTIONS = 12;
 const RECENT_ENDS = 64;
 
@@ -182,8 +188,10 @@ interface TaskHost {
     turns?: number;
     /** Prompt for the executor's next turn, kept while the run is paused. */
     pending?: string;
-    /** Supervisor messages queued for the executor's next turn. */
+    /** Messages (supervisor, user, challenges) queued for the executor's next turn. */
     messages?: string[];
+    /** Challenges this card sent (competing hypotheses). */
+    challenges?: number;
     /** Deliverable handed in through the deliver or escalate tool during the current turn. */
     delivered?: Deliverable;
     verdict?: { verdict: string; reasons: string[]; outOfOwnership: string[] };
@@ -219,12 +227,25 @@ interface RunHost {
     warnings: string[];
     /** Updates waiting for the supervisor's next turn. */
     inbox: string[];
+    /** `standard`, or `hypotheses` for competing hypotheses (06 §7). */
+    mode?: TeamMode;
+    /** Every message of the run, for the team conversation view (06 §7). */
+    conversation?: ConversationEntry[];
     tasks: Record<string, TaskHost>;
     reviewThreads: string[];
     /** Recent actions for loop detection. */
     actions: string[];
     report?: string;
     finalChecks?: Array<{ run: string; exit: number | null; ran: boolean }>;
+}
+
+interface ConversationEntry {
+    readonly ts: number;
+    /** `user`, `supervisor` or a task id. */
+    readonly from: string;
+    readonly to: string;
+    readonly text: string;
+    readonly kind: 'message' | 'question' | 'answer' | 'user' | 'challenge';
 }
 
 interface Question {
@@ -350,6 +371,7 @@ export class TeamService {
         goal: string;
         autonomy?: AutonomyLevel;
         budget?: number;
+        mode?: TeamMode;
     }): Promise<TeamRunView> {
         await this.#ready;
         const { projects, settings, threads } = this.#deps;
@@ -422,6 +444,7 @@ export class TeamService {
             orgSources: [...loaded.sources],
             warnings,
             inbox: [],
+            ...(input.mode === 'hypotheses' ? { mode: 'hypotheses' as const } : {}),
             tasks: {},
             reviewThreads: [],
             actions: [],
@@ -431,7 +454,7 @@ export class TeamService {
         this.#save(state);
         this.#attachTools(state);
         try {
-            await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel()));
+            await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel(), host.mode));
         } catch (error) {
             this.#setStatus(state, 'failed', `主管线程没能启动：${errorText(error)}`);
             throw error;
@@ -947,6 +970,8 @@ export class TeamService {
             budget: run.budget ? { amount: run.budget.limit, currency: run.budget.currency } : null,
             ...(host.note ? { note: host.note } : {}),
             ...(host.warnings.length > 0 ? { warnings: [...host.warnings] } : {}),
+            mode: host.mode ?? 'standard',
+            conversation: [...(host.conversation ?? [])],
             supervisorThreadId: host.supervisorThreadId,
             tasks,
             ...(state.ledger
@@ -1007,7 +1032,9 @@ export class TeamService {
         const allowed = new Set(toolsOf(agent));
         const runId = state.run.id;
         return {
-            tools: MEMBER_TOOLS.filter((tool) => allowed.has(tool.name)),
+            tools: MEMBER_TOOLS.filter(
+                (tool) => allowed.has(tool.name) && (tool.name !== 'challenge' || state.host.mode === 'hypotheses'),
+            ),
             disabledTools: disabledBuiltins(agent),
             mcpTools: mcpToolsOf(agent),
             layers: systemLayers(state.host.org, agent),
@@ -1696,15 +1723,95 @@ export class TeamService {
         if (question) {
             state.questions.delete(taskId);
             question.answer(`The supervisor answers: ${text}`);
+            this.#record(state, { from: 'supervisor', to: taskId, text, kind: 'answer' });
             return ok(`Answered the question of ${taskId}.`);
         }
         if (task.status === 'done' || task.status === 'cancelled' || task.status === 'failed') {
             return fail(`Task ${taskId} is ${task.status}; nobody reads messages for it. Create or update a task.`);
         }
         const info = this.#taskHost(state, taskId);
-        info.messages = [...(info.messages ?? []), text];
+        info.messages = [...(info.messages ?? []), `From the supervisor: ${text}`];
+        this.#record(state, { from: 'supervisor', to: taskId, text, kind: 'message' });
         this.#save(state);
         return ok(`Queued for ${taskId}: the member reads it at its next turn.`);
+    }
+
+    /** One line of the team conversation (06 §7); the oldest go once there are too many. */
+    #record(state: RunState, entry: Omit<ConversationEntry, 'ts'>): void {
+        const list = state.host.conversation ?? [];
+        list.push({ ts: Date.now(), ...entry });
+        state.host.conversation = list.slice(-CONVERSATION_LIMIT);
+        this.#changed(state);
+    }
+
+    /** A member challenges another investigation card (competing hypotheses, 06 §7). */
+    #challenge(state: RunState, from: string, input: unknown): HostToolResult {
+        if (state.host.mode !== 'hypotheses') {
+            return fail('challenge is only for competing-hypotheses runs.');
+        }
+        const parsed = ChallengeInput.safeParse(input);
+        if (!parsed.success) {
+            return fail(`Invalid arguments: ${formatIssues(parsed.error.issues).join('; ')}`);
+        }
+        const { to, text } = parsed.data;
+        const target = state.board.get(to);
+        if (!target || to === from) {
+            return fail(`No other card ${to}; challenge another investigation card by its task id.`);
+        }
+        if (target.status === 'done' || target.status === 'cancelled' || target.status === 'failed') {
+            return fail(`${to} is ${target.status}; raise it with the supervisor through ask_supervisor instead.`);
+        }
+        const info = this.#taskHost(state, from);
+        if ((info.challenges ?? 0) >= MAX_CHALLENGES) {
+            return fail(`You sent ${MAX_CHALLENGES} challenges already; put the rest into your deliverable.`);
+        }
+        info.challenges = (info.challenges ?? 0) + 1;
+        const other = this.#taskHost(state, to);
+        other.messages = [
+            ...(other.messages ?? []),
+            `Challenge from ${from}: ${text}\nAnswer it in your deliverable (concede, or show why your evidence holds).`,
+        ];
+        state.host.inbox.push(`${from} challenged ${to}: ${shorten(text, 300)}`);
+        this.#record(state, { from, to, text, kind: 'challenge' });
+        this.#save(state);
+        return ok(`Sent to ${to}; its member reads it at its next turn. Carry on with your own investigation.`);
+    }
+
+    /**
+     * The user writes to the supervisor or to a member while the run goes on (06 §7). The supervisor is woken; a
+     * member reads it at its next turn, and the supervisor hears of it. A message directs; it never approves.
+     */
+    async message(runId: string, to: string, text: string): Promise<TeamRunView> {
+        await this.#ready;
+        const state = await this.#require(runId);
+        if (TERMINAL.has(state.host.status)) {
+            throw new RpcError(RpcErrorCode.Rejected, '运行已经结束，消息不会送达');
+        }
+        if (to === 'supervisor') {
+            this.#record(state, { from: 'user', to, text, kind: 'user' });
+            this.#wake(state, `Message from the user: ${text}`);
+            this.#save(state);
+            return this.#view(state);
+        }
+        const task = state.board.get(to);
+        if (!task) {
+            throw new RpcError(RpcErrorCode.NotFound, `没有任务${to}`);
+        }
+        if (task.status === 'done' || task.status === 'cancelled' || task.status === 'failed') {
+            throw new RpcError(RpcErrorCode.Rejected, `任务${to}已经结束，可以发给主管`);
+        }
+        this.#record(state, { from: 'user', to, text, kind: 'user' });
+        const question = state.questions.get(to);
+        if (question) {
+            state.questions.delete(to);
+            question.answer(`The user answers: ${text}`);
+        } else {
+            const info = this.#taskHost(state, to);
+            info.messages = [...(info.messages ?? []), `From the user: ${text}`];
+        }
+        state.host.inbox.push(`The user wrote to ${to}: ${shorten(text, 300)}`);
+        this.#save(state);
+        return this.#view(state);
     }
 
     #syncLedger(state: RunState, reason: string): void {
@@ -1837,6 +1944,8 @@ export class TeamService {
                 }
                 return this.#ask(state, taskId, parsed.data.question, signal);
             }
+            case 'challenge':
+                return this.#challenge(state, taskId, input);
             default:
                 return fail(`Unknown team tool ${name}.`);
         }
@@ -1865,6 +1974,7 @@ export class TeamService {
             signal.addEventListener('abort', () => settle(fail('The question was cancelled.')), { once: true });
             state.questions.get(taskId)?.answer('Superseded by a newer question.');
             state.questions.set(taskId, entry);
+            this.#record(state, { from: taskId, to: 'supervisor', text: question, kind: 'question' });
             this.#wake(
                 state,
                 `Question from ${owner} on ${taskId}: ${question}\nAnswer with send_message to ${taskId}.`,
@@ -2208,10 +2318,7 @@ export class TeamService {
             throw new Error(`task ${taskId} has no executor thread`);
         }
         const queued = info.messages?.splice(0) ?? [];
-        let text =
-            queued.length > 0
-                ? `${prompt}\n\n<supervisor_messages>\n${queued.join('\n')}\n</supervisor_messages>`
-                : prompt;
+        let text = queued.length > 0 ? `${prompt}\n\n<team_messages>\n${queued.join('\n')}\n</team_messages>` : prompt;
         info.delivered = undefined;
         info.pending = undefined;
         this.#save(state);
@@ -3017,4 +3124,5 @@ export function registerTeamHandlers(peer: UiPeer, team: TeamService): void {
     peer.handle('team.stop', ({ runId }) => team.stop(runId));
     peer.handle('team.resume', ({ runId, budget }) => team.resume(runId, budget));
     peer.handle('team.roster', ({ projectId }) => team.roster(projectId));
+    peer.handle('team.message', ({ runId, to, text }) => team.message(runId, to, text));
 }

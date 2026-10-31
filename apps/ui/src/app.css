@@ -2441,3 +2441,56 @@ pre {
     border-left: 2px solid var(--xk-pending);
     margin-top: 6px;
 }
+
+/* Team conversation (06 §7) ------------------------------------------------------------------------- */
+
+.team__conversation {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.conversation {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.conversation__entry {
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-sm);
+    padding: 8px 10px;
+}
+
+.conversation__entry.is-challenge {
+    border-color: var(--xk-error);
+}
+
+.conversation__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--xk-text-muted);
+}
+
+.conversation__time {
+    margin-left: auto;
+}
+
+.conversation__text {
+    margin-top: 4px;
+    font-size: 13px;
+    white-space: pre-wrap;
+}
+
+.conversation__composer {
+    border-top: 1px solid var(--xk-border);
+    padding-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}

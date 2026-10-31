@@ -129,7 +129,7 @@ export const TEAM_TOOLS = {
         'ledger_update',
         'request_review',
     ],
-    member: ['deliver', 'escalate', 'ask_supervisor'],
+    member: ['deliver', 'escalate', 'ask_supervisor', 'challenge'],
 } as const;
 
 const READ_TOOLS = ['read', 'list', 'glob', 'grep', 'lsp'];

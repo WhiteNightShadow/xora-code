@@ -1,4 +1,4 @@
-import type { TeamTask } from '@xora/protocol';
+import type { TeamRun, TeamTask } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
@@ -48,10 +48,91 @@ function TaskCard({ task }: { task: TeamTask }) {
     );
 }
 
+/** Messages between the user, the supervisor and the members, and a box to write to one of them (06 §7). */
+function Conversation({ run }: { run: TeamRun }) {
+    const s = useStrings();
+    const open = !['done', 'failed', 'cancelled'].includes(run.status);
+    const targets = [
+        { value: 'supervisor', label: s.team.supervisorName },
+        ...run.tasks
+            .filter((task) => !['done', 'failed', 'cancelled'].includes(task.status))
+            .map((task) => ({ value: task.id, label: `${task.id} ${task.title}` })),
+    ];
+    const [to, setTo] = useState('supervisor');
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const name = (who: string) => (who === 'user' ? s.team.user : who === 'supervisor' ? s.team.supervisorName : who);
+    const send = async () => {
+        setBusy(true);
+        const updated = await attempt(() => host.call('team.message', { runId: run.id, to, text }));
+        setBusy(false);
+        if (updated) {
+            setText('');
+            useApp.setState((state) => ({ teamRuns: { ...state.teamRuns, [updated.id]: updated } }));
+        }
+    };
+    const entries = run.conversation ?? [];
+    return (
+        <div className="team__conversation">
+            {entries.length === 0 ? (
+                <Empty>{s.team.noConversation}</Empty>
+            ) : (
+                <ol className="conversation">
+                    {entries.map((entry) => (
+                        <li
+                            key={`${entry.ts}-${entry.from}-${entry.to}`}
+                            className={`conversation__entry is-${entry.kind}`}
+                        >
+                            <div className="conversation__head">
+                                <Badge
+                                    tone={
+                                        entry.kind === 'challenge' ? 'error' : entry.kind === 'user' ? 'ok' : 'accent'
+                                    }
+                                >
+                                    {s.team.kinds[entry.kind]}
+                                </Badge>
+                                <span>
+                                    {name(entry.from)} → {name(entry.to)}
+                                </span>
+                                <span className="conversation__time">{new Date(entry.ts).toLocaleTimeString()}</span>
+                            </div>
+                            <div className="conversation__text">{entry.text}</div>
+                        </li>
+                    ))}
+                </ol>
+            )}
+            {open && (
+                <div className="conversation__composer">
+                    <Field label={s.team.to}>
+                        <Select label={s.team.to} value={to} options={targets} onChange={setTo} />
+                    </Field>
+                    <textarea
+                        className="textarea"
+                        rows={3}
+                        value={text}
+                        placeholder={s.team.messagePlaceholder}
+                        onChange={(event) => setText(event.target.value)}
+                    />
+                    <div className="row">
+                        <button
+                            type="button"
+                            className="button button--primary"
+                            disabled={busy || !text.trim()}
+                            onClick={() => void send()}
+                        >
+                            {busy ? <Spinner /> : null} {s.team.send}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 export function TeamView({ runId }: { runId: string }) {
     const s = useStrings();
     const run = useApp((state) => state.teamRuns[runId]);
-    const [tab, setTab] = useState<'board' | 'ledger' | 'cost' | 'report'>('board');
+    const [tab, setTab] = useState<'board' | 'ledger' | 'conversation' | 'cost' | 'report'>('board');
     const [budget, setBudget] = useState('');
     useEffect(() => {
         void host
@@ -81,6 +162,7 @@ export function TeamView({ runId }: { runId: string }) {
                             {s.team.autonomy}
                             {run.autonomy}
                         </span>
+                        {run.mode === 'hypotheses' && <Badge tone="accent">{s.team.hypothesesBadge}</Badge>}
                         <span>
                             {s.thread.cost} {formatMoney(run.cost)}
                             {run.budget ? ` / ${formatMoney(run.budget)}` : ''}
@@ -152,7 +234,7 @@ export function TeamView({ runId }: { runId: string }) {
                 </div>
             </header>
             <div className="segmented team__tabs">
-                {(['board', 'ledger', 'cost', 'report'] as const).map((key) => (
+                {(['board', 'ledger', 'conversation', 'cost', 'report'] as const).map((key) => (
                     <button
                         key={key}
                         type="button"
@@ -210,6 +292,7 @@ export function TeamView({ runId }: { runId: string }) {
                     </ol>
                 </div>
             )}
+            {tab === 'conversation' && <Conversation run={run} />}
             {tab === 'cost' && (
                 <table className="table">
                     <tbody>
@@ -239,6 +322,7 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
     const s = useStrings();
     const [goal, setGoal] = useState('');
     const [autonomy, setAutonomy] = useState<'L0' | 'L1' | 'L2' | 'L3'>('L1');
+    const [mode, setMode] = useState<'standard' | 'hypotheses'>('standard');
     const [budget, setBudget] = useState('');
     const [busy, setBusy] = useState(false);
     const close = () => useApp.setState({ teamStartFor: undefined });
@@ -247,7 +331,7 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
         const run = await attempt(() =>
             host.call(
                 'team.start',
-                { projectId, goal, autonomy, ...(Number(budget) > 0 ? { budget: Number(budget) } : {}) },
+                { projectId, goal, autonomy, mode, ...(Number(budget) > 0 ? { budget: Number(budget) } : {}) },
                 { timeoutMs: 120_000 },
             ),
         );
@@ -269,6 +353,17 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
                         rows={5}
                         value={goal}
                         onChange={(event) => setGoal(event.target.value)}
+                    />
+                </Field>
+                <Field label={s.team.mode}>
+                    <Select
+                        label={s.team.mode}
+                        value={mode}
+                        options={(['standard', 'hypotheses'] as const).map((value) => ({
+                            value,
+                            label: s.team.modes[value],
+                        }))}
+                        onChange={setMode}
                     />
                 </Field>
                 <Field label={s.team.autonomy}>

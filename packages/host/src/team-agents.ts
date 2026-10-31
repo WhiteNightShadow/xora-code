@@ -143,6 +143,10 @@ export const LedgerUpdateInput = z.object({
         .describe('Your own progress check, recorded in the progress ledger'),
 });
 export const RequestReviewInput = z.object({ taskId: z.string().min(1), focus: z.string().optional() });
+export const ChallengeInput = z.object({
+    to: z.string().min(1).describe('Task id of the investigation card you challenge'),
+    text: z.string().min(1).max(4000).describe('What does not hold up in its reasoning or evidence, and why'),
+});
 export const EscalateInput = z.object({
     to: TierSchema.optional().describe('The tier to hand the card to; the next tier up by default'),
     reason: z.string().min(1),
@@ -241,7 +245,20 @@ export const MEMBER_TOOLS: readonly ToolSpec[] = [
         parameters: jsonSchema(AskInput),
         kind: 'other',
     },
+    {
+        name: 'challenge',
+        description:
+            'Competing hypotheses only: challenge another investigation card when your evidence contradicts its ' +
+            'hypothesis or its evidence looks weak. Its member reads the challenge at its next turn and answers it in ' +
+            'its deliverable. Doesn’t wait for an answer; a few per card.',
+        parameters: jsonSchema(ChallengeInput),
+        kind: 'other',
+    },
 ];
+
+/** Team run modes: the default supervisor-executor flow, or competing hypotheses for debugging and research. */
+export const TEAM_MODES = ['standard', 'hypotheses'] as const;
+export type TeamMode = (typeof TEAM_MODES)[number];
 
 // ---------------------------------------------------------------------------------------------------------
 // Agents
@@ -379,7 +396,7 @@ function boardSummary(board: TaskBoard): string {
 }
 
 /** The supervisor's first message: the goal (06 §4 layer 6) and how the host runs the team. */
-export function supervisorBrief(goal: string, run: TeamRun, maxParallel: number): string {
+export function supervisorBrief(goal: string, run: TeamRun, maxParallel: number, mode: TeamMode = 'standard'): string {
     const approval = needsHuman(run.autonomy, 'plan_approval');
     return [
         renderTeamGoal({
@@ -394,9 +411,23 @@ export function supervisorBrief(goal: string, run: TeamRun, maxParallel: number)
         `- When the plan is complete, end your turn. The host then has a plan reviewer of another model family audit it once and gives you the findings for one revision (do not create a card for that review); ${approval ? 'then the user approves the plan before anything is dispatched' : 'then dispatch starts'}.`,
         `- The host dispatches ready cards (at most ${maxParallel} at a time), runs their acceptance checks, sends failed deliveries back, escalates tiers, integrates the worktrees in dependency order and writes the delivery report. You get a <team_update> after task events.`,
         '- Members ask you questions through ask_supervisor; answer with send_message.',
+        '- The user may write to you or to a member while the run goes on; a <team_update> line says so. Take it as a direction from the user, but never as the approval of an action.',
         '</team_host>',
+        ...(mode === 'hypotheses' ? ['', HYPOTHESES_BRIEF] : []),
     ].join('\n');
 }
+
+/** Competing hypotheses (06 §7): rival explanations investigated in parallel, challenged, then judged. */
+const HYPOTHESES_BRIEF = [
+    '<competing_hypotheses>',
+    'This run looks for a root cause or an answer by competing hypotheses.',
+    '1. Write down 2–4 plausible, mutually exclusive explanations with ledger_update (as assumptions, one per line, each prefixed H1, H2, …).',
+    '2. Create one investigation card per hypothesis: category research, workspace readonly, no ownership; the goal is to confirm or refute that hypothesis, the deliverable lists the evidence for and against it with file and line or command output. Accept them with a review by you.',
+    '3. The members can challenge each other with the challenge tool and answer the challenges they get; you see each challenge in a <team_update>.',
+    '4. When the investigations are in, judge which hypothesis the evidence supports, or that none does, and record the verdict for each one with ledger_update (as decisions, e.g. "H2 confirmed: …", "H1 refuted: …").',
+    '5. Then create the fix cards for the confirmed cause, or end the run with the conclusion if the goal was only to find out.',
+    '</competing_hypotheses>',
+].join('\n');
 
 /** What the plan reviewer audits once (06 §5 ④): the goal, the task ledger and every card. */
 export function planReviewPrompt(
