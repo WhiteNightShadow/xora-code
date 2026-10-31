@@ -367,18 +367,25 @@ export class BundleRuntime {
     /** Closing the window while turns run hides it to the tray instead of quitting (04 §6). */
     async #confirmClose(window: BrowserWindow): Promise<void> {
         let running = 0;
+        let triggers = 0;
         try {
-            running = (await this.#shell?.request('host.activity', {}, { timeoutMs: 1500 }))?.runningTurns ?? 0;
+            const activity = await this.#shell?.request('host.activity', {}, { timeoutMs: 1500 });
+            running = (activity?.runningTurns ?? 0) + (activity?.workflowRuns ?? 0);
+            triggers = activity?.workflowTriggers ?? 0;
         } catch {
             running = 0;
         }
-        if (running > 0 && !window.isDestroyed()) {
+        // Running work, and workflows that start on a schedule or a trigger, keep the app in the tray (06 §12).
+        if ((running > 0 || triggers > 0) && !window.isDestroyed()) {
             window.hide();
             this.#tray.setHidden(true);
             if (Notification.isSupported()) {
                 new Notification({
                     title: 'Xora Code',
-                    body: `${running}个任务在后台继续运行，点托盘图标可以打开窗口`,
+                    body:
+                        running > 0
+                            ? `${running}个任务在后台继续运行，点托盘图标可以打开窗口`
+                            : '有自动运行的工作流，应用留在托盘里，点托盘图标可以打开窗口',
                 }).show();
             }
             return;

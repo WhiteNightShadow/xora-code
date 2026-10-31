@@ -932,8 +932,14 @@ export class HostCore {
         return engineById(id);
     }
 
-    activity(): { runningTurns: number; pendingApprovals: number } {
-        return { runningTurns: this.turns.runningCount, pendingApprovals: this.approvals.list().length };
+    activity(): { runningTurns: number; pendingApprovals: number; workflowRuns: number; workflowTriggers: number } {
+        const workflows = this.workflows.background();
+        return {
+            runningTurns: this.turns.runningCount,
+            pendingApprovals: this.approvals.list().length,
+            workflowRuns: workflows.runs,
+            workflowTriggers: workflows.triggers,
+        };
     }
 
     async dispose(): Promise<void> {

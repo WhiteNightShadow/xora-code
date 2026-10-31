@@ -101,7 +101,14 @@ export const shellMethods = {
     // Served by the host.
     'host.activity': {
         params: empty,
-        result: z.object({ runningTurns: z.number().int().nonnegative(), pendingApprovals: z.number().int() }),
+        result: z.object({
+            runningTurns: z.number().int().nonnegative(),
+            pendingApprovals: z.number().int(),
+            /** Workflow runs that are not over (queued, running, waiting at a gate). */
+            workflowRuns: z.number().int().nonnegative().optional(),
+            /** Workflows whose schedule, file, git or webhook triggers are on: they need the app running. */
+            workflowTriggers: z.number().int().nonnegative().optional(),
+        }),
     },
     'host.focusThread': { params: z.object({ threadId: z.string() }).strict(), result: ok },
 } as const;

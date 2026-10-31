@@ -536,6 +536,15 @@ export class WorkflowService {
         });
     }
 
+    /** What keeps the app running when its window closes: runs that are not over, and switched-on triggers. */
+    background(): { runs: number; triggers: number } {
+        const runs = [...this.#runs.values()].filter((state) => !TERMINAL.has(state.record.status)).length;
+        const triggers =
+            this.#deps.db.get<{ count: number }>('select count(*) as count from workflow_triggers where enabled = 1')
+                ?.count ?? 0;
+        return { runs, triggers };
+    }
+
     /** Projects with a workflow run that is not over: their own file changes must not trigger runs. */
     activeProjects(): Set<string> {
         return new Set(
