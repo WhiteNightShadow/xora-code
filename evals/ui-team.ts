@@ -73,7 +73,9 @@ async function hostCall<T>(page: Page, method: string, params: unknown): Promise
                     if ((event.data as { type?: string } | null)?.type !== 'xora:port' || !port) return;
                     window.removeEventListener('message', onMessage);
                     port.onmessage = (reply) => {
-                        const data = reply.data as { result?: unknown; error?: { message: string } };
+                        const data = reply.data as { id?: unknown; result?: unknown; error?: { message: string } };
+                        // Notifications (a saved connection broadcasts one) come on the same port: wait for the reply.
+                        if (data.id !== 'ui-team') return;
                         if (data.error) reject(new Error(data.error.message));
                         else resolve(data.result);
                         port.close();
