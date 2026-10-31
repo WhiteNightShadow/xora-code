@@ -595,6 +595,75 @@ describe('agent team limits', () => {
             expect(readFileSync(path.join(repo, `${id}.txt`), 'utf8')).toBe('x\n');
         }
     }, 90_000);
+
+    it('fails an attempt that uses up the card turn budget and sends the card a tier up', async () => {
+        const repo = gitRepo();
+        const card = {
+            id: 'T1',
+            title: 'Write a.txt',
+            goal: 'a.txt exists',
+            category: 'coding',
+            tier: 'economy',
+            ownership: ['a.txt'],
+            acceptance: [{ type: 'command', run: 'node -e "process.exit(0)"' }],
+            deliverable: { kind: 'code-change' },
+            budget: { cost: 2, maxTurns: 3 },
+            workspace: 'worktree',
+        };
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) {
+                return undefined;
+            }
+            const last = body.messages.at(-1);
+            if (agentOf(body) === 'Supervisor') {
+                if (last?.role === 'tool') return say('Planned.');
+                return textOf(last?.content).includes('<team_goal>')
+                    ? call({ name: 'task_create', arguments: { tasks: [card] } })
+                    : say('Noted.');
+            }
+            // The economy model keeps reading and never delivers; the standard one does the work.
+            if (body.model === 'deepseek-flash') {
+                return call({ name: 'read', arguments: { path: 'README.md' } });
+            }
+            if (last?.role !== 'tool') {
+                return call({ name: 'write', arguments: { path: 'a.txt', content: 'done\n' } });
+            }
+            return lastCall(body) === 'write'
+                ? call({
+                      name: 'deliver',
+                      arguments: {
+                          status: 'done',
+                          summary: 'wrote a.txt',
+                          changes: [{ file: 'a.txt', kind: 'added' }],
+                          evidence: [{ type: 'diff' }],
+                      },
+                  })
+                : say('Handed in T1.');
+        });
+        const { ui } = await startHost(mkdtempSync(path.join(tmpdir(), 'xora-team-data-')));
+        approve(ui, [], new Set());
+        await connect(ui);
+        const project = await ui.request('project.add', { path: repo });
+        const before = server.requests.length;
+        const run = await ui.request('team.start', { projectId: project.id, goal: '写a.txt', autonomy: 'L2' });
+        const done = await waitFor(async () => {
+            const current = await ui.request('team.get', { runId: run.id });
+            return current.status === 'done' || current.status === 'failed' ? current : undefined;
+        }, 'run done');
+        expect(done.status).toBe('done');
+        expect(done.tasks[0]).toMatchObject({ id: 'T1', status: 'done', tier: 'standard', attempts: 2 });
+        const economy = server.requests
+            .slice(before)
+            .map((request) => request.body as ChatBody | undefined)
+            .filter((body) => agentOf(body) === 'Coder' && body?.model === 'deepseek-flash');
+        expect(economy).toHaveLength(3);
+        const first = textOf(economy[0]?.messages.find((message) => message.role === 'user')?.content);
+        expect(first).toContain('You have 3 model turns for this card');
+        const progress = done.progress as Array<{ reason: string }>;
+        expect(progress.some((entry) => entry.reason.includes('used up its turn budget (3 of 3'))).toBe(true);
+        expect(readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('done\n');
+    }, 90_000);
 });
 
 describe('team persistence and organizations', () => {

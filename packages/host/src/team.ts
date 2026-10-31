@@ -119,6 +119,11 @@ import type { WorktreeService } from './worktrees.ts';
  * and both ledgers live in `@xora/workflows`; this service drives them and persists every change.
  */
 
+/**
+ * Model requests an executor may make for one card when its `budget.maxTurns` is not set (06 §6): per dispatch,
+ * retries on the same thread included. Generous for one card; it stops an agent that goes round in circles.
+ */
+export const DEFAULT_MAX_TURNS = 80;
 /** Bounds of the team concurrency setting (06 §1: a few members at a time is plenty). */
 const MIN_PARALLEL = 1;
 const MAX_PARALLEL = 8;
@@ -169,6 +174,8 @@ interface TaskHost {
     handoff?: string[];
     /** The supervisor released a task it had taken over (task_assign). */
     released?: boolean;
+    /** Model requests of the executor since the task was dispatched, retries included (`budget.maxTurns`). */
+    turns?: number;
     /** Prompt for the executor's next turn, kept while the run is paused. */
     pending?: string;
     /** Supervisor messages queued for the executor's next turn. */
@@ -597,7 +604,7 @@ export class TeamService {
             }
         }
         for (const [turnId, resolve] of [...this.#waiters]) {
-            resolve({ threadId: '', turnId, outcome: 'cancelled', lastText: '', changedFiles: [] });
+            resolve({ threadId: '', turnId, outcome: 'cancelled', lastText: '', changedFiles: [], requests: 0 });
         }
         this.#waiters.clear();
         for (const resolvers of this.#idle.values()) {
@@ -992,6 +999,8 @@ export class TeamService {
             disabledTools: disabledBuiltins(agent),
             layers: systemLayers(state.host.org, agent),
             highRiskApproval: true,
+            // The engine stops the turn where the card's turn budget runs out.
+            maxTurnRequests: () => this.#turnsLeft(state, taskId),
             handle: (name, input, signal) => this.#memberTool(runId, taskId, name, input, signal),
         };
     }
@@ -1928,6 +1937,7 @@ export class TeamService {
         info.changed = [];
         info.verdict = undefined;
         info.released = false;
+        info.turns = 0;
         turns.setHostTools(thread.id, this.#memberProvider(state, taskId, agent));
         this.#save(state);
         const layers = buildAgentLayers({
@@ -1937,7 +1947,7 @@ export class TeamService {
             ...(handoff.length > 0 ? { handoff } : {}),
         });
         const taskLayer = layers.find((layer) => layer.placement === 'user')?.text ?? renderTaskCard(card);
-        return `${taskLayer}\n\n${executorNote(card, location)}`;
+        return `${taskLayer}\n\n${executorNote(card, location, this.#turnLimit(state, taskId))}`;
     }
 
     /** L0 confirms every step (06 §8): each dispatch waits for the user; a refusal fails the task for the supervisor. */
@@ -2022,6 +2032,8 @@ export class TeamService {
             } else if (mode === 'continue') {
                 prompt = state.host.tasks[taskId]?.pending ?? RESUME_PROMPT;
             }
+            // The prompt is feedback on a failed acceptance, which is on the board as an attempt already.
+            let retry = false;
             for (;;) {
                 if (prompt !== undefined) {
                     if (!this.#active(state)) {
@@ -2029,8 +2041,23 @@ export class TeamService {
                         this.#save(state);
                         return;
                     }
+                    if (this.#turnsLeft(state, taskId) <= 0) {
+                        this.#outOfTurns(state, taskId, !retry);
+                        return;
+                    }
                     const ended = await this.#executorTurn(state, taskId, prompt);
-                    if (!ended || !(await this.#submit(state, taskId, ended))) {
+                    if (!ended) {
+                        return;
+                    }
+                    if (
+                        ended.stopReason === 'max_turn_requests' &&
+                        this.#turnsLeft(state, taskId) <= 0 &&
+                        !this.#taskHost(state, taskId).delivered
+                    ) {
+                        this.#outOfTurns(state, taskId, true, ended.lastText);
+                        return;
+                    }
+                    if (!(await this.#submit(state, taskId, ended))) {
                         return;
                     }
                     prompt = undefined;
@@ -2042,6 +2069,7 @@ export class TeamService {
                 if (prompt === undefined) {
                     return;
                 }
+                retry = true;
             }
         } catch (error) {
             if (!this.#disposed) {
@@ -2082,6 +2110,8 @@ export class TeamService {
         this.#save(state);
         for (;;) {
             const ended = await this.#turn(threadId, text);
+            info.turns = (info.turns ?? 0) + ended.requests;
+            this.#save(state);
             if (!this.#live(state) || state.board.get(taskId)?.status === 'cancelled') {
                 return undefined;
             }
@@ -2102,7 +2132,10 @@ export class TeamService {
                 return undefined;
             }
             const errorClass = this.#lastError(threadId);
-            const next = errorClass && FALLBACK_ERRORS.has(errorClass) ? info.fallbacks?.shift() : undefined;
+            const next =
+                errorClass && FALLBACK_ERRORS.has(errorClass) && this.#turnsLeft(state, taskId) > 0
+                    ? info.fallbacks?.shift()
+                    : undefined;
             if (!next) {
                 state.board.block(taskId, `执行者这一轮出错了（${errorClass ?? 'unknown'}）`);
                 this.#recordProgress(
@@ -2125,6 +2158,58 @@ export class TeamService {
             this.#save(state);
             text = `The previous model request failed (${errorClass}); you now run on ${next.ref.model}. Continue the task from where it stopped and deliver.`;
         }
+    }
+
+    /** The card's turn budget (06 §6): `budget.maxTurns`, else {@link DEFAULT_MAX_TURNS}. */
+    #turnLimit(state: RunState, taskId: string): number {
+        return state.board.get(taskId)?.card.budget.maxTurns ?? DEFAULT_MAX_TURNS;
+    }
+
+    #turnsLeft(state: RunState, taskId: string): number {
+        return this.#turnLimit(state, taskId) - (state.host.tasks[taskId]?.turns ?? 0);
+    }
+
+    /**
+     * The executor used up the card's turn budget (06 §6): the attempt counts as failed and, with no turns left at
+     * this tier, goes straight on the escalation path: one tier up with what it wrote, the supervisor after
+     * flagship, then the user (06 §9). `record` is false when the failed attempt is already on the board (a retry
+     * that has no turns left).
+     */
+    #outOfTurns(state: RunState, taskId: string, record: boolean, lastText = ''): void {
+        const { board } = state;
+        const info = this.#taskHost(state, taskId);
+        const why = `used up its turn budget (${info.turns ?? 0} of ${this.#turnLimit(state, taskId)} model requests)`;
+        const task = board.get(taskId);
+        if (!task) {
+            return;
+        }
+        if (record && task.owner && (task.status === 'assigned' || task.status === 'in_progress')) {
+            const progress = shorten(lastText, 600);
+            board.submit(
+                taskId,
+                task.owner,
+                DeliverableSchema.parse({
+                    taskId,
+                    status: 'partial',
+                    summary: `The executor ${why} before delivering.`,
+                    ...(progress ? { evidence: [{ type: 'note', text: `Its last message: ${progress}` }] } : {}),
+                }),
+            );
+            if (board.get(taskId)?.status === 'in_review') {
+                board.reject(taskId, why);
+            }
+        }
+        info.verdict = { verdict: 'fail', reasons: [why], outOfOwnership: [] };
+        this.#recordProgress(state, false, `${taskId} ${why}`, `turns:${taskId}`);
+        const decision = shouldEscalate(board.get(taskId)?.attempts ?? [], 1);
+        if (decision.action === 'escalate' || decision.action === 'supervisor' || decision.action === 'human') {
+            this.#escalate(state, taskId, decision, { reason: why });
+            return;
+        }
+        // No failed attempt to go on (the board changed meanwhile): leave it to the supervisor.
+        board.fail(taskId, why);
+        this.#wake(state, `${taskId} ${why}. Retry it with task_update status "ready", or change the plan.`);
+        this.#save(state);
     }
 
     /** Takes the turn's deliverable (deliver tool, else the final message, else a reviewer's repair) to review. */
@@ -2301,7 +2386,7 @@ export class TeamService {
         const card = task.card;
         const info = this.#taskHost(state, taskId);
         if (deliverable.status === 'escalate') {
-            this.#escalate(state, taskId, shouldEscalate(task.attempts), deliverable);
+            this.#escalate(state, taskId, shouldEscalate(task.attempts), { deliverable });
             return undefined;
         }
         const project = await this.#deps.projects.get(host.projectId);
@@ -2437,7 +2522,7 @@ export class TeamService {
             this.#save(state);
             return feedback;
         }
-        this.#escalate(state, taskId, decision, undefined, judgement);
+        this.#escalate(state, taskId, decision, { judgement });
         return undefined;
     }
 
@@ -2547,19 +2632,23 @@ export class TeamService {
         }
     }
 
-    /** Escalation (06 §9): one tier up with the findings, then the supervisor, then the user. */
+    /**
+     * Escalation (06 §9): one tier up with the findings, then the supervisor, then the user. `reason` says what
+     * went wrong when it was neither the executor's request nor failed acceptance (a spent turn budget).
+     */
     #escalate(
         state: RunState,
         taskId: string,
         decision: EscalationDecision,
-        deliverable?: Deliverable,
-        judgement?: Judgement,
+        details: { deliverable?: Deliverable; judgement?: Judgement; reason?: string } = {},
     ): void {
         const { board } = state;
+        const { deliverable, judgement, reason } = details;
         const task = board.get(taskId) as BoardTask;
         const info = this.#taskHost(state, taskId);
         const findings = deliverable?.escalate?.findings ?? [];
-        const why = deliverable?.escalate?.reason ?? judgement?.reasons.slice(0, 3).join('; ') ?? 'acceptance failed';
+        const why =
+            reason ?? deliverable?.escalate?.reason ?? judgement?.reasons.slice(0, 3).join('; ') ?? 'acceptance failed';
         if (decision.action === 'escalate') {
             const escalated = board.escalate(taskId, decision.to, `${decision.reason}: ${shorten(why, 200)}`);
             if (!escalated.ok) {
@@ -2569,7 +2658,9 @@ export class TeamService {
             info.handoff = [
                 decision.reason === 'requested'
                     ? `${info.agentId ?? 'The executor'} at ${decision.from} escalated: ${why}`
-                    : `Acceptance failed twice at ${decision.from}: ${why}`,
+                    : reason !== undefined
+                      ? `${info.agentId ?? 'The executor'} at ${decision.from} ${why}`
+                      : `Acceptance failed twice at ${decision.from}: ${why}`,
                 ...findings,
                 ...(task.deliverable && task.deliverable.status !== 'escalate'
                     ? [`Its last deliverable said: ${task.deliverable.summary}`]

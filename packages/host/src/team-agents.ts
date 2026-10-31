@@ -389,8 +389,8 @@ export function wakeText(lines: readonly string[], board: TaskBoard): string {
     ].join('\n');
 }
 
-/** Follows the task card in an executor's first message. */
-export function executorNote(card: TaskCard, location: 'worktree' | 'local'): string {
+/** Follows the task card in an executor's first message; `turns` is the card's turn budget. */
+export function executorNote(card: TaskCard, location: 'worktree' | 'local', turns: number): string {
     const where =
         card.workspace === 'readonly'
             ? 'This card is read-only: change no files.'
@@ -401,6 +401,7 @@ export function executorNote(card: TaskCard, location: 'worktree' | 'local'): st
         '<team_host>',
         where,
         'When the work is done, call deliver with the deliverable and end your turn. If the card needs a stronger tier, call escalate with your findings. Use ask_supervisor only for what the card and the code cannot answer.',
+        `You have ${turns} model turns for this card, rework after a failed acceptance included. When they run out the attempt fails and the card goes to a stronger tier, so deliver or escalate in time.`,
         '</team_host>',
     ].join('\n');
 }

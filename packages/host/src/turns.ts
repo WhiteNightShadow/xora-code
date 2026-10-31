@@ -45,6 +45,8 @@ const BUSY_ERROR_CODE = -32051;
 
 const READ_KINDS: ReadonlySet<string> = new Set(['read', 'search', 'think']);
 
+/** Model requests the engine makes in one turn at most. */
+const MAX_TURN_REQUESTS = 200;
 /** Times a Stop or SubagentStop hook may send the agent back to work within one turn (09 §4). */
 export const MAX_STOP_CONTINUATIONS = 3;
 /** How long SessionEnd hooks may take: closing a thread or quitting does not wait longer (09 §4). */
@@ -98,6 +100,8 @@ export interface HostToolProvider {
      * payments), whatever its mode, rules or hooks say. Threads of a team run always get this.
      */
     readonly highRiskApproval?: boolean;
+    /** Model requests the next turn may make at most, e.g. what is left of a task card's `budget.maxTurns`. */
+    maxTurnRequests?(): number | undefined;
     handle(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
 }
 
@@ -109,6 +113,8 @@ export interface TurnEnded {
     /** The last agent message of the turn. */
     readonly lastText: string;
     readonly changedFiles: readonly string[];
+    /** Model requests that completed in the turn. */
+    readonly requests: number;
 }
 
 function money(total: Money | null, add: Money | null): Money | null {
@@ -210,6 +216,8 @@ class RunningTurn {
     text: ItemOf<'agent_message'> | undefined;
     reasoning: ItemOf<'reasoning'> | undefined;
     requests = 0;
+    /** Model requests that completed, with or without reported usage; see {@link TurnEnded.requests}. */
+    modelCalls = 0;
     inputTokens = 0;
     cachedTokens = 0;
     outputTokens = 0;
@@ -426,7 +434,10 @@ export class TurnService {
             mode: thread.mode,
             layers,
             softContextWindow: current.softContextWindow,
-            maxTurnRequests: 200,
+            maxTurnRequests: Math.max(
+                1,
+                Math.min(MAX_TURN_REQUESTS, provider?.maxTurnRequests?.() ?? MAX_TURN_REQUESTS),
+            ),
             userAgent: this.#deps.userAgent,
             env:
                 thread.location.kind === 'worktree' && this.#deps.portFor
@@ -1201,6 +1212,9 @@ export class TurnService {
                 source: request.usage ? 'vendor' : 'estimate',
             });
             cost = recorded.cost;
+            if (request.status === 'ok') {
+                running.modelCalls++;
+            }
             if (request.usage) {
                 running.requests++;
                 running.inputTokens += request.usage.inputTokens;
@@ -1530,6 +1544,7 @@ export class TurnService {
                     ...(stopReason ? { stopReason } : {}),
                     lastText: running.lastText,
                     changedFiles,
+                    requests: running.modelCalls,
                 });
             } catch (error) {
                 this.#deps.log.warn(`turn hook failed: ${error instanceof Error ? error.message : String(error)}`);
