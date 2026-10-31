@@ -1714,9 +1714,12 @@ pre {
     display: flex;
 }
 
+/* min-width: 0 lets the panel, not the terminal's own width, size the screen: otherwise fitting the terminal to a
+   screen it props up shrinks it a few pixels per resize (seen on Linux, whose scrollbars take room). */
 .terminal-panel {
     flex: 1;
     min-height: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     background: var(--xk-bg-sunken);
@@ -1725,6 +1728,8 @@ pre {
 .terminal-panel__screen {
     flex: 1;
     min-height: 0;
+    min-width: 0;
+    overflow: hidden;
     padding: 6px 0 0 8px;
 }
 
