@@ -1,3 +1,4 @@
+import type { AcpPort } from '@xora/engine';
 import {
     electronPortTransport,
     type MessagePortMainLike,
@@ -9,19 +10,20 @@ import {
 } from '@xora/protocol';
 import { trustSystemCertificates } from '@xora/providers';
 import { HostCore } from './core.ts';
+import { ShellEngines } from './engines/shell-engines.ts';
 import { HostLog } from './log.ts';
 import { hostPaths } from './paths.ts';
-import type { ShellApi } from './shell.ts';
+import type { EngineStart, ShellApi } from './shell.ts';
 
 /**
  * Entry point of the host. The bootstrap starts it with `utilityProcess.fork`, so `process.parentPort` is the
  * channel back to the bootstrap: first an `xora:shell` port for shell services, then one `xora:connect` port
- * per window.
+ * per window and one `xora:engine` port per engine process the host asked for.
  */
 
 interface ParentPortMessage {
     readonly data: unknown;
-    readonly ports: readonly MessagePortMainLike[];
+    readonly ports: ReadonlyArray<MessagePortMainLike & AcpPort>;
 }
 
 interface ParentPort {
@@ -44,6 +46,9 @@ if (!dataDir) {
 }
 const bundleVersion = process.env.XORA_BUNDLE_VERSION ?? 'unknown';
 const shellVersion = process.env.XORA_SHELL_VERSION ?? 'unknown';
+// Packaged builds ignore it (RunAsNode fuse off), but it must not reach agents, their commands or terminals:
+// it would start any other Electron app there as plain Node.
+delete process.env.ELECTRON_RUN_AS_NODE;
 const log = new HostLog(hostPaths(dataDir).logsDir);
 // Model connections, `/models` checks and update downloads use Node's TLS, not Chromium's.
 try {
@@ -54,9 +59,11 @@ try {
 
 class RpcShell implements ShellApi {
     readonly #peer: ShellPeer;
+    readonly #engines: ShellEngines;
 
-    constructor(peer: ShellPeer) {
+    constructor(peer: ShellPeer, engines: ShellEngines) {
         this.#peer = peer;
+        this.#engines = engines;
     }
 
     info() {
@@ -104,11 +111,16 @@ class RpcShell implements ShellApi {
             running: running.map((entry) => ({ ...entry, title: entry.title.slice(0, 200) })),
         });
     }
+
+    startEngine(request: EngineStart) {
+        return this.#engines.start(request);
+    }
 }
 
 let core: HostCore | undefined;
 const waiting: MessagePortMainLike[] = [];
 let shellPeer: ShellPeer | undefined;
+let shellEngines: ShellEngines | undefined;
 
 function serveUi(port: MessagePortMainLike): void {
     if (!core) {
@@ -119,11 +131,11 @@ function serveUi(port: MessagePortMainLike): void {
     port.on('close' as 'message', () => peer.dispose());
 }
 
-async function start(peer: ShellPeer): Promise<void> {
+async function start(peer: ShellPeer, engines: ShellEngines): Promise<void> {
     try {
         core = await HostCore.create({
             dataDir: dataDir as string,
-            shell: new RpcShell(peer),
+            shell: new RpcShell(peer, engines),
             bundleVersion,
             shellVersion,
             log,
@@ -148,7 +160,7 @@ async function start(peer: ShellPeer): Promise<void> {
 }
 
 parentPort.on('message', (message) => {
-    const data = message.data as { type?: unknown } | null;
+    const data = message.data as { type?: unknown; id?: unknown } | null;
     const port = message.ports[0];
     if (!port) {
         return;
@@ -159,9 +171,12 @@ parentPort.on('message', (message) => {
             notifications: shellNotifications,
             onProtocolError: (error) => log.warn(`shell protocol error: ${error.message}`),
         });
-        void start(shellPeer);
+        shellEngines = new ShellEngines(shellPeer);
+        void start(shellPeer, shellEngines);
     } else if (data?.type === 'xora:connect') {
         serveUi(port);
+    } else if (data?.type === 'xora:engine' && typeof data.id === 'string') {
+        shellEngines?.deliver(data.id, port);
     }
 });
 
