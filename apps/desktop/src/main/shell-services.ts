@@ -1,8 +1,9 @@
+import { lstatSync } from 'node:fs';
 import path from 'node:path';
 import { RpcPeer } from '@xora/protocol/rpc';
 import { type ShellMethods, type ShellNotifications, shellMethods, shellNotifications } from '@xora/protocol/shell';
 import { electronPortTransport } from '@xora/protocol/transport';
-import type { TrustedKeys } from '@xora/updater';
+import { isSafeRelativePath, type TrustedKeys } from '@xora/updater';
 import {
     app,
     type BrowserWindow,
@@ -12,6 +13,7 @@ import {
     powerSaveBlocker,
     shell,
     type UtilityProcess,
+    utilityProcess,
 } from 'electron';
 import { stageBundle } from './install.ts';
 import type { BootLog } from './log.ts';
@@ -39,8 +41,8 @@ let sleepBlocker: number | undefined;
 
 /**
  * What only the main process can do for the host (02 §1): keychain secrets, native dialogs, notifications,
- * power management, opening files and links, and staging verified updates. Served over a private
- * MessagePort that the host receives right after it starts.
+ * power management, opening files and links, forking the engine, and staging verified updates. Served over a
+ * private MessagePort that the host receives right after it starts.
  */
 export function attachShellServices(host: UtilityProcess, deps: ShellServiceDeps): ShellPeer {
     const { port1, port2 } = new MessageChannelMain();
@@ -147,7 +149,56 @@ export function attachShellServices(host: UtilityProcess, deps: ShellServiceDeps
         setTimeout(() => deps.relaunch(), 50);
         return ok;
     });
+
+    // The xora engine runs as a utility process so that the Electron binary never has to run as plain Node
+    // (10 §6). Its ACP port goes straight to the host: turns do not pass through the main process.
+    const engines = new Map<string, UtilityProcess>();
+    peer.handle('shell.engine.start', ({ id, entry, env }) => {
+        const file = bundleFile(deps.bundleDir, entry);
+        if (engines.has(id)) {
+            throw new Error(`engine ${id} is already running`);
+        }
+        const childEnv = { ...env };
+        delete childEnv.ELECTRON_RUN_AS_NODE;
+        const child = utilityProcess.fork(file, [], { env: childEnv, stdio: 'pipe', serviceName: 'Xora Engine' });
+        engines.set(id, child);
+        const { port1, port2 } = new MessageChannelMain();
+        child.postMessage({ type: 'xora:acp' }, [port1]);
+        host.postMessage({ type: 'xora:engine', id }, [port2]);
+        for (const output of [child.stdout, child.stderr]) {
+            output?.setEncoding('utf8');
+            output?.on('data', (text: string) => peer.notify('shell.engine.output', { id, text }));
+        }
+        return new Promise<{ pid: number }>((resolve, reject) => {
+            child.once('spawn', () => resolve({ pid: child.pid ?? -1 }));
+            child.once('exit', (code) => {
+                engines.delete(id);
+                peer.notify('shell.engine.exit', { id, code });
+                reject(new Error(`engine exited with code ${code} before it started`));
+            });
+        });
+    });
+    peer.handle('shell.engine.stop', ({ id }) => {
+        engines.get(id)?.kill();
+        return ok;
+    });
+    // Engines belong to this host: they end when it is replaced and when the app quits.
+    peer.onDispose(() => {
+        for (const child of engines.values()) {
+            child.kill();
+        }
+        engines.clear();
+    });
     return peer;
+}
+
+/** A regular file of the verified bundle this shell serves; the host cannot have anything else started. */
+function bundleFile(bundleDir: string, entry: string): string {
+    const file = path.join(bundleDir, ...entry.split('/'));
+    if (!isSafeRelativePath(entry) || !lstatSync(file, { throwIfNoEntry: false })?.isFile()) {
+        throw new Error(`not a file of the app bundle: ${entry}`);
+    }
+    return file;
 }
 
 export function releasePowerBlocker(): void {

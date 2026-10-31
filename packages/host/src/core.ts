@@ -58,7 +58,7 @@ export interface HostOptions {
     readonly bundleVersion: string;
     readonly shellVersion: string;
     readonly log?: Logger;
-    /** Path of the xora engine entry; defaults to `<bundle>/engine/index.cjs`. */
+    /** Path of the xora engine entry when it runs over stdio (tests); defaults to `<bundle>/engine/index.cjs`. */
     readonly engineEntry?: string;
     /** Skip resolving the login shell PATH (tests). */
     readonly skipShellEnv?: boolean;
@@ -99,7 +99,7 @@ export class HostCore {
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
 
-    private constructor(options: HostOptions, bundleDir: string, execPath: string) {
+    private constructor(options: HostOptions, bundleDir: string) {
         this.#options = options;
         this.paths = hostPaths(options.dataDir);
         this.log = options.log ?? new HostLog(this.paths.logsDir);
@@ -127,28 +127,28 @@ export class HostCore {
         this.engines = new EngineManager({
             log: this.log,
             version: options.bundleVersion,
+            shell: options.shell,
             launch: async (definition) => {
                 if (definition.kind === 'builtin') {
-                    const entry =
-                        options.engineEntry ??
-                        process.env.XORA_ENGINE_ENTRY ??
-                        path.join(bundleDir, 'engine', 'index.cjs');
-                    return {
-                        command: execPath,
-                        args: [entry],
-                        env: {
-                            ...process.env,
-                            ELECTRON_RUN_AS_NODE: '1',
-                            NODE_NO_WARNINGS: '1',
-                            XORA_ENGINE_DATA: engineData,
-                            XORA_ENGINE_VERSION: options.bundleVersion,
-                        },
+                    const env = {
+                        ...process.env,
+                        NODE_NO_WARNINGS: '1',
+                        XORA_ENGINE_DATA: engineData,
+                        XORA_ENGINE_VERSION: options.bundleVersion,
                     };
+                    // In the app the bootstrap forks it from the bundle as a utility process, so the Electron binary
+                    // never runs as plain Node (10 §6); tests and runs outside Electron use this process's Node.
+                    if (options.shell.startEngine) {
+                        return { kind: 'utility', entry: 'engine/index.cjs', env };
+                    }
+                    const entry = options.engineEntry ?? path.join(bundleDir, 'engine', 'index.cjs');
+                    return { kind: 'stdio', command: process.execPath, args: [entry], env };
                 }
                 if (!definition.command) {
                     throw new Error(`engine ${definition.id} has no launch command`);
                 }
                 return {
+                    kind: 'stdio',
                     command: definition.command,
                     args: definition.args ?? [],
                     env: { ...process.env, ...definition.env, GROK_TELEMETRY_ENABLED: '0' },
@@ -240,7 +240,7 @@ export class HostCore {
 
     static async create(options: HostOptions): Promise<HostCore> {
         const info = await options.shell.info();
-        const core = new HostCore(options, info.bundleDir, info.execPath);
+        const core = new HostCore(options, info.bundleDir);
         core.#recover();
         if (!options.skipShellEnv) {
             const login = await resolveLoginPath();

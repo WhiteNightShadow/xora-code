@@ -24,8 +24,9 @@ electronLanguages:
   - zh-TW
 # Flipped in the Electron binary when packaging; see docs/design/10-security.md.
 electronFuses:
-  # The xora engine runs on this binary with ELECTRON_RUN_AS_NODE=1 (packages/host/src/core.ts).
-  runAsNode: true
+  # Nobody can run this binary as plain Node (or open an inspector that way). The xora engine is a utility
+  # process the shell forks (apps/desktop/src/main/shell-services.ts); child_process.fork throws with this off.
+  runAsNode: false
   enableCookieEncryption: true
   # Also drops NODE_EXTRA_CA_CERTS; host and engine add the system certificate store instead.
   enableNodeOptionsEnvironmentVariable: false

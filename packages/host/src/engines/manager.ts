@@ -1,9 +1,9 @@
-import { type ChildProcess, spawn } from 'node:child_process';
-import { Readable, Writable } from 'node:stream';
 import * as acp from '@agentclientprotocol/sdk';
 import { z } from 'zod';
 import type { Logger } from '../log.ts';
+import type { ShellApi } from '../shell.ts';
 import type { EngineDefinition } from './registry.ts';
+import { type EngineLaunch, type EngineTransport, overPort, spawnStdio } from './transport.ts';
 
 export interface SessionHandlers {
     onUpdate(notification: acp.SessionNotification): void;
@@ -36,13 +36,6 @@ export interface HostToolResult {
 
 const HostToolCallSchema = z.object({ sessionId: z.string(), name: z.string(), input: z.unknown() });
 
-export interface EngineLaunch {
-    readonly command: string;
-    readonly args: readonly string[];
-    readonly env: Readonly<Record<string, string | undefined>>;
-    readonly cwd?: string;
-}
-
 /** One running engine process with its ACP connection. */
 export class EngineProcess {
     readonly key: string;
@@ -50,20 +43,20 @@ export class EngineProcess {
     readonly agent: acp.ClientContext;
     readonly capabilities: acp.AgentCapabilities;
     readonly info: acp.InitializeResponse;
-    readonly #child: ChildProcess;
+    readonly #transport: EngineTransport;
     readonly #connection: acp.ClientConnection;
     #alive = true;
 
     constructor(options: {
         key: string;
         definition: EngineDefinition;
-        child: ChildProcess;
+        transport: EngineTransport;
         connection: acp.ClientConnection;
         info: acp.InitializeResponse;
     }) {
         this.key = options.key;
         this.definition = options.definition;
-        this.#child = options.child;
+        this.#transport = options.transport;
         this.#connection = options.connection;
         this.agent = options.connection.agent;
         this.info = options.info;
@@ -74,8 +67,10 @@ export class EngineProcess {
         return this.#alive && !this.#connection.signal.aborted;
     }
 
-    markDead(): void {
+    /** The process has ended: requests still waiting on it fail now instead of waiting for the stream to end. */
+    markDead(reason: string): void {
         this.#alive = false;
+        this.#connection.close(new Error(reason));
     }
 
     get supportsResume(): boolean {
@@ -94,20 +89,21 @@ export class EngineProcess {
     kill(): void {
         this.#alive = false;
         this.#connection.close();
-        if (this.#child.exitCode === null && !this.#child.killed) {
-            this.#child.kill();
-        }
+        this.#transport.kill();
     }
 }
 
 /**
  * Starts engines as ACP subprocesses (one process per engine and project, 02 §1) and routes their callbacks
  * to the session that owns them. The engines never decide permissions: every request comes back here.
+ * External agents are child processes on stdio; in the app the xora engine is a utility process that the
+ * bootstrap forks, with ACP over a MessagePort.
  */
 export class EngineManager {
     readonly #log: Logger;
     readonly #version: string;
     readonly #launch: (definition: EngineDefinition) => Promise<EngineLaunch>;
+    readonly #shell: Pick<ShellApi, 'startEngine'> | undefined;
     readonly #processes = new Map<string, Promise<EngineProcess>>();
     readonly #sessions = new Map<string, { handlers: SessionHandlers; processKey: string }>();
 
@@ -115,10 +111,13 @@ export class EngineManager {
         log: Logger;
         version: string;
         launch: (definition: EngineDefinition) => Promise<EngineLaunch>;
+        /** The bootstrap, which starts `utility` launches. */
+        shell?: Pick<ShellApi, 'startEngine'>;
     }) {
         this.#log = options.log;
         this.#version = options.version;
         this.#launch = options.launch;
+        this.#shell = options.shell;
     }
 
     register(sessionId: string, processKey: string, handlers: SessionHandlers): void {
@@ -145,31 +144,29 @@ export class EngineManager {
         return starting;
     }
 
+    async #open(key: string, launch: EngineLaunch, onOutput: (text: string) => void): Promise<EngineTransport> {
+        if (launch.kind === 'stdio') {
+            this.#log.info(`starting engine ${key}: ${launch.command} ${launch.args.join(' ')}`);
+            return spawnStdio(launch, onOutput);
+        }
+        const shell = this.#shell;
+        if (!shell?.startEngine) {
+            throw new Error(`engine ${key} can only be started by the app's shell`);
+        }
+        const engine = await shell.startEngine({ entry: launch.entry, env: launch.env, onOutput });
+        this.#log.info(`started engine ${key} as utility process ${engine.pid}: ${launch.entry}`);
+        return overPort(engine);
+    }
+
     async #start(definition: EngineDefinition, key: string): Promise<EngineProcess> {
         const launch = await this.#launch(definition);
-        this.#log.info(`starting engine ${key}: ${launch.command} ${launch.args.join(' ')}`);
-        const child = spawn(launch.command, [...launch.args], {
-            env: launch.env as NodeJS.ProcessEnv,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            windowsHide: true,
-            ...(launch.cwd ? { cwd: launch.cwd } : {}),
-        });
-        child.stderr?.setEncoding('utf8');
-        child.stderr?.on('data', (chunk: string) => {
-            for (const line of chunk.split('\n')) {
+        const transport = await this.#open(key, launch, (text) => {
+            for (const line of text.split('\n')) {
                 if (line.trim()) {
                     this.#log.info(`[${definition.id}] ${line}`);
                 }
             }
         });
-        const spawned = new Promise<void>((resolve, reject) => {
-            child.once('spawn', () => resolve());
-            child.once('error', reject);
-        });
-        await spawned;
-        if (!child.stdin || !child.stdout) {
-            throw new Error(`engine ${definition.id} has no stdio`);
-        }
         const app = acp
             .client({ name: 'xora-host' })
             .onRequest('session/request_permission', ({ params, signal }) => {
@@ -193,11 +190,7 @@ export class EngineManager {
                 const handler = this.#sessions.get(params.sessionId)?.handlers.onHook;
                 return handler ? handler(params, signal) : {};
             });
-        const stream = acp.ndJsonStream(
-            Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-            Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-        );
-        const connection = app.connect(stream);
+        const connection = app.connect(transport.stream);
         let info: acp.InitializeResponse;
         try {
             info = await connection.agent.request('initialize', {
@@ -206,14 +199,14 @@ export class EngineManager {
                 clientInfo: { name: 'xora-host', title: 'Xora Code', version: this.#version },
             });
         } catch (error) {
-            child.kill();
+            transport.kill();
             throw error;
         }
-        const process = new EngineProcess({ key, definition, child, connection, info });
-        child.once('exit', (code, signal) => {
-            process.markDead();
+        const process = new EngineProcess({ key, definition, transport, connection, info });
+        void transport.exited.then((code) => {
+            const reason = `engine ${definition.id} exited (${code})`;
+            process.markDead(reason);
             this.#processes.delete(key);
-            const reason = `engine ${definition.id} exited (${signal ?? code})`;
             this.#log.warn(reason);
             for (const [sessionId, entry] of [...this.#sessions]) {
                 if (entry.processKey === key) {

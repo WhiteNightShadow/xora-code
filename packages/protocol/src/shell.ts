@@ -2,8 +2,9 @@ import { z } from 'zod';
 
 /**
  * Bootstrap↔host channel. The host asks the bootstrap for what only the Electron main process can do:
- * keychain-backed secrets, native dialogs, notifications, power management, opening files and URLs, and
- * staging a downloaded app bundle. The bootstrap asks the host whether work is in progress.
+ * keychain-backed secrets, native dialogs, notifications, power management, opening files and URLs, starting
+ * the xora engine as a utility process, and staging a downloaded app bundle. The bootstrap asks the host
+ * whether work is in progress.
  */
 
 const empty = z.object({}).strict();
@@ -12,12 +13,15 @@ const ok = z.object({ ok: z.literal(true) });
 /** Secret names are opaque ids chosen by the host, e.g. `connection.<id>`. */
 const SecretNameSchema = z.string().regex(/^[a-z][a-z0-9._-]{0,127}$/);
 
+/** Engine process ids are chosen by the host and unique while it runs. */
+const EngineIdSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
+
 export const ShellInfoSchema = z.object({
     shellVersion: z.string(),
     bundleVersion: z.string(),
     bundleDir: z.string(),
     dataDir: z.string(),
-    /** Electron executable; engines run with `ELECTRON_RUN_AS_NODE=1` on it. */
+    /** Electron executable, for diagnostics: the engine is a utility process, nothing runs this as plain Node. */
     execPath: z.string(),
     /** `node_modules` of the shell, for native modules such as node-pty. */
     shellModulesDir: z.string(),
@@ -76,6 +80,23 @@ export const shellMethods = {
     },
     /** Relaunches the app so a staged bundle takes effect. */
     'shell.update.restart': { params: empty, result: ok },
+    /**
+     * Forks a file of the running app bundle (the xora engine) as an Electron utility process; only the main
+     * process can. Its ACP port reaches the host as an `xora:engine` message with the same `id` on the parent
+     * port, apart from this reply. Output and exit follow as notifications.
+     */
+    'shell.engine.start': {
+        params: z
+            .object({
+                id: EngineIdSchema,
+                /** Bundle-relative POSIX path, e.g. `engine/index.cjs`. */
+                entry: z.string().min(1).max(512),
+                env: z.record(z.string(), z.string()),
+            })
+            .strict(),
+        result: z.object({ pid: z.number().int() }),
+    },
+    'shell.engine.stop': { params: z.object({ id: EngineIdSchema }).strict(), result: ok },
 
     // Served by the host.
     'host.activity': {
@@ -93,6 +114,10 @@ export const shellNotifications = {
     'shell.openThread': z.object({ threadId: z.string() }),
     /** Window focus, used to decide whether to raise system notifications. */
     'shell.focus': z.object({ focused: z.boolean() }),
+    /** What an engine started with `shell.engine.start` wrote to stdout or stderr. */
+    'shell.engine.output': z.object({ id: z.string(), text: z.string() }),
+    /** An engine started with `shell.engine.start` has exited. */
+    'shell.engine.exit': z.object({ id: z.string(), code: z.number().int() }),
 } as const;
 
 export type ShellNotifications = typeof shellNotifications;

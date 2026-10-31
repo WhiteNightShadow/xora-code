@@ -1,3 +1,4 @@
+import type { AcpPort } from '@xora/engine';
 import type { ShellInfo } from '@xora/protocol';
 
 /**
@@ -16,6 +17,28 @@ export interface ShellApi {
     stageUpdate(dir: string): Promise<{ ok: boolean; version?: string; error?: string }>;
     restart(): Promise<void>;
     updateTray(running: ReadonlyArray<{ threadId: string; title: string; status: string }>): Promise<void>;
+    /**
+     * Has the bootstrap fork the xora engine from the app bundle as an Electron utility process. Only the app's
+     * shell can; without it the host runs the engine over stdio on its own Node (tests, runs outside Electron).
+     */
+    startEngine?(request: EngineStart): Promise<ShellEngine>;
+}
+
+export interface EngineStart {
+    /** Bundle-relative POSIX path, e.g. `engine/index.cjs`. */
+    readonly entry: string;
+    readonly env: Readonly<Record<string, string | undefined>>;
+    /** What the engine writes to stdout or stderr. */
+    readonly onOutput: (text: string) => void;
+}
+
+/** An engine process the bootstrap started; ACP runs over its port. */
+export interface ShellEngine {
+    readonly pid: number;
+    readonly port: AcpPort;
+    /** Resolves with the exit code once the process has ended. */
+    readonly exited: Promise<number>;
+    stop(): void;
 }
 
 /** In-memory shell for tests and headless runs: secrets live in a map, dialogs return a preset answer. */

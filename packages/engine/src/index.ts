@@ -9,4 +9,5 @@ export {
     SessionConfigSchema,
 } from './config.ts';
 export { estimateTokens } from './context.ts';
+export { type AcpPort, portStream } from './port.ts';
 export { SYSTEM_PROMPT, systemSegments } from './prompt.ts';
