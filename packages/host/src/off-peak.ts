@@ -1,0 +1,39 @@
+import { findPriceTableForModel, getPriceTable, offPeakStart, type PeriodRule } from '@xora/metering';
+import type { ModelRef } from '@xora/protocol';
+
+/**
+ * Off-peak waiting for workflow runs (06 §12, 11 §7): a run marked `offPeakOnly` starts once every model it may
+ * use is in its vendor's cheap hours. A model's hours come from its price table, found the way usage accounting
+ * finds it: the model's `pricing` id, else the first table that lists the model.
+ */
+
+/** Looks up what a connection says about a model; {@link ConnectionService} fits. */
+export interface ModelLookup {
+    model(ref: ModelRef): { readonly pricing?: string } | undefined;
+}
+
+/** Peak-hour rules of the models, once per price table; models without a table or without peak hours add none. */
+export function peakRules(models: ModelLookup, refs: readonly ModelRef[]): PeriodRule[] {
+    const rules = new Map<string, PeriodRule>();
+    for (const ref of refs) {
+        let pricing: string | undefined;
+        try {
+            pricing = models.model(ref)?.pricing;
+        } catch {
+            // A connection removed since: the model id alone still finds a table.
+        }
+        const table = (pricing ? getPriceTable(pricing) : undefined) ?? findPriceTableForModel(ref.model);
+        if (table?.period && table.period.peak.length > 0) {
+            rules.set(table.id, table.period);
+        }
+    }
+    return [...rules.values()];
+}
+
+/**
+ * When a run that waits for off-peak may start: `at` itself when all its models are off-peak (or have no peak
+ * hours), else the moment they all are; undefined when that does not happen within eight days.
+ */
+export function offPeakStartFor(models: ModelLookup, refs: readonly ModelRef[], at = new Date()): Date | undefined {
+    return offPeakStart(peakRules(models, refs), at);
+}
