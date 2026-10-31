@@ -421,6 +421,12 @@ describe('workflow runs', () => {
         expect(refused?.status).toBe('failed');
         expect(refused?.note).toContain('not allowed: custom');
         expect(refused?.note).toContain('L3 needs a budget');
+        // It would fail the same way every time: its triggers are switched off.
+        expect(
+            (await host.ui.request('workflow.list', { projectId: project.id })).find(
+                (info) => info.key === 'project:nightly',
+            )?.triggers,
+        ).toEqual({ enabled: false, stale: false });
 
         // An api connection and a budget: the run starts on the api channel, then pauses once the budget is gone.
         const api = await host.ui.request('provider.save', {
@@ -448,7 +454,11 @@ describe('workflow runs', () => {
             trigger: { reason: 'schedule' },
         });
         expect(unpriced?.status).toBe('failed');
-        expect(unpriced?.note).toBe('没有开始：无人值守运行要能计价，这些模型没有价格表：kimi-k3.1-pro');
+        expect(unpriced?.note).toBe(
+            '没有开始：无人值守运行要能计价，这些模型没有价格表：kimi-k3.1-pro。已停用自动运行，解决后重新启用',
+        );
+        const switchedOff = await host.ui.request('workflow.list', { projectId: project.id });
+        expect(switchedOff.find((info) => info.key === 'project:nightly-flagship')?.triggers.enabled).toBe(false);
         await host.ui.request('provider.remove', { connectionId: kimi.id });
         await host.ui.request('workflow.triggers', {
             projectId: project.id,
@@ -466,12 +476,28 @@ describe('workflow runs', () => {
             return current.status === 'paused' ? current : undefined;
         }, 'budget pause');
         expect(paused.note).toContain('预算用完');
-        expect(paused.steps.map((step) => step.status)).toEqual(['succeeded', 'pending']);
+        // The first turn already spent it: the step stops there and waits for more budget.
+        expect(paused.steps.map((step) => step.status)).toEqual(['pending', 'pending']);
         const threads = await host.ui.request('thread.list', { includeArchived: true });
         const step = threads.find((thread) => thread.workflowRunId === run?.id && thread.taskId === 'first');
         expect(step?.model?.connectionId).toBe(api.id);
+        await expect(host.ui.request('workflow.resume', { runId: run?.id as string })).rejects.toThrow('预算还是不够');
+
+        // More budget: the step continues in its thread, then the second step runs.
+        await host.ui.request('workflow.resume', { runId: run?.id as string, budget: 100 });
+        const finished = await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run?.id as string });
+            return current.status === 'completed' || current.status === 'failed' ? current : undefined;
+        }, 'run after more budget');
+        expect(finished.status).toBe('completed');
+        expect(finished.steps.map((current) => [current.id, current.attempts, current.threadIds.length])).toEqual([
+            ['first', 2, 1],
+            ['second', 1, 1],
+        ]);
+        expect(finished.cost.amount).toBeGreaterThan(0);
 
         // A changed file switches its triggers off until they are switched on again.
+        await host.ui.request('workflow.triggers', { projectId: project.id, key: 'project:nightly', enabled: true });
         writeFileSync(path.join(repo, '.xora', 'workflows', 'nightly.yaml'), `${NIGHTLY}\n# edited\n`);
         const listed = await host.ui.request('workflow.list', { projectId: project.id });
         expect(listed.find((info) => info.key === 'project:nightly')?.triggers).toEqual({ enabled: true, stale: true });

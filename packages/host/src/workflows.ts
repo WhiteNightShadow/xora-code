@@ -719,7 +719,20 @@ export class WorkflowService {
         this.#mute(record.id, project.path);
         log.info(`workflow ${runId} (${entry.key}) started in ${project.id}: ${input.trigger.reason}`);
         if (problems.length > 0) {
-            this.#finish(state, 'failed', `没有开始：${problems.join('；')}`);
+            // A trigger would fail the same way next time: switch it off until the user fixes the cause.
+            const off = input.unattended && input.parentRunId === undefined;
+            if (off) {
+                this.#deps.db.run(
+                    'update workflow_triggers set enabled = 0, updated_at = ? where project_id = ? and workflow_key = ?',
+                    [Date.now(), project.id, entry.key],
+                );
+                this.#deps.onTriggersChanged?.();
+            }
+            this.#finish(
+                state,
+                'failed',
+                `没有开始：${problems.join('；')}${off ? '。已停用自动运行，解决后重新启用' : ''}`,
+            );
             return this.#view(state);
         }
         if (warnings.length > 0) {
@@ -1230,11 +1243,17 @@ export class WorkflowService {
         return Math.max(0.01, round(budget.limit - this.#cost(state.record).total));
     }
 
+    /** Pauses the run and stops the agent turns still going, so the spending stops now (06 §9). */
     #pauseForBudget(state: RunState): void {
         const { record } = state;
+        if (!this.#active(record)) return;
         const cost = this.#cost(record);
         record.status = 'paused';
         record.note = `预算用完：已花${round(cost.total)}/${record.budget?.limit ?? 0} ${cost.currency}，追加预算后继续`;
+        for (const id of state.working) {
+            const thread = record.steps[id]?.threadIds.at(-1);
+            if (thread && this.#deps.turns.isRunning(thread)) this.#deps.turns.cancel(thread);
+        }
         this.#notice(state, 'warning', '暂停', record.note);
         this.#save(state);
     }
@@ -1408,6 +1427,10 @@ export class WorkflowService {
             this.#save(state);
             state.results.delete(step.id);
             const ended = await this.#turn(threadId, prompt);
+            if (this.#live(state) && this.#overBudget(state)) {
+                // The step continues in this thread once the run gets more budget.
+                this.#pauseForBudget(state);
+            }
             if (!this.#live(state)) return this.#interrupted(state);
             let failure: string | undefined;
             let summary = '';
