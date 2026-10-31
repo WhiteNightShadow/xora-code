@@ -121,6 +121,10 @@ function ToolCallView({ item }: { item: ItemOf<'tool_call'> }) {
                     {item.display && item.output && item.display.kind !== 'command' && item.status === 'failed' && (
                         <pre className="tool__output">{item.output}</pre>
                     )}
+                    {/* Language server problems the edit introduced, as the model saw them. */}
+                    {item.display?.kind === 'diff' && item.output && item.status !== 'failed' && (
+                        <pre className="tool__output tool__diagnostics">{item.output}</pre>
+                    )}
                 </div>
             )}
         </div>

@@ -18,6 +18,9 @@ import {
 const MESSAGE_MAX_CHARS = 400;
 
 /** `12:5` for a 0-based protocol position. */
+/** Starts the note an edit's tool result gets when language servers report new problems. */
+export const LSP_EDIT_NOTE = 'LSP diagnostics after the edit:';
+
 export function position(range: Range): string {
     return `${range.start.line + 1}:${range.start.character + 1}`;
 }
@@ -195,7 +198,7 @@ export function formatEditNote(
         }
         blocks.push(lines.join('\n'));
     }
-    return blocks.length > 0 ? `LSP diagnostics after the edit:\n${blocks.join('\n')}` : undefined;
+    return blocks.length > 0 ? `${LSP_EDIT_NOTE}\n${blocks.join('\n')}` : undefined;
 }
 
 /** `src/a.ts:12:5: const x = foo(1);` with the source line when `preview` has it. */

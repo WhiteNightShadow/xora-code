@@ -2436,3 +2436,8 @@ pre {
     font-size: 12px;
     word-break: break-all;
 }
+
+.tool__diagnostics {
+    border-left: 2px solid var(--xk-pending);
+    margin-top: 6px;
+}

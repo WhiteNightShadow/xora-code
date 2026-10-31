@@ -47,6 +47,7 @@ function lspManager(): LspManager {
 
 async function session(lsp: LspManager, cwd: string, settings: Record<string, unknown> = {}) {
     const permissions: acp.RequestPermissionRequest[] = [];
+    const updates: acp.SessionNotification[] = [];
     const agent = createXoraAgent({
         dataDir: mkdtempSync(path.join(tmpdir(), 'xora-engine-lsp-')),
         version: 'test',
@@ -54,7 +55,9 @@ async function session(lsp: LspManager, cwd: string, settings: Record<string, un
     });
     const connection = acp
         .client({ name: 'test-host' })
-        .onNotification('session/update', () => undefined)
+        .onNotification('session/update', ({ params }) => {
+            updates.push(params);
+        })
         .onRequest('session/request_permission', ({ params }) => {
             permissions.push(params);
             return { outcome: { outcome: 'selected' as const, optionId: 'allow_once' } };
@@ -77,7 +80,7 @@ async function session(lsp: LspManager, cwd: string, settings: Record<string, un
     });
     const prompt = (text: string) =>
         connection.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
-    return { prompt, permissions, close: () => connection.close() };
+    return { prompt, permissions, updates, close: () => connection.close() };
 }
 
 function workspace(): string {
@@ -114,6 +117,15 @@ describe('language servers in the engine', () => {
         expect(toolResults()).toEqual([
             'Created bad.fake (2 lines).\n\nLSP diagnostics after the edit:\nbad.fake: 1 error (fake-lsp)\n  2:1 error E1: broken here',
         ]);
+        // The host gets the diff and, under it, the same diagnostics for the user.
+        type Update = acp.SessionNotification['update'];
+        const finished = s.updates
+            .map((update) => update.update)
+            .find(
+                (update): update is Extract<Update, { sessionUpdate: 'tool_call_update' }> =>
+                    update.sessionUpdate === 'tool_call_update' && update.status === 'completed',
+            );
+        expect(finished?.content?.map((entry) => entry.type)).toEqual(['diff', 'content']);
         s.close();
     });
 

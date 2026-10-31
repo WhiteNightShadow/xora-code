@@ -9,6 +9,7 @@ import {
     checkPathAccess,
     isReadOnlyCommand,
     isSensitivePath,
+    LSP_EDIT_NOTE,
     type LspManager,
     ProviderError,
     sanitizeEnv,
@@ -216,12 +217,15 @@ function prepareCall(
 
 function acpContent(result: ToolResult): acp.ToolCallContent[] {
     if (result.display?.kind === 'diff') {
-        return result.display.diffs.map((diff) => ({
+        const diffs: acp.ToolCallContent[] = result.display.diffs.map((diff) => ({
             type: 'diff' as const,
             path: diff.path,
             oldText: diff.oldText,
             newText: diff.newText,
         }));
+        // The diagnostics the model got with the edit, so the user sees them under the diff too.
+        const note = result.content.indexOf(LSP_EDIT_NOTE);
+        return note < 0 ? diffs : [...diffs, { type: 'content', content: text(result.content.slice(note)) }];
     }
     const body = result.content.length > 8000 ? `${result.content.slice(0, 8000)}\n…` : result.content;
     return [{ type: 'content', content: text(body) }];

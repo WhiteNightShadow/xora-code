@@ -9,7 +9,7 @@ export {
 export { isSecretEnvName, KEPT_ENV_NAMES, sanitizeEnv } from './env.ts';
 export { createJobRegistry, type ManagedJobRegistry, ShellJob } from './jobs.ts';
 export { type DiagnosticsReport, LspClient } from './lsp/client.ts';
-export { type EditReport, formatEditNote, newDiagnostics } from './lsp/format.ts';
+export { type EditReport, formatEditNote, LSP_EDIT_NOTE, newDiagnostics } from './lsp/format.ts';
 export {
     ConnectionClosedError,
     encodeMessage,

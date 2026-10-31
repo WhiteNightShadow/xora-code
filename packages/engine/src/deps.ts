@@ -9,6 +9,7 @@ export {
     createDefaultTools,
     isReadOnlyCommand,
     isSensitivePath,
+    LSP_EDIT_NOTE,
     LspManager,
     sanitizeEnv,
     type ToolContext,
