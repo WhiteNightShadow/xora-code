@@ -99,6 +99,26 @@ steps:
         ]);
     });
 
+    it('checks the cron expressions and the time zone of the trigger', () => {
+        const steps = 'steps:\n  - { id: a, agent: c, task: t }\n';
+        expect(
+            issues(parseWorkflow(`name: x\ntrigger: { schedule: "0 2 * *", timezone: Mars/Base }\n${steps}`)),
+        ).toEqual([
+            'trigger.schedule: invalid cron expression "0 2 * *": expected 5 fields (minute hour day-of-month month day-of-week), found 4',
+            'trigger.timezone: unknown time zone Mars/Base',
+        ]);
+        expect(
+            issues(parseWorkflow(`name: x\ntrigger: { schedule: ["@daily", "0 0 30 2 *", "61 * * * *"] }\n${steps}`)),
+        ).toEqual([
+            'trigger.schedule[1]: invalid cron expression "0 0 30 2 *": it never fires: no month in it has day 30',
+            'trigger.schedule[2]: invalid cron expression "61 * * * *": minute 61 is out of range 0-59',
+        ]);
+        const fine = parseWorkflow(
+            `name: x\ntrigger: { schedule: "*/15 9-17 * * MON-FRI", timezone: America/New_York, missed: once }\n${steps}`,
+        );
+        expect(issues(fine)).toEqual([]);
+    });
+
     it('rejects unknown fields and a workflow that runs itself', () => {
         expect(issues(parseWorkflow('name: x\nsteps:\n  - { id: a, agent: c, task: t, colour: red }\n'))[0]).toMatch(
             /steps\[0\]/,

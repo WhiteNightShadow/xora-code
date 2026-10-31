@@ -547,6 +547,9 @@ importers:
 
   packages/workflows:
     dependencies:
+      '@xora/metering':
+        specifier: workspace:*
+        version: link:../metering
       js-yaml:
         specifier: 4.3.2
         version: 4.3.2

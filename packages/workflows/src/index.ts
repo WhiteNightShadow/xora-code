@@ -52,6 +52,17 @@ export {
     type TaskStatus,
 } from './board.ts';
 export {
+    type CronInput,
+    type CronSchedule,
+    cronError,
+    isTimeZone,
+    lastCronTime,
+    nextCronTime,
+    parseCron,
+    scheduleList,
+    systemTimeZone,
+} from './cron.ts';
+export {
     CODER_PROMPT,
     DEBUGGER_PROMPT,
     DELIVERABLE_CONTRACT,
@@ -266,6 +277,7 @@ export {
     type TriggerSpec,
     TriggerSpecSchema,
     templateRefs,
+    triggerIssues,
     type WorkflowDefinition,
     WorkflowDefinitionSchema,
     type WorkflowInput,

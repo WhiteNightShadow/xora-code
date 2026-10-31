@@ -65,8 +65,8 @@ function wallClock(timeZone: string, epochMs: number): WallClock {
     };
 }
 
-/** Offset of the zone's wall clock from UTC at an instant, in milliseconds. */
-function offsetAt(timeZone: string, epochMs: number): number {
+/** Offset of the zone's wall clock from UTC at an instant, in milliseconds (negative west of Greenwich). */
+export function zoneOffset(timeZone: string, epochMs: number): number {
     const clock = wallClock(timeZone, epochMs);
     const wall = Date.UTC(clock.year, clock.month - 1, clock.day, clock.hour, clock.minute, clock.second);
     // The formatted clock has no milliseconds, so compare against the instant truncated to the second.
@@ -101,8 +101,8 @@ export function zonedTime(timeZone: string, epochMs: number): ZonedTime {
  */
 export function zonedEpoch(timeZone: string, date: CivilDate, minuteOfDay = 0): number {
     const wall = Date.UTC(date.year, date.month - 1, date.day, 0, minuteOfDay);
-    const guess = wall - offsetAt(timeZone, wall);
-    return wall - offsetAt(timeZone, guess);
+    const guess = wall - zoneOffset(timeZone, wall);
+    return wall - zoneOffset(timeZone, guess);
 }
 
 export function epochOf(at: Date): number {
