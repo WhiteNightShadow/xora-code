@@ -121,14 +121,26 @@ export function Modal({
     wide?: boolean;
 }) {
     const ref = useRef<HTMLDivElement>(null);
+    // Callers pass a new onClose on every render: kept in a ref, so typing (which renders) never re-runs the
+    // effect below and pulls the focus out of the field being typed in.
+    const close = useRef(onClose);
+    close.current = onClose;
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') onClose();
+            if (event.key === 'Escape') close.current();
         };
         window.addEventListener('keydown', onKey);
-        ref.current?.focus();
+        // Opening a form dialog puts the cursor in its first field, ready to type; the wide ones (settings, usage)
+        // are pages to look through.
+        const dialog = ref.current;
+        const field = dialog?.classList.contains('modal--wide')
+            ? null
+            : dialog?.querySelector<HTMLElement>(
+                  'textarea:not([disabled]), input:not([disabled]):not([type=checkbox]):not([type=hidden])',
+              );
+        (field ?? dialog)?.focus();
         return () => window.removeEventListener('keydown', onKey);
-    }, [onClose]);
+    }, []);
     return (
         <div className="modal-backdrop">
             <button
