@@ -222,7 +222,10 @@ function modeDefault(
                     ? { decision: 'allow', reason: text.readOnlyCommand }
                     : { decision: 'deny', reason: text.planCommand };
             default:
-                return { decision: 'ask', reason: text.askCommand };
+                // Looking around (`ls`, `git status`) changes nothing: only the other commands wait for the user.
+                return facts.readOnlyCommand
+                    ? { decision: 'allow', reason: text.readOnlyCommand }
+                    : { decision: 'ask', reason: text.askCommand };
         }
     }
     if (facts.kind === 'fetch') {

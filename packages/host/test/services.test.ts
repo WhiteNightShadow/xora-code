@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { XoraDatabase } from '@xora/storage';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ApprovalService } from '../src/approvals.ts';
+import { type ApprovalOutcome, ApprovalService, type FollowsMode } from '../src/approvals.ts';
 import { Bus, type Subscriber } from '../src/bus.ts';
 import type { CallFacts } from '../src/policy.ts';
 import { PromptService } from '../src/prompts.ts';
@@ -200,6 +200,44 @@ describe('ApprovalService', () => {
         expect(() => approvals.respond('a_forged', 'allow_once')).toThrow();
         approvals.cancelThread('t1');
         await expect(outcome).resolves.toEqual({ status: 'cancelled' });
+    });
+
+    it('decides the waiting tool calls of a thread again when its mode changes, and leaves every other card', async () => {
+        const approvals = new ApprovalService(database(), new Bus());
+        const follows: FollowsMode = { projectId: 'p1', projectRoot: '/work' };
+        const outcomes = new Map<string, Promise<ApprovalOutcome>>();
+        const ask = (title: string, threadId: string, follow?: FollowsMode) =>
+            outcomes.set(
+                title,
+                approvals.request({ ...base, threadId, title }, facts, () => undefined, follow),
+            );
+        ask('tool call', 't1', follows);
+        // A PreToolUse hook asked for this one: no mode lets it through without the user.
+        ask('hook asked', 't1', { ...follows, hookAsked: true });
+        // A team's or a workflow's card does not follow the thread's mode.
+        ask('run card', 't1');
+        ask('other thread', 't2', follows);
+
+        approvals.reconsider('t1', 'full');
+        await expect(outcomes.get('tool call')).resolves.toEqual({
+            status: 'allowed',
+            decision: 'allow_once',
+            message: '全权模式',
+            decidedBy: 'policy',
+        });
+        expect(approvals.list().map((approval) => approval.title)).toEqual(['hook asked', 'run card', 'other thread']);
+        // "Allow once": nothing is remembered for the next call.
+        expect(approvals.evaluate('t1', facts, context).decision).toBe('ask');
+
+        approvals.reconsider('t1', 'plan');
+        await expect(outcomes.get('hook asked')).resolves.toEqual({
+            status: 'denied',
+            decision: 'deny',
+            message: '计划模式不运行会改动状态的命令',
+            decidedBy: 'policy',
+        });
+        expect(approvals.list().map((approval) => approval.title)).toEqual(['run card', 'other thread']);
+        approvals.dispose();
     });
 });
 

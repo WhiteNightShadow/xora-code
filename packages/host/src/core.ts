@@ -13,6 +13,7 @@ import {
     RpcPeer,
     type RpcTransport,
     resolveLanguage,
+    type Settings,
     type ThreadMeta,
 } from '@xora/protocol';
 import { completeModel } from '@xora/providers';
@@ -310,6 +311,7 @@ export class HostCore {
             threads: this.threads,
             turns: this.turns,
             projects: this.projects,
+            settings: this.settings,
             log: this.log,
             workflowsDir: this.paths.workflowsDir,
             extensionsDir: this.paths.extensionsDir,
@@ -609,9 +611,17 @@ export class HostCore {
             projects.touch(project.id);
             return thread;
         };
-        peer.handle('thread.create', (params) => createThread(params));
+        peer.handle('thread.create', async (params) => {
+            const thread = await createThread(params);
+            // The mode picked for a new thread is where the next one starts, until the user picks another.
+            if (params.mode) this.#remember({ defaultMode: params.mode });
+            return thread;
+        });
         peer.handle('thread.distill', ({ threadId, kind, scope }) =>
             this.distill.start({ threadId, kind, scope: scope ?? 'project' }),
+        );
+        peer.handle('workflow.draft', ({ projectId, description, scope }) =>
+            this.distill.draft({ projectId, description, scope: scope ?? 'project' }),
         );
         const history = new HistoryService({
             threads,
@@ -671,6 +681,8 @@ export class HostCore {
                 });
                 created.push(thread);
             }
+            // Picked in the same dialog as a new thread's mode.
+            if (mode) this.#remember({ defaultMode: mode });
             for (const thread of created) {
                 await turns.start(thread.id, text, []);
             }
@@ -761,6 +773,14 @@ export class HostCore {
             };
             if (Object.keys(config).length > 0) {
                 threads.append(threadId, 'thread.config', config);
+            }
+            if (mode !== undefined && mode !== before.mode) {
+                // The switch reaches the tool calls already waiting for an answer, not only the next ones.
+                approvals.reconsider(threadId, mode);
+            }
+            // The user's own threads only: team, workflow and subagent threads have modes of their own.
+            if (mode !== undefined && !before.teamRunId && !before.workflowRunId && !before.parent) {
+                this.#remember({ defaultMode: mode });
             }
             return thread;
         });
@@ -869,8 +889,20 @@ export class HostCore {
             }),
         );
         peer.handle('goal.stop', ({ threadId }) => this.goals.stop(threadId));
-        registerTeamHandlers(peer, this.team);
-        registerWorkflowHandlers(peer, this.workflows);
+        // What the user starts a team or a workflow with is what the next one starts from.
+        registerTeamHandlers(peer, this.team, (params, run) =>
+            this.#remember({
+                lastChoices: {
+                    ...settings.get().lastChoices,
+                    teamAutonomy: params.autonomy ?? run.autonomy,
+                    teamMode: params.mode ?? 'standard',
+                    teamBudget: params.budget ?? null,
+                },
+            }),
+        );
+        registerWorkflowHandlers(peer, this.workflows, (mode) =>
+            this.#remember({ lastChoices: { ...settings.get().lastChoices, workflowMode: mode } }),
+        );
 
         // Extensions (09) ---------------------------------------------------------------------------------------
         const extensions = this.extensions;
@@ -1103,6 +1135,20 @@ export class HostCore {
             this.#tellShellLanguage();
         }
         return next;
+    }
+
+    /**
+     * Keeps what the user chose last (a thread's mode, how a team or workflow run started) as the next default.
+     * A change reaches every window the way `settings.update` does.
+     */
+    #remember(patch: Partial<Settings>): void {
+        const current = this.settings.get();
+        const changed = Object.entries(patch).some(
+            ([key, value]) => JSON.stringify(value) !== JSON.stringify(current[key as keyof Settings]),
+        );
+        if (changed) {
+            this.#applySettings(patch);
+        }
     }
 
     /** The shell's menus, tray and dialogs follow the language setting; an older shell keeps the system's. */

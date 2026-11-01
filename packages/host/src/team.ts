@@ -4,6 +4,7 @@ import {
     type HostMethods,
     type HostNotifications,
     type ItemOf,
+    type MethodParams,
     type ModelRef,
     type PermissionMode,
     type Project,
@@ -3411,9 +3412,17 @@ export class TeamService {
 
 type UiPeer = RpcPeer<HostMethods, HostNotifications>;
 
-/** The `team.*` handlers, registered on every UI connection. */
-export function registerTeamHandlers(peer: UiPeer, team: TeamService): void {
-    peer.handle('team.start', (params) => team.start(params));
+/** The `team.*` handlers, registered on every UI connection; `started` hears of each run the user starts. */
+export function registerTeamHandlers(
+    peer: UiPeer,
+    team: TeamService,
+    started?: (params: MethodParams<'team.start'>, run: TeamRunView) => void,
+): void {
+    peer.handle('team.start', async (params) => {
+        const run = await team.start(params);
+        started?.(params, run);
+        return run;
+    });
     peer.handle('team.list', ({ projectId }) => team.list(projectId));
     peer.handle('team.get', ({ runId }) => team.get(runId));
     peer.handle('team.stop', ({ runId }) => team.stop(runId));

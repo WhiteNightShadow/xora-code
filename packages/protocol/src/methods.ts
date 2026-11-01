@@ -28,6 +28,7 @@ import {
     UsageRowSchema,
     UsageTotalsSchema,
     WorkflowInfoSchema,
+    WorkflowRunModeSchema,
     WorkflowRunSchema,
 } from './domain.ts';
 import { EventEnvelopeSchema } from './events.ts';
@@ -386,9 +387,29 @@ export const methods = {
                 budget: z.number().positive().optional(),
                 /** Wait for the off-peak window of the models it uses. */
                 offPeak: z.boolean().optional(),
+                mode: WorkflowRunModeSchema.optional(),
             })
             .strict(),
         result: WorkflowRunSchema,
+    },
+    /** Changes a live run's permissions: its running steps' threads at once, and the steps still to come. */
+    'workflow.setMode': {
+        params: z.object({ runId: z.string(), mode: WorkflowRunModeSchema }).strict(),
+        result: WorkflowRunSchema,
+    },
+    /**
+     * Starts a thread whose agent writes a new workflow file from what the user describes (like `thread.distill`
+     * without a source thread); the file is then listed by `workflow.list`.
+     */
+    'workflow.draft': {
+        params: z
+            .object({
+                projectId: IdSchema,
+                description: z.string().min(1).max(20_000),
+                scope: z.enum(['project', 'user']).optional(),
+            })
+            .strict(),
+        result: ThreadMetaSchema,
     },
     'workflow.runs': {
         params: z.object({ projectId: IdSchema.optional() }).strict(),

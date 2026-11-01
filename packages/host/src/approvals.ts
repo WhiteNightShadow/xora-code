@@ -25,11 +25,25 @@ export interface ApprovalOutcome {
     readonly status: 'allowed' | 'denied' | 'expired' | 'cancelled';
     readonly decision?: ApprovalDecision;
     readonly message?: string;
+    /** Set when no one answered the card: the thread's mode changed and a rule or the policy settled the call. */
+    readonly decidedBy?: 'rule' | 'policy';
+}
+
+/**
+ * A tool call that follows its thread's mode: what deciding it again takes when the mode changes while it waits
+ * (see {@link ApprovalService.reconsider}).
+ */
+export interface FollowsMode {
+    readonly projectId: string;
+    readonly projectRoot: string;
+    /** A PreToolUse hook asked for this confirmation: a new mode may still refuse the call, never allow it. */
+    readonly hookAsked?: boolean;
 }
 
 interface Pending {
     readonly approval: Approval;
     readonly facts: CallFacts;
+    readonly follows?: FollowsMode;
     readonly resolve: (outcome: ApprovalOutcome) => void;
     readonly timer: ReturnType<typeof setTimeout>;
 }
@@ -124,11 +138,15 @@ export class ApprovalService {
         return [...this.#pending.values()].filter((pending) => pending.approval.threadId === threadId).length;
     }
 
-    /** Registers an approval and resolves when the user answers, it expires, or the turn is cancelled. */
+    /**
+     * Registers an approval and resolves when the user answers, it expires, or the turn is cancelled. With `follows`
+     * a change of the thread's mode can settle it too; the cards of team and workflow runs go without.
+     */
     request(
         input: Omit<Approval, 'id' | 'createdAt' | 'expiresAt' | 'alwaysScopes'>,
         facts: CallFacts,
         onCreated: (approval: Approval) => void,
+        follows?: FollowsMode,
     ): Promise<ApprovalOutcome> {
         const now = Date.now();
         const approval: Approval = {
@@ -142,7 +160,7 @@ export class ApprovalService {
         };
         return new Promise((resolve) => {
             const timer = setTimeout(() => this.#settle(approval.id, { status: 'expired' }), APPROVAL_TTL_MS);
-            this.#pending.set(approval.id, { approval, facts, resolve, timer });
+            this.#pending.set(approval.id, { approval, facts, ...(follows ? { follows } : {}), resolve, timer });
             onCreated(approval);
             this.#bus.broadcast('approval.requested', { approval });
         });
@@ -178,6 +196,35 @@ export class ApprovalService {
             decision,
             ...(message ? { message } : {}),
         });
+    }
+
+    /**
+     * The thread's mode changed (10 §2): its waiting tool calls are decided again. What the new mode allows goes
+     * ahead once and what it denies is refused with the reason, the way an answer on the card would settle them;
+     * the rest keeps waiting. Approvals without `follows` (a team's plan, a workflow's gate or command) stay.
+     */
+    reconsider(threadId: string, mode: PermissionMode): void {
+        for (const { approval, facts, follows } of [...this.#pending.values()]) {
+            if (approval.threadId !== threadId || !follows) {
+                continue;
+            }
+            const policy = this.evaluate(threadId, facts, {
+                mode,
+                projectId: follows.projectId,
+                projectRoot: follows.projectRoot,
+            });
+            const decidedBy = policy.ruleId ? 'rule' : 'policy';
+            if (policy.decision === 'deny') {
+                this.#settle(approval.id, { status: 'denied', decision: 'deny', message: policy.reason, decidedBy });
+            } else if (policy.decision === 'allow' && !follows.hookAsked) {
+                this.#settle(approval.id, {
+                    status: 'allowed',
+                    decision: 'allow_once',
+                    message: policy.reason,
+                    decidedBy,
+                });
+            }
+        }
     }
 
     /** Cancels every pending approval of a thread (turn cancelled or failed). */

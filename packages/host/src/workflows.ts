@@ -16,6 +16,7 @@ import {
     type TeamRun,
     type ToolKind,
     type WorkflowInfo,
+    type WorkflowRunMode,
     type WorkflowRun as WorkflowRunView,
     type WorkflowStepRun,
 } from '@xora/protocol';
@@ -56,7 +57,7 @@ import {
     type WorkflowStep,
 } from '@xora/workflows';
 import { pickTierModel, runChannels } from './agent-models.ts';
-import type { ApprovalOutcome, ApprovalService } from './approvals.ts';
+import type { ApprovalOutcome, ApprovalService, FollowsMode } from './approvals.ts';
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
 import type { HostToolResult } from './engines/manager.ts';
@@ -210,6 +211,10 @@ const TEXT = bilingual(
         childDone: (name: string) => `子工作流${name}完成`,
         commandTitle: (label: string, highRisk: HighRiskAction | undefined) =>
             highRisk ? `${label}：运行命令（高风险动作：${highRiskLabel(highRisk, 'zh-CN')}）` : `${label}：运行命令`,
+        runEnded: '运行已经结束，不能再改权限',
+        unattendedFull: '无人值守的运行不能用全权',
+        modes: { default: '默认', auto_edit: '自动编辑', full: '全权' } as Readonly<Record<WorkflowRunMode, string>>,
+        modeChanged: (mode: string) => `权限改为${mode}`,
     },
     {
         tooLarge: 'File too large (256 KB at most)',
@@ -330,6 +335,10 @@ const TEXT = bilingual(
             highRisk
                 ? `${label}: run a command (high-risk action: ${highRiskLabel(highRisk, 'en')})`
                 : `${label}: run a command`,
+        runEnded: 'The run has ended, so its permissions cannot change',
+        unattendedFull: 'An unattended run cannot have full access',
+        modes: { default: 'Default', auto_edit: 'Auto edit', full: 'Full access' },
+        modeChanged: (mode) => `Permissions changed to ${mode}`,
     },
 );
 
@@ -354,6 +363,8 @@ interface RunRecord {
     warnings: string[];
     budget?: { limit: number; currency: string };
     startsAt?: number;
+    /** The permissions the user gave the run; absent on runs from before it existed, which is `default`. */
+    mode?: WorkflowRunMode;
     steps: Record<string, StepState>;
     readonly createdAt: number;
     updatedAt: number;
@@ -406,6 +417,8 @@ interface ApproveRequest {
     readonly risks: readonly Risk[];
     readonly command?: string;
     readonly highRisk?: HighRisk;
+    /** A command the policy asked about: decided again when the run's permissions change while it waits. */
+    readonly follows?: FollowsMode;
 }
 
 export interface WorkflowDeps {
@@ -468,6 +481,27 @@ function fail(content: string): HostToolResult {
 /** The key the trigger service knows a project workflow by. */
 export function triggerKey(projectId: string, key: string): string {
     return `${projectId}|${key}`;
+}
+
+/** Permission modes from the most to the least restrictive (10 §2). */
+const MODE_ORDER: readonly PermissionMode[] = ['plan', 'ask', 'auto_edit', 'full'];
+
+/**
+ * The mode an agent step works in under the run's permissions: its own with `default`, else at least the run's.
+ * A read-only (plan) agent stays read-only whatever the run allows.
+ */
+function agentMode(own: PermissionMode, run: WorkflowRunMode | undefined): PermissionMode {
+    if (own === 'plan' || run === undefined || run === 'default') return own;
+    return MODE_ORDER.indexOf(own) >= MODE_ORDER.indexOf(run) ? own : run;
+}
+
+/**
+ * The mode a command the host runs for a step (a script step, a verification) is decided in: the project's, or at
+ * least the run's. Permissions given to a run only ever add to the user's own.
+ */
+function commandMode(own: PermissionMode, run: WorkflowRunMode | undefined): PermissionMode {
+    if (run === undefined || run === 'default') return own;
+    return MODE_ORDER.indexOf(own) >= MODE_ORDER.indexOf(run) ? own : run;
 }
 
 const STEP_RESULT_TOOL: HostToolProvider['tools'][number] = {
@@ -787,6 +821,8 @@ export class WorkflowService {
             unattended: true,
             offPeak: entry.parsed.definition.trigger.offPeakOnly,
             depth: 0,
+            // Nobody picked anything for a run nobody watches: each step keeps its own permissions.
+            mode: 'default',
         });
     }
 
@@ -816,6 +852,7 @@ export class WorkflowService {
         inputs?: Record<string, WorkflowScalar>;
         budget?: number;
         offPeak?: boolean;
+        mode?: WorkflowRunMode;
     }): Promise<WorkflowRunView> {
         await this.#ready;
         const project = await this.#deps.projects.get(input.projectId);
@@ -841,6 +878,7 @@ export class WorkflowService {
             unattended: false,
             offPeak: input.offPeak ?? false,
             depth: 0,
+            mode: input.mode ?? 'default',
             ...(input.budget !== undefined ? { budget: input.budget } : {}),
         });
     }
@@ -853,6 +891,7 @@ export class WorkflowService {
         unattended: boolean;
         offPeak: boolean;
         depth: number;
+        mode: WorkflowRunMode;
         budget?: number;
         parentRunId?: string;
     }): Promise<WorkflowRunView> {
@@ -970,6 +1009,7 @@ export class WorkflowService {
             status: 'running',
             warnings,
             ...(limit !== undefined ? { budget: { limit, currency } } : {}),
+            mode: input.mode,
             steps,
             createdAt: now,
             updatedAt: now,
@@ -1108,6 +1148,64 @@ export class WorkflowService {
         this.#pump(state);
         this.#save(state);
         return this.#view(state);
+    }
+
+    /**
+     * Changes the permissions of a run that is not over: the agent steps working now (their threads, and the tool
+     * calls waiting there for an answer) at once, the steps still to come when they start. Its sub-workflows follow;
+     * team steps keep their own.
+     */
+    async setMode(runId: string, mode: WorkflowRunMode): Promise<WorkflowRunView> {
+        await this.#ready;
+        const state = this.#require(runId);
+        const text = textOf(TEXT);
+        if (TERMINAL.has(state.record.status)) {
+            throw new RpcError(RpcErrorCode.Rejected, text.runEnded);
+        }
+        // Nobody watches an unattended run: no full access there (06 §8, §12).
+        if (state.record.unattended && mode === 'full') {
+            throw new RpcError(RpcErrorCode.Rejected, text.unattendedFull);
+        }
+        const project = await this.#deps.projects.get(state.record.projectId);
+        this.#applyMode(state, mode, project.defaults?.mode ?? this.#deps.settings.get().defaultMode);
+        return this.#view(state);
+    }
+
+    /** `own` is the mode the project's commands get without the run's permissions. */
+    #applyMode(state: RunState, mode: WorkflowRunMode, own: PermissionMode): void {
+        const { record } = state;
+        if (TERMINAL.has(record.status) || (record.mode ?? 'default') === mode) return;
+        record.mode = mode;
+        for (const step of record.definition.steps) {
+            const current = record.steps[step.id];
+            if (!current || isFinished(current.status)) continue;
+            if (step.type === 'agent') {
+                // The thread the step works in, or continues in after a pause; a read-only agent's stays as it is.
+                const agent = current.agent ? findAgent(record.org, current.agent) : undefined;
+                const threadId = current.threadIds.at(-1);
+                if (agent && agent.mode !== 'plan' && threadId) {
+                    this.#setThreadMode(threadId, agentMode(agent.mode, mode));
+                }
+            } else if (step.type === 'workflow' && current.childRunId) {
+                const child = this.#load(current.childRunId);
+                if (child) this.#applyMode(child, mode, own);
+            }
+        }
+        // A command waiting on the run's own thread is decided again too; gates still wait for a person.
+        this.#deps.approvals.reconsider(record.threadId, commandMode(own, mode));
+        const text = textOf(TEXT);
+        this.#notice(state, 'info', text.modeChanged(text.modes[mode]));
+        this.#save(state);
+    }
+
+    /** A step thread takes the run's new permissions: its next tool calls, and the ones waiting for an answer. */
+    #setThreadMode(threadId: string, mode: PermissionMode): void {
+        const { threads, approvals } = this.#deps;
+        const thread = threads.find(threadId);
+        if (!thread || thread.mode === mode) return;
+        threads.update(threadId, { mode });
+        threads.append(threadId, 'thread.config', { mode });
+        approvals.reconsider(threadId, mode);
     }
 
     onTurnEnded(event: TurnEnded): void {
@@ -1569,12 +1667,14 @@ export class WorkflowService {
         const retries = step.onFailure?.retries ?? 0;
         const last = step.onFailure?.finally ?? 'abort';
         const project = await this.#deps.projects.get(record.projectId);
-        const mode = project.defaults?.mode ?? this.#deps.settings.get().defaultMode;
+        const own = project.defaults?.mode ?? this.#deps.settings.get().defaultMode;
         for (let attempt = 0; ; attempt++) {
             if (!this.#live(state)) return this.#interrupted(state);
             current.attempts += 1;
             this.#save(state);
             const command = renderTemplate(step.run, this.#context(record), { command: true });
+            // Read at every attempt: the run's permissions may have changed since the last one.
+            const mode = commandMode(own, record.mode);
             const result = await this.#runCommand(state, command, stepTitle(step), mode, step.timeoutMinutes);
             if (!this.#live(state)) return this.#interrupted(state);
             const text = textOf(TEXT);
@@ -1664,7 +1764,7 @@ export class WorkflowService {
                     title: `${shorten(stepTitle(step), 16)}·${agent.name}`,
                     engine: 'xora',
                     model: pick.ref,
-                    mode: agent.mode,
+                    mode: agentMode(agent.mode, record.mode),
                     effort: pick.effort,
                     extra: {
                         workflowRunId: record.id,
@@ -1713,7 +1813,7 @@ export class WorkflowService {
                     failure = textOf(TEXT).outputsMissing(missing);
                 } else if (step.verify) {
                     current.outputs = outputs;
-                    const check = await this.#verify(state, step.verify, agent.mode);
+                    const check = await this.#verify(state, step.verify, commandMode(agent.mode, record.mode));
                     if (!this.#live(state)) return this.#interrupted(state);
                     if (!check.ok) failure = check.note;
                 }
@@ -1837,7 +1937,7 @@ export class WorkflowService {
         const retries = step.onFailure?.retries ?? 0;
         const last = step.onFailure?.finally ?? 'abort';
         const project = await this.#deps.projects.get(record.projectId);
-        const mode = project.defaults?.mode ?? this.#deps.settings.get().defaultMode;
+        const own = project.defaults?.mode ?? this.#deps.settings.get().defaultMode;
         let feedback: string | undefined;
         for (let attempt = 0; ; attempt++) {
             if (!this.#live(state)) return this.#interrupted(state);
@@ -1885,7 +1985,7 @@ export class WorkflowService {
             if (final?.status !== 'done') {
                 failure = textOf(TEXT).teamNotDone(final?.status, final?.note);
             } else if (step.verify) {
-                const check = await this.#verify(state, step.verify, mode);
+                const check = await this.#verify(state, step.verify, commandMode(own, record.mode));
                 if (!this.#live(state)) return this.#interrupted(state);
                 if (!check.ok) failure = check.note;
             }
@@ -1955,6 +2055,7 @@ export class WorkflowService {
                     offPeak: false,
                     depth: record.depth + 1,
                     parentRunId: record.id,
+                    mode: record.mode ?? 'default',
                     ...(remaining !== undefined ? { budget: remaining } : {}),
                 });
             } catch (error) {
@@ -2052,6 +2153,7 @@ export class WorkflowService {
                 command,
                 risks: policy.risks,
                 ...(highRisk ? { highRisk } : {}),
+                follows: { projectId: record.projectId, projectRoot: project.path },
             });
             if (outcome.status !== 'allowed') return undefined;
         }
@@ -2120,6 +2222,7 @@ export class WorkflowService {
                     this.#save(state);
                 }
             },
+            request.follows,
         );
         if (item && !this.#disposed) {
             threads.append(
@@ -2130,7 +2233,7 @@ export class WorkflowService {
                         ...item,
                         status: outcome.status,
                         ...(outcome.decision ? { decision: outcome.decision } : {}),
-                        decidedBy: 'user',
+                        decidedBy: outcome.decidedBy ?? 'user',
                         ...(outcome.message ? { message: outcome.message } : {}),
                     },
                 },
@@ -2213,6 +2316,7 @@ export class WorkflowService {
             steps,
             budget: record.budget ? { amount: record.budget.limit, currency: record.budget.currency } : null,
             cost: { amount: round(cost.total), currency: cost.currency },
+            mode: record.mode ?? 'default',
             createdAt: record.createdAt,
             updatedAt: record.updatedAt,
             ...(record.endedAt !== undefined ? { endedAt: record.endedAt } : {}),
@@ -2222,10 +2326,26 @@ export class WorkflowService {
 
 type UiPeer = RpcPeer<HostMethods, HostNotifications>;
 
-/** The `workflow.*` handlers, registered on every UI connection. */
-export function registerWorkflowHandlers(peer: UiPeer, workflows: WorkflowService): void {
+/**
+ * The `workflow.*` handlers, registered on every UI connection; `chosen` hears the permissions the user gives a run,
+ * when it starts or later.
+ */
+export function registerWorkflowHandlers(
+    peer: UiPeer,
+    workflows: WorkflowService,
+    chosen?: (mode: WorkflowRunMode) => void,
+): void {
     peer.handle('workflow.list', ({ projectId }) => workflows.list(projectId));
-    peer.handle('workflow.start', (params) => workflows.start(params));
+    peer.handle('workflow.start', async (params) => {
+        const run = await workflows.start(params);
+        chosen?.(params.mode ?? 'default');
+        return run;
+    });
+    peer.handle('workflow.setMode', async ({ runId, mode }) => {
+        const run = await workflows.setMode(runId, mode);
+        chosen?.(mode);
+        return run;
+    });
     peer.handle('workflow.runs', ({ projectId }) => workflows.runs(projectId));
     peer.handle('workflow.get', ({ runId }) => workflows.get(runId));
     peer.handle('workflow.stop', ({ runId }) => workflows.stop(runId));

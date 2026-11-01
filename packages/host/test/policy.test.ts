@@ -55,7 +55,7 @@ const fetchCall = facts({ toolName: 'web_fetch', kind: 'fetch', readOnly: true, 
 const TABLE: Array<[string, CallFacts, Record<PermissionMode, 'allow' | 'ask' | 'deny'>]> = [
     ['read in workspace', read, { ask: 'allow', auto_edit: 'allow', plan: 'allow', full: 'allow' }],
     ['edit in workspace', edit, { ask: 'ask', auto_edit: 'allow', plan: 'deny', full: 'allow' }],
-    ['read-only command', readOnlyCommand, { ask: 'ask', auto_edit: 'allow', plan: 'allow', full: 'allow' }],
+    ['read-only command', readOnlyCommand, { ask: 'allow', auto_edit: 'allow', plan: 'allow', full: 'allow' }],
     ['other command', command, { ask: 'ask', auto_edit: 'ask', plan: 'deny', full: 'allow' }],
     ['network fetch', fetchCall, { ask: 'ask', auto_edit: 'ask', plan: 'ask', full: 'allow' }],
     [
@@ -99,6 +99,11 @@ describe('permission contract', () => {
             });
         }
     }
+
+    it('runs read-only commands in ask mode and says why, and asks about the others', () => {
+        expect(decide(readOnlyCommand, context('ask'))).toMatchObject({ decision: 'allow', reason: '只读命令' });
+        expect(decide(command, context('ask'))).toMatchObject({ decision: 'ask', reason: '询问模式下命令需要确认' });
+    });
 });
 
 describe('rules', () => {

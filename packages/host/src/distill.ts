@@ -1,17 +1,27 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { bilingual, parseThreadEvent, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
+import {
+    bilingual,
+    type PermissionMode,
+    type Project,
+    parseThreadEvent,
+    RpcError,
+    RpcErrorCode,
+    type ThreadMeta,
+} from '@xora/protocol';
 import { issuePath, parseWorkflow } from '@xora/workflows';
 import type { Logger } from './log.ts';
 import type { ProjectService } from './projects.ts';
+import type { SettingsService } from './settings.ts';
 import { textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
 import type { HostToolProvider, TurnService } from './turns.ts';
 
 /**
  * Distilling a finished thread into a workflow or a skill (06 §11, 15 §6): a new thread in the same project gets
- * the old one's transcript and the extension-creator skill's formats, and saves the file with the write tool, so
- * the user reviews it in an approval card. A workflow draft is checked with `workflow_check` until it parses.
+ * the old one's transcript and the extension-creator skill's formats, and saves the file with the write tool. A
+ * workflow draft is checked with `workflow_check` until it parses. `workflow.draft` does the same for a workflow
+ * the user describes in their own words, without a source thread.
  */
 
 const TRANSCRIPT_LIMIT = 24_000;
@@ -34,6 +44,7 @@ const TEXT = bilingual(
         omitted: '…（中间省略）…',
         projectMissing: (folder: string) => `项目文件夹不存在：${folder}`,
         empty: '这个线程还没有内容',
+        noDescription: '先描述要写成工作流的流程',
         inProject: (file: string) => `${file}（项目根目录下）`,
         title: (kind: DistillKind, source: string) => `${kind === 'workflow' ? '沉淀工作流' : '沉淀skill'}：${source}`,
         workflowPrompt: (target: string) =>
@@ -61,6 +72,21 @@ const TEXT = bilingual(
                 '',
                 '写好后说明它会在什么情况下被用到。',
             ].join('\n'),
+        draftTitle: (request: string) => `新工作流：${request}`,
+        draftPrompt: (target: string) =>
+            [
+                '用户在下面的<request>里描述了一个要反复执行的流程，把它写成一个工作流。',
+                '',
+                '先用skill工具读extension-creator，按其中“Workflows”一节的格式起草：',
+                `- 文件：${target}，name用小写字母、数字和-，文件名和name一致`,
+                '- 每次运行会变的东西（问题描述、文件、分支等）做成inputs',
+                '- 每一步交给合适的agent（scout侦察、coder编码、tester测试、debugger修bug、reviewer审查、writer文档）；能用命令验收的步骤加verify',
+                '- 推送、发布、删除这类动作前加人工关卡（gate）',
+                '- 不要写进密钥、token和本机的绝对路径',
+                '- 只有缺了必不可少的信息才问用户，其余按合理的做法定下来',
+                '',
+                '写好后调用workflow_check检查，有问题就改，直到通过。最后用一两句话说明它做什么、需要哪些输入，并告诉用户文件已经写好，可以到工作流看板运行。',
+            ].join('\n'),
     },
     {
         user: '## User',
@@ -72,6 +98,7 @@ const TEXT = bilingual(
         omitted: '… (middle omitted) …',
         projectMissing: (folder) => `The project folder does not exist: ${folder}`,
         empty: 'This thread has no content yet',
+        noDescription: 'Describe the process to write as a workflow first',
         inProject: (file) => `${file} (under the project root)`,
         title: (kind, source) => `${kind === 'workflow' ? 'Save as a workflow' : 'Save as a skill'}: ${source}`,
         workflowPrompt: (target) =>
@@ -99,6 +126,21 @@ const TEXT = bilingual(
                 '',
                 'When it is written, say in which situations it will be used.',
             ].join('\n'),
+        draftTitle: (request) => `New workflow: ${request}`,
+        draftPrompt: (target) =>
+            [
+                'In <request> below, the user describes a process to run again and again. Write it as a workflow.',
+                '',
+                'First read extension-creator with the skill tool, then draft the workflow in the format of its "Workflows" section:',
+                `- File: ${target}; the name uses lower-case letters, digits and -, and the file name matches the name`,
+                '- What changes from one run to the next (the problem description, files, branches and so on) becomes inputs',
+                '- Give every step to a fitting agent (scout explores, coder codes, tester tests, debugger fixes bugs, reviewer reviews, writer writes docs); add verify to steps a command can check',
+                '- Put a human gate (gate) before actions such as pushing, publishing or deleting',
+                '- Do not write keys, tokens or absolute paths of this machine into it',
+                '- Ask the user only when something essential is missing; settle the rest the way that makes sense',
+                '',
+                'When it is written, check it with workflow_check and fix every problem until it passes. Finally say in a sentence or two what it does and which inputs it needs, and tell the user the file is ready to run from the workflow board.',
+            ].join('\n'),
     },
 );
 
@@ -106,6 +148,7 @@ export interface DistillDeps {
     readonly threads: ThreadStore;
     readonly turns: TurnService;
     readonly projects: ProjectService;
+    readonly settings: SettingsService;
     readonly log: Logger;
     /** `<data>/workflows` and `<data>/extensions`, for user-level results. */
     readonly workflowsDir: string;
@@ -173,32 +216,21 @@ export class DistillService {
     }
 
     async start(input: { threadId: string; kind: DistillKind; scope: 'project' | 'user' }): Promise<ThreadMeta> {
-        const { threads, turns, projects, log } = this.#deps;
+        const { threads, turns, log } = this.#deps;
         const words = textOf(TEXT);
         const source = threads.get(input.threadId);
-        const project = await projects.get(source.projectId);
-        if (project.missing) {
-            throw new RpcError(RpcErrorCode.Rejected, words.projectMissing(project.path));
-        }
+        const project = await this.#project(source.projectId);
         const text = transcript(threads, source.id);
         if (!text.trim()) {
             throw new RpcError(RpcErrorCode.Rejected, words.empty);
         }
-        const target =
-            input.kind === 'workflow'
-                ? input.scope === 'project'
-                    ? words.inProject(`${path.join('.xora', 'workflows')}${path.sep}<name>.yaml`)
-                    : path.join(this.#deps.workflowsDir, '<name>.yaml')
-                : input.scope === 'project'
-                  ? words.inProject(`${path.join('.xora', 'skills', '<name>')}${path.sep}SKILL.md`)
-                  : path.join(this.#deps.extensionsDir, 'skills', '<name>', 'SKILL.md');
+        const target = this.#target(input.kind, input.scope);
         const thread = threads.create({
             projectId: project.id,
             title: words.title(input.kind, clip(source.title, 20)),
             engine: 'xora',
             model: source.model,
-            // Every file is written through an approval card: the user reviews the draft before it exists.
-            mode: 'ask',
+            mode: this.#mode(project),
             effort: source.effort,
             ...(input.kind === 'workflow' ? { extra: { role: DISTILL_ROLE } } : {}),
         });
@@ -206,11 +238,83 @@ export class DistillService {
             turns.setHostTools(thread.id, this.#checkTool(project.path));
         }
         const prompt = input.kind === 'workflow' ? words.workflowPrompt(target) : words.skillPrompt(target);
-        await turns.start(
-            thread.id,
+        const started = await this.#open(
+            thread,
             `${prompt}\n\n<thread_transcript title="${source.title.replaceAll('"', "'")}">\n${text}\n</thread_transcript>`,
         );
         log.info(`distill ${input.kind} from ${source.id} in ${thread.id}`);
+        return started;
+    }
+
+    /**
+     * A thread whose agent writes a new workflow from what the user describes (`workflow.draft`): distilling into a
+     * workflow with the user's request in place of a thread's transcript.
+     */
+    async draft(input: { projectId: string; description: string; scope: 'project' | 'user' }): Promise<ThreadMeta> {
+        const { threads, turns, settings, log } = this.#deps;
+        const words = textOf(TEXT);
+        const project = await this.#project(input.projectId);
+        const description = input.description.trim();
+        if (!description) {
+            throw new RpcError(RpcErrorCode.InvalidParams, words.noDescription);
+        }
+        // The model and effort a new thread of the user's gets.
+        const current = settings.get();
+        const thread = threads.create({
+            projectId: project.id,
+            title: words.draftTitle(clip(description.replace(/\s+/g, ' '), 20)),
+            engine: 'xora',
+            model: project.defaults?.model ?? current.defaultModel,
+            mode: this.#mode(project),
+            effort: current.defaultEffort,
+            extra: { role: DISTILL_ROLE },
+        });
+        turns.setHostTools(thread.id, this.#checkTool(project.path));
+        const prompt = words.draftPrompt(this.#target('workflow', input.scope));
+        const started = await this.#open(thread, `${prompt}\n\n<request>\n${description}\n</request>`);
+        log.info(`draft workflow in ${thread.id}`);
+        return started;
+    }
+
+    async #project(projectId: string): Promise<Project> {
+        const project = await this.#deps.projects.get(projectId);
+        if (project.missing) {
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).projectMissing(project.path));
+        }
+        return project;
+    }
+
+    /**
+     * The mode a thread the user opens gets, not a fixed one: in ask mode they review the file in an approval card
+     * before it exists; in auto edit or full mode the agent writes it into the project without asking.
+     */
+    #mode(project: Project): PermissionMode {
+        return project.defaults?.mode ?? this.#deps.settings.get().defaultMode;
+    }
+
+    /** The file the agent writes, as the prompt names it. */
+    #target(kind: DistillKind, scope: 'project' | 'user'): string {
+        const words = textOf(TEXT);
+        if (kind === 'workflow') {
+            return scope === 'project'
+                ? words.inProject(`${path.join('.xora', 'workflows')}${path.sep}<name>.yaml`)
+                : path.join(this.#deps.workflowsDir, '<name>.yaml');
+        }
+        return scope === 'project'
+            ? words.inProject(`${path.join('.xora', 'skills', '<name>')}${path.sep}SKILL.md`)
+            : path.join(this.#deps.extensionsDir, 'skills', '<name>', 'SKILL.md');
+    }
+
+    /** Starts the writing turn; a thread that cannot start (no model, a spent budget) does not stay behind empty. */
+    async #open(thread: ThreadMeta, prompt: string): Promise<ThreadMeta> {
+        const { threads, turns } = this.#deps;
+        try {
+            await turns.start(thread.id, prompt);
+        } catch (error) {
+            turns.setHostTools(thread.id, undefined);
+            threads.delete(thread.id);
+            throw error;
+        }
         return threads.get(thread.id);
     }
 

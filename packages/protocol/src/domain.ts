@@ -473,6 +473,14 @@ export type ModelOption = z.infer<typeof ModelOptionSchema>;
 // ---------------------------------------------------------------------------------------------------------
 // Settings
 
+/**
+ * The permissions a workflow run's steps get: `default` keeps each step's own (its agent's mode, the project's for
+ * commands); `auto_edit` lets every step edit files; `full` allows everything inside the workspace. Read-only agents
+ * stay read-only.
+ */
+export const WorkflowRunModeSchema = z.enum(['default', 'auto_edit', 'full']);
+export type WorkflowRunMode = z.infer<typeof WorkflowRunModeSchema>;
+
 export const SettingsSchema = z.object({
     language: LanguageSettingSchema,
     theme: z.enum(['system', 'light', 'dark']),
@@ -507,6 +515,13 @@ export const SettingsSchema = z.object({
     }),
     /** Agent teams (06): members of one run that work at the same time. */
     team: z.object({ maxParallel: z.number().int().min(1).max(8) }),
+    /** What the user chose when they last started a team run or a workflow: the next one starts from it. */
+    lastChoices: z.object({
+        teamAutonomy: z.enum(['L0', 'L1', 'L2', 'L3']),
+        teamMode: z.enum(['standard', 'hypotheses']),
+        teamBudget: z.number().positive().nullable(),
+        workflowMode: WorkflowRunModeSchema,
+    }),
 });
 export type Settings = z.infer<typeof SettingsSchema>;
 
@@ -791,6 +806,8 @@ export const WorkflowRunSchema = z.object({
     steps: z.array(WorkflowStepRunSchema),
     budget: MoneySchema.nullable(),
     cost: MoneySchema,
+    /** Absent on runs from before it existed: `default`. */
+    mode: WorkflowRunModeSchema.optional(),
     createdAt: z.number(),
     updatedAt: z.number(),
     endedAt: z.number().optional(),

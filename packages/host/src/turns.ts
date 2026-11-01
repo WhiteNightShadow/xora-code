@@ -1554,8 +1554,9 @@ export class TurnService {
                 ...(message ? { _meta: { xora: { message } } } : {}),
             };
         };
-        const thread = threads.get(running.threadId);
         const facts = await this.#facts(running, request);
+        // Read after the facts: from here to the card nothing waits, so a mode change lands before or reconsiders it.
+        const thread = threads.get(running.threadId);
         // The engine only offers allowed MCP tools; a call to another one is refused all the same (06 §4).
         const granted = this.#hostTools.get(running.threadId)?.mcpTools;
         if (
@@ -1655,6 +1656,12 @@ export class TurnService {
                                 .catch(() => undefined);
                         }
                     },
+                    // A mode change while it waits decides the call again; a hook's question stays a question.
+                    {
+                        projectId: running.projectId,
+                        projectRoot: running.cwd,
+                        ...(hookDecision === 'ask' ? { hookAsked: true } : {}),
+                    },
                 )
                 .then(resolve);
         });
@@ -1663,7 +1670,7 @@ export class TurnService {
                 ...approvalItem,
                 status: outcome.status,
                 ...(outcome.decision ? { decision: outcome.decision } : {}),
-                decidedBy: 'user',
+                decidedBy: outcome.decidedBy ?? 'user',
                 ...(outcome.message ? { message: outcome.message } : {}),
             });
         }

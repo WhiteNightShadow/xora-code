@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS: Settings = {
     update: { channel: 'stable', feedUrl: DEFAULT_FEED_URL, autoCheck: true },
     budgets: { dailyLimit: null, monthlyLimit: null, turnLimit: null },
     team: { maxParallel: 3 },
+    lastChoices: { teamAutonomy: 'L1', teamMode: 'standard', teamBudget: null, workflowMode: 'default' },
 };
 
 const KEY = 'settings';
