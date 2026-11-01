@@ -519,3 +519,43 @@ describe('usage without a price', () => {
         server.reset();
     });
 });
+
+describe('manual compaction', () => {
+    it('compacts in the same thread, drops its context at once and counts the summary tokens', async () => {
+        server.reset();
+        server.respondWith((request) => {
+            if (request.method !== 'POST') return undefined;
+            const body = request.body as { messages?: Array<{ content: unknown }> };
+            return JSON.stringify(body.messages?.[0]?.content ?? '').includes('compress the earlier part')
+                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.', {
+                      usage: { prompt_tokens: 3000, completion_tokens: 40 },
+                  })
+                : openaiText('x'.repeat(2000), { usage: { prompt_tokens: 30_000, completion_tokens: 500 } });
+        });
+        const { harness } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: gitRepo() });
+        const thread = await ui.request('thread.create', { projectId: project.id });
+        const ended = (count: number) =>
+            waitFor(async () => {
+                const read = await ui.request('thread.read', { threadId: thread.id });
+                return read.events.filter((event) => event.kind === 'turn.completed').length >= count
+                    ? true
+                    : undefined;
+            }, `turn ${count} to end`);
+        for (let turn = 1; turn <= 4; turn++) {
+            await ui.request('turn.start', { threadId: thread.id, text: `turn ${turn} ${'y'.repeat(4000)}` });
+            await ended(turn);
+        }
+        const [before] = await ui.request('thread.list', { projectId: project.id });
+        expect(before?.context?.used).toBe(30_000);
+
+        await ui.request('turn.compact', { threadId: thread.id });
+        await ended(5);
+        const threads = await ui.request('thread.list', { projectId: project.id });
+        expect(threads.map((item) => item.id)).toEqual([thread.id]);
+        expect(threads[0]?.context?.used).toBeLessThan(30_000);
+        expect(threads[0]?.tokens).toEqual({ input: 4 * 30_000 + 3000, output: 4 * 500 + 40 });
+        server.reset();
+    });
+});

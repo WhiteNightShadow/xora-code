@@ -1,4 +1,4 @@
-import type { AssistantPart, Message, UserPart } from '@xora/providers';
+import type { AssistantPart, Message, ModelEvent, UserPart } from '@xora/providers';
 import { completeModel } from './deps.ts';
 import type { EngineSession, ResolvedTarget } from './session.ts';
 
@@ -120,6 +120,8 @@ export interface CompactionResult {
     readonly before: number;
     readonly after: number;
     readonly summary?: string;
+    /** The summary request as the vendor reported it, so its tokens are counted like any other request. */
+    readonly done?: Extract<ModelEvent, { type: 'done' }>;
 }
 
 /** Level 2: replace older tool results with placeholders, keeping the latest `keepTools` intact. */
@@ -279,5 +281,5 @@ export async function summarise(
         tokensBefore: before,
         tokensAfter: after,
     });
-    return { level: 3, before, after, summary };
+    return { level: 3, before, after, summary, done };
 }

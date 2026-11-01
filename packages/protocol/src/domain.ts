@@ -734,6 +734,8 @@ export const WorkflowInfoSchema = z.object({
     path: z.string(),
     /** Problems in the file; a workflow with any cannot run. */
     issues: z.array(z.object({ path: z.string(), message: z.string(), line: z.number().optional() })),
+    /** A project workflow in a project not trusted yet: it cannot run until the user trusts the project. */
+    untrusted: z.boolean(),
     inputs: z.array(
         z.object({
             name: z.string(),

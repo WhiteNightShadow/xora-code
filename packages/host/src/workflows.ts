@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
     bilingual,
@@ -101,6 +101,7 @@ const TEXT = bilingual(
         tooLarge: '文件太大（上限256kb）',
         nameTaken: (name: string) => `另一个文件已经用了名字${name}`,
         untrusted: '项目还没有被信任：信任后才能运行项目里的工作流',
+        removeBusy: '这个工作流还有没结束的运行：先停止它再删除',
         notFound: (key: string) => `找不到工作流${key}`,
         projectOnly: '只有项目里的工作流能自动运行',
         fixFirst: '工作流有问题，先修好再启用自动运行',
@@ -220,6 +221,7 @@ const TEXT = bilingual(
         tooLarge: 'File too large (256 KB at most)',
         nameTaken: (name) => `Another file already uses the name ${name}`,
         untrusted: 'The project is not trusted yet: trust it to run its workflows',
+        removeBusy: 'A run of this workflow is still under way: stop it before deleting it',
         notFound: (key) => `Workflow ${key} not found`,
         projectOnly: 'Only workflows in a project can run automatically',
         fixFirst: 'The workflow has problems: fix them before switching on automatic runs',
@@ -399,7 +401,10 @@ interface DefinitionEntry {
     readonly path: string;
     readonly hash: string;
     readonly parsed: WorkflowParse;
+    /** Everything that stops it from running, an untrusted project included (it is listed last). */
     readonly problems: readonly string[];
+    /** A project workflow in a project not trusted yet; the list shows it as the project's state, not a problem. */
+    readonly untrusted: boolean;
 }
 
 interface TriggerRow {
@@ -585,7 +590,8 @@ export class WorkflowService {
                     problems.push(text.nameTaken(name));
                 }
                 seen.add(name);
-                if (source === 'project' && !project.trusted) {
+                const untrusted = source === 'project' && !project.trusted;
+                if (untrusted) {
                     problems.push(text.untrusted);
                 }
                 entries.push({
@@ -596,6 +602,7 @@ export class WorkflowService {
                     hash: createHash('sha256').update(content).digest('hex'),
                     parsed,
                     problems,
+                    untrusted,
                 });
             }
         }
@@ -627,7 +634,10 @@ export class WorkflowService {
                       message: issue.message,
                       ...(issue.line !== undefined ? { line: issue.line } : {}),
                   }))),
-            ...entry.problems.map((message) => ({ path: '', message })),
+            ...(entry.untrusted ? entry.problems.slice(0, -1) : entry.problems).map((message) => ({
+                path: '',
+                message,
+            })),
         ];
         const row = this.#triggerRow(project.id, entry.key);
         const trigger = definition?.trigger;
@@ -641,6 +651,7 @@ export class WorkflowService {
             source: entry.source,
             path: entry.path,
             issues,
+            untrusted: entry.untrusted,
             inputs: Object.entries(definition?.inputs ?? {}).map(([name, input]) => ({
                 name,
                 type: input.type,
@@ -722,6 +733,30 @@ export class WorkflowService {
         this.#deps.log.info(`workflow ${key} in ${projectId}: triggers ${enabled ? 'on' : 'off'}`);
         this.#deps.onTriggersChanged?.();
         return this.#info(project, entry);
+    }
+
+    /** Deletes a workflow's file; its runs stay in the history. Refused while one of its runs is under way. */
+    async remove(projectId: string, key: string): Promise<void> {
+        await this.#ready;
+        const project = await this.#deps.projects.get(projectId);
+        const entry = await this.#entry(project, key);
+        const busy = [...this.#runs.values()].some(
+            (state) =>
+                state.record.projectId === projectId && state.record.key === key && !TERMINAL.has(state.record.status),
+        );
+        if (busy) {
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).removeBusy);
+        }
+        await rm(entry.path, { force: true });
+        const row = this.#triggerRow(projectId, key);
+        if (row) {
+            this.#deps.db.run('delete from workflow_triggers where project_id = ? and workflow_key = ?', [
+                projectId,
+                key,
+            ]);
+            if (row.enabled === 1) this.#deps.onTriggersChanged?.();
+        }
+        this.#deps.log.info(`workflow ${key} in ${projectId}: deleted ${entry.path}`);
     }
 
     async webhook(projectId: string, key: string): Promise<{ url: string; token: string }> {
@@ -2351,5 +2386,9 @@ export function registerWorkflowHandlers(
     peer.handle('workflow.stop', ({ runId }) => workflows.stop(runId));
     peer.handle('workflow.resume', ({ runId, budget }) => workflows.resume(runId, budget));
     peer.handle('workflow.triggers', ({ projectId, key, enabled }) => workflows.setTriggers(projectId, key, enabled));
+    peer.handle('workflow.delete', async ({ projectId, key }) => {
+        await workflows.remove(projectId, key);
+        return { ok: true } as const;
+    });
     peer.handle('workflow.webhook', ({ projectId, key }) => workflows.webhook(projectId, key));
 }

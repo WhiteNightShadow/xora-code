@@ -13,14 +13,15 @@ const TEXT = bilingual(
         externalEngine: '外部引擎的线程不能回退或分叉对话；要恢复文件可以用每一轮的“撤销这一轮”',
         running: '线程正在运行，先停止再操作',
         noTurn: '找不到这一轮，或者它已经回退过了',
-        forkTitle: (title: string) => `${title}（分叉）`,
+        // A fork of a fork keeps one mark.
+        forkTitle: (title: string) => `${title.replace(/（分叉）$/, '')}（分叉）`,
     },
     {
         externalEngine:
             'Threads on an external engine cannot rewind or fork the conversation; to restore files, use "Undo this turn" on each turn',
         running: 'The thread is running; stop it first',
         noTurn: 'This turn was not found, or it was already rewound',
-        forkTitle: (title) => `${title} (fork)`,
+        forkTitle: (title) => `${title.replace(/ \(fork\)$/, '')} (fork)`,
     },
 );
 

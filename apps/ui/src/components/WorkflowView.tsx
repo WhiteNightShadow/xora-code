@@ -308,10 +308,12 @@ function TriggerSummary({ info }: { info: WorkflowInfo }) {
 
 function WorkflowCard({
     projectId,
+    projectPath,
     info,
     onChanged,
 }: {
     projectId: string;
+    projectPath: string;
     info: WorkflowInfo;
     onChanged: () => void;
 }) {
@@ -369,6 +371,20 @@ function WorkflowCard({
         const updated = await attempt(() => host.call('workflow.triggers', { projectId, key: info.key, enabled }));
         if (updated) onChanged();
     };
+    const remove = async () => {
+        const file =
+            projectPath && info.path.startsWith(projectPath)
+                ? info.path.slice(projectPath.length).replace(/^[\\/]/, '')
+                : info.path;
+        const question = info.source === 'user' ? s.workflow.confirmRemoveUser : s.workflow.confirmRemove;
+        if (!window.confirm(format(question, { title: info.title, path: file }))) return;
+        const removed = await attempt(() => host.call('workflow.delete', { projectId, key: info.key }));
+        if (removed) {
+            toast(s.workflow.removed, 'success');
+            onChanged();
+        }
+    };
+    const runnable = info.issues.length === 0 && !info.untrusted;
     return (
         <div className="workflow-card">
             <div className="workflow-card__head">
@@ -377,10 +393,12 @@ function WorkflowCard({
                     <Badge tone="accent">{s.workflow.source[info.source]}</Badge>
                     {info.issues.length > 0 && <Badge tone="error">{s.workflow.issues}</Badge>}
                 </button>
+                <IconButton icon="trash" label={s.workflow.remove} onClick={() => void remove()} />
                 <button
                     type="button"
                     className="button button--small button--primary"
-                    disabled={info.issues.length > 0}
+                    disabled={!runnable}
+                    title={info.untrusted ? s.workflow.needsTrust : undefined}
                     onClick={() => setOpen(true)}
                 >
                     {s.workflow.run}
@@ -403,7 +421,7 @@ function WorkflowCard({
                     ))}
                 </ul>
             )}
-            {open && info.issues.length === 0 && (
+            {open && runnable && (
                 <div className="dialog workflow-card__form">
                     {info.inputs.map((input) => (
                         <Field
@@ -459,7 +477,7 @@ function WorkflowCard({
                     </div>
                 </div>
             )}
-            {info.source === 'project' && automatic && info.issues.length === 0 && (
+            {info.source === 'project' && automatic && runnable && (
                 <div className="workflow-card__triggers">
                     <Field
                         label={s.workflow.triggers}
@@ -512,6 +530,7 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
     const project = useApp((state) => state.projects.find((item) => item.id === projectId));
     const allRuns = useApp((state) => state.workflowRuns);
     const [list, setList] = useState<WorkflowInfo[] | undefined>();
+    const [trusting, setTrusting] = useState(false);
     const load = () => {
         void host
             .call('workflow.list', { projectId })
@@ -526,7 +545,15 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
             )
             .catch(() => undefined);
     };
-    useEffect(load, [projectId]);
+    // Trusting the project here or in settings changes what can run.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: reloads when the project's trust changes
+    useEffect(load, [projectId, project?.trusted]);
+    const trust = async () => {
+        setTrusting(true);
+        const done = await attempt(() => host.call('project.trust', { projectId, trusted: true }));
+        setTrusting(false);
+        if (done) load();
+    };
     const runs = Object.values(allRuns)
         .filter((run) => run.projectId === projectId && !run.parentRunId)
         .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -548,6 +575,23 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
             </header>
             <div className="wf-board__body">
                 <p className="wf-board__intro">{s.workflow.boardIntro}</p>
+                {list?.some((info) => info.untrusted) && (
+                    <div className="wf-board__trust">
+                        <Icon name="shield" size={18} className="wf-board__trust-icon" />
+                        <div className="wf-board__trust-text">
+                            <strong>{s.workflow.untrustedTitle}</strong>
+                            <span>{s.workflow.untrustedHint}</span>
+                        </div>
+                        <button
+                            type="button"
+                            className="button button--primary"
+                            disabled={trusting}
+                            onClick={() => void trust()}
+                        >
+                            {trusting ? <Spinner /> : null} {s.workflow.trust}
+                        </button>
+                    </div>
+                )}
                 {!list ? (
                     <Empty>
                         <Spinner />
@@ -563,7 +607,13 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
                 ) : (
                     <div className="workflow-list">
                         {list.map((info) => (
-                            <WorkflowCard key={info.key} projectId={projectId} info={info} onChanged={load} />
+                            <WorkflowCard
+                                key={info.key}
+                                projectId={projectId}
+                                projectPath={project?.path ?? ''}
+                                info={info}
+                                onChanged={load}
+                            />
                         ))}
                     </div>
                 )}

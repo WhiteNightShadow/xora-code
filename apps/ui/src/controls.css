@@ -586,6 +586,35 @@
     animation: xk-fade-in var(--xk-duration-base) var(--xk-ease-out) backwards;
 }
 
+/* `/compact` is a divider in the thread, with the focus the user gave under it */
+
+.turn--compaction {
+    padding-top: 2px;
+    padding-bottom: 2px;
+}
+
+.compaction__focus {
+    margin-top: 4px;
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+    text-align: center;
+}
+
+/* Rewind and fork show up on the turn the pointer is on */
+
+.turn__history {
+    display: inline-flex;
+    gap: 14px;
+    opacity: 0;
+    transition: opacity var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.turn:hover .turn__history,
+.turn__history:focus-within,
+.turn__history.is-open {
+    opacity: 1;
+}
+
 /* Sidebar: one "+" per project, and its workflow board */
 
 .project__create .icon-button {
@@ -661,6 +690,49 @@
 .wf-board__intro {
     margin-top: 0;
     margin-bottom: 16px;
+    color: var(--xk-text-muted);
+}
+
+.wf-board__trust {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--xk-border);
+    border-radius: 12px;
+    background: var(--xk-accent-subtle);
+    animation: xk-fade-in var(--xk-duration-base) var(--xk-ease-out) backwards;
+}
+
+.wf-board__trust-icon {
+    flex: none;
+    color: var(--xk-accent-text);
+}
+
+.wf-board__trust-text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.wf-board__trust-text span {
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.wf-board__trust > .button {
+    flex: none;
+}
+
+/* A workflow's title takes the row; delete and run sit together at its end */
+.workflow-card__title {
+    margin-right: auto;
+}
+
+.workflow-card__head > .icon-button {
     color: var(--xk-text-muted);
 }
 
@@ -813,8 +885,13 @@
     .popover__panel,
     .draft-banner,
     .compaction__summary,
-    .wf-board__empty {
+    .wf-board__empty,
+    .wf-board__trust {
         animation: none;
+    }
+
+    .turn__history {
+        transition: none;
     }
 
     .ring__fill,

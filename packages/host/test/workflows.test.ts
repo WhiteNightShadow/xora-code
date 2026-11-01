@@ -302,17 +302,25 @@ describe('workflow runs', () => {
         await connectCustom(first.ui);
         const project = await first.ui.request('project.add', { path: repo });
 
-        // An untrusted project's workflows are listed with the reason they cannot run.
+        // An untrusted project's workflows are listed as waiting for trust, not as broken, and cannot start.
         const untrusted = await first.ui.request('workflow.list', { projectId: project.id });
-        expect(untrusted.map((info) => [info.key, info.issues.map((issue) => issue.message)])).toEqual([
-            ['project:bugfix', ['项目还没有被信任：信任后才能运行项目里的工作流']],
+        expect(untrusted.map((info) => [info.key, info.untrusted, info.issues])).toEqual([
+            ['project:bugfix', true, []],
         ]);
+        await expect(
+            first.ui.request('workflow.start', {
+                projectId: project.id,
+                key: 'project:bugfix',
+                inputs: { issue: 'x' },
+            }),
+        ).rejects.toThrow('项目还没有被信任：信任后才能运行项目里的工作流');
         await first.ui.request('project.trust', { projectId: project.id, trusted: true });
         const [info] = await first.ui.request('workflow.list', { projectId: project.id });
         expect(info).toMatchObject({
             key: 'project:bugfix',
             title: '修缺陷',
             issues: [],
+            untrusted: false,
             inputs: [{ name: 'issue', type: 'string' }],
             triggers: { enabled: false, stale: false },
         });
@@ -648,9 +656,10 @@ steps:
         await host.ui.request('settings.update', { patch: { language: 'en' } });
         const project = await host.ui.request('project.add', { path: repo });
         const [untrusted] = await host.ui.request('workflow.list', { projectId: project.id });
-        expect(untrusted?.issues.map((issue) => issue.message)).toEqual([
+        expect(untrusted).toMatchObject({ untrusted: true, issues: [] });
+        await expect(host.ui.request('workflow.start', { projectId: project.id, key: 'project:ship' })).rejects.toThrow(
             'The project is not trusted yet: trust it to run its workflows',
-        ]);
+        );
         await host.ui.request('project.trust', { projectId: project.id, trusted: true });
         await expect(
             host.ui.request('workflow.triggers', { projectId: project.id, key: 'project:ship', enabled: true }),
@@ -668,6 +677,35 @@ steps:
         }, 'failed run');
         expect(done.steps[0]?.note).toBe('The command was denied by a permission rule or not approved');
         expect(done.note).toBe('Step push failed: The command was denied by a permission rule or not approved');
+    }, 60_000);
+
+    it('deletes a workflow file, but not while one of its runs is under way', async () => {
+        const hold = 'name: hold\nsteps:\n  - id: wait\n    gate: human\n    message: 继续吗？\n';
+        const repo = gitRepo({ 'hold.yaml': hold, 'other.yaml': hold.replace('name: hold', 'name: other') });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        const host = await startHost(dataDir);
+        const seen: Approval[] = [];
+        approve(host.ui, seen, new Set(['workflow_gate']));
+        const project = await host.ui.request('project.add', { path: repo });
+
+        // Deleting runs nothing, so an untrusted project's workflow can go.
+        await host.ui.request('workflow.delete', { projectId: project.id, key: 'project:other' });
+        expect(existsSync(path.join(repo, '.xora', 'workflows', 'other.yaml'))).toBe(false);
+
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        const run = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:hold' });
+        await waitFor(() => seen.find((approval) => approval.toolName === 'workflow_gate'), 'gate card');
+        await expect(
+            host.ui.request('workflow.delete', { projectId: project.id, key: 'project:hold' }),
+        ).rejects.toThrow('这个工作流还有没结束的运行：先停止它再删除');
+        expect(existsSync(path.join(repo, '.xora', 'workflows', 'hold.yaml'))).toBe(true);
+
+        await host.ui.request('workflow.stop', { runId: run.id });
+        await host.ui.request('workflow.delete', { projectId: project.id, key: 'project:hold' });
+        expect(await host.ui.request('workflow.list', { projectId: project.id })).toEqual([]);
+        // Its runs stay in the history.
+        const runs = await host.ui.request('workflow.runs', { projectId: project.id });
+        expect(runs.map((item) => [item.id, item.status])).toEqual([[run.id, 'cancelled']]);
     }, 60_000);
 
     it('distills a thread into a workflow file that the check tool accepts', async () => {

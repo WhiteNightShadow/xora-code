@@ -141,6 +141,23 @@ function text(value: string): acp.ContentBlock {
     return { type: 'text', text: value };
 }
 
+/** A finished model request as the host records it for usage and cost. */
+function requestRecord(target: ResolvedTarget, done: Extract<ModelEvent, { type: 'done' }>) {
+    return {
+        provider: target.connection.preset.id,
+        channel: target.connection.preset.channel,
+        model: target.model.id,
+        family: target.model.family,
+        pricing: target.model.pricing,
+        usage: done.usage ?? null,
+        latencyMs: done.latencyMs,
+        ttftMs: done.ttftMs,
+        requestId: done.requestId,
+        stopReason: done.stopReason,
+        status: 'ok',
+    };
+}
+
 /** Converts ACP prompt blocks into the user message the model sees. */
 export function toUserMessage(prompt: readonly acp.ContentBlock[], session: EngineSession): Message {
     const parts: UserPart[] = [];
@@ -409,6 +426,7 @@ export class TurnRunner {
                 // Nothing to summarise yet: only older tool output was replaced, which is level 2.
                 _meta: { xora: { level: result ? level : 2, before: result?.before, after: result?.after } },
             } as acp.SessionUpdate);
+            this.#reportContext(result?.done ? { target, done: result.done } : undefined);
             return result !== undefined;
         } catch (error) {
             this.#io.update({
@@ -418,8 +436,29 @@ export class TurnRunner {
                 error: error instanceof Error ? error.message : String(error),
             } as acp.SessionUpdate);
             pruneToolResults(session, 2);
+            this.#reportContext();
             return false;
         }
+    }
+
+    /**
+     * The context as it is after a compaction, so the meter drops at once instead of at the next request (a manual
+     * `/compact` has none); carries the summary request, counted like any other.
+     */
+    #reportContext(summary?: { target: ResolvedTarget; done: Extract<ModelEvent, { type: 'done' }> }): void {
+        const session = this.#session;
+        let size: number;
+        try {
+            size = contextBudget(session, resolveTarget(session.config.model));
+        } catch {
+            return;
+        }
+        this.#io.update({
+            sessionUpdate: 'usage_update',
+            used: currentContextTokens(session, systemSegments(session.config.layers)),
+            size,
+            ...(summary ? { _meta: { xora: { request: requestRecord(summary.target, summary.done) } } } : {}),
+        });
     }
 
     #buildRequest(target: ResolvedTarget): ModelRequest {
@@ -563,23 +602,7 @@ export class TurnRunner {
             sessionUpdate: 'usage_update',
             used: promptTokens,
             size: contextBudget(session, target),
-            _meta: {
-                xora: {
-                    request: {
-                        provider: target.connection.preset.id,
-                        channel: target.connection.preset.channel,
-                        model: target.model.id,
-                        family: target.model.family,
-                        pricing: target.model.pricing,
-                        usage: done.usage ?? null,
-                        latencyMs: done.latencyMs,
-                        ttftMs: done.ttftMs,
-                        requestId: done.requestId,
-                        stopReason: done.stopReason,
-                        status: 'ok',
-                    },
-                },
-            },
+            _meta: { xora: { request: requestRecord(target, done) } },
         });
     }
 

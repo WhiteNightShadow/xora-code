@@ -536,6 +536,37 @@ describe('tool hooks', () => {
         h.close();
     }, 30_000);
 
+    it('reports the smaller context and counts the summary request right after /compact', async () => {
+        server.reset();
+        server.respondWith((request) => {
+            const body = request.body as { messages: Array<{ role: string; content: unknown }> };
+            return JSON.stringify(body.messages[0]?.content ?? '').includes('compress the earlier part')
+                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.', {
+                      usage: { prompt_tokens: 3000, completion_tokens: 40 },
+                  })
+                : openaiText('x'.repeat(2000));
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace());
+        for (let turn = 0; turn < 4; turn++) {
+            await h.client.request('session/prompt', {
+                sessionId,
+                prompt: [{ type: 'text', text: `turn ${turn} ${'y'.repeat(4000)}` }],
+            });
+        }
+        type Usage = Extract<acp.SessionUpdate, { sessionUpdate: 'usage_update' }>;
+        const usage = () => h.updates.filter((update): update is Usage => update.sessionUpdate === 'usage_update');
+        const before = usage().at(-1);
+        await h.client.request('_xora/session/compact', { sessionId });
+        const after = usage().at(-1);
+        expect(after).not.toBe(before);
+        expect(after?.used).toBeLessThan(before?.used ?? 0);
+        const request = (after?._meta as { xora?: { request?: { usage?: { inputTokens?: number } } } } | undefined)
+            ?.xora?.request;
+        expect(request?.usage?.inputTokens).toBe(3000);
+        h.close();
+    }, 30_000);
+
     it('does not call the host when no hook events are configured', async () => {
         const cwd = workspace();
         writeFileSync(path.join(cwd, 'x.txt'), 'x\n');

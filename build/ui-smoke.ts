@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -307,7 +307,22 @@ try {
     }
     await step(page, '撤销后文件恢复');
 
-    // M3-3: fork the thread from its turn, then go back to before that turn in the fork (files untouched).
+    // Compacting stays in this thread: a divider in the conversation, no "/compact" message, no new thread.
+    const rows = await page.locator('.thread-row').count();
+    await page.locator('.composer').getByRole('button', { name: '上下文', exact: true }).click();
+    await page.locator('.context-card').getByRole('button', { name: '立即压缩', exact: true }).click();
+    await page.locator('.turn--compaction .compaction.is-completed').waitFor();
+    await page.keyboard.press('Escape');
+    if ((await page.locator('.user-message', { hasText: '/compact' }).count()) > 0) {
+        throw new Error('"/compact" shows up as a message');
+    }
+    if ((await page.locator('.thread-row').count()) !== rows) {
+        throw new Error('compacting made another thread');
+    }
+    await step(page, '压缩留在当前线程');
+
+    // M3-3: fork the thread from an earlier turn (the last one offers none: it would only copy the thread), then go
+    // back to before that turn in the fork (files untouched).
     await page.getByRole('button', { name: '从这一轮分叉' }).first().click();
     await page.locator('.toast', { hasText: '已分叉到新线程' }).waitFor();
     await page.locator('.sidebar', { hasText: '（分叉）' }).waitFor();
@@ -423,6 +438,11 @@ try {
     }
 
     // M5: the project's workflow board; "new workflow" asks for a description (not sent here).
+    await mkdir(path.join(repo, '.xora', 'workflows'), { recursive: true });
+    await writeFile(
+        path.join(repo, '.xora', 'workflows', 'tidy.yaml'),
+        'name: tidy\ntitle: 整理文件\nsteps:\n  - id: done\n    gate: human\n    message: 整理好了吗\n',
+    );
     await page.locator('.project__board').first().click();
     await page.locator('.wf-board').getByRole('button', { name: '新建工作流', exact: true }).click();
     await page.locator('.modal textarea').pressSequentially('每天跑一遍测试');
@@ -431,6 +451,24 @@ try {
     }
     await page.locator('.modal').getByRole('button', { name: '取消', exact: true }).click();
     await step(page, '工作流看板能新建工作流');
+    // A workflow of the project waits for the project to be trusted, right on the board; it can be deleted.
+    const tidy = page.locator('.workflow-card', { hasText: '整理文件' });
+    const trustBanner = page.locator('.wf-board__trust');
+    await trustBanner.waitFor();
+    if (await tidy.getByRole('button', { name: '运行', exact: true }).isEnabled()) {
+        throw new Error('a workflow of an untrusted project can be run');
+    }
+    await trustBanner.getByRole('button', { name: '信任这个项目', exact: true }).click();
+    await trustBanner.waitFor({ state: 'detached' });
+    if (!(await tidy.getByRole('button', { name: '运行', exact: true }).isEnabled())) {
+        throw new Error('the workflow cannot run once the project is trusted');
+    }
+    await tidy.getByRole('button', { name: '删除', exact: true }).click();
+    await tidy.waitFor({ state: 'detached' });
+    if (existsSync(path.join(repo, '.xora', 'workflows', 'tidy.yaml'))) {
+        throw new Error('the deleted workflow file is still there');
+    }
+    await step(page, '看板上能信任项目、删除工作流');
     // Run a workflow from the board; its command and its human gate are answered in the run view.
     const card = page.locator('.workflow-card', { hasText: '冒烟工作流' });
     await card.getByRole('button', { name: '运行', exact: true }).click();

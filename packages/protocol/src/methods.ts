@@ -427,6 +427,8 @@ export const methods = {
         params: z.object({ projectId: IdSchema, key: z.string(), enabled: z.boolean() }).strict(),
         result: WorkflowInfoSchema,
     },
+    /** Deletes the workflow's file (runs and their history stay); refused while a run of it is under way. */
+    'workflow.delete': { params: z.object({ projectId: IdSchema, key: z.string() }).strict(), result: ok },
     /** The local webhook address and token of a workflow whose triggers are on. */
     'workflow.webhook': {
         params: z.object({ projectId: IdSchema, key: z.string() }).strict(),

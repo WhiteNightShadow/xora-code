@@ -277,8 +277,11 @@ function DraftBanner({ thread }: { thread: ThreadMeta }) {
     );
 }
 
-/** Go back to before a turn, or fork the thread from it (M3-3); only the xora engine keeps turn markers. */
-function TurnHistory({ thread, turn }: { thread: ThreadMeta; turn: TurnView }) {
+/**
+ * Go back to before a turn, or fork the thread from it (M3-3); only the xora engine keeps turn markers. Shown when the
+ * turn is hovered; the last turn has no fork, which would only copy the whole thread.
+ */
+function TurnHistory({ thread, turn, isLast }: { thread: ThreadMeta; turn: TurnView; isLast: boolean }) {
     const s = useStrings();
     const [confirming, setConfirming] = useState(false);
     const [files, setFiles] = useState(true);
@@ -305,12 +308,16 @@ function TurnHistory({ thread, turn }: { thread: ThreadMeta; turn: TurnView }) {
     };
     return (
         <>
-            <button type="button" className="link" onClick={() => setConfirming(!confirming)}>
-                {s.thread.rewind}
-            </button>
-            <button type="button" className="link" onClick={() => void fork()}>
-                {s.thread.fork}
-            </button>
+            <span className={`turn__history${confirming ? ' is-open' : ''}`}>
+                <button type="button" className="link" onClick={() => setConfirming(!confirming)}>
+                    {s.thread.rewind}
+                </button>
+                {!isLast && (
+                    <button type="button" className="link" onClick={() => void fork()}>
+                        {s.thread.fork}
+                    </button>
+                )}
+            </span>
             {confirming && (
                 <div className="turn__confirm">
                     <span>{s.thread.rewindHint}</span>
@@ -333,11 +340,31 @@ function TurnHistory({ thread, turn }: { thread: ThreadMeta; turn: TurnView }) {
     );
 }
 
+const COMPACT_COMMAND = /^\/compact(?:\s+([\s\S]*))?$/;
+
 function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; thread: ThreadMeta }) {
     const s = useStrings();
     const running = turn.status === 'running';
     const items = visibleItems(turn.items);
     const lastItem = items.at(-1);
+    const compact = COMPACT_COMMAND.exec(turn.input.text.trim());
+    // `/compact` changes this thread's context in place: its turn reads as a divider in the conversation, with no
+    // message bubble and nothing to rewind to or fork from. A turn that ended without a compaction shows as usual.
+    if (compact && (items.length > 0 ? items.every((item) => item.type === 'compaction') : running)) {
+        const focus = compact[1]?.trim();
+        return (
+            <section className="turn turn--compaction">
+                {items.length === 0 ? (
+                    <div className="turn__working">
+                        <Spinner /> {s.context.compacting}
+                    </div>
+                ) : (
+                    items.map((item) => <ItemView key={item.id} item={item} live={false} turnRunning={running} />)
+                )}
+                {focus && <div className="compaction__focus">{format(s.context.focus, { focus })}</div>}
+            </section>
+        );
+    }
     if (turn.rewound) {
         return (
             <section className="turn turn--rewound">
@@ -394,7 +421,7 @@ function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; 
                             {s.thread.review}
                         </button>
                     )}
-                    <TurnHistory thread={thread} turn={turn} />
+                    <TurnHistory thread={thread} turn={turn} isLast={isLast} />
                 </div>
             )}
         </section>
@@ -601,7 +628,7 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
     const send = async () => {
         if (running || sending || (!text.trim() && attachments.length === 0)) return;
         setSending(true);
-        const compact = /^\/compact(?:\s+([\s\S]*))?$/.exec(text.trim());
+        const compact = COMPACT_COMMAND.exec(text.trim());
         const result = compact
             ? await attempt(() =>
                   host.call('turn.compact', {

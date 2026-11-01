@@ -152,6 +152,7 @@ const zh = {
             4: '上下文超限，较早的对话已总结成摘要',
         },
         showSummary: '查看摘要',
+        focus: '关注点：{focus}',
     },
     tool: {
         pending: '等待中',
@@ -593,6 +594,15 @@ const zh = {
         offPeakHint: '按用到的模型的峰谷时段排队，空闲时段价格更低。',
         budget: '预算',
         issues: '问题',
+        untrustedTitle: '这个项目还没被信任，项目里的工作流不能运行',
+        untrustedHint: '信任后，这个项目里的工作流、hooks和mcp服务器才会运行，skills才能执行脚本。只信任你了解的仓库。',
+        trust: '信任这个项目',
+        needsTrust: '信任项目后才能运行',
+        remove: '删除',
+        confirmRemove: '删除工作流“{title}”？会删除文件{path}，运行记录保留。',
+        confirmRemoveUser:
+            '删除工作流“{title}”？这是你的个人工作流，所有项目里都会消失；会删除文件{path}，运行记录保留。',
+        removed: '已删除工作流',
         steps: '步骤',
         triggers: '自动运行',
         triggersHint:
@@ -907,6 +917,7 @@ const en: Widen<Strings> = {
             4: 'Context overflowed; earlier turns summarised',
         },
         showSummary: 'Show the summary',
+        focus: 'Focus: {focus}',
     },
     tool: {
         pending: 'Pending',
@@ -1361,6 +1372,16 @@ const en: Widen<Strings> = {
         offPeakHint: 'Queues the run for the off-peak window of the models it uses, when prices are lower.',
         budget: 'Budget',
         issues: 'Problems',
+        untrustedTitle: 'This project is not trusted yet, so its workflows cannot run',
+        untrustedHint:
+            "Once trusted, the project's workflows, hooks and MCP servers run, and its skills may run scripts. Trust only repositories you know.",
+        trust: 'Trust this project',
+        needsTrust: 'Trust the project to run it',
+        remove: 'Delete',
+        confirmRemove: 'Delete the workflow "{title}"? The file {path} is deleted; its runs stay.',
+        confirmRemoveUser:
+            'Delete the workflow "{title}"? It is your own, so it disappears from every project; the file {path} is deleted and its runs stay.',
+        removed: 'Workflow deleted',
         steps: 'Steps',
         triggers: 'Automatic runs',
         triggersHint:
