@@ -1,10 +1,10 @@
 import type { Project, ThreadMeta } from '@xora/protocol';
 import { useMemo, useState } from 'react';
 import { host } from '../host.ts';
-import { attempt, openProject, openSettings, selectThread, useApp, useStrings } from '../store.ts';
-import { LogoMark } from './Art.tsx';
+import { attempt, openProject, openSettings, openWorkflowBoard, selectThread, useApp, useStrings } from '../store.ts';
+import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
-import { formatMoney, IconButton, relativeTime, Spinner } from './primitives.tsx';
+import { AutoFocusInput, formatMoney, IconButton, relativeTime, Spinner } from './primitives.tsx';
 
 function StatusMark({ thread }: { thread: ThreadMeta }) {
     const s = useStrings();
@@ -20,8 +20,32 @@ function StatusMark({ thread }: { thread: ThreadMeta }) {
 function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean }) {
     const s = useStrings();
     const [menu, setMenu] = useState(false);
+    // Renamed in place: Electron has no window.prompt.
+    const [renaming, setRenaming] = useState<string | undefined>();
     const update = (patch: { pinned?: boolean; archived?: boolean; title?: string }) =>
         void attempt(() => host.call('thread.update', { threadId: thread.id, ...patch }));
+    if (renaming !== undefined) {
+        const done = () => {
+            const title = renaming.trim();
+            setRenaming(undefined);
+            if (title && title !== thread.title) update({ title });
+        };
+        return (
+            <div className="thread-row is-renaming">
+                <AutoFocusInput
+                    className="input thread-row__rename"
+                    value={renaming}
+                    aria-label={s.sidebar.rename}
+                    onChange={(event) => setRenaming(event.target.value)}
+                    onBlur={done}
+                    onKeyDown={(event) => {
+                        if (event.key === 'Enter') done();
+                        if (event.key === 'Escape') setRenaming(undefined);
+                    }}
+                />
+            </div>
+        );
+    }
     return (
         <div className={`thread-row${selected ? ' is-selected' : ''}${thread.archived ? ' is-archived' : ''}`}>
             <button type="button" className="thread-row__main" onClick={() => void selectThread(thread.id)}>
@@ -43,8 +67,7 @@ function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean
                             type="button"
                             onClick={() => {
                                 setMenu(false);
-                                const title = window.prompt(s.sidebar.rename, thread.title);
-                                if (title?.trim()) update({ title: title.trim() });
+                                setRenaming(thread.title);
                             }}
                         >
                             {s.sidebar.rename}
@@ -103,6 +126,7 @@ function ProjectGroup({
     const [showArchived, setShowArchived] = useState(false);
     const teamRunId = useApp((state) => state.teamRunId);
     const workflowRunId = useApp((state) => state.workflowRunId);
+    const workflowsFor = useApp((state) => state.workflowsFor);
     const allRuns = useApp((state) => state.teamRuns);
     const allWorkflowRuns = useApp((state) => state.workflowRuns);
     const runs = Object.values(allRuns)
@@ -134,25 +158,61 @@ function ProjectGroup({
                     {project.git.branch && <span className="project__branch">{project.git.branch}</span>}
                     {project.missing && <span className="project__missing">!</span>}
                 </button>
-                <IconButton
-                    icon="list"
-                    label={s.workflow.open}
-                    size={14}
-                    onClick={() => useApp.setState({ workflowsFor: project.id })}
-                />
-                <IconButton
-                    icon="route"
-                    label={s.team.start}
-                    size={14}
-                    onClick={() => useApp.setState({ teamStartFor: project.id })}
-                />
-                <IconButton
-                    icon="plus"
-                    label={s.sidebar.newThread}
-                    size={14}
-                    onClick={() => useApp.setState({ newThreadFor: project.id })}
-                />
+                <Popover
+                    label={s.sidebar.create}
+                    placement="down"
+                    align="end"
+                    className="project__create"
+                    triggerClassName="icon-button"
+                    trigger={<Icon name="plus" size={14} />}
+                >
+                    {(close) => (
+                        <Choices
+                            value={undefined}
+                            options={[
+                                {
+                                    value: 'thread',
+                                    label: s.sidebar.createThread,
+                                    hint: s.sidebar.createThreadHint,
+                                    icon: 'message',
+                                },
+                                {
+                                    value: 'team',
+                                    label: s.sidebar.createTeam,
+                                    hint: s.sidebar.createTeamHint,
+                                    icon: 'users',
+                                },
+                                {
+                                    value: 'workflow',
+                                    label: s.sidebar.createWorkflow,
+                                    hint: s.sidebar.createWorkflowHint,
+                                    icon: 'bolt',
+                                },
+                            ]}
+                            onPick={(kind) => {
+                                close();
+                                useApp.setState(
+                                    kind === 'thread'
+                                        ? { newThreadFor: project.id }
+                                        : kind === 'team'
+                                          ? { teamStartFor: project.id }
+                                          : { workflowDraftFor: project.id },
+                                );
+                            }}
+                        />
+                    )}
+                </Popover>
             </div>
+            {open && (
+                <button
+                    type="button"
+                    className={`run-row project__board${workflowsFor === project.id && !teamRunId && !workflowRunId ? ' is-selected' : ''}`}
+                    onClick={() => openWorkflowBoard(project.id)}
+                >
+                    <Icon name="bolt" size={12} />
+                    <span className="thread-row__title">{s.sidebar.workflows}</span>
+                </button>
+            )}
             {open && workflowRuns.length > 0 && (
                 <div className="project__runs">
                     {workflowRuns.map((run) => (
@@ -160,9 +220,15 @@ function ProjectGroup({
                             key={run.id}
                             type="button"
                             className={`run-row${workflowRunId === run.id ? ' is-selected' : ''}`}
-                            onClick={() => useApp.setState({ workflowRunId: run.id, teamRunId: undefined })}
+                            onClick={() =>
+                                useApp.setState({
+                                    workflowRunId: run.id,
+                                    teamRunId: undefined,
+                                    workflowsFor: undefined,
+                                })
+                            }
                         >
-                            <Icon name="list" size={11} />
+                            <Icon name="bolt" size={11} />
                             <span className="thread-row__title">{run.title}</span>
                             <span className="thread-row__meta">{s.workflow.statuses[run.status]}</span>
                         </button>
@@ -176,9 +242,15 @@ function ProjectGroup({
                             key={run.id}
                             type="button"
                             className={`run-row${teamRunId === run.id ? ' is-selected' : ''}`}
-                            onClick={() => useApp.setState({ teamRunId: run.id, workflowRunId: undefined })}
+                            onClick={() =>
+                                useApp.setState({
+                                    teamRunId: run.id,
+                                    workflowRunId: undefined,
+                                    workflowsFor: undefined,
+                                })
+                            }
                         >
-                            <Icon name="route" size={11} />
+                            <Icon name="users" size={11} />
                             <span className="thread-row__title">{run.goal}</span>
                             <span className="thread-row__meta">{s.team.statuses[run.status]}</span>
                         </button>
@@ -251,11 +323,8 @@ export function Sidebar() {
 
     return (
         <nav className="sidebar" aria-label={s.sidebar.projects}>
+            {/* No title bar: this strip drags the window, and on macOS holds its buttons. */}
             <div className="sidebar__top">
-                <span className="sidebar__brand">
-                    <LogoMark size={24} className="sidebar__logo" />
-                    Xora
-                </span>
                 <IconButton icon="folder" label={s.sidebar.openProject} onClick={() => void openProject()} />
             </div>
             <div className="sidebar__search">

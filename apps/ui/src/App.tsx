@@ -5,7 +5,7 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { TeamStartDialog, TeamView } from './components/TeamView.tsx';
 import { ThreadView } from './components/ThreadView.tsx';
 import { Welcome } from './components/Welcome.tsx';
-import { WorkflowRunView, WorkflowsDialog } from './components/WorkflowView.tsx';
+import { WorkflowBoard, WorkflowDraftDialog, WorkflowRunView } from './components/WorkflowView.tsx';
 import { RightPanel } from './panels/RightPanel.tsx';
 import { UsageModal } from './panels/UsageModal.tsx';
 import { SettingsModal } from './settings/SettingsModal.tsx';
@@ -38,7 +38,8 @@ export function App() {
     const teamStartFor = useApp((state) => state.teamStartFor);
     const workflowRunId = useApp((state) => state.workflowRunId);
     const workflowsFor = useApp((state) => state.workflowsFor);
-    const runShown = Boolean(teamRunId || workflowRunId);
+    const workflowDraftFor = useApp((state) => state.workflowDraftFor);
+    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor);
     const splitIds = useApp((state) => state.split);
     const threads = useApp((state) => state.threads);
     const split = splitIds.map((id) => threads[id]).filter((item) => item !== undefined);
@@ -49,6 +50,7 @@ export function App() {
         else root.setAttribute('data-theme', settings.theme);
         root.setAttribute('data-density', settings?.density ?? 'comfortable');
         root.lang = uiLanguage(settings?.language);
+        window.xoraShell?.setTheme?.(settings?.theme ?? 'system');
     }, [settings]);
 
     if (!ready) {
@@ -66,6 +68,8 @@ export function App() {
                     <TeamView runId={teamRunId} />
                 ) : workflowRunId ? (
                     <WorkflowRunView key={workflowRunId} runId={workflowRunId} />
+                ) : workflowsFor ? (
+                    <WorkflowBoard key={workflowsFor} projectId={workflowsFor} />
                 ) : split.length > 1 ? (
                     split.map((item) => (
                         <div key={item.id} className="split-pane">
@@ -83,7 +87,7 @@ export function App() {
             {usageOpen && <UsageModal />}
             {newThreadFor && <NewThreadDialog projectId={newThreadFor} />}
             {teamStartFor && <TeamStartDialog projectId={teamStartFor} />}
-            {workflowsFor && <WorkflowsDialog projectId={workflowsFor} />}
+            {workflowDraftFor && <WorkflowDraftDialog projectId={workflowDraftFor} />}
             {!connected && <div className="banner">{s.app.disconnected}</div>}
             <Toasts />
         </div>

@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { DiffView } from '../components/DiffView.tsx';
 import { Icon, type IconName } from '../components/Icon.tsx';
 import { Markdown } from '../components/Markdown.tsx';
-import { AutoFocusInput, Badge, formatMoney, Spinner } from '../components/primitives.tsx';
+import { AutoFocusInput, Badge, formatMoney, formatTokens, Spinner } from '../components/primitives.tsx';
 import { host } from '../host.ts';
 import { attempt, openReview, selectThread, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
@@ -257,6 +257,41 @@ function ReasoningView({ item, live }: { item: ItemOf<'reasoning'>; live: boolea
 }
 
 /** Work handed to a subagent: its child thread's progress, until the answer is back in this turn. */
+/** Where the context was compacted: a divider in the conversation, the summary a click away. */
+function CompactionView({ item }: { item: ItemOf<'compaction'> }) {
+    const s = useStrings();
+    const [open, setOpen] = useState(false);
+    const level = (s.context.levels as Record<number, string>)[item.level];
+    return (
+        <div className={`compaction is-${item.status}`}>
+            <div className="compaction__line">
+                {item.status === 'started' ? <Spinner size={11} /> : <Icon name="compress" size={13} />}
+                <span className="compaction__text">
+                    {item.status === 'started'
+                        ? s.context.compacting
+                        : item.status === 'failed'
+                          ? s.context.compactFailed
+                          : s.context.compactedItem}
+                    {item.status === 'completed' && item.before && item.after
+                        ? ` · ${formatTokens(item.before)} → ${formatTokens(item.after)} token`
+                        : ''}
+                    {item.status === 'completed' && level ? ` · ${level}` : ''}
+                </span>
+                {item.summary && (
+                    <button type="button" className="link" onClick={() => setOpen(!open)}>
+                        {open ? s.thread.showLess : s.context.showSummary}
+                    </button>
+                )}
+            </div>
+            {open && item.summary && (
+                <div className="compaction__summary">
+                    <Markdown text={item.summary} />
+                </div>
+            )}
+        </div>
+    );
+}
+
 function SubagentView({ item, turnRunning }: { item: ItemOf<'subagent'>; turnRunning: boolean }) {
     const s = useStrings();
     const child = useApp((state) => (item.threadId ? state.threads[item.threadId] : undefined));
@@ -351,18 +386,7 @@ export function ItemView({ item, live, turnRunning = true }: { item: Item; live:
             );
         }
         case 'compaction':
-            return (
-                <div className="notice notice--info">
-                    <Icon name="list" size={13} />
-                    <span>
-                        {item.status === 'started'
-                            ? '正在压缩上下文…'
-                            : item.status === 'failed'
-                              ? '上下文压缩失败'
-                              : `已压缩上下文${item.before && item.after ? `（约${item.before}→${item.after} token）` : ''}`}
-                    </span>
-                </div>
-            );
+            return <CompactionView item={item} />;
         case 'subagent':
             return <SubagentView item={item} turnRunning={turnRunning} />;
     }

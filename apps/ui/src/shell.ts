@@ -46,6 +46,8 @@ export interface XoraShellApi {
     signalReady(): void;
     shellInfo(): Promise<ShellInfo>;
     restartToSafeMode(): void;
+    /** Older shells lack it. */
+    setTheme?(theme: 'system' | 'light' | 'dark'): void;
     onHostRestarted(listener: () => void): () => void;
     readonly preview?: PreviewApi;
 }

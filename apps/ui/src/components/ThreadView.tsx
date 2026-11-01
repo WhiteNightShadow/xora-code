@@ -1,11 +1,11 @@
-import type { Attachment, Effort, ModelOption, PermissionMode, ThreadMeta } from '@xora/protocol';
+import type { Attachment, ThreadMeta } from '@xora/protocol';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { host } from '../host.ts';
 import { ItemView } from '../items/ItemView.tsx';
 import {
     attempt,
     openReview,
-    openSettings,
+    openWorkflowBoard,
     selectThread,
     takeComposerInbox,
     toast,
@@ -16,25 +16,10 @@ import {
 import { format } from '../strings.ts';
 import { type TurnView, visibleItems } from '../timeline.ts';
 import { ConversationArt } from './Art.tsx';
+import { ContextMeter, EffortPicker, ModelPicker, ModePicker, Popover } from './Controls.tsx';
 import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
-import { Icon } from './Icon.tsx';
-import {
-    AutoFocusInput,
-    formatMoney,
-    formatTokens,
-    IconButton,
-    type Option,
-    Select,
-    Spinner,
-    Toggle,
-} from './primitives.tsx';
-
-const MODES: PermissionMode[] = ['ask', 'auto_edit', 'plan', 'full'];
-const EFFORTS: Effort[] = ['off', 'low', 'medium', 'high', 'max'];
-
-function modelKey(option: { connectionId: string; model: string }): string {
-    return `${option.connectionId}::${option.model}`;
-}
+import { Icon, type IconName } from './Icon.tsx';
+import { AutoFocusInput, formatMoney, formatTokens, Spinner, Toggle } from './primitives.tsx';
 
 /** A subagent's thread links back to the thread whose agent started it. */
 function ParentLink({ threadId }: { threadId: string }) {
@@ -48,40 +33,33 @@ function ParentLink({ threadId }: { threadId: string }) {
     );
 }
 
+type PanelName =
+    | 'changes'
+    | 'worktree'
+    | 'compare'
+    | 'plan'
+    | 'trajectory'
+    | 'prompt'
+    | 'terminal'
+    | 'preview'
+    | 'file';
+
+/**
+ * The thread's top bar: its title and where it works. The per-message choices (mode, model, thinking, context)
+ * sit under the composer; panels and thread actions are in the ⋯ menu.
+ */
 function Header({ thread }: { thread: ThreadMeta }) {
     const s = useStrings();
-    const models = useApp((state) => state.models);
     const rightPanel = useApp((state) => state.rightPanel);
     const project = useApp((state) => state.projects.find((item) => item.id === thread.projectId));
     const [editing, setEditing] = useState(false);
     const [title, setTitle] = useState(thread.title);
     useEffect(() => setTitle(thread.title), [thread.title]);
-    const update = (patch: {
-        title?: string;
-        mode?: PermissionMode;
-        effort?: Effort;
-        model?: { connectionId: string; model: string };
-    }) => void attempt(() => host.call('thread.update', { threadId: thread.id, ...patch }));
-    const modelOptions: Option<string>[] = models.map((option: ModelOption) => ({
-        value: modelKey({ connectionId: option.connectionId, model: option.model.id }),
-        label: `${option.model.name} · ${option.connectionName}`,
-    }));
-    const currentModel = models.find(
-        (option) =>
-            thread.model && option.connectionId === thread.model.connectionId && option.model.id === thread.model.model,
-    );
-    const efforts = currentModel
-        ? EFFORTS.filter((effort) =>
-              effort === 'off'
-                  ? currentModel.model.reasoning.mode === 'toggle'
-                  : currentModel.model.reasoning.efforts.includes(effort),
-          )
-        : EFFORTS;
-    const [menu, setMenu] = useState(false);
+    const rename = (value: string) =>
+        void attempt(() => host.call('thread.update', { threadId: thread.id, title: value }));
     const [goalOpen, setGoalOpen] = useState(false);
     const split = useApp((state) => state.split);
     const handoff = async (to: 'local' | 'worktree') => {
-        setMenu(false);
         const result = await attempt(() =>
             host.call('thread.handoff', { threadId: thread.id, to }, { timeoutMs: 120_000 }),
         );
@@ -93,10 +71,25 @@ function Header({ thread }: { thread: ThreadMeta }) {
                 result.result.status === 'conflicts' ? 'error' : 'success',
             );
     };
-    const toggle = (
-        panel: 'changes' | 'worktree' | 'compare' | 'plan' | 'trajectory' | 'prompt' | 'terminal' | 'preview' | 'file',
-    ) => useApp.setState({ rightPanel: rightPanel === panel ? undefined : panel });
-    const contextRatio = thread.context && thread.context.size > 0 ? thread.context.used / thread.context.size : 0;
+    const panels: Array<{ panel: PanelName; icon: IconName; label: string }> = [
+        { panel: 'changes', icon: 'diff', label: s.panel.changes },
+        ...(project?.git.isRepo
+            ? [{ panel: 'worktree' as const, icon: 'pencil' as const, label: s.panel.worktree }]
+            : []),
+        ...(thread.group ? [{ panel: 'compare' as const, icon: 'chart' as const, label: s.panel.compare }] : []),
+        { panel: 'plan', icon: 'list', label: s.panel.plan },
+        { panel: 'trajectory', icon: 'route', label: s.panel.trajectory },
+        { panel: 'prompt', icon: 'brain', label: s.panel.prompt },
+        { panel: 'terminal', icon: 'terminal', label: s.panel.terminal },
+        { panel: 'preview', icon: 'globe', label: s.panel.preview },
+        { panel: 'file', icon: 'file', label: s.panel.file },
+    ];
+    const distill = (kind: 'workflow' | 'skill') =>
+        void attempt(() => host.call('thread.distill', { threadId: thread.id, kind })).then((created) => {
+            if (!created) return;
+            useApp.setState((state) => ({ threads: { ...state.threads, [created.id]: created } }));
+            void selectThread(created.id);
+        });
     return (
         <header className="thread-header">
             <div className="thread-header__title">
@@ -107,7 +100,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
                         onChange={(event) => setTitle(event.target.value)}
                         onBlur={() => {
                             setEditing(false);
-                            if (title.trim() && title.trim() !== thread.title) update({ title: title.trim() });
+                            if (title.trim() && title.trim() !== thread.title) rename(title.trim());
                         }}
                         onKeyDown={(event) => {
                             if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
@@ -133,152 +126,64 @@ function Header({ thread }: { thread: ThreadMeta }) {
                 {thread.parent && <ParentLink threadId={thread.parent.threadId} />}
             </div>
             <div className="thread-header__controls">
-                {models.length === 0 ? (
-                    <button type="button" className="button button--small" onClick={() => openSettings('models')}>
-                        {s.welcome.connectModel}
-                    </button>
-                ) : (
-                    <Select
-                        compact
-                        label={s.thread.model}
-                        value={thread.model ? modelKey(thread.model) : ''}
-                        options={modelOptions}
-                        onChange={(value) => {
-                            const [connectionId, model] = value.split('::');
-                            if (connectionId && model) update({ model: { connectionId, model } });
-                        }}
-                    />
-                )}
-                <Select
-                    compact
-                    label={s.thread.mode}
-                    value={thread.mode}
-                    options={MODES.map((mode) => ({ value: mode, label: s.modes[mode], hint: s.modeHints[mode] }))}
-                    onChange={(mode) => {
-                        if (mode === 'full' && !window.confirm(`${s.modes.full}：${s.modeHints.full}`)) return;
-                        update({ mode });
-                    }}
-                />
-                {currentModel?.model.reasoning.mode !== 'none' && (
-                    <Select
-                        compact
-                        label={s.thread.effort}
-                        value={efforts.includes(thread.effort) ? thread.effort : ''}
-                        options={efforts.map((effort) => ({
-                            value: effort,
-                            label: `${s.thread.effort}·${s.efforts[effort]}`,
-                        }))}
-                        onChange={(effort) => update({ effort })}
-                    />
-                )}
-                {thread.context && (
-                    <span
-                        className={`meter${contextRatio > 0.8 ? ' is-high' : ''}`}
-                        title={`${s.thread.context} ${formatTokens(thread.context.used)}/${formatTokens(thread.context.size)}`}
-                    >
-                        <span
-                            className="meter__bar"
-                            style={{ width: `${Math.min(100, Math.round(contextRatio * 100))}%` }}
-                        />
-                    </span>
-                )}
-                <span
-                    className="thread-header__cost"
-                    title={[
-                        `${s.thread.cost} ${formatMoney(thread.cost)}`,
-                        thread.tokens
-                            ? format(s.thread.tokens, {
-                                  input: formatTokens(thread.tokens.input),
-                                  output: formatTokens(thread.tokens.output),
-                              })
-                            : '',
-                    ]
-                        .filter(Boolean)
-                        .join('\n')}
+                <Popover
+                    label={s.common.more}
+                    placement="down"
+                    align="end"
+                    className="thread-header__menu"
+                    triggerClassName="icon-button"
+                    trigger={<Icon name="more" size={16} />}
                 >
-                    {/* Without a price for the model, what the thread used is shown in tokens. */}
-                    {thread.cost || !thread.tokens
-                        ? formatMoney(thread.cost)
-                        : `${formatTokens(thread.tokens.input + thread.tokens.output)} token`}
-                </span>
-                <div className="thread-header__panels">
-                    <IconButton
-                        icon="diff"
-                        label={s.panel.changes}
-                        active={rightPanel === 'changes'}
-                        onClick={() => toggle('changes')}
-                    />
-                    {project?.git.isRepo && (
-                        <IconButton
-                            icon="pencil"
-                            label={s.panel.worktree}
-                            active={rightPanel === 'worktree'}
-                            onClick={() => toggle('worktree')}
-                        />
-                    )}
-                    {thread.group && (
-                        <IconButton
-                            icon="chart"
-                            label={s.panel.compare}
-                            active={rightPanel === 'compare'}
-                            onClick={() => toggle('compare')}
-                        />
-                    )}
-                    <IconButton
-                        icon="list"
-                        label={s.panel.plan}
-                        active={rightPanel === 'plan'}
-                        onClick={() => toggle('plan')}
-                    />
-                    <IconButton
-                        icon="route"
-                        label={s.panel.trajectory}
-                        active={rightPanel === 'trajectory'}
-                        onClick={() => toggle('trajectory')}
-                    />
-                    <IconButton
-                        icon="brain"
-                        label={s.panel.prompt}
-                        active={rightPanel === 'prompt'}
-                        onClick={() => toggle('prompt')}
-                    />
-                    <IconButton
-                        icon="terminal"
-                        label={s.panel.terminal}
-                        active={rightPanel === 'terminal'}
-                        onClick={() => toggle('terminal')}
-                    />
-                    <IconButton
-                        icon="globe"
-                        label={s.panel.preview}
-                        active={rightPanel === 'preview'}
-                        onClick={() => toggle('preview')}
-                    />
-                    <IconButton
-                        icon="file"
-                        label={s.panel.file}
-                        active={rightPanel === 'file'}
-                        onClick={() => toggle('file')}
-                    />
-                </div>
-                <span className="thread-header__menu">
-                    <IconButton icon="more" label={s.common.more} onClick={() => setMenu(!menu)} />
-                    {menu && (
-                        <div className="menu" role="menu" tabIndex={-1} onMouseLeave={() => setMenu(false)}>
+                    {(close) => (
+                        <div className="menu-list">
+                            <div className="popover__title">{s.thread.panels}</div>
+                            {panels.map((item) => (
+                                <button
+                                    key={item.panel}
+                                    type="button"
+                                    role="menuitemcheckbox"
+                                    aria-checked={rightPanel === item.panel}
+                                    className={rightPanel === item.panel ? 'is-active' : ''}
+                                    onClick={() => {
+                                        close();
+                                        useApp.setState({
+                                            rightPanel: rightPanel === item.panel ? undefined : item.panel,
+                                        });
+                                    }}
+                                >
+                                    <Icon name={item.icon} size={14} /> {item.label}
+                                    {rightPanel === item.panel && (
+                                        <Icon name="check" size={14} className="menu-list__check" />
+                                    )}
+                                </button>
+                            ))}
+                            <div className="popover__title">{s.thread.actions}</div>
                             {project?.git.isRepo && thread.location.kind === 'local' && !thread.parent && (
-                                <button type="button" onClick={() => void handoff('worktree')}>
-                                    {s.location.toWorktree}
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        close();
+                                        void handoff('worktree');
+                                    }}
+                                >
+                                    <Icon name="route" size={14} /> {s.location.toWorktree}
                                 </button>
                             )}
                             {thread.location.kind === 'worktree' && !thread.parent && (
                                 <>
-                                    <button type="button" onClick={() => void handoff('local')}>
-                                        {s.location.toLocal}
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            close();
+                                            void handoff('local');
+                                        }}
+                                    >
+                                        <Icon name="route" size={14} /> {s.location.toLocal}
                                     </button>
                                     <button
                                         type="button"
                                         onClick={() => {
-                                            setMenu(false);
+                                            close();
                                             void attempt(() =>
                                                 host.call(
                                                     'worktree.apply',
@@ -297,44 +202,43 @@ function Header({ thread }: { thread: ThreadMeta }) {
                                             );
                                         }}
                                     >
-                                        {s.location.applyToMain}
+                                        <Icon name="check" size={14} /> {s.location.applyToMain}
                                     </button>
                                 </>
                             )}
                             <button
                                 type="button"
                                 onClick={() => {
-                                    setMenu(false);
+                                    close();
                                     setGoalOpen(true);
                                 }}
                             >
-                                {s.goal.setGoal}
+                                <Icon name="pin" size={14} /> {s.goal.setGoal}
                             </button>
-                            {(['workflow', 'skill'] as const).map((kind) => (
-                                <button
-                                    key={kind}
-                                    type="button"
-                                    disabled={thread.turns === 0}
-                                    onClick={() => {
-                                        setMenu(false);
-                                        void attempt(() =>
-                                            host.call('thread.distill', { threadId: thread.id, kind }),
-                                        ).then((created) => {
-                                            if (!created) return;
-                                            useApp.setState((state) => ({
-                                                threads: { ...state.threads, [created.id]: created },
-                                            }));
-                                            void selectThread(created.id);
-                                        });
-                                    }}
-                                >
-                                    {kind === 'workflow' ? s.thread.distillWorkflow : s.thread.distillSkill}
-                                </button>
-                            ))}
+                            <button
+                                type="button"
+                                disabled={thread.turns === 0}
+                                onClick={() => {
+                                    close();
+                                    distill('workflow');
+                                }}
+                            >
+                                <Icon name="bolt" size={14} /> {s.thread.distillWorkflow}
+                            </button>
+                            <button
+                                type="button"
+                                disabled={thread.turns === 0}
+                                onClick={() => {
+                                    close();
+                                    distill('skill');
+                                }}
+                            >
+                                <Icon name="sparkle" size={14} /> {s.thread.distillSkill}
+                            </button>
                             <button
                                 type="button"
                                 onClick={() => {
-                                    setMenu(false);
+                                    close();
                                     useApp.setState({
                                         split: split.includes(thread.id)
                                             ? split.filter((id) => id !== thread.id)
@@ -342,14 +246,34 @@ function Header({ thread }: { thread: ThreadMeta }) {
                                     });
                                 }}
                             >
+                                <Icon name="panel" size={14} />{' '}
                                 {split.includes(thread.id) ? s.location.unsplit : s.location.split}
                             </button>
                         </div>
                     )}
-                </span>
+                </Popover>
             </div>
             {goalOpen && <GoalDialog thread={thread} onClose={() => setGoalOpen(false)} />}
         </header>
+    );
+}
+
+/** A thread that writes a workflow says what comes next: running it from the workflow board. */
+function DraftBanner({ thread }: { thread: ThreadMeta }) {
+    const s = useStrings();
+    if (thread.role !== 'distill') return null;
+    return (
+        <div className="draft-banner">
+            <Icon name="bolt" size={14} />
+            <span>{s.thread.draftBanner}</span>
+            <button
+                type="button"
+                className="button button--small button--primary"
+                onClick={() => openWorkflowBoard(thread.projectId)}
+            >
+                {s.thread.openBoard}
+            </button>
+        </div>
     );
 }
 
@@ -509,7 +433,7 @@ interface Suggestion {
     readonly hint?: string;
 }
 
-function Composer({ thread }: { thread: ThreadMeta }) {
+function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnView[] }) {
     const s = useStrings();
     const [text, setText] = useState('');
     const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -812,7 +736,12 @@ function Composer({ thread }: { thread: ThreadMeta }) {
                             onChange={(event) => event.target.files && void addFiles(event.target.files)}
                         />
                     </label>
-                    <span className="composer__hint">{s.modes[thread.mode]}</span>
+                    <ModePicker thread={thread} />
+                    {/* Other engines pick their own model and thinking. */}
+                    {thread.engine === 'xora' && <ModelPicker thread={thread} />}
+                    {thread.engine === 'xora' && <EffortPicker thread={thread} />}
+                    <span className="composer__spacer" />
+                    <ContextMeter thread={thread} turns={turns} />
                     {running ? (
                         <button
                             type="button"
@@ -868,6 +797,7 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
     return (
         <div className="thread">
             <Header thread={thread} />
+            <DraftBanner thread={thread} />
             <GoalBanner thread={thread} />
             <div
                 className="timeline"
@@ -893,7 +823,7 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
                 ))}
             </div>
             {/* A workflow run's own thread is its log: notices and approval cards, nobody to talk to. */}
-            {thread.role !== 'workflow' && <Composer thread={thread} />}
+            {thread.role !== 'workflow' && <Composer thread={thread} turns={turns} />}
         </div>
     );
 }

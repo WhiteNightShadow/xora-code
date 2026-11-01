@@ -1,0 +1,853 @@
+/* The window's top bar, the composer's pickers, the context meter, the thread menu and the workflow board. */
+
+/* Window without a title bar ---------------------------------------------------------------------------- */
+
+:root {
+    /* Room for the window's own buttons (runtime.ts): macOS draws them at the top left of the sidebar,
+       Windows and Linux over the top right of the window. */
+    --titlebar-start: 0px;
+    --titlebar-end: 0px;
+}
+
+:root[data-platform="mac"] {
+    --titlebar-start: 72px;
+}
+
+:root[data-platform="windows"],
+:root[data-platform="linux"] {
+    --titlebar-end: 140px;
+}
+
+/* The top bars drag the window; what is clickable in them does not. A click on a draggable area never
+   reaches the page, so anything that opens over them (dialogs, menus) is not draggable either. */
+.thread-header,
+.team__header,
+.wf-board__header,
+.right-panel__header {
+    -webkit-app-region: drag;
+}
+
+.sidebar__top :is(button, input, a),
+.thread-header :is(h1, button, input, select, a, .popover),
+.team__header :is(h1, button, input, select, a, .popover),
+.wf-board__header :is(button, input, a),
+.right-panel__header :is(button, input, select, a),
+.popover__panel,
+.modal-backdrop {
+    -webkit-app-region: no-drag;
+}
+
+/* The welcome page has no top bar: its empty top drags the window. */
+.main:has(> .welcome) {
+    position: relative;
+}
+
+.main:has(> .welcome)::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 52px;
+    pointer-events: none;
+    -webkit-app-region: drag;
+}
+
+.sidebar__top {
+    justify-content: flex-end;
+    padding-left: calc(14px + var(--titlebar-start));
+}
+
+/* Popover: a small panel above or below its button ----------------------------------------------------- */
+
+.popover {
+    position: relative;
+    display: inline-flex;
+}
+
+.popover__panel {
+    position: absolute;
+    z-index: var(--xk-z-dropdown);
+    min-width: 220px;
+    max-width: min(360px, 90vw);
+    padding: 6px;
+    border: 1px solid var(--xk-border);
+    border-radius: 12px;
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-lg), var(--xk-highlight);
+    text-align: left;
+    animation: xk-pop-in var(--xk-duration-fast) var(--xk-ease-out) backwards;
+}
+
+.popover__panel.is-up {
+    bottom: calc(100% + 6px);
+    transform-origin: bottom left;
+    animation-name: xk-pop-up;
+}
+
+.popover__panel.is-down {
+    top: calc(100% + 6px);
+    transform-origin: top left;
+}
+
+.popover__panel.is-start {
+    left: 0;
+}
+
+.popover__panel.is-end {
+    right: 0;
+}
+
+.popover__panel.is-up.is-end {
+    transform-origin: bottom right;
+}
+
+.popover__panel.is-down.is-end {
+    transform-origin: top right;
+}
+
+.popover__title {
+    padding: 6px 8px 4px;
+    font-size: var(--xk-text-2xs);
+    font-weight: var(--xk-weight-semibold);
+    color: var(--xk-text-faint);
+    letter-spacing: 0.02em;
+}
+
+.popover__note {
+    margin-top: 4px;
+    padding: 8px 8px 2px;
+    border-top: 1px solid var(--xk-border-subtle);
+    font-size: var(--xk-text-2xs);
+    line-height: var(--xk-leading-snug);
+    color: var(--xk-text-muted);
+}
+
+.popover__scroll {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.popover__footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-top: 4px;
+    padding: 8px 8px 4px;
+    border: 0;
+    border-top: 1px solid var(--xk-border-subtle);
+    background: none;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+    cursor: pointer;
+}
+
+.popover__footer:hover {
+    color: var(--xk-text);
+}
+
+/* Choices: a picker's options, each saying what it does */
+
+.choices {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.choice {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 9px;
+    width: 100%;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--xk-text);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color var(--xk-duration-instant) var(--xk-ease-out);
+}
+
+.choice:hover {
+    background: var(--xk-bg-hover);
+}
+
+.choice:focus-visible {
+    outline: 2px solid var(--xk-accent);
+    outline-offset: -2px;
+}
+
+.choice.is-active {
+    background: var(--xk-accent-subtle);
+}
+
+.choice__icon {
+    display: inline-grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: var(--xk-bg-sunken);
+    color: var(--xk-text-muted);
+    transition:
+        background-color var(--xk-duration-fast) var(--xk-ease-out),
+        color var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.choice.is-active .choice__icon {
+    background: var(--xk-accent);
+    color: var(--xk-on-accent);
+}
+
+.choice.is-warn .choice__icon {
+    color: var(--xk-warn);
+}
+
+.choice.is-warn.is-active {
+    background: var(--xk-warn-subtle);
+}
+
+.choice.is-warn.is-active .choice__icon {
+    background: var(--xk-warn-solid);
+    color: var(--xk-on-accent);
+}
+
+.choice__text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding-top: 2px;
+}
+
+.choice__label {
+    font-size: var(--xk-text-sm);
+    font-weight: var(--xk-weight-medium);
+}
+
+.choice__hint {
+    font-size: var(--xk-text-2xs);
+    line-height: var(--xk-leading-snug);
+    color: var(--xk-text-muted);
+    white-space: normal;
+}
+
+.choice__check {
+    margin-top: 5px;
+    color: var(--xk-accent-text);
+}
+
+.choice.is-warn .choice__check {
+    color: var(--xk-warn);
+}
+
+/* Composer: mode, model and thinking on the left, the context on the right ----------------------------- */
+
+/* A narrow composer (a panel open beside it) wraps the bar and keeps the pickers to their icons. */
+.composer {
+    container-type: inline-size;
+}
+
+.composer__bar {
+    flex-wrap: wrap;
+    gap: 4px 2px;
+}
+
+@container (max-width: 400px) {
+    .composer__bar .picker__value,
+    .composer__bar .picker__chevron,
+    .context-meter__trigger > span {
+        display: none;
+    }
+}
+
+.composer__spacer {
+    flex: 1;
+}
+
+/* Right-aligned, also when it wraps onto a line of its own. */
+.composer__bar > .button {
+    margin-left: auto;
+}
+
+.composer__bar > .context-meter {
+    margin-right: 4px;
+}
+
+.picker__trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    max-width: 240px;
+    padding: 0 7px 0 8px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: none;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-medium);
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+        background-color var(--xk-duration-instant) var(--xk-ease-out),
+        color var(--xk-duration-instant) var(--xk-ease-out),
+        border-color var(--xk-duration-instant) var(--xk-ease-out);
+}
+
+.picker__trigger:hover:not(:disabled),
+.picker__trigger.is-open {
+    background: var(--xk-bg-hover);
+    color: var(--xk-text);
+}
+
+.picker__trigger:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.picker__trigger:focus-visible {
+    outline: 2px solid var(--xk-accent);
+    outline-offset: 1px;
+}
+
+.picker__value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.picker__chevron {
+    flex: none;
+    opacity: 0.6;
+}
+
+/* The mode is the choice with consequences: it reads as a chip, full access in amber. */
+.mode-chip {
+    border-color: var(--xk-border-subtle);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text);
+}
+
+.mode-chip.is-auto_edit {
+    color: var(--xk-info);
+}
+
+.mode-chip.is-plan {
+    color: var(--xk-accent-text);
+}
+
+.mode-chip.is-full,
+.mode-chip.is-full:hover:not(:disabled) {
+    border-color: var(--xk-warn-border);
+    background: var(--xk-warn-subtle);
+    color: var(--xk-warn);
+}
+
+/* Context meter */
+
+.context-meter__trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 8px 0 6px;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: background-color var(--xk-duration-instant) var(--xk-ease-out);
+}
+
+.context-meter__trigger:hover,
+.context-meter__trigger.is-open {
+    background: var(--xk-bg-hover);
+    color: var(--xk-text);
+}
+
+.context-meter__trigger.is-mid {
+    color: var(--xk-warn);
+}
+
+.context-meter__trigger.is-high {
+    color: var(--xk-error);
+}
+
+.ring__track,
+.ring__fill {
+    fill: none;
+    stroke-width: 2.6;
+}
+
+.ring__track {
+    stroke: var(--xk-border);
+}
+
+.ring__fill {
+    stroke: var(--xk-accent);
+    stroke-linecap: round;
+    transform: rotate(-90deg);
+    transform-origin: 50% 50%;
+    transition: stroke-dashoffset var(--xk-duration-slow) var(--xk-ease-out);
+}
+
+.is-mid > .ring .ring__fill {
+    stroke: var(--xk-warn-solid);
+}
+
+.is-high > .ring .ring__fill {
+    stroke: var(--xk-error);
+}
+
+.context-card {
+    width: 300px;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 6px 6px;
+}
+
+.context-card .popover__title {
+    padding-inline: 0;
+}
+
+.context-card__value {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: var(--xk-text-sm);
+    font-variant-numeric: tabular-nums;
+}
+
+.context-card__value strong {
+    font-size: var(--xk-text-md);
+}
+
+.context-card__value .is-mid {
+    color: var(--xk-warn);
+}
+
+.context-card__value .is-high {
+    color: var(--xk-error);
+}
+
+.context-card__bar {
+    position: relative;
+    height: 8px;
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-bg-sunken);
+    overflow: hidden;
+}
+
+.context-card__bar span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--xk-accent);
+    transition: width var(--xk-duration-slow) var(--xk-ease-out);
+}
+
+.context-card__bar span.is-mid {
+    background: var(--xk-warn-solid);
+}
+
+.context-card__bar span.is-high {
+    background: var(--xk-error);
+}
+
+/* Where compaction starts (60%) and summarises (80%). */
+.context-card__bar i {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--xk-bg-elevated);
+}
+
+.context-card__hint {
+    margin: 0;
+    font-size: var(--xk-text-2xs);
+    line-height: var(--xk-leading-snug);
+    color: var(--xk-text-muted);
+}
+
+.context-card__row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+.context-card__row svg {
+    flex: none;
+}
+
+.context-card .button {
+    align-self: flex-start;
+    margin-top: 2px;
+}
+
+/* Thread header: the title, and one menu ------------------------------------------------------------------ */
+
+/* The title shortens rather than pushing the menu onto a second line. */
+.thread-header {
+    flex-wrap: nowrap;
+}
+
+.thread-header__title {
+    flex: 1 1 auto;
+}
+
+.thread-header__controls {
+    flex: none;
+}
+
+/* A thread that writes a workflow says what comes next */
+
+.draft-banner {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px 8px 20px;
+    border-bottom: 1px solid var(--xk-border-subtle);
+    background: var(--xk-accent-subtle);
+    font-size: var(--xk-text-sm);
+    animation: xk-fade-in var(--xk-duration-base) var(--xk-ease-out) backwards;
+}
+
+.draft-banner > svg {
+    flex: none;
+    color: var(--xk-accent-text);
+}
+
+.draft-banner > span {
+    flex: 1;
+    min-width: 0;
+}
+
+.draft-banner > .button {
+    flex: none;
+}
+
+/* Compaction in the conversation: a divider */
+
+.compaction {
+    margin: 4px 0;
+}
+
+.compaction__line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+.compaction__line::before,
+.compaction__line::after {
+    content: "";
+    flex: 1;
+    min-width: 16px;
+    height: 1px;
+    background: var(--xk-border);
+}
+
+.compaction__line > svg {
+    flex: none;
+    color: var(--xk-accent-text);
+}
+
+.compaction__text {
+    text-align: center;
+}
+
+.compaction.is-failed .compaction__line,
+.compaction.is-failed .compaction__line > svg {
+    color: var(--xk-error);
+}
+
+.compaction__summary {
+    margin-top: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 10px 14px;
+    border: 1px solid var(--xk-border-subtle);
+    border-radius: 10px;
+    background: var(--xk-bg-subtle);
+    font-size: var(--xk-text-sm);
+    animation: xk-fade-in var(--xk-duration-base) var(--xk-ease-out) backwards;
+}
+
+/* Sidebar: one "+" per project, and its workflow board */
+
+.project__create .icon-button {
+    width: 24px;
+    height: 24px;
+    color: var(--xk-text-muted);
+}
+
+/* The project list scrolls and would clip a wider panel: it stays inside the sidebar. */
+.project__create .popover__panel {
+    width: calc(var(--xk-sidebar-width) - 20px);
+    min-width: 0;
+}
+
+.project__board {
+    margin-top: 1px;
+}
+
+/* Workflow board --------------------------------------------------------------------------------------- */
+
+.wf-board {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.wf-board__header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--xk-space-3);
+    min-height: 52px;
+    padding: 8px 12px 8px 24px;
+    border-bottom: 1px solid var(--xk-border-subtle);
+}
+
+.wf-board__title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+}
+
+.wf-board__title h1 {
+    margin: 0;
+    font-size: var(--xk-text-lg);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.wf-board__project {
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.wf-board__body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px 24px 40px;
+}
+
+.wf-board__body > * {
+    max-width: 920px;
+    margin-inline: auto;
+}
+
+.wf-board .workflow-list {
+    padding: 0;
+}
+
+.wf-board__intro {
+    margin-top: 0;
+    margin-bottom: 16px;
+    color: var(--xk-text-muted);
+}
+
+.wf-board__empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 36px 24px;
+    border: 1px dashed var(--xk-border-strong);
+    border-radius: 14px;
+    color: var(--xk-text-muted);
+    text-align: center;
+    animation: xk-fade-up var(--xk-duration-slow) var(--xk-ease-out) backwards;
+}
+
+.wf-board__empty > svg {
+    color: var(--xk-accent-text);
+}
+
+.wf-board__empty p {
+    max-width: 540px;
+    margin: 0;
+    line-height: var(--xk-leading-relaxed);
+}
+
+.wf-board__heading {
+    margin-top: 28px;
+    margin-bottom: 10px;
+    font-size: var(--xk-text-md);
+}
+
+.wf-board__runs {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.wf-board__run {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--xk-border-subtle);
+    border-radius: 10px;
+    background: var(--xk-bg-elevated);
+    color: var(--xk-text);
+    text-align: left;
+    cursor: pointer;
+    transition:
+        border-color var(--xk-duration-fast) var(--xk-ease-out),
+        box-shadow var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.wf-board__run:hover {
+    border-color: var(--xk-border-strong);
+    box-shadow: var(--xk-shadow-xs);
+}
+
+.wf-board__run:focus-visible {
+    outline: 2px solid var(--xk-accent);
+    outline-offset: 2px;
+}
+
+.wf-board__run-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: var(--xk-weight-medium);
+}
+
+.wf-board__run-meta {
+    flex: none;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+}
+
+/* The thread menu (later than the rules above: its svg rules are more specific). */
+
+.menu-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 210px;
+}
+
+.menu-list button {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 30px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 7px;
+    background: none;
+    color: var(--xk-text);
+    font-size: var(--xk-text-sm);
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color var(--xk-duration-instant) var(--xk-ease-out);
+}
+
+.menu-list button svg {
+    flex: none;
+    color: var(--xk-text-muted);
+}
+
+.menu-list button:hover:not(:disabled) {
+    background: var(--xk-bg-hover);
+}
+
+.menu-list button.is-active,
+.menu-list button.is-active svg {
+    color: var(--xk-accent-text);
+}
+
+.menu-list button:disabled,
+.menu-list button:disabled svg {
+    color: var(--xk-text-disabled);
+    cursor: not-allowed;
+}
+
+.menu-list .menu-list__check {
+    margin-left: auto;
+}
+
+.menu-list .popover__title:not(:first-child) {
+    margin-top: 4px;
+    padding-top: 9px;
+    border-top: 1px solid var(--xk-border-subtle);
+}
+
+/* Whatever sits at the top right moves clear of the Windows and Linux window buttons. */
+.app:not(.has-panel) .main:not(.main--split) > .thread > .thread-header,
+.app:not(.has-panel) .main--split > .split-pane:last-child .thread-header,
+.app:not(.has-panel) .wf-board__header,
+.app.has-panel .right-panel__header {
+    padding-right: calc(12px + var(--titlebar-end));
+}
+
+.app:not(.has-panel) .team__header {
+    padding-right: var(--titlebar-end);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .popover__panel,
+    .draft-banner,
+    .compaction__summary,
+    .wf-board__empty {
+        animation: none;
+    }
+
+    .ring__fill,
+    .context-card__bar span {
+        transition: none;
+    }
+}
+
+/* A dialog's rarely changed options, folded */
+
+.dialog__more {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-3);
+}
+
+.dialog__more > summary {
+    width: fit-content;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+    cursor: pointer;
+    user-select: none;
+}
+
+.dialog__more > summary:hover {
+    color: var(--xk-text);
+}
+
+.thread-row.is-renaming {
+    padding: 2px 4px;
+}
+
+.thread-row__rename {
+    width: 100%;
+    height: 28px;
+}

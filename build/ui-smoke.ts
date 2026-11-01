@@ -90,7 +90,7 @@ git('commit', '-q', '-m', 'init');
 await mkdir(path.join(dataDir, 'workflows'), { recursive: true });
 await writeFile(
     path.join(dataDir, 'workflows', 'smoke.yaml'),
-    'name: smoke\ntitle: 冒烟工作流\nsteps:\n  - id: status\n    run: git status --short\n  - id: confirm\n    needs: [status]\n    gate: human\n    message: 冒烟确认\n',
+    'name: smoke\ntitle: 冒烟工作流\nsteps:\n  - id: status\n    run: git branch xora-smoke\n  - id: confirm\n    needs: [status]\n    gate: human\n    message: 冒烟确认\n',
 );
 
 const server = await startMockModelServer();
@@ -276,8 +276,11 @@ try {
     await page.locator('.project__name', { hasText: 'repo' }).waitFor();
     await step(page, '打开项目');
 
-    await page.getByRole('button', { name: '新线程' }).first().click();
-    await page.locator('.dialog textarea').fill('把hello.txt里的hello改成hello world');
+    // New things start from the project's "+": a thread, a team or a workflow.
+    await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
+    await page.getByRole('menuitemradio', { name: /新建线程/ }).click();
+    // Typed key by key: a dialog that takes the focus back on every render loses all but the first character.
+    await page.locator('.dialog textarea').pressSequentially('把hello.txt里的hello改成hello world');
     await page.getByRole('button', { name: '创建' }).click();
     await page.getByRole('button', { name: '允许一次' }).waitFor();
     await step(page, '出现审批卡片');
@@ -335,8 +338,33 @@ try {
     await step(page, '设置的扩展页列出项目命令');
     await page.keyboard.press('Escape');
 
+    // The composer's choices: the mode switches at once and becomes the default; the context meter opens.
+    await page
+        .locator('.composer')
+        .getByRole('button', { name: /权限模式/ })
+        .click();
+    await page.getByRole('menuitemradio', { name: /全权/ }).click();
+    await page.locator('.composer .mode-chip.is-full').waitFor();
+    await page.locator('.composer').getByRole('button', { name: '上下文', exact: true }).click();
+    await page.locator('.context-card', { hasText: '立即压缩' }).waitFor();
+    await step(page, '输入框下面能切换模式、查看上下文');
+    await page.keyboard.press('Escape');
+    // Back to ask, which new work then starts with again: the workflow below expects its command to ask.
+    await page
+        .locator('.composer')
+        .getByRole('button', { name: /权限模式/ })
+        .click();
+    await page.getByRole('menuitemradio', { name: /询问/ }).click();
+    await page.locator('.composer .mode-chip.is-ask').waitFor();
+
+    // Panels open from the thread's ⋯ menu.
+    const openPanel = async (name: string) => {
+        await page.locator('.thread-header').getByRole('button', { name: '更多', exact: true }).click();
+        await page.getByRole('menuitemcheckbox', { name, exact: true }).click();
+    };
+
     // A real shell through node-pty in the thread's folder (M3-5).
-    await page.getByRole('button', { name: '终端', exact: true }).click();
+    await openPanel('终端');
     await page.locator('.terminal-panel .xterm').waitFor();
     // Type only once the shell has drawn its prompt; some shells drop what was typed while they start.
     await page.waitForFunction(
@@ -365,7 +393,7 @@ try {
 
     // The preview panel loads a local page in its sandboxed view (M3-6). Screenshots need a window on screen, so
     // they are only checked with --show.
-    await page.getByRole('button', { name: '预览', exact: true }).click();
+    await openPanel('预览');
     await page.locator('.preview input[aria-label=url]').fill(siteUrl);
     await page.locator('.preview').getByRole('button', { name: '打开', exact: true }).click();
     await page.locator('.preview__title', { hasText: 'Smoke page' }).waitFor();
@@ -376,8 +404,9 @@ try {
     await step(page, '预览能打开本地页面');
 
     // M4: hand a goal to a team; the team view shows the run, which can be stopped.
-    await page.getByRole('button', { name: '交给团队', exact: true }).first().click();
-    await page.locator('.modal textarea').fill('把hello.txt整理一下');
+    await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
+    await page.getByRole('menuitemradio', { name: /交给团队/ }).click();
+    await page.locator('.modal textarea').pressSequentially('把hello.txt整理一下');
     await page.locator('.modal').getByRole('button', { name: '开始', exact: true }).click();
     await page.locator('.team__goal', { hasText: '把hello.txt整理一下' }).waitFor();
     await step(page, '交给团队后显示团队视图');
@@ -393,12 +422,20 @@ try {
         await page.locator('.team .badge', { hasText: /已停止|已暂停|失败/ }).waitFor();
     }
 
-    // M5: run a workflow from the list; its command and its human gate are answered in the run view.
-    await page.getByRole('button', { name: '工作流', exact: true }).first().click();
+    // M5: the project's workflow board; "new workflow" asks for a description (not sent here).
+    await page.locator('.project__board').first().click();
+    await page.locator('.wf-board').getByRole('button', { name: '新建工作流', exact: true }).click();
+    await page.locator('.modal textarea').pressSequentially('每天跑一遍测试');
+    if ((await page.locator('.modal textarea').inputValue()) !== '每天跑一遍测试') {
+        throw new Error('the new workflow dialog lost what was typed');
+    }
+    await page.locator('.modal').getByRole('button', { name: '取消', exact: true }).click();
+    await step(page, '工作流看板能新建工作流');
+    // Run a workflow from the board; its command and its human gate are answered in the run view.
     const card = page.locator('.workflow-card', { hasText: '冒烟工作流' });
     await card.getByRole('button', { name: '运行', exact: true }).click();
     await card.getByRole('button', { name: '开始运行', exact: true }).click();
-    const command = page.locator('.workflow__approval', { hasText: 'git status --short' });
+    const command = page.locator('.workflow__approval', { hasText: 'git branch xora-smoke' });
     await command.getByRole('button', { name: '允许', exact: true }).click();
     const gate = page.locator('.workflow__approval', { hasText: '冒烟确认' });
     await gate.getByRole('button', { name: '允许', exact: true }).click();

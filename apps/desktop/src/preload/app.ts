@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('xoraShell', {
     signalReady: () => ipcRenderer.send('xora:ui-ready'),
     shellInfo: () => ipcRenderer.invoke('xora:shell-info'),
     restartToSafeMode: () => ipcRenderer.send('xora:restart-safe-mode'),
+    setTheme: (theme: string) => ipcRenderer.send('xora:theme', theme),
     onHostRestarted: (listener: () => void) => {
         hostRestartedListeners.add(listener);
         return () => {

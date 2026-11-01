@@ -87,6 +87,22 @@ export function NewThreadDialog({ projectId }: { projectId: string }) {
         setBusy(false);
     };
 
+    const modeField = (
+        <Field label={s.thread.mode} hint={s.modeHints[mode]}>
+            <div className="segmented">
+                {MODES.map((value) => (
+                    <button
+                        key={value}
+                        type="button"
+                        className={mode === value ? 'is-active' : ''}
+                        onClick={() => setMode(value)}
+                    >
+                        {s.modes[value]}
+                    </button>
+                ))}
+            </div>
+        </Field>
+    );
     return (
         <Modal title={`${s.sidebar.newThread} · ${project?.name ?? ''}`} onClose={close}>
             <div className="dialog">
@@ -108,8 +124,31 @@ export function NewThreadDialog({ projectId }: { projectId: string }) {
                         {s.newThread.bestOfN}
                     </button>
                 </div>
+                {/* The task first: the dialog opens with the cursor in it. */}
+                <Field label={s.newThread.task}>
+                    <textarea
+                        className="textarea"
+                        rows={4}
+                        value={text}
+                        placeholder={s.thread.placeholder}
+                        onChange={(event) => setText(event.target.value)}
+                        onKeyDown={(event) => {
+                            if (
+                                event.key === 'Enter' &&
+                                (event.metaKey || event.ctrlKey) &&
+                                tab === 'single' &&
+                                !busy
+                            ) {
+                                event.preventDefault();
+                                void create();
+                            }
+                        }}
+                    />
+                </Field>
+                {modeField}
                 {tab === 'single' ? (
-                    <>
+                    <details className="dialog__more">
+                        <summary>{s.newThread.moreOptions}</summary>
                         <Field label={s.newThread.location}>
                             <Select
                                 label={s.newThread.location}
@@ -138,7 +177,7 @@ export function NewThreadDialog({ projectId }: { projectId: string }) {
                                 <Select label={s.thread.model} value={model} options={options} onChange={setModel} />
                             </Field>
                         )}
-                    </>
+                    </details>
                 ) : (
                     <Field label={s.newThread.models} hint={s.newThread.bestHint}>
                         <div className="checklist">
@@ -162,23 +201,6 @@ export function NewThreadDialog({ projectId }: { projectId: string }) {
                         </div>
                     </Field>
                 )}
-                <Field label={s.thread.mode}>
-                    <Select
-                        label={s.thread.mode}
-                        value={mode}
-                        options={MODES.map((value) => ({ value, label: s.modes[value], hint: s.modeHints[value] }))}
-                        onChange={setMode}
-                    />
-                </Field>
-                <Field label={s.newThread.task}>
-                    <textarea
-                        className="textarea"
-                        rows={4}
-                        value={text}
-                        placeholder={s.thread.placeholder}
-                        onChange={(event) => setText(event.target.value)}
-                    />
-                </Field>
                 <div className="row">
                     {tab === 'single' ? (
                         <button

@@ -1,10 +1,25 @@
-import type { WorkflowInfo, WorkflowRun, WorkflowStepRun } from '@xora/protocol';
+import type { WorkflowInfo, WorkflowRun, WorkflowRunMode, WorkflowStepRun } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { Choices, Popover } from './Controls.tsx';
+import { Icon, type IconName } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
-import { Badge, Empty, Field, formatMoney, Modal, Spinner, Toggle } from './primitives.tsx';
+import { Badge, Empty, Field, formatMoney, IconButton, Modal, relativeTime, Spinner, Toggle } from './primitives.tsx';
+
+const RUN_MODES: WorkflowRunMode[] = ['default', 'auto_edit', 'full'];
+const RUN_MODE_ICONS: Record<WorkflowRunMode, IconName> = { default: 'shield', auto_edit: 'pencil', full: 'bolt' };
+
+function runModeChoices(s: ReturnType<typeof useStrings>) {
+    return RUN_MODES.map((mode) => ({
+        value: mode,
+        label: s.workflow.modes[mode],
+        hint: s.workflow.modeHints[mode],
+        icon: RUN_MODE_ICONS[mode],
+        ...(mode === 'full' ? { tone: 'warn' as const } : {}),
+    }));
+}
 
 type Tone = 'ok' | 'error' | 'accent';
 
@@ -148,6 +163,41 @@ export function WorkflowRunView({ runId }: { runId: string }) {
                     ))}
                 </div>
                 <div className="row">
+                    <Popover
+                        label={`${s.workflow.mode}：${s.workflow.modes[run.mode ?? 'default']}`}
+                        placement="down"
+                        align="end"
+                        className="picker"
+                        triggerClassName={`picker__trigger mode-chip is-${run.mode ?? 'default'}`}
+                        disabled={over}
+                        trigger={
+                            <>
+                                <Icon name={RUN_MODE_ICONS[run.mode ?? 'default']} size={13} />
+                                {s.workflow.modes[run.mode ?? 'default']}
+                                <Icon name="chevronDown" size={12} className="picker__chevron" />
+                            </>
+                        }
+                    >
+                        {(close) => (
+                            <>
+                                <div className="popover__title">{s.workflow.mode}</div>
+                                <Choices
+                                    value={run.mode ?? 'default'}
+                                    options={runModeChoices(s)}
+                                    onPick={(mode) => {
+                                        close();
+                                        void attempt(() => host.call('workflow.setMode', { runId, mode })).then(
+                                            (updated) =>
+                                                updated &&
+                                                useApp.setState((state) => ({
+                                                    workflowRuns: { ...state.workflowRuns, [updated.id]: updated },
+                                                })),
+                                        );
+                                    }}
+                                />
+                            </>
+                        )}
+                    </Popover>
                     <button type="button" className="button button--small" onClick={() => openThread(run.threadId)}>
                         {s.workflow.openThread}
                     </button>
@@ -266,6 +316,8 @@ function WorkflowCard({
     onChanged: () => void;
 }) {
     const s = useStrings();
+    const remembered = useApp((state) => state.settings?.lastChoices.workflowMode ?? 'default');
+    const [mode, setMode] = useState<WorkflowRunMode>(remembered);
     const [open, setOpen] = useState(false);
     const [inputs, setInputs] = useState<Record<string, string>>(() =>
         Object.fromEntries(
@@ -297,6 +349,7 @@ function WorkflowCard({
                     key: info.key,
                     inputs: given,
                     offPeak,
+                    mode,
                     ...(Number(budget) > 0 ? { budget: Number(budget) } : {}),
                 },
                 { timeoutMs: 120_000 },
@@ -366,6 +419,20 @@ function WorkflowCard({
                             />
                         </Field>
                     ))}
+                    <Field label={s.workflow.mode} hint={s.workflow.modeHints[mode]}>
+                        <div className="segmented">
+                            {RUN_MODES.map((value) => (
+                                <button
+                                    key={value}
+                                    type="button"
+                                    className={mode === value ? 'is-active' : ''}
+                                    onClick={() => setMode(value)}
+                                >
+                                    {s.workflow.modes[value]}
+                                </button>
+                            ))}
+                        </div>
+                    </Field>
                     <Field label={s.workflow.budget}>
                         <input
                             className="input"
@@ -377,7 +444,7 @@ function WorkflowCard({
                             onChange={(event) => setBudget(event.target.value)}
                         />
                     </Field>
-                    <Field label={s.workflow.offPeak} hint={s.workflow.offPeakHint}>
+                    <Field label={s.workflow.offPeakLabel} hint={s.workflow.offPeakHint}>
                         <Toggle checked={offPeak} onChange={setOffPeak} label={s.workflow.offPeak} />
                     </Field>
                     <div className="row">
@@ -439,32 +506,139 @@ function WorkflowCard({
     );
 }
 
-export function WorkflowsDialog({ projectId }: { projectId: string }) {
+/** A project's workflows in the main area: what they are, how to make one, each with its run form, and the runs. */
+export function WorkflowBoard({ projectId }: { projectId: string }) {
     const s = useStrings();
+    const project = useApp((state) => state.projects.find((item) => item.id === projectId));
+    const allRuns = useApp((state) => state.workflowRuns);
     const [list, setList] = useState<WorkflowInfo[] | undefined>();
     const load = () => {
         void host
             .call('workflow.list', { projectId })
             .then(setList)
             .catch((error) => toast(errorMessage(error), 'error'));
+        void host
+            .call('workflow.runs', { projectId })
+            .then((runs) =>
+                useApp.setState((state) => ({
+                    workflowRuns: { ...state.workflowRuns, ...Object.fromEntries(runs.map((run) => [run.id, run])) },
+                })),
+            )
+            .catch(() => undefined);
     };
     useEffect(load, [projectId]);
-    const close = () => useApp.setState({ workflowsFor: undefined });
+    const runs = Object.values(allRuns)
+        .filter((run) => run.projectId === projectId && !run.parentRunId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 20);
+    const create = () => useApp.setState({ workflowDraftFor: projectId });
     return (
-        <Modal title={s.workflow.title} onClose={close} wide>
-            {!list ? (
-                <Empty>
-                    <Spinner />
-                </Empty>
-            ) : list.length === 0 ? (
-                <Empty>{s.workflow.none}</Empty>
-            ) : (
-                <div className="workflow-list">
-                    {list.map((info) => (
-                        <WorkflowCard key={info.key} projectId={projectId} info={info} onChanged={load} />
-                    ))}
+        <div className="wf-board">
+            <header className="wf-board__header">
+                <div className="wf-board__title">
+                    <h1>{s.workflow.title}</h1>
+                    <span className="wf-board__project">{project?.name}</span>
                 </div>
-            )}
+                <div className="row">
+                    <IconButton icon="refresh" label={s.common.refresh} onClick={load} />
+                    <button type="button" className="button button--primary" onClick={create}>
+                        <Icon name="plus" size={14} /> {s.workflow.create}
+                    </button>
+                </div>
+            </header>
+            <div className="wf-board__body">
+                <p className="wf-board__intro">{s.workflow.boardIntro}</p>
+                {!list ? (
+                    <Empty>
+                        <Spinner />
+                    </Empty>
+                ) : list.length === 0 ? (
+                    <div className="wf-board__empty">
+                        <Icon name="bolt" size={22} />
+                        <p>{s.workflow.howToCreate}</p>
+                        <button type="button" className="button button--primary" onClick={create}>
+                            <Icon name="plus" size={14} /> {s.workflow.create}
+                        </button>
+                    </div>
+                ) : (
+                    <div className="workflow-list">
+                        {list.map((info) => (
+                            <WorkflowCard key={info.key} projectId={projectId} info={info} onChanged={load} />
+                        ))}
+                    </div>
+                )}
+                <h3 className="wf-board__heading">{s.workflow.runsTitle}</h3>
+                {runs.length === 0 ? (
+                    <p className="muted">{s.workflow.noRuns}</p>
+                ) : (
+                    <div className="wf-board__runs">
+                        {runs.map((run) => (
+                            <button
+                                key={run.id}
+                                type="button"
+                                className="wf-board__run"
+                                onClick={() => useApp.setState({ workflowRunId: run.id, workflowsFor: undefined })}
+                            >
+                                <Badge tone={runTone(run.status)}>{s.workflow.statuses[run.status]}</Badge>
+                                <span className="wf-board__run-title">{run.title}</span>
+                                <span className="wf-board__run-meta">
+                                    {s.workflow.reasons[run.reason]} · {relativeTime(run.updatedAt)}
+                                    {run.cost.amount > 0 ? ` · ${formatMoney(run.cost)}` : ''}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+/** "New workflow": the user describes the process and an agent writes the workflow file in a new thread. */
+export function WorkflowDraftDialog({ projectId }: { projectId: string }) {
+    const s = useStrings();
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const close = () => useApp.setState({ workflowDraftFor: undefined });
+    const start = async () => {
+        setBusy(true);
+        const thread = await attempt(() =>
+            host.call('workflow.draft', { projectId, description: text.trim() }, { timeoutMs: 120_000 }),
+        );
+        setBusy(false);
+        if (thread) {
+            useApp.setState((state) => ({
+                threads: { ...state.threads, [thread.id]: thread },
+                workflowDraftFor: undefined,
+            }));
+            await selectThread(thread.id);
+        }
+    };
+    return (
+        <Modal title={s.workflow.create} onClose={close}>
+            <div className="dialog">
+                <Field label={s.workflow.describe} hint={s.workflow.describeHint}>
+                    <textarea
+                        className="textarea"
+                        rows={6}
+                        value={text}
+                        onChange={(event) => setText(event.target.value)}
+                    />
+                </Field>
+                <div className="row">
+                    <button
+                        type="button"
+                        className="button button--primary"
+                        disabled={busy || !text.trim()}
+                        onClick={() => void start()}
+                    >
+                        {busy ? <Spinner /> : null} {s.workflow.createStart}
+                    </button>
+                    <button type="button" className="button" onClick={close}>
+                        {s.common.cancel}
+                    </button>
+                </div>
+            </div>
         </Modal>
     );
 }

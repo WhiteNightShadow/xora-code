@@ -136,7 +136,8 @@ try {
     await page.locator('.project__name', { hasText: 'repo' }).waitFor();
     await snap(page, '项目已打开');
 
-    await page.getByRole('button', { name: '交给团队', exact: true }).first().click();
+    await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
+    await page.getByRole('menuitemradio', { name: /交给团队/ }).click();
     const dialog = page.locator('.modal');
     await dialog.locator('textarea').fill(task.prompt);
     await dialog.getByRole('combobox', { name: '自主级别' }).selectOption(values.autonomy);

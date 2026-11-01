@@ -80,8 +80,10 @@ interface AppState {
     workflowRuns: Record<string, WorkflowRun>;
     /** Workflow run shown in the main area instead of a thread. */
     workflowRunId: string | undefined;
-    /** Project the workflow list is open for. */
+    /** Project whose workflow board is shown in the main area. */
     workflowsFor: string | undefined;
+    /** Project whose "new workflow" dialog is open. */
+    workflowDraftFor: string | undefined;
     toasts: Toast[];
     /** Bumps when usage changes, so open usage views refetch. */
     usageVersion: number;
@@ -116,6 +118,7 @@ export const useApp = create<AppState>(() => ({
     workflowRuns: {},
     workflowRunId: undefined,
     workflowsFor: undefined,
+    workflowDraftFor: undefined,
     toasts: [],
     usageVersion: 0,
 }));
@@ -329,14 +332,27 @@ export async function startApp(): Promise<void> {
     await loaded;
 }
 
+/** The project's workflow board in the main area: its workflows, how to make one, and its runs. */
+export function openWorkflowBoard(projectId: string): void {
+    set({ workflowsFor: projectId, teamRunId: undefined, workflowRunId: undefined, selectedProjectId: projectId });
+}
+
 export async function selectThread(threadId: string | undefined): Promise<void> {
-    const previous = get().selectedThreadId;
-    if (previous === threadId) return;
-    const thread = threadId ? get().threads[threadId] : undefined;
+    const current = get();
+    if (
+        current.selectedThreadId === threadId &&
+        !current.teamRunId &&
+        !current.workflowRunId &&
+        !current.workflowsFor
+    ) {
+        return;
+    }
+    const thread = threadId ? current.threads[threadId] : undefined;
     set({
         selectedThreadId: threadId,
         teamRunId: undefined,
         workflowRunId: undefined,
+        workflowsFor: undefined,
         reviewTurnId: undefined,
         ...(thread ? { selectedProjectId: thread.projectId } : {}),
     });

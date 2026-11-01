@@ -696,20 +696,6 @@ pre {
     -webkit-app-region: no-drag;
 }
 
-.sidebar__brand {
-    display: inline-flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 15px;
-    font-weight: var(--xk-weight-bold);
-    letter-spacing: -0.01em;
-}
-
-.sidebar__logo {
-    flex: none;
-    filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--xk-brand-to) 35%, transparent));
-}
-
 .sidebar__search {
     flex: none;
     margin: 0 10px 10px;
@@ -1334,10 +1320,6 @@ pre {
     -webkit-app-region: drag;
 }
 
-.thread-header > * {
-    -webkit-app-region: no-drag;
-}
-
 .thread-header__title {
     flex: 1 1 220px;
     min-width: 0;
@@ -1393,77 +1375,8 @@ pre {
     justify-content: flex-end;
 }
 
-.thread-header__controls .select--compact {
-    min-width: 0;
-    background-color: var(--xk-bg-subtle);
-    border-color: var(--xk-border-subtle);
-}
-
-.thread-header__controls .select--compact:hover:not(:disabled) {
-    background-color: var(--xk-bg-elevated);
-    border-color: var(--xk-border-strong);
-}
-
-/* The panel switches as one toolbar. */
-.thread-header__panels {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 1px;
-    padding: 2px;
-    border-radius: 10px;
-    background: var(--xk-bg-subtle);
-    box-shadow: inset 0 0 0 1px var(--xk-border-subtle);
-}
-
-.thread-header__panels .icon-button {
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-}
-
-.thread-header__panels .icon-button.is-active,
-.thread-header__panels .icon-button.is-active:hover:not(:disabled) {
-    background: var(--xk-bg-elevated);
-    color: var(--xk-accent-text);
-    box-shadow: var(--xk-shadow-xs), var(--xk-elevated-ring);
-}
-
-.thread-header__cost {
-    display: inline-flex;
-    align-items: center;
-    height: 24px;
-    padding: 0 4px;
-    font-variant-numeric: tabular-nums;
-    font-size: var(--xk-text-xs);
-    color: var(--xk-text-muted);
-}
-
 .thread-header__menu {
     position: relative;
-}
-
-.meter {
-    width: 44px;
-    height: 6px;
-    border-radius: var(--xk-radius-full);
-    background: var(--xk-bg-sunken);
-    box-shadow: inset 0 0 0 1px var(--xk-border-subtle);
-    overflow: hidden;
-}
-
-.meter__bar {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: var(--xk-accent);
-    transition:
-        width var(--xk-duration-slow) var(--xk-ease-out),
-        background-color var(--xk-duration-base) var(--xk-ease-out);
-}
-
-.meter.is-high .meter__bar {
-    background: var(--xk-warn-solid);
 }
 
 /* Scoped to the thread: a list elsewhere may also be called a timeline. */
@@ -2426,29 +2339,6 @@ button.tool__header:hover {
     align-items: center;
     gap: var(--xk-space-2);
     padding: 4px 8px 8px 8px;
-}
-
-.composer__hint {
-    margin-right: auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 8px;
-    border-radius: var(--xk-radius-full);
-    background: var(--xk-bg-sunken);
-    color: var(--xk-text-muted);
-    font-size: var(--xk-text-2xs);
-    font-weight: var(--xk-weight-medium);
-    white-space: nowrap;
-}
-
-.composer__hint::before {
-    content: "";
-    width: 11px;
-    height: 11px;
-    background: currentColor;
-    mask: var(--xk-icon-shield) center / contain no-repeat;
 }
 
 .composer__bar .button {

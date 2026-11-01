@@ -9,6 +9,7 @@ import {
     ipcMain,
     MessageChannelMain,
     Notification,
+    nativeTheme,
     shell,
     type UtilityProcess,
     utilityProcess,
@@ -21,6 +22,26 @@ import { PreviewController } from './preview.ts';
 import { attachShellServices, releasePowerBlocker, type ShellPeer } from './shell-services.ts';
 import { shellStrings } from './strings.ts';
 import { AppTray, forceQuit, trayIconPath } from './tray.ts';
+
+/** Height of the UI's top bar, where the window's own buttons sit (the sidebar top and the view headers). */
+const TITLE_BAR_HEIGHT = 52;
+
+/** The window buttons Windows and Linux draw over the page, in the page's colors (tokens.css `--xk-bg`, `--xk-text`). */
+function titleBarOverlay(): Electron.TitleBarOverlayOptions {
+    return nativeTheme.shouldUseDarkColors
+        ? { color: '#141518', symbolColor: '#ececf0', height: TITLE_BAR_HEIGHT }
+        : { color: '#ffffff', symbolColor: '#17181c', height: TITLE_BAR_HEIGHT };
+}
+
+/**
+ * No title bar: the page runs to the top edge and its top bar drags the window (`-webkit-app-region` in app.css).
+ * macOS keeps its traffic lights inset over the sidebar; Windows and Linux draw their buttons over the top right.
+ */
+function framelessOptions(): Electron.BrowserWindowConstructorOptions {
+    return process.platform === 'darwin'
+        ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 18 } }
+        : { titleBarStyle: 'hidden', titleBarOverlay: titleBarOverlay() };
+}
 
 export type LaunchOutcome =
     | { readonly kind: 'good' }
@@ -237,6 +258,7 @@ export class BundleRuntime {
             minHeight: 480,
             show: false,
             title: 'Xora Code',
+            ...framelessOptions(),
             webPreferences: {
                 preload: preloadPath,
                 sandbox: true,
@@ -297,6 +319,18 @@ export class BundleRuntime {
                 this.#options.onSafeModeRequest();
             }
         };
+        // The UI's theme setting: native menus and dialogs follow it, and so do the window buttons it draws over.
+        const onTheme = (event: IpcMainEvent, theme: unknown) => {
+            if (fromThisWindow(event) && (theme === 'system' || theme === 'light' || theme === 'dark')) {
+                nativeTheme.themeSource = theme;
+            }
+        };
+        const onNativeTheme = () => {
+            if (process.platform !== 'darwin' && !window.isDestroyed()) {
+                window.setTitleBarOverlay(titleBarOverlay());
+            }
+        };
+        nativeTheme.on('updated', onNativeTheme);
         const preview = new PreviewController(window, this.#options.log, (event) => {
             if (!contents.isDestroyed()) contents.send('xora:preview-event', event);
         });
@@ -341,6 +375,7 @@ export class BundleRuntime {
         ipcMain.on('xora:request-port', onRequestPort);
         ipcMain.on('xora:ui-ready', onUiReady);
         ipcMain.on('xora:restart-safe-mode', onSafeMode);
+        ipcMain.on('xora:theme', onTheme);
         ipcMain.handle('xora:shell-info', (event) => {
             if (!fromThisWindow(event)) {
                 throw new Error('forbidden');
@@ -357,6 +392,8 @@ export class BundleRuntime {
             ipcMain.removeListener('xora:request-port', onRequestPort);
             ipcMain.removeListener('xora:ui-ready', onUiReady);
             ipcMain.removeListener('xora:restart-safe-mode', onSafeMode);
+            ipcMain.removeListener('xora:theme', onTheme);
+            nativeTheme.removeListener('updated', onNativeTheme);
             ipcMain.removeHandler('xora:shell-info');
             ipcMain.removeHandler('xora:preview');
             preview.close();

@@ -347,10 +347,12 @@ export function TeamView({ runId }: { runId: string }) {
 
 export function TeamStartDialog({ projectId }: { projectId: string }) {
     const s = useStrings();
+    // Starts from what the user chose last time (the host remembers it on each start).
+    const last = useApp((state) => state.settings?.lastChoices);
     const [goal, setGoal] = useState('');
-    const [autonomy, setAutonomy] = useState<'L0' | 'L1' | 'L2' | 'L3'>('L1');
-    const [mode, setMode] = useState<'standard' | 'hypotheses'>('standard');
-    const [budget, setBudget] = useState('');
+    const [autonomy, setAutonomy] = useState<'L0' | 'L1' | 'L2' | 'L3'>(last?.teamAutonomy ?? 'L1');
+    const [mode, setMode] = useState<'standard' | 'hypotheses'>(last?.teamMode ?? 'standard');
+    const [budget, setBudget] = useState(last?.teamBudget ? String(last.teamBudget) : '');
     const [busy, setBusy] = useState(false);
     const close = () => useApp.setState({ teamStartFor: undefined });
     const start = async () => {

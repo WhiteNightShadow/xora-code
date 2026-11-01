@@ -1,4 +1,5 @@
 import { openProject, openSettings, useApp, useStrings } from '../store.ts';
+import { format } from '../strings.ts';
 import { WelcomeArt } from './Art.tsx';
 import { Icon } from './Icon.tsx';
 
@@ -41,7 +42,9 @@ export function Welcome() {
                 >
                     <span className="step__icon">3</span>
                     <span className="step__title">{s.welcome.startThread}</span>
-                    <span className="step__hint">{project ? project.name : s.welcome.ready}</span>
+                    <span className="step__hint">
+                        {project ? format(s.welcome.moreWays, { project: project.name }) : s.welcome.ready}
+                    </span>
                 </button>
             </div>
         </div>
