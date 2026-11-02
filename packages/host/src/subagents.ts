@@ -9,14 +9,15 @@ import {
     type Project,
     type ThreadMeta,
 } from '@xora/protocol';
-import { modelChain, TIERS, type Tier } from '@xora/workflows';
-import { connectedModels, effortOf } from './agent-models.ts';
+import { type AgentSpec, modelChain, type Organization, TIERS, type Tier } from '@xora/workflows';
+import { connectedModels, effortOf, pickTierModel } from './agent-models.ts';
 import type { ConnectionService } from './connections.ts';
 import type { HostToolResult } from './engines/manager.ts';
 import { XORA_ENGINE } from './engines/registry.ts';
 import type { SessionExtras } from './extensions.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
+import { type MemberService, memberName } from './members.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import { builtinsOutside, loadTeamOrganization, mcpPatternsOf, shorten } from './team-agents.ts';
@@ -29,8 +30,8 @@ import type { HostToolProvider, SharedToolCall, SharedTools, TurnEnded, TurnServ
  * The helper is a child thread (`parent` set) in the same project folder, read-only unless the call lets it
  * write; it runs one turn on the task, and its last message comes back as the tool result while the parent's
  * turn shows a subagent card. A few run at once per turn, and there is no nesting: child threads and the members
- * of team and workflow runs do not get the tool. `@name` of a defined agent in a user's message asks the
- * thread's agent to hand the message to that agent.
+ * of team and workflow runs do not get the tool. `@name` of a defined agent or of a member of the team (06 §19) in
+ * a user's message asks the thread's agent to hand the message to it; a member's subagent works as that member.
  */
 
 export const AGENT_TOOL = 'agent';
@@ -62,6 +63,8 @@ const TEXT = bilingual(
             ].join('\n'),
         agents: (list: string) => `已定义的agent（把名字填进\`agent\`）：\n${list}`,
         agentLine: (name: string, description: string) => `- ${name}：${description}`,
+        memberLine: (name: string, id: string, description: string) =>
+            `- ${name}（团队成员${id}）${description ? `：${description}` : ''}`,
         noAgents: '这个项目没有定义agent：不填`agent`，就是一个通用子agent。',
         description: '用几个词概括这项任务，作为子agent线程的标题',
         prompt: '完整、自成一体的任务说明：子agent只看得到这段文字',
@@ -107,6 +110,7 @@ const TEXT = bilingual(
             ].join('\n'),
         agents: (list) => `Defined agents (pass the name as \`agent\`):\n${list}`,
         agentLine: (name, description) => `- ${name}: ${description}`,
+        memberLine: (name, id, description) => `- ${name} (team member ${id})${description ? `: ${description}` : ''}`,
         noAgents: 'No agents are defined in this project: leave out `agent` for a general-purpose subagent.',
         description: "A few words naming the task; the title of the subagent's thread",
         prompt: 'The full, self-contained task: the only thing the subagent sees',
@@ -222,11 +226,19 @@ function engineToolNames(tools: readonly string[]): string[] {
     });
 }
 
-function agentTool(agents: readonly AgentDefinition[], minutes: number): HostToolProvider['tools'][number] {
+function agentTool(
+    agents: readonly AgentDefinition[],
+    members: readonly AgentSpec[],
+    minutes: number,
+): HostToolProvider['tools'][number] {
     const text = textOf(TEXT);
-    const listed = agents
-        .slice(0, MAX_LISTED_AGENTS)
-        .map((agent) => text.agentLine(agent.name, shorten(agent.description, MAX_DESCRIPTION_CHARS)));
+    const listed = [
+        ...agents.map((agent) => text.agentLine(agent.name, shorten(agent.description, MAX_DESCRIPTION_CHARS))),
+        ...members.map((member) =>
+            text.memberLine(memberName(member), member.id, shorten(member.description ?? '', MAX_DESCRIPTION_CHARS)),
+        ),
+    ].slice(0, MAX_LISTED_AGENTS);
+    const names = [...agents.map((agent) => agent.name), ...members.map((member) => memberName(member))];
     return {
         name: AGENT_TOOL,
         description: [
@@ -238,9 +250,7 @@ function agentTool(agents: readonly AgentDefinition[], minutes: number): HostToo
             properties: {
                 description: { type: 'string', description: text.description },
                 prompt: { type: 'string', description: text.prompt },
-                ...(agents.length > 0
-                    ? { agent: { type: 'string', enum: agents.map((agent) => agent.name), description: text.agent } }
-                    : {}),
+                ...(names.length > 0 ? { agent: { type: 'string', enum: names, description: text.agent } } : {}),
                 write: { type: 'boolean', description: text.write },
             },
             required: ['description', 'prompt'],
@@ -274,6 +284,30 @@ interface AgentCall {
     readonly prompt: string;
     readonly agent?: string;
     readonly write: boolean;
+}
+
+/** Who a subagent works as: a defined agent (or none, general purpose), or a member of the team. */
+type Helper =
+    | { readonly kind: 'agent'; readonly agent: AgentDefinition | undefined }
+    | { readonly kind: 'member'; readonly member: AgentSpec; readonly org: Organization };
+
+/** Members a thread may hand work to: everyone but the supervisor, which only works in team runs; agents win a clash. */
+function delegableMembers(members: readonly AgentSpec[], agents: readonly AgentDefinition[]): AgentSpec[] {
+    const taken = new Set(agents.map((agent) => agent.name.toLowerCase()));
+    return members.filter(
+        (member) =>
+            member.role !== 'supervisor' &&
+            !taken.has(member.id.toLowerCase()) &&
+            !taken.has(memberName(member).toLowerCase()),
+    );
+}
+
+function findMember(members: readonly AgentSpec[], name: string): AgentSpec | undefined {
+    const lower = name.toLowerCase();
+    return (
+        members.find((member) => memberName(member).toLowerCase() === lower) ??
+        members.find((member) => member.id.toLowerCase() === lower)
+    );
 }
 
 /** The call's arguments, or what is wrong with them. */
@@ -355,6 +389,8 @@ export interface SubagentDeps {
     readonly orgsDir: string;
     /** How long one subagent may run; {@link SUBAGENT_TIME_LIMIT_MS} by default. */
     readonly timeLimitMs?: number;
+    /** The team's members a thread may hand work to by name or `@` mention (06 §19). */
+    readonly members?: Pick<MemberService, 'roster' | 'provider'>;
 }
 
 export class SubagentService implements SharedTools {
@@ -372,21 +408,55 @@ export class SubagentService implements SharedTools {
         return Math.max(1, Math.round((this.#deps.timeLimitMs ?? SUBAGENT_TIME_LIMIT_MS) / 60_000));
     }
 
-    tools(thread: ThreadMeta, extras: SessionExtras | undefined): HostToolProvider['tools'] {
-        return canDelegate(thread) ? [agentTool(usableAgents(extras), this.#minutes)] : [];
+    async tools(thread: ThreadMeta, extras: SessionExtras | undefined): Promise<HostToolProvider['tools']> {
+        if (!canDelegate(thread)) {
+            return [];
+        }
+        const agents = usableAgents(extras);
+        const team = await this.#team(thread.projectId);
+        return [agentTool(agents, delegableMembers(team?.members ?? [], agents), this.#minutes)];
     }
 
-    /** The hand-off of a message that mentions defined agents (03 §4 "@agent下发"). */
-    instructions(thread: ThreadMeta, extras: SessionExtras | undefined, text: string): string | undefined {
-        if (!canDelegate(thread)) {
+    /** The hand-off of a message that mentions defined agents or members (03 §4 "@agent下发", 06 §19). */
+    async instructions(
+        thread: ThreadMeta,
+        extras: SessionExtras | undefined,
+        text: string,
+    ): Promise<string | undefined> {
+        if (!canDelegate(thread) || !text.includes('@')) {
             return undefined;
         }
-        const names = mentionedAgents(
-            text,
-            usableAgents(extras).map((agent) => agent.name),
-        );
+        const agents = usableAgents(extras);
+        const members = delegableMembers((await this.#team(thread.projectId))?.members ?? [], agents);
+        // A member is addressed by its name or its id, and handed the work by its name.
+        const byMention = new Map<string, string>();
+        for (const agent of agents) byMention.set(agent.name, agent.name);
+        for (const member of members) {
+            const name = memberName(member);
+            if (!byMention.has(name)) byMention.set(name, name);
+            if (!byMention.has(member.id)) byMention.set(member.id, name);
+        }
+        const named = [
+            ...new Set(
+                mentionedAgents(text, [...byMention.keys()]).map((mention) => byMention.get(mention) ?? mention),
+            ),
+        ];
         const words = textOf(TEXT);
-        return names.length > 0 ? words.handoff(words.names(names.map((name) => `@${name}`))) : undefined;
+        return named.length > 0 ? words.handoff(words.names(named.map((name) => `@${name}`))) : undefined;
+    }
+
+    /** The project's members with their organization; none when the project cannot be read. */
+    async #team(projectId: string): Promise<{ org: Organization; members: AgentSpec[] } | undefined> {
+        if (!this.#deps.members) {
+            return undefined;
+        }
+        try {
+            const { org, members } = await this.#deps.members.roster(projectId);
+            return { org, members };
+        } catch (error) {
+            this.#deps.log.warn(`subagent members of ${projectId}: ${errorText(error)}`);
+            return undefined;
+        }
     }
 
     async handle(name: string, input: unknown, call: SharedToolCall): Promise<HostToolResult> {
@@ -398,15 +468,24 @@ export class SubagentService implements SharedTools {
         if (typeof args === 'string') {
             return { content: text.badInput(args), isError: true };
         }
-        const agents = usableAgents(call.extras);
-        const agent = args.agent ? findAgent(agents, args.agent) : undefined;
-        if (args.agent && !agent) {
-            const names = agents.map((item) => item.name).join(', ') || text.none;
-            return { content: text.unknownAgent(args.agent, names), isError: true };
-        }
         const parent = this.#deps.threads.find(call.threadId);
         if (!parent) {
             return { content: text.turnStopped, isError: true };
+        }
+        const agents = usableAgents(call.extras);
+        const agent = args.agent ? findAgent(agents, args.agent) : undefined;
+        let helper: Helper = { kind: 'agent', agent };
+        if (args.agent && !agent) {
+            const team = await this.#team(parent.projectId);
+            const members = delegableMembers(team?.members ?? [], agents);
+            const member = findMember(members, args.agent);
+            if (!team || !member) {
+                const names =
+                    [...agents.map((item) => item.name), ...members.map((item) => memberName(item))].join(', ') ||
+                    text.none;
+                return { content: text.unknownAgent(args.agent, names), isError: true };
+            }
+            helper = { kind: 'member', member, org: team.org };
         }
         let slots = this.#turns.get(call.turnId);
         if (!slots) {
@@ -420,7 +499,7 @@ export class SubagentService implements SharedTools {
                 return { content: text.turnStopped, isError: true };
             }
             try {
-                return await this.#run(parent, agent, args, call, signal);
+                return await this.#run(parent, helper, args, call, signal);
             } finally {
                 slots.release();
             }
@@ -455,7 +534,7 @@ export class SubagentService implements SharedTools {
 
     async #run(
         parent: ThreadMeta,
-        agent: AgentDefinition | undefined,
+        helper: Helper,
         args: AgentCall,
         call: SharedToolCall,
         signal: AbortSignal,
@@ -463,7 +542,12 @@ export class SubagentService implements SharedTools {
         const { threads, projects, turns } = this.#deps;
         const text = textOf(TEXT);
         const project = await projects.get(parent.projectId);
-        const model = await this.#modelFor(parent, project, agent);
+        const agent = helper.kind === 'agent' ? helper.agent : undefined;
+        const member = helper.kind === 'member' ? helper.member : undefined;
+        const model =
+            helper.kind === 'member'
+                ? this.#memberModel(parent, project, helper)
+                : await this.#modelFor(parent, project, agent);
         if (signal.aborted) {
             return { content: text.turnStopped, isError: true };
         }
@@ -472,7 +556,7 @@ export class SubagentService implements SharedTools {
             title: shorten(args.description, 60),
             engine: XORA_ENGINE.id,
             model: model.ref,
-            mode: subagentMode(parent.mode, args.write, agent?.mode),
+            mode: subagentMode(parent.mode, args.write, member?.mode ?? agent?.mode),
             effort: model.effort,
             // The same folder, a worktree included: the subagent works on what its parent sees.
             location: parent.location,
@@ -480,10 +564,11 @@ export class SubagentService implements SharedTools {
             extra: {
                 parent: { threadId: parent.id, turnId: call.turnId },
                 ...(agent ? { agentId: agent.name } : {}),
+                ...(member ? { agentId: member.id, role: member.role } : {}),
                 ...(model.tier ? { tier: model.tier } : {}),
             },
         });
-        turns.setHostTools(child.id, childTools(agent, true));
+        turns.setHostTools(child.id, this.#helperTools(helper, parent.projectId, true));
         const ended = new Promise<TurnEnded>((resolve) => this.#waiters.set(child.id, resolve));
         try {
             await turns.start(child.id, args.prompt);
@@ -493,7 +578,8 @@ export class SubagentService implements SharedTools {
             threads.delete(child.id);
             return { content: text.notStarted(errorText(error)), isError: true };
         }
-        this.#deps.log.info(`subagent ${child.id} of ${parent.id}${agent ? ` (${agent.name})` : ''}`);
+        const who = member ? memberName(member) : (agent?.name ?? '');
+        this.#deps.log.info(`subagent ${child.id} of ${parent.id}${who ? ` (${who})` : ''}`);
         const item: ItemOf<'subagent'> = {
             id: newId('i'),
             turnId: call.turnId,
@@ -501,7 +587,7 @@ export class SubagentService implements SharedTools {
             type: 'subagent',
             taskId: call.toolCallId ?? child.id,
             title: child.title,
-            agent: agent?.name ?? '',
+            agent: who,
             status: 'running',
             threadId: child.id,
             ...(call.toolCallId ? { toolCallId: call.toolCallId } : {}),
@@ -515,7 +601,7 @@ export class SubagentService implements SharedTools {
             );
         const limitMs = this.#deps.timeLimitMs ?? SUBAGENT_TIME_LIMIT_MS;
         const outcome = await this.#outcome(ended, signal, limitMs);
-        turns.setHostTools(child.id, childTools(agent, false));
+        turns.setHostTools(child.id, this.#helperTools(helper, parent.projectId, false));
         if (outcome === 'aborted') {
             // First, while the parent's turn still runs: its card ends with it.
             finish('cancelled', text.stoppedSummary);
@@ -554,6 +640,45 @@ export class SubagentService implements SharedTools {
         const files = outcome.changedFiles;
         const listed = files.length > MAX_LISTED_FILES ? [...files.slice(0, MAX_LISTED_FILES), '…'] : files;
         return { content: `${reply}\n\n${listed.length > 0 ? text.changed(listed.join(', ')) : text.unchanged}` };
+    }
+
+    /**
+     * The child's tools: a defined agent's whitelist, or a member's own setup (its layers, whitelist, memory and
+     * `remember`); while it works for its parent, the brief on how it reports.
+     */
+    #helperTools(helper: Helper, projectId: string, brief: boolean): HostToolProvider {
+        if (helper.kind === 'agent' || !this.#deps.members) {
+            return childTools(helper.kind === 'agent' ? helper.agent : undefined, brief);
+        }
+        const text = textOf(TEXT);
+        return this.#deps.members.provider(helper.member, helper.org, projectId, {
+            layers: brief ? [{ id: 'subagent_instructions', title: text.briefTitle, text: text.brief }] : [],
+        });
+    }
+
+    /** A member's subagent works on its tier's model (06 §3), or on its parent's when the tier has none. */
+    #memberModel(
+        parent: ThreadMeta,
+        project: Project,
+        helper: Extract<Helper, { kind: 'member' }>,
+    ): { ref: ModelRef | null; effort: Effort; tier?: Tier } {
+        const { member, org } = helper;
+        try {
+            const pick = pickTierModel(this.#deps, {
+                org,
+                project,
+                tier: member.tier,
+                unattended: false,
+                warnings: [],
+            });
+            return { ref: pick.ref, effort: pick.effort, tier: member.tier };
+        } catch (error) {
+            this.#deps.log.warn(`subagent ${member.id}: tier ${member.tier}: ${errorText(error)}`);
+            return {
+                ref: parent.model ?? project.defaults?.model ?? this.#deps.settings.get().defaultModel,
+                effort: parent.effort,
+            };
+        }
     }
 
     /** The subagent's turn ending, the parent's stop, or the time running out, whichever comes first. */

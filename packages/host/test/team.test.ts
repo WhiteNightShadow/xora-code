@@ -155,6 +155,7 @@ interface ChatMessage {
 interface ChatBody {
     readonly model: string;
     readonly messages: readonly ChatMessage[];
+    readonly tools?: ReadonlyArray<{ function: { name: string } }>;
 }
 
 function textOf(content: unknown): string {
@@ -765,6 +766,11 @@ describe('agent team limits', () => {
         expect(economy).toHaveLength(3);
         const first = textOf(economy[0]?.messages.find((message) => message.role === 'user')?.content);
         expect(first).toContain('You have 3 model turns for this card');
+        // The member working the card brings its memory along and may add to it (06 §19).
+        expect(economy[0]?.tools?.map((tool) => tool.function.name)).toContain('remember');
+        expect(textOf(economy[0]?.messages.find((message) => message.role === 'system')?.content)).toContain(
+            '<member_memory title="记忆：编码">',
+        );
         const progress = done.progress as Array<{ reason: string }>;
         expect(progress.some((entry) => entry.reason.includes('used up its turn budget (3 of 3'))).toBe(true);
         expect(readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('done\n');

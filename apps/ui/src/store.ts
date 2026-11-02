@@ -3,6 +3,7 @@ import {
     type Attachment,
     type Connection,
     type LanguageSetting,
+    type Member,
     type ModelOption,
     type PresetSummary,
     type Project,
@@ -84,6 +85,13 @@ interface AppState {
     workflowsFor: string | undefined;
     /** Project whose "new workflow" dialog is open. */
     workflowDraftFor: string | undefined;
+    /** The members of the selected project's organization (06 §19), for the members page, chips and mentions. */
+    members: Member[];
+    /** The members page is in the main area; `memberId` shows one member. */
+    membersOpen: boolean;
+    memberId: string | undefined;
+    /** The member the "hand it work" dialog is open for. */
+    dispatchTo: string | undefined;
     toasts: Toast[];
     /** Bumps when usage changes, so open usage views refetch. */
     usageVersion: number;
@@ -119,6 +127,10 @@ export const useApp = create<AppState>(() => ({
     workflowRunId: undefined,
     workflowsFor: undefined,
     workflowDraftFor: undefined,
+    members: [],
+    membersOpen: false,
+    memberId: undefined,
+    dispatchTo: undefined,
     toasts: [],
     usageVersion: 0,
 }));
@@ -195,6 +207,7 @@ async function loadAll(): Promise<void> {
         host.call('workflow.runs', {}),
     ]);
     await refreshConnections();
+    void loadMembers(get().selectedProjectId ?? projects[0]?.id);
     const selectedThreadId = get().selectedThreadId;
     set((state) => ({
         info,
@@ -307,6 +320,29 @@ function listen(): void {
     host.on('workflow.changed', ({ run }) =>
         set((state) => ({ workflowRuns: { ...state.workflowRuns, [run.id]: run } })),
     );
+    host.on('member.changed', () => void loadMembers(get().selectedProjectId));
+}
+
+/** Loads the members of a project's organization (the built-in and the user's ones without a project). */
+export async function loadMembers(projectId: string | undefined): Promise<void> {
+    try {
+        const members = await host.call('member.list', projectId ? { projectId } : {});
+        set({ members });
+    } catch {
+        // An older host without members: the page stays empty.
+    }
+}
+
+/** The members page in the main area, or one member on it. */
+export function openMembers(memberId?: string): void {
+    set({
+        membersOpen: true,
+        memberId,
+        teamRunId: undefined,
+        workflowRunId: undefined,
+        workflowsFor: undefined,
+    });
+    void loadMembers(get().selectedProjectId);
 }
 
 /** Connects, loads the initial state and resolves once the UI has data to show. */
@@ -334,7 +370,13 @@ export async function startApp(): Promise<void> {
 
 /** The project's workflow board in the main area: its workflows, how to make one, and its runs. */
 export function openWorkflowBoard(projectId: string): void {
-    set({ workflowsFor: projectId, teamRunId: undefined, workflowRunId: undefined, selectedProjectId: projectId });
+    set({
+        workflowsFor: projectId,
+        teamRunId: undefined,
+        workflowRunId: undefined,
+        selectedProjectId: projectId,
+        membersOpen: false,
+    });
 }
 
 export async function selectThread(threadId: string | undefined): Promise<void> {
@@ -343,7 +385,8 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         current.selectedThreadId === threadId &&
         !current.teamRunId &&
         !current.workflowRunId &&
-        !current.workflowsFor
+        !current.workflowsFor &&
+        !current.membersOpen
     ) {
         return;
     }
@@ -353,6 +396,7 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         teamRunId: undefined,
         workflowRunId: undefined,
         workflowsFor: undefined,
+        membersOpen: false,
         reviewTurnId: undefined,
         ...(thread ? { selectedProjectId: thread.projectId } : {}),
     });

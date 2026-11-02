@@ -11,6 +11,7 @@ import {
     HandoffResultSchema,
     IdSchema,
     ItemSchema,
+    MemberSchema,
     ModelOptionSchema,
     ModelRefSchema,
     MoneySchema,
@@ -441,6 +442,85 @@ export const methods = {
         params: z.object({ projectId: IdSchema, key: z.string() }).strict(),
         result: z.object({ url: z.string(), token: z.string() }),
     },
+    /** The members of a project's organization; without a project, the built-in and the user's ones. */
+    'member.list': { params: z.object({ projectId: IdSchema.optional() }).strict(), result: z.array(MemberSchema) },
+    /**
+     * Creates or changes a member. A new one gets an id from its name; changing a built-in member writes a file of
+     * the user's that overrides it. `scope: 'project'` writes `.xora/agents/<id>.md` into the project.
+     */
+    'member.save': {
+        params: z
+            .object({
+                projectId: IdSchema.optional(),
+                scope: z.enum(['user', 'project']),
+                member: z
+                    .object({
+                        id: z.string().max(64).optional(),
+                        name: z.string().min(1).max(60),
+                        role: z.string(),
+                        category: z.string().max(40).optional(),
+                        tier: z.string(),
+                        mode: PermissionModeSchema,
+                        description: z.string().max(500).optional(),
+                        prompt: z.string().max(20_000),
+                        tools: z.array(z.string()).optional(),
+                    })
+                    .strict(),
+            })
+            .strict(),
+        result: MemberSchema,
+    },
+    /** Deletes a member's file: a member the user made goes, a changed built-in one goes back to its default. */
+    'member.delete': {
+        params: z.object({ projectId: IdSchema.optional(), memberId: z.string() }).strict(),
+        result: ok,
+    },
+    'member.memory': {
+        params: z.object({ memberId: z.string() }).strict(),
+        result: z.object({ text: z.string(), updatedAt: z.number().optional() }),
+    },
+    'member.setMemory': {
+        params: z.object({ memberId: z.string(), text: z.string().max(50_000) }).strict(),
+        result: ok,
+    },
+    'member.saveRoutine': {
+        params: z
+            .object({
+                memberId: z.string(),
+                routine: z
+                    .object({
+                        id: z.string().optional(),
+                        title: z.string().min(1).max(80),
+                        schedule: z.string().min(1).max(100),
+                        timezone: z.string().max(64).optional(),
+                        projectId: IdSchema,
+                        instruction: z.string().min(1).max(10_000),
+                        enabled: z.boolean(),
+                    })
+                    .strict(),
+            })
+            .strict(),
+        result: MemberSchema,
+    },
+    'member.deleteRoutine': {
+        params: z.object({ memberId: z.string(), routineId: z.string() }).strict(),
+        result: MemberSchema,
+    },
+    /** Runs a routine now, whatever its schedule; returns the run's thread. */
+    'member.runRoutine': {
+        params: z.object({ memberId: z.string(), routineId: z.string() }).strict(),
+        result: ThreadMetaSchema,
+    },
+    /** A conversation with a member in a project: a new thread where it works as itself, started with `text`. */
+    'member.chat': {
+        params: z.object({ projectId: IdSchema, memberId: z.string(), text: z.string().min(1).max(20_000) }).strict(),
+        result: ThreadMetaSchema,
+    },
+    /** The threads a member works or worked in, in every project, newest first. */
+    'member.threads': {
+        params: z.object({ memberId: z.string(), limit: z.number().int().positive().max(200).optional() }).strict(),
+        result: z.array(ThreadMetaSchema),
+    },
     'team.roster': {
         params: z.object({ projectId: IdSchema }).strict(),
         result: z.object({
@@ -721,6 +801,8 @@ export const notifications = {
     'terminal.exit': z.object({ terminalId: z.string(), exitCode: z.number().nullable() }),
     'team.changed': z.object({ run: TeamRunSchema }),
     'workflow.changed': z.object({ run: WorkflowRunSchema }),
+    /** A member, its memory or its routines changed. */
+    'member.changed': z.object({ memberId: z.string() }),
     'extension.changed': z.object({}),
     /** The user clicked a system notification or tray entry for this thread. */
     'ui.focusThread': z.object({ threadId: z.string() }),

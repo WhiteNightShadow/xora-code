@@ -38,6 +38,7 @@ import { GoalService } from './goals.ts';
 import { HistoryService } from './history.ts';
 import { detectLocalServers } from './local-models.ts';
 import { HostLog, type Logger } from './log.ts';
+import { MemberService, parseRoutineKey, registerMemberHandlers } from './members.ts';
 import { offPeakStartFor } from './off-peak.ts';
 import { type HostPaths, hostPaths } from './paths.ts';
 import { ProjectService } from './projects.ts';
@@ -66,6 +67,7 @@ const TEXT = bilingual(
         builtIn: '内置',
         team: '团队',
         subagent: '子agent',
+        member: '成员',
         extensions: '扩展',
         projectBusy: '这个项目里还有线程在运行',
         unknownEngine: (id: string) => `未知的引擎：${id}`,
@@ -91,6 +93,7 @@ const TEXT = bilingual(
         builtIn: 'Built-in',
         team: 'Team',
         subagent: 'Subagent',
+        member: 'Member',
         extensions: 'Extensions',
         projectBusy: 'Threads in this project are still running',
         unknownEngine: (id) => `Unknown engine: ${id}`,
@@ -157,6 +160,7 @@ export class HostCore {
     readonly team: TeamService;
     readonly workflows: WorkflowService;
     readonly distill: DistillService;
+    readonly members: MemberService;
     readonly triggers: TriggerService;
     #triggerSync: ReturnType<typeof setInterval> | undefined;
     readonly #options: HostOptions;
@@ -244,6 +248,18 @@ export class HostCore {
                 this.workflows.onTurnEnded(event);
             },
         });
+        this.members = new MemberService({
+            threads: this.threads,
+            turns: this.turns,
+            projects: this.projects,
+            connections: this.connections,
+            settings: this.settings,
+            bus: this.bus,
+            log: this.log,
+            orgsDir: this.paths.orgsDir,
+            membersDir: this.paths.membersDir,
+            onRoutinesChanged: () => this.#syncTriggers(),
+        });
         this.subagents = new SubagentService({
             threads: this.threads,
             projects: this.projects,
@@ -252,6 +268,7 @@ export class HostCore {
             settings: this.settings,
             log: this.log,
             orgsDir: this.paths.orgsDir,
+            members: this.members,
         });
         this.goals = new GoalService({
             threads: this.threads,
@@ -272,6 +289,7 @@ export class HostCore {
             worktrees: this.worktrees,
             turns: this.turns,
             orgsDir: this.paths.orgsDir,
+            members: this.members,
         });
         // The webhook keeps its port across restarts, so the URL given out stays valid (06 §12).
         const webhookPort = Number(this.#value('webhookPort') ?? 0);
@@ -306,6 +324,7 @@ export class HostCore {
                 };
             },
             userAgent,
+            members: this.members,
         });
         this.triggers.onFire((fire) => this.#onTrigger(fire));
         this.distill = new DistillService({
@@ -349,6 +368,7 @@ export class HostCore {
         }
         core.#tellShellLanguage();
         await core.distill.restore().catch((error) => core.log.warn(`distill: ${String(error)}`));
+        await core.members.restore().catch((error) => core.log.warn(`members: ${String(error)}`));
         core.#syncTriggers();
         // Also catches what no event reports: a project that lost its trust, a workflow file edited by hand.
         core.#triggerSync = setInterval(() => core.#syncTriggers(), 60_000);
@@ -370,20 +390,24 @@ export class HostCore {
 
     #syncing: Promise<void> = Promise.resolve();
 
-    /** Hands the switched-on workflow triggers to the trigger service (06 §12). */
+    /** Hands the switched-on workflow triggers and the members' routines to the trigger service (06 §12, §18). */
     #syncTriggers(): void {
         this.#syncing = this.#syncing
             .then(async () => {
-                const enabled = await this.workflows.enabledTriggers();
-                await this.triggers.update(
-                    enabled.map((entry) => ({
+                const [enabled, routines] = await Promise.all([
+                    this.workflows.enabledTriggers(),
+                    this.members.triggerTargets(),
+                ]);
+                await this.triggers.update([
+                    ...enabled.map((entry) => ({
                         key: triggerKey(entry.projectId, entry.key),
                         projectDir: entry.projectDir,
                         spec: entry.definition.trigger,
                         ...(entry.lastScheduledAt !== undefined ? { lastScheduledAt: entry.lastScheduledAt } : {}),
                         ...(entry.webhookToken ? { webhookToken: entry.webhookToken } : {}),
                     })),
-                );
+                    ...routines,
+                ]);
                 const port = this.triggers.webhookPort();
                 if (port !== undefined && String(port) !== this.#value('webhookPort')) {
                     this.#setValue('webhookPort', String(port));
@@ -395,6 +419,14 @@ export class HostCore {
     }
 
     #onTrigger(fire: TriggerFire): void {
+        if (parseRoutineKey(fire.key)) {
+            void this.members
+                .fire(fire.key, fire.scheduledFor)
+                .catch((error) =>
+                    this.log.warn(`${fire.key}: ${error instanceof Error ? error.message : String(error)}`),
+                );
+            return;
+        }
         const split = fire.key.indexOf('|');
         if (split < 0) return;
         const projectId = fire.key.slice(0, split);
@@ -492,7 +524,16 @@ export class HostCore {
         // The same order the engine gets (see TurnService): team layers after the user's global layer, skills last.
         const team = this.turns
             .hostLayers(thread.id)
-            .map((layer) => extra(layer, thread.parent ? text.subagent : text.team));
+            .map((layer) =>
+                extra(
+                    layer,
+                    thread.parent
+                        ? text.subagent
+                        : thread.agentId && !thread.teamRunId && !thread.workflowRunId
+                          ? text.member
+                          : text.team,
+                ),
+            );
         const globalIndex = layers.findIndex((layer) => layer.id === 'user_global_instructions');
         let skills: PromptLayer[] = [];
         try {
@@ -904,6 +945,7 @@ export class HostCore {
         registerWorkflowHandlers(peer, this.workflows, (mode) =>
             this.#remember({ lastChoices: { ...settings.get().lastChoices, workflowMode: mode } }),
         );
+        registerMemberHandlers(peer, this.members);
 
         // Extensions (09) ---------------------------------------------------------------------------------------
         const extensions = this.extensions;
@@ -1168,7 +1210,8 @@ export class HostCore {
             runningTurns: this.turns.runningCount,
             pendingApprovals: this.approvals.list().length,
             workflowRuns: workflows.runs,
-            workflowTriggers: workflows.triggers,
+            // Members' routines are schedules too: they need the app running.
+            workflowTriggers: workflows.triggers + this.members.enabledRoutines,
         };
     }
 

@@ -131,6 +131,14 @@ server.respondWith((request) => {
             '## 结论\n冒烟工作流跑完了，交回了hello.txt。\n\n## 问题\n- 无\n\n## 下一步\n- 打开hello.txt看一眼',
         );
     }
+    // A member asked to remember something writes it into its memory.
+    if (
+        body?.tools?.some((tool) => tool.function?.name === 'remember') &&
+        messages.at(-1)?.role === 'user' &&
+        JSON.stringify(messages.at(-1)).includes('记住：')
+    ) {
+        return openaiToolCalls([{ name: 'remember', arguments: JSON.stringify({ note: 'hello.txt是冒烟用的文件' }) }]);
+    }
     // A workflow step's agent hands its result in.
     if (body?.tools?.some((tool) => tool.function?.name === 'step_result')) {
         return messages.at(-1)?.role === 'tool'
@@ -551,6 +559,37 @@ try {
     await page.locator('.wf-ask').getByRole('button', { name: '提问', exact: true }).click();
     await page.locator('.user-message', { hasText: 'hello.txt里写的是什么？' }).waitFor();
     await step(page, '追问会开一个带着运行记录的线程');
+    // Members (06 §19): the built-in ones are there; a new one made from a template is handed work, writes down
+    // what it learned, and gets a routine that can also run right away.
+    await page.locator('.sidebar__nav', { hasText: '成员' }).click();
+    await page.locator('.member-card', { hasText: '侦察' }).first().waitFor();
+    await step(page, '侧栏进成员页，内置成员都在');
+    await page.getByRole('button', { name: '新建成员', exact: true }).click();
+    const memberEditor = page.locator('.member-editor');
+    await memberEditor.getByPlaceholder('比如：抓包侦察、日报员').pressSequentially('冒烟侦察');
+    await memberEditor.getByPlaceholder('比如：抓app的接口、整理请求链路').fill('看冒烟仓库里的文件');
+    await memberEditor.getByRole('button', { name: '保存', exact: true }).click();
+    await page.locator('.member-detail h1', { hasText: '冒烟侦察' }).waitFor();
+    await step(page, '新建成员后进入它的页面');
+    await page.locator('.member-detail__actions').getByRole('button', { name: '派活' }).click();
+    await page.locator('.modal textarea').pressSequentially('记住：hello.txt是冒烟用的文件');
+    await page.getByRole('button', { name: '派给它', exact: true }).click();
+    await page.locator('.thread-header .member-chip', { hasText: '冒烟侦察' }).waitFor();
+    await step(page, '派活给成员会开一个它的线程');
+    await page.locator('.thread-header .member-chip').click();
+    await page.locator('.member-memory', { hasText: 'hello.txt是冒烟用的文件' }).waitFor();
+    await step(page, '成员会把学到的事记进自己的记忆');
+    await page.getByRole('button', { name: '添加例行任务' }).click();
+    const routineForm = page.locator('.routine-form');
+    await routineForm.getByPlaceholder('比如：早上检查抓包链路').fill('冒烟早检');
+    await routineForm.locator('textarea').fill('看一眼hello.txt');
+    await routineForm.getByRole('button', { name: '保存', exact: true }).click();
+    const routine = page.locator('.routine', { hasText: '冒烟早检' });
+    await routine.locator('.routine__when', { hasText: '工作日09:00' }).waitFor();
+    await step(page, '给成员设例行任务');
+    await routine.getByRole('button', { name: '现在跑一次' }).click();
+    await page.locator('.thread-header h1', { hasText: '例行：冒烟早检' }).waitFor();
+    await step(page, '例行任务可以马上跑一次');
 } catch (error) {
     reportFailure(error);
     console.error(

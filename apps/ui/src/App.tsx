@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { DispatchDialog, MembersPage } from './components/MembersView.tsx';
 import { NewThreadDialog } from './components/NewThreadDialog.tsx';
 import { Spinner } from './components/primitives.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
@@ -40,7 +41,9 @@ export function App() {
     const workflowRunId = useApp((state) => state.workflowRunId);
     const workflowsFor = useApp((state) => state.workflowsFor);
     const workflowDraftFor = useApp((state) => state.workflowDraftFor);
-    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor);
+    const membersOpen = useApp((state) => state.membersOpen);
+    const dispatchTo = useApp((state) => state.dispatchTo);
+    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor || membersOpen);
     const splitIds = useApp((state) => state.split);
     const threads = useApp((state) => state.threads);
     const split = splitIds.map((id) => threads[id]).filter((item) => item !== undefined);
@@ -71,6 +74,8 @@ export function App() {
                     <WorkflowRunView key={workflowRunId} runId={workflowRunId} />
                 ) : workflowsFor ? (
                     <WorkflowBoard key={workflowsFor} projectId={workflowsFor} />
+                ) : membersOpen ? (
+                    <MembersPage />
                 ) : split.length > 1 ? (
                     split.map((item) => (
                         <div key={item.id} className="split-pane">
@@ -89,6 +94,7 @@ export function App() {
             {newThreadFor && <NewThreadDialog projectId={newThreadFor} />}
             {teamStartFor && <TeamStartDialog projectId={teamStartFor} />}
             {workflowDraftFor && <WorkflowDraftDialog projectId={workflowDraftFor} />}
+            {dispatchTo && <DispatchDialog key={dispatchTo} memberId={dispatchTo} />}
             {!connected && <div className="banner">{s.app.disconnected}</div>}
             <Toasts />
         </div>

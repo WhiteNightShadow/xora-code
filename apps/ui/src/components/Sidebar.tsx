@@ -1,9 +1,20 @@
 import type { Project, ThreadMeta } from '@xora/protocol';
 import { useMemo, useState } from 'react';
 import { host } from '../host.ts';
-import { attempt, openProject, openSettings, openWorkflowBoard, selectThread, useApp, useStrings } from '../store.ts';
+import { memberOf } from '../members.ts';
+import {
+    attempt,
+    openMembers,
+    openProject,
+    openSettings,
+    openWorkflowBoard,
+    selectThread,
+    useApp,
+    useStrings,
+} from '../store.ts';
 import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
+import { MemberAvatar } from './MembersView.tsx';
 import { AutoFocusInput, formatMoney, IconButton, relativeTime, Spinner } from './primitives.tsx';
 
 function StatusMark({ thread }: { thread: ThreadMeta }) {
@@ -19,6 +30,7 @@ function StatusMark({ thread }: { thread: ThreadMeta }) {
 
 function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean }) {
     const s = useStrings();
+    const member = useApp((state) => memberOf(thread, state.members));
     const [menu, setMenu] = useState(false);
     // Renamed in place: Electron has no window.prompt.
     const [renaming, setRenaming] = useState<string | undefined>();
@@ -51,6 +63,11 @@ function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean
             <button type="button" className="thread-row__main" onClick={() => void selectThread(thread.id)}>
                 <StatusMark thread={thread} />
                 <span className="thread-row__title">
+                    {member && (
+                        <span className="thread-row__member" title={member.name}>
+                            <MemberAvatar member={member} size={15} />
+                        </span>
+                    )}
                     {thread.pinned && <Icon name="pin" size={11} className="thread-row__pin" />}
                     {thread.location.kind === 'worktree' && <Icon name="route" size={11} className="thread-row__pin" />}
                     {thread.title}
@@ -287,6 +304,7 @@ export function Sidebar() {
     const projects = useApp((state) => state.projects);
     const threadMap = useApp((state) => state.threads);
     const update = useApp((state) => state.update);
+    const membersOpen = useApp((state) => state.membersOpen);
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<Array<{ threadId: string; title: string; snippet: string }> | undefined>();
@@ -351,6 +369,13 @@ export function Sidebar() {
                     ))}
                 </div>
             )}
+            <button
+                type="button"
+                className={`sidebar__nav${membersOpen ? ' is-selected' : ''}`}
+                onClick={() => openMembers()}
+            >
+                <Icon name="users" size={14} /> {s.sidebar.members}
+            </button>
             {inbox.length > 0 && (
                 <div className="inbox">
                     <div className="inbox__title">

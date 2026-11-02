@@ -789,6 +789,57 @@ export const WorkflowStepRunSchema = z.object({
 });
 export type WorkflowStepRun = z.infer<typeof WorkflowStepRunSchema>;
 
+/** A job a member does on a schedule (06 §19), in one project, unattended. */
+export const MemberRoutineSchema = z.object({
+    id: z.string(),
+    title: z.string(),
+    /** Five-field cron such as `0 9 * * 1-5`, or `@daily` and the like, in `timezone` (the system's when absent). */
+    schedule: z.string(),
+    timezone: z.string().optional(),
+    projectId: IdSchema,
+    /** What the member does each time. */
+    instruction: z.string(),
+    enabled: z.boolean(),
+    lastRunAt: z.number().optional(),
+    /** The thread of the last run. */
+    lastThreadId: z.string().optional(),
+    nextRunAt: z.number().optional(),
+    /** Why it does not run: a schedule that does not parse, a project that is gone. */
+    problem: z.string().optional(),
+});
+export type MemberRoutine = z.infer<typeof MemberRoutineSchema>;
+
+/**
+ * A member of the team (06 §19): one of the organization's agents, built in or made by the user, with a name, a
+ * job, a model tier and permissions, a long-term memory it keeps itself, and routines. Its conversations, workflow
+ * steps and team tasks are threads with its id as `agentId`.
+ */
+export const MemberSchema = z.object({
+    id: z.string(),
+    /** Built-in members carry their name in the UI language until the user renames them. */
+    name: z.string(),
+    /** supervisor, planner, plan_reviewer, scout, executor, reviewer or specialist. */
+    role: z.string(),
+    /** An executor's kind of work, such as `coding` or `testing`. */
+    category: z.string().optional(),
+    tier: z.string(),
+    mode: PermissionModeSchema,
+    description: z.string().optional(),
+    /** Its own layer of the system prompt. */
+    prompt: z.string(),
+    /** Its tool whitelist; absent means its role's. */
+    tools: z.array(z.string()).optional(),
+    /** Built in, the user's (every project, `<data>/orgs/default/agents/`) or the project's (`.xora/agents/`). */
+    source: z.enum(['builtin', 'user', 'project']),
+    /** A built-in member the user changed: a file of the user's overrides it. */
+    customized: z.boolean(),
+    /** The file that defines it, when there is one. */
+    file: z.string().optional(),
+    memory: z.object({ chars: z.number(), updatedAt: z.number().optional() }),
+    routines: z.array(MemberRoutineSchema),
+});
+export type Member = z.infer<typeof MemberSchema>;
+
 /**
  * The report for whoever ordered a run (06 §11): what came of it, what is wrong, what to do next, without the
  * steps. Written once the run is over.

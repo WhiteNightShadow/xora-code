@@ -137,7 +137,9 @@ describe('subagents', () => {
         expect(lastOf(parent[1] as Body)).toMatchObject({ role: 'tool' });
         expect(textOf(lastOf(parent[1] as Body)?.content)).toBe('入口在src/main.ts。');
         const tool = parent[0]?.tools?.find((item) => item.function.name === 'agent');
-        expect(tool?.function.description).toContain('这个项目没有定义agent');
+        // Without agent files the team's members are there to hand work to; the supervisor only works in team runs.
+        expect(tool?.function.description).toContain('- 侦察（团队成员scout）');
+        expect(tool?.function.description).not.toContain('团队成员supervisor');
     }, 60_000);
 
     it('runs the subagents of one response at the same time', async () => {

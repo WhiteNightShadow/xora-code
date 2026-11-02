@@ -2,6 +2,7 @@ import type { Attachment, ThreadMeta } from '@xora/protocol';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { host } from '../host.ts';
 import { ItemView } from '../items/ItemView.tsx';
+import { memberOf } from '../members.ts';
 import {
     attempt,
     openReview,
@@ -19,6 +20,7 @@ import { ConversationArt } from './Art.tsx';
 import { ContextMeter, EffortPicker, ModelPicker, ModePicker, Popover } from './Controls.tsx';
 import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
 import { Icon, type IconName } from './Icon.tsx';
+import { MemberChip } from './MembersView.tsx';
 import { AutoFocusInput, formatMoney, formatTokens, Spinner, Toggle } from './primitives.tsx';
 
 /** A subagent's thread links back to the thread whose agent started it. */
@@ -52,6 +54,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
     const s = useStrings();
     const rightPanel = useApp((state) => state.rightPanel);
     const project = useApp((state) => state.projects.find((item) => item.id === thread.projectId));
+    const member = useApp((state) => memberOf(thread, state.members));
     const [editing, setEditing] = useState(false);
     const [title, setTitle] = useState(thread.title);
     useEffect(() => setTitle(thread.title), [thread.title]);
@@ -123,6 +126,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
                           ? ` · ${project.git.branch}`
                           : ''}
                 </span>
+                {member && <MemberChip member={member} />}
                 {thread.parent && <ParentLink threadId={thread.parent.threadId} />}
             </div>
             <div className="thread-header__controls">

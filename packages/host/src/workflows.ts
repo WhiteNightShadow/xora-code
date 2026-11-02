@@ -68,6 +68,7 @@ import { readForPreview, resolveInside, unfence } from './files.ts';
 import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
+import type { MemberService } from './members.ts';
 import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
@@ -605,6 +606,8 @@ export interface WorkflowDeps {
     readonly muteFiles?: (projectDir: string) => () => void;
     /** Sent with the model requests the host makes itself (a run's brief). */
     readonly userAgent: string;
+    /** Gives each step's agent its memory and the `remember` tool (06 §19). */
+    readonly members?: Pick<MemberService, 'withMemory'>;
 }
 
 function errorText(error: unknown): string {
@@ -2160,6 +2163,12 @@ export class WorkflowService {
     }
 
     #stepTools(state: RunState, step: AgentStep, agent: AgentSpec): HostToolProvider {
+        const provider = this.#stepProvider(state, step, agent);
+        // The step's agent is a member: it brings its memory along and may add to it (06 §19).
+        return this.#deps.members?.withMemory(provider, agent, state.record.projectId) ?? provider;
+    }
+
+    #stepProvider(state: RunState, step: AgentStep, agent: AgentSpec): HostToolProvider {
         const declared = new Set(step.outputs);
         return {
             tools: [STEP_RESULT_TOOL],

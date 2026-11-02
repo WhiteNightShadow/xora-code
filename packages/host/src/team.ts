@@ -84,6 +84,7 @@ import type { HostToolResult } from './engines/manager.ts';
 import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
+import type { MemberService } from './members.ts';
 import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
@@ -331,6 +332,8 @@ export interface TeamDeps {
     /** `<data>/orgs`: user-level organizations, one directory each (06 §2). */
     readonly orgsDir: string;
     readonly commandTimeoutMs?: number;
+    /** Gives the supervisor and the members working cards their memory and the `remember` tool (06 §19). */
+    readonly members?: Pick<MemberService, 'withMemory'>;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1274,20 +1277,25 @@ export class TeamService {
     #supervisorProvider(state: RunState, agent: AgentSpec): HostToolProvider {
         const allowed = new Set(toolsOf(agent));
         const runId = state.run.id;
-        return {
+        return this.#withMemory(state, agent, {
             tools: SUPERVISOR_TOOLS.filter((tool) => allowed.has(tool.name)),
             disabledTools: disabledBuiltins(agent),
             mcpTools: mcpToolsOf(agent),
             layers: systemLayers(state.host.org, agent),
             highRiskApproval: true,
             handle: (name, input) => this.#supervisorTool(runId, name, input),
-        };
+        });
+    }
+
+    /** The run's supervisor and members are members of the team: they bring their memory along (06 §19). */
+    #withMemory(state: RunState, agent: AgentSpec, provider: HostToolProvider): HostToolProvider {
+        return this.#deps.members?.withMemory(provider, agent, state.host.projectId) ?? provider;
     }
 
     #memberProvider(state: RunState, taskId: string, agent: AgentSpec): HostToolProvider {
         const allowed = new Set(toolsOf(agent));
         const runId = state.run.id;
-        return {
+        return this.#withMemory(state, agent, {
             tools: MEMBER_TOOLS.filter(
                 (tool) => allowed.has(tool.name) && (tool.name !== 'challenge' || state.host.mode === 'hypotheses'),
             ),
@@ -1298,7 +1306,7 @@ export class TeamService {
             // The engine stops the turn where the card's turn budget runs out.
             maxTurnRequests: () => this.#turnsLeft(state, taskId),
             handle: (name, input, signal) => this.#memberTool(runId, taskId, name, input, signal),
-        };
+        });
     }
 
     /** A thread of the run; `worktree` places it in an existing checkout (a reviewer reads the executor's). */

@@ -178,9 +178,16 @@ export interface SharedToolCall {
  */
 export interface SharedTools {
     /** The tools the thread gets for a turn of the xora engine; read when the turn configures the session. */
-    tools(thread: ThreadMeta, extras: SessionExtras | undefined): HostToolProvider['tools'];
-    /** Instructions sent after the user's message, e.g. to hand it to an agent it @-mentions. */
-    instructions(thread: ThreadMeta, extras: SessionExtras | undefined, text: string): string | undefined;
+    tools(
+        thread: ThreadMeta,
+        extras: SessionExtras | undefined,
+    ): HostToolProvider['tools'] | Promise<HostToolProvider['tools']>;
+    /** Instructions sent after the user's message, e.g. to hand it to an agent or a member it @-mentions. */
+    instructions(
+        thread: ThreadMeta,
+        extras: SessionExtras | undefined,
+        text: string,
+    ): string | undefined | Promise<string | undefined>;
     handle(name: string, input: unknown, call: SharedToolCall): Promise<HostToolResult>;
 }
 
@@ -494,7 +501,7 @@ export class TurnService {
             // Only xora sessions get shared tools; `/compact` is a command, not a message.
             const note =
                 engine.kind === 'builtin' && !/^\/compact(?:\s|$)/.test(text.trim())
-                    ? this.#deps.sharedTools?.()?.instructions(thread, extras, text)
+                    ? await this.#deps.sharedTools?.()?.instructions(thread, extras, text)
                     : undefined;
             return note ? [...blocks, { type: 'text', text: note }] : blocks;
         });
@@ -569,7 +576,7 @@ export class TurnService {
             ...baseLayers.slice(globalIndex + 1),
             ...(extras?.layers ?? []),
         ];
-        const shared = (this.#deps.sharedTools?.()?.tools(thread, extras) ?? []).filter(
+        const shared = ((await this.#deps.sharedTools?.()?.tools(thread, extras)) ?? []).filter(
             (tool) => !provider?.tools.some((own) => own.name === tool.name),
         );
         running.shared = new Set(shared.map((tool) => tool.name));
