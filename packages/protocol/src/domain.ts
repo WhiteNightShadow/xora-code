@@ -851,6 +851,8 @@ export const MemberSchema = z.object({
     /** An executor's kind of work, such as `coding` or `testing`. */
     category: z.string().optional(),
     tier: z.string(),
+    /** The model it runs on before its tier's chain (06 §21), as a model id; absent: the tier picks. */
+    model: z.string().optional(),
     mode: PermissionModeSchema,
     description: z.string().optional(),
     /** Its own layer of the system prompt. */

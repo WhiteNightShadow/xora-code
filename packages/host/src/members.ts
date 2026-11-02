@@ -258,6 +258,8 @@ export interface MemberInput {
     readonly role: string;
     readonly category?: string | undefined;
     readonly tier: string;
+    /** A model id it runs on before its tier's chain (06 §21). */
+    readonly model?: string | undefined;
     readonly mode: PermissionMode;
     readonly description?: string | undefined;
     readonly prompt: string;
@@ -351,7 +353,9 @@ export function agentFileText(
 ): string {
     const lines = ['---', `id: ${quoted(fields.id)}`, `name: ${quoted(oneLine(fields.name))}`, `role: ${fields.role}`];
     if (fields.category) lines.push(`category: ${quoted(oneLine(fields.category).toLowerCase())}`);
-    lines.push(`tier: ${fields.tier}`, `mode: ${fields.mode}`);
+    lines.push(`tier: ${fields.tier}`);
+    if (fields.model && oneLine(fields.model)) lines.push(`model: ${quoted(oneLine(fields.model))}`);
+    lines.push(`mode: ${fields.mode}`);
     if (fields.description && oneLine(fields.description)) {
         lines.push(`description: ${quoted(oneLine(fields.description))}`);
     }
@@ -549,6 +553,7 @@ export class MemberService {
                     role,
                     ...(given.category ? { category: given.category } : {}),
                     tier,
+                    ...(given.model?.trim() ? { model: given.model.trim() } : {}),
                     mode: given.mode,
                     ...(given.description ? { description: given.description } : {}),
                     ...(given.tools ? { tools: given.tools } : {}),
@@ -615,6 +620,7 @@ export class MemberService {
             role: agent.role,
             ...(agent.category ? { category: agent.category } : {}),
             tier: agent.tier,
+            ...(agent.models?.[0] ? { model: agent.models[0].model } : {}),
             mode: agent.mode,
             ...(agent.description ? { description: agent.description } : {}),
             prompt: agent.prompt,
@@ -881,7 +887,14 @@ export class MemberService {
         if (!agent) {
             throw new RpcError(RpcErrorCode.NotFound, text.notInProject(input.memberId, project.name));
         }
-        const pick = pickTierModel(this.#deps, { org, project, tier: agent.tier, unattended: false, warnings: [] });
+        const pick = pickTierModel(this.#deps, {
+            org,
+            project,
+            tier: agent.tier,
+            unattended: false,
+            warnings: [],
+            ...(agent.models ? { prefer: agent.models } : {}),
+        });
         const thread = threads.create({
             projectId: project.id,
             title: text.chatTitle(memberName(agent), shorten(input.text, 20)),
@@ -1190,7 +1203,14 @@ export class MemberService {
         if (!agent) {
             throw new RpcError(RpcErrorCode.Rejected, text.notInProject(memberId, project.name));
         }
-        const pick = pickTierModel(this.#deps, { org, project, tier: agent.tier, unattended: true, warnings: [] });
+        const pick = pickTierModel(this.#deps, {
+            org,
+            project,
+            tier: agent.tier,
+            unattended: true,
+            warnings: [],
+            ...(agent.models ? { prefer: agent.models } : {}),
+        });
         // The chain leaves subscriptions out; the default model it falls back to may still be one.
         const presetId = connections.list().find((connection) => connection.id === pick.ref.connectionId)?.presetId;
         const channel = connections.presets().find((preset) => preset.id === presetId)?.channel;

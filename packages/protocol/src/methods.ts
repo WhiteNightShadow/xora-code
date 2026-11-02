@@ -483,6 +483,8 @@ export const methods = {
                         role: z.string(),
                         category: z.string().max(40).optional(),
                         tier: z.string(),
+                        /** A connected model's id; it runs on that first, its tier's chain after (06 §21). */
+                        model: z.string().max(200).optional(),
                         mode: PermissionModeSchema,
                         description: z.string().max(500).optional(),
                         prompt: z.string().max(20_000),

@@ -59,6 +59,19 @@ describe('modelChain', () => {
         { connectionId: 'deepseek', model: 'deepseek-flash', channel: 'api' },
     ];
 
+    it('tries an agent’s own models before its tier’s chain', () => {
+        expect(
+            modelChain('flagship', DEFAULT_ORG, available, {
+                prefer: [{ model: 'deepseek-flash', effort: 'low' }, { model: 'not-connected' }],
+            }).map((model) => [model.model, model.effort]),
+        ).toEqual([
+            ['deepseek-flash', 'low'],
+            ['kimi-k3.1-pro', 'high'],
+            ['glm-5.3', 'high'],
+            ['glm-5.3', 'high'],
+        ]);
+    });
+
     it('keeps the tier order and drops models the user does not have', () => {
         expect(modelChain('flagship', DEFAULT_ORG, available)).toEqual([
             {

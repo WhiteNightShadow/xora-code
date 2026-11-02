@@ -209,6 +209,7 @@ describe('loadOrganization', () => {
             'data/orgs/acme/agents/coder.md': [
                 '---',
                 'tier: standard',
+                'model: kimi-k3 (high)',
                 'tools: [read, edit, bash]',
                 '---',
                 'User-level coder prompt.',
@@ -237,6 +238,8 @@ describe('loadOrganization', () => {
         expect(org.budgets).toEqual({ currency: 'CNY', perRun: 20 });
         expect(org.prompt).toBe('Acme builds payment software. Never touch the ledger tables.');
         expect(org.tiers.flagship.models).toEqual([{ model: 'kimi-k3.1-pro' }, { model: 'glm-5.3' }]);
+        // 06 §21: a member's own model, kept when a later level changes other fields.
+        expect(findAgent(org, 'coder')?.models).toEqual([{ model: 'kimi-k3', effort: 'high' }]);
         expect(org.tiers.fast.models).toEqual([
             { model: 'deepseek-flash', effort: 'off' },
             { model: 'glm-5.3-flash', effort: 'low' },

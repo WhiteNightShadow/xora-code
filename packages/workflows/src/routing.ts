@@ -5,6 +5,7 @@ import {
     agentsWithRole,
     findAgent,
     inferFamily,
+    type ModelChainEntry,
     type Organization,
     ROLE_TIERS,
     type Role,
@@ -103,6 +104,8 @@ export interface ResolvedModel {
 export interface ModelChainOptions {
     /** Unattended runs (L3, schedules, triggers) do not use subscription quotas: api, local and custom only. */
     readonly unattended?: boolean;
+    /** An agent's own models (06 §21): tried before the tier's chain, which stays as the fallback. */
+    readonly prefer?: readonly ModelChainEntry[];
 }
 
 /**
@@ -118,7 +121,7 @@ export function modelChain(
     const spec = org.tiers[tier];
     const chain: ResolvedModel[] = [];
     const seen = new Set<string>();
-    for (const entry of spec.models) {
+    for (const entry of [...(options.prefer ?? []), ...spec.models]) {
         for (const connected of available) {
             if (
                 connected.model !== entry.model ||

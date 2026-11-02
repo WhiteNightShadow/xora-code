@@ -132,6 +132,7 @@ const AGENT_KEYS = new Set([
     'role',
     'category',
     'tier',
+    'model',
     'description',
     'tools',
     'mode',
@@ -246,6 +247,13 @@ function applyAgentFile(
         role,
         category,
         tier: (asEnum(TIERS, data.tier, 'tier', warn) as Tier | undefined) ?? kept?.tier ?? ROLE_TIERS[role],
+        ...(data.model !== undefined
+            ? modelList(data.model).length > 0
+                ? { models: modelList(data.model) }
+                : {}
+            : kept?.models
+              ? { models: kept.models }
+              : {}),
         description: asText(data.description) ?? kept?.description,
         prompt: prompt !== '' ? prompt : (kept?.prompt ?? template?.prompt ?? ''),
         tools: tools ?? kept?.tools,

@@ -2095,6 +2095,7 @@ export class WorkflowService {
                         tier,
                         unattended: record.unattended,
                         warnings: record.warnings,
+                        ...(agent.models && agent.tier === tier ? { prefer: agent.models } : {}),
                     });
                 } catch (error) {
                     return { status: 'failed', note: errorText(error) };

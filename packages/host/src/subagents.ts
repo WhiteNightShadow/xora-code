@@ -670,6 +670,7 @@ export class SubagentService implements SharedTools {
                 tier: member.tier,
                 unattended: false,
                 warnings: [],
+                ...(member.models ? { prefer: member.models } : {}),
             });
             return { ref: pick.ref, effort: pick.effort, tier: member.tier };
         } catch (error) {

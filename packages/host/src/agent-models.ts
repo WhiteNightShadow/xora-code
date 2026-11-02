@@ -2,6 +2,7 @@ import { bilingual, type Effort, type ModelRef, type Project, RpcError, RpcError
 import {
     type ConnectedModel,
     inferFamily,
+    type ModelChainEntry,
     modelChain,
     type Organization,
     pickReviewerModel,
@@ -88,10 +89,15 @@ export function pickTierModel(
         readonly unattended: boolean;
         readonly warnings: string[];
         readonly reviewerOf?: string;
+        /** The agent's own models (06 §21), tried before the tier's chain. */
+        readonly prefer?: readonly ModelChainEntry[];
     },
 ): ModelPick {
     const { org, project, tier, warnings } = input;
-    const chain = modelChain(tier, org, connectedModels(sources.connections), { unattended: input.unattended });
+    const chain = modelChain(tier, org, connectedModels(sources.connections), {
+        unattended: input.unattended,
+        ...(input.prefer && input.prefer.length > 0 ? { prefer: input.prefer } : {}),
+    });
     const reviewer = input.reviewerOf !== undefined ? pickReviewerModel(input.reviewerOf, chain) : undefined;
     const picked = input.reviewerOf !== undefined ? reviewer?.model : chain[0];
     const toRef = (model: ResolvedModel) => ({

@@ -785,7 +785,7 @@ export class TeamService {
         const runId = newId('team');
         const warnings = [...loaded.warnings];
         const tier = resolveTier('supervisor', undefined, org).tier;
-        const pick = this.#pickModel(org, autonomy, project, tier, warnings);
+        const pick = this.#pickModel(org, autonomy, project, tier, warnings, undefined, supervisor);
         const base = project.git.isRepo ? await headCommit(project.path).catch(() => undefined) : undefined;
         if (base && (await this.#deps.worktrees.changedFiles(project.path)).length > 0) {
             warnings.push(text.uncommitted);
@@ -1331,7 +1331,10 @@ export class TeamService {
         tier: Tier,
         warnings: string[],
         reviewerOf?: string,
+        agent?: AgentSpec,
     ): ModelPick {
+        // An agent's own models only at its own tier: an escalation asks for a stronger tier's chain (06 §21).
+        const prefer = agent?.models && agent.tier === tier ? agent.models : undefined;
         return pickTierModel(this.#deps, {
             org,
             project,
@@ -1339,6 +1342,7 @@ export class TeamService {
             unattended: autonomy === 'L3',
             warnings,
             ...(reviewerOf !== undefined ? { reviewerOf } : {}),
+            ...(prefer ? { prefer } : {}),
         });
     }
 
@@ -1847,6 +1851,7 @@ export class TeamService {
                 reviewer.tier,
                 host.warnings,
                 crossFamily ? (family ?? '') : undefined,
+                reviewer,
             );
         } catch (error) {
             return skip((text) => text.planReviewNoModel(errorText(error)));
@@ -2650,7 +2655,7 @@ export class TeamService {
         const info = this.#taskHost(state, taskId);
         // A new dispatch starts clean: the worktree of an earlier, abandoned attempt is removed.
         await this.#dropWorktree(state, taskId, project);
-        const pick = this.#pickModel(host.org, state.run.autonomy, project, task.tier, host.warnings);
+        const pick = this.#pickModel(host.org, state.run.autonomy, project, task.tier, host.warnings, undefined, agent);
         const writable = card.workspace !== 'readonly';
         let location: 'worktree' | 'local' = 'local';
         if (card.workspace === 'worktree') {
@@ -3868,6 +3873,7 @@ export class TeamService {
             tier,
             host.warnings,
             reviewer.crossFamily === false ? undefined : (info.family ?? ''),
+            supervisorReview ? undefined : reviewer,
         );
         const reviewerId = supervisorReview ? 'supervisor' : reviewer.id;
         const thread = this.#createThread(state, {

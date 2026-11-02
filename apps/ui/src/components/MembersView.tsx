@@ -45,7 +45,7 @@ function roleLine(member: Member, s: Strings): string {
             ? ((s.members.categories as Record<string, string>)[member.category] ?? member.category)
             : ((s.members.roles as Record<string, string>)[member.role] ?? member.role);
     const tier = (s.team.tiers as Record<string, string>)[member.tier] ?? member.tier;
-    return [role, format(s.members.tierLabel, { tier }), s.members.modes[member.mode]].join(' · ');
+    return [role, member.model ?? format(s.members.tierLabel, { tier }), s.members.modes[member.mode]].join(' · ');
 }
 
 /** A built-in member's job in the UI language until the user writes another. */
@@ -618,6 +618,16 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
     const [description, setDescription] = useState(existing ? (descriptionOf(existing, s) ?? '') : '');
     const [prompt, setPrompt] = useState(start?.prompt ?? '');
     const [tier, setTier] = useState(start?.tier ?? 'standard');
+    // 06 §21: a model of its own, tried before the tier's chain; '' leaves it to the tier.
+    const [model, setModel] = useState(existing?.model ?? '');
+    const connected = useApp((state) => state.models);
+    const modelChoices = [
+        { value: '', label: s.members.modelByTier },
+        ...[...new Set(connected.map((option) => option.model.id))].map((id) => ({ value: id, label: id })),
+        ...(model && !connected.some((option) => option.model.id === model)
+            ? [{ value: model, label: `${model}（${s.members.modelMissing}）` }]
+            : []),
+    ];
     const [mode, setMode] = useState<PermissionMode>(start?.mode ?? 'ask');
     const [scope, setScope] = useState<'user' | 'project'>(existing?.source === 'project' ? 'project' : 'user');
     const [busy, setBusy] = useState(false);
@@ -643,6 +653,7 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
                     role: base.role,
                     ...(base.category ? { category: base.category } : {}),
                     tier,
+                    ...(model ? { model } : {}),
                     mode,
                     ...(description.trim() ? { description: description.trim() } : {}),
                     prompt,
@@ -714,6 +725,9 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
                             }))}
                             onChange={setTier}
                         />
+                    </Field>
+                    <Field label={s.members.model} hint={s.members.modelHint}>
+                        <Select label={s.members.model} value={model} options={modelChoices} onChange={setModel} />
                     </Field>
                     <Field label={s.members.mode}>
                         <Select

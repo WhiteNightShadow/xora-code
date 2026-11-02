@@ -67,6 +67,8 @@ export interface AgentSpec {
     /** Executor category such as `coding`, matched against task cards. */
     readonly category?: string;
     readonly tier: Tier;
+    /** Models the agent runs on before its tier's chain (06 §21); the tier's chain stays as the fallback. */
+    readonly models?: readonly ModelChainEntry[];
     /** One line for the supervisor's roster: what the agent is good at. */
     readonly description?: string;
     /** Agent layer of the prompt (06 §4 layer 5). */

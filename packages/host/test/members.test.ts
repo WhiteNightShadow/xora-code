@@ -148,6 +148,7 @@ describe('members', () => {
             name: "Bob's #1 QA",
             role: 'scout',
             tier: 'fast',
+            model: 'kimi-k3',
             mode: 'plan' as const,
             description: '看: 文件 # 不是注释',
             prompt: '只看不改。',
@@ -155,6 +156,7 @@ describe('members', () => {
         const bob = await ui.request('member.save', { scope: 'user', member: input });
         expect(bob).toMatchObject({
             id: 'bob-s-1-qa',
+            model: 'kimi-k3',
             name: "Bob's #1 QA",
             description: '看: 文件 # 不是注释',
             prompt: '只看不改。',
