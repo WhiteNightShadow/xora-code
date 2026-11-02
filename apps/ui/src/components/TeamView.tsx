@@ -180,7 +180,23 @@ function TeamBrief({ run }: { run: TeamRun }) {
             (updated) =>
                 updated && useApp.setState((state) => ({ teamRuns: { ...state.teamRuns, [updated.id]: updated } })),
         );
-    if (!brief) return null;
+    if (!brief) {
+        // A run that ended before reports were written (06 §22) can have one written now.
+        if (!['done', 'failed'].includes(run.status)) return null;
+        return (
+            <section className="overview-card wf-brief" aria-label={s.team.briefTitle}>
+                <header className="wf-brief__head">
+                    <h3>{s.team.briefTitle}</h3>
+                </header>
+                <div className="wf-brief__empty">
+                    <p>{s.team.briefMissing}</p>
+                    <button type="button" className="button button--small button--primary" onClick={rewrite}>
+                        {s.team.briefWrite}
+                    </button>
+                </div>
+            </section>
+        );
+    }
     return (
         <section className={`overview-card wf-brief is-${run.status}`} aria-label={s.team.briefTitle}>
             <header className="wf-brief__head">
