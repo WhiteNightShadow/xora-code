@@ -250,16 +250,19 @@ describe('members', () => {
             project.id,
         );
         const remember = (input: unknown) => provider.handle('remember', input, signal());
-        expect(provider.tools.map((tool) => tool.name)).toEqual(['remember']);
+        expect(provider.tools.map((tool) => tool.name)).toEqual(['remember', 'recall']);
         expect(await remember({ note: '  测试用 pnpm test\n跑  ' })).toEqual({ content: '记下了。' });
         expect(await remember({ note: '测试用 pnpm test 跑' })).toEqual({ content: '这条已经记过了。' });
-        const memory = await ui.request('member.memory', { memberId: 'scout' });
+        // A note goes to the member's notes in the project by default (06 §21).
+        const here = { memberId: 'scout', scope: 'project' as const, projectId: project.id };
+        expect((await ui.request('member.memory', { memberId: 'scout' })).text).toBe('');
+        const memory = await ui.request('member.memory', here);
         expect(memory.text).toBe(`- [${project.name} ${today()}] 测试用 pnpm test 跑\n`);
         expect(memory.updatedAt).toBeGreaterThan(0);
         expect(await remember({ note: '测试用 pnpm vitest 跑', replaces: 'PNPM TEST' })).toEqual({
             content: '换掉了原来那条。',
         });
-        expect((await ui.request('member.memory', { memberId: 'scout' })).text).toBe(
+        expect((await ui.request('member.memory', here)).text).toBe(
             `- [${project.name} ${today()}] 测试用 pnpm vitest 跑\n`,
         );
         expect(await remember({ note: '别的', replaces: '没有这条' })).toMatchObject({ isError: true });
@@ -276,14 +279,12 @@ describe('members', () => {
             { length: 200 },
             (_, index) => `- [旧项目 2026-10-01] 第${index}条：${'很长的笔记'.repeat(16)}`,
         );
-        await ui.request('member.setMemory', { memberId: 'scout', text: old.join('\r\n') });
-        expect((await ui.request('member.memory', { memberId: 'scout' })).text.length).toBeGreaterThan(
-            MEMORY_FILE_CHARS,
-        );
+        await ui.request('member.setMemory', { ...here, text: old.join('\r\n') });
+        expect((await ui.request('member.memory', here)).text.length).toBeGreaterThan(MEMORY_FILE_CHARS);
         expect((await remember({ note: '新的一条' })).content).toMatch(
             /^记下了。 记忆超过16000字，删掉了最早的\d+条。$/,
         );
-        const capped = (await ui.request('member.memory', { memberId: 'scout' })).text;
+        const capped = (await ui.request('member.memory', here)).text;
         expect(capped.length).toBeLessThanOrEqual(MEMORY_FILE_CHARS);
         expect(capped).not.toContain('第0条：');
         expect(capped.trim().split('\n').at(-1)).toBe(`- [${project.name} ${today()}] 新的一条`);
@@ -294,12 +295,79 @@ describe('members', () => {
         expect(layer?.text).toContain('（更早的笔记没有放进来）');
         expect(layer?.text).not.toContain('第0条：');
 
-        await ui.request('member.setMemory', { memberId: 'scout', text: '  ' });
-        expect(await ui.request('member.memory', { memberId: 'scout' })).toEqual({ text: '' });
+        await ui.request('member.setMemory', { ...here, text: '  ' });
+        expect(await ui.request('member.memory', here)).toEqual({ text: '', projects: [] });
         expect((await ui.request('member.list', {})).find((member) => member.id === 'scout')?.memory).toEqual({
             chars: 0,
         });
         expect(provider.layers?.at(-1)?.text).toContain('（还没有笔记）');
+    }, 60_000);
+
+    it('splits the memory: general, per project and the team’s; old notes move to their project; recall finds them all', async () => {
+        const { core, ui, dataDir, project } = await setUp();
+        // The single memory file of before: one note names this project, one an unknown project, one none.
+        const folder = path.join(dataDir, 'members', 'coder');
+        mkdirSync(folder, { recursive: true });
+        writeFileSync(
+            path.join(folder, 'memory.md'),
+            [
+                `- [${project.name} 2026-10-30] 构建用 pnpm build`,
+                '- [别的项目 2026-10-01] 那边用 make',
+                '- 回答先给结论',
+            ].join('\n'),
+        );
+        // Untagged notes stay general; a removed project's notes keep its name as a project of their own.
+        expect((await ui.request('member.memory', { memberId: 'coder' })).text).toBe('- 回答先给结论\n');
+        const moved = await ui.request('member.memory', { memberId: 'coder', scope: 'project', projectId: project.id });
+        expect(moved.text).toBe(`- [${project.name} 2026-10-30] 构建用 pnpm build\n`);
+        expect(moved.projects).toEqual(
+            expect.arrayContaining([
+                { projectId: project.id, name: project.name, chars: moved.text.trim().length },
+                expect.objectContaining({ name: '别的项目' }),
+            ]),
+        );
+
+        const coder = core.members.withMemory(
+            { tools: [], handle: async () => ({ content: '' }) },
+            { id: 'coder', name: 'Coder' },
+            project.id,
+        );
+        const scout = core.members.withMemory(
+            { tools: [], handle: async () => ({ content: '' }) },
+            { id: 'scout', name: 'Scout' },
+            project.id,
+        );
+        expect(await coder.handle('remember', { note: '用户要求提交信息写中文', scope: 'member' }, signal())).toEqual({
+            content: '记下了。',
+        });
+        expect(await scout.handle('remember', { note: '接口文档在 docs/api.md', scope: 'team' }, signal())).toEqual({
+            content: '记下了。',
+        });
+        // Each prompt carries the three parts of this project; the team's notes reach every member.
+        const layer = coder.layers?.at(-1)?.text ?? '';
+        expect(layer).toContain('【通用】');
+        expect(layer).toContain('用户要求提交信息写中文');
+        expect(layer).toContain('构建用 pnpm build');
+        expect(layer).toContain('接口文档在 docs/api.md');
+        expect(layer).not.toContain('那边用 make');
+        expect(scout.layers?.at(-1)?.text).toContain('接口文档在 docs/api.md');
+        expect(scout.layers?.at(-1)?.text).not.toContain('构建用 pnpm build');
+        // recall reaches another member's notes, says whose they are, and finds Chinese words inside a note.
+        const found = await scout.handle('recall', { query: '构建' }, signal());
+        expect(found.content).toContain('找到1条');
+        expect(found.content).toContain(`(编码 · ${project.name})`);
+        expect(found.content).toContain('构建用 pnpm build');
+        expect((await scout.handle('recall', { query: '接口文档' }, signal())).content).toContain('(团队 · ');
+        expect((await scout.handle('recall', { query: '不存在的事' }, signal())).content).toBe(
+            '记忆里没有和“不存在的事”有关的笔记',
+        );
+        expect((await ui.request('member.list', {})).find((member) => member.id === 'coder')?.memory).toMatchObject({
+            projects: 2,
+        });
+        // A general note carries its date alone.
+        expect((await ui.request('member.memory', { memberId: 'coder' })).text).toContain(
+            `- [${today()}] 用户要求提交信息写中文`,
+        );
     }, 60_000);
 
     it('talks with a member in a thread of its own, where it works as itself and writes down what it learned', async () => {
@@ -337,7 +405,9 @@ describe('members', () => {
         // Its own tools: a read-only scout cannot write, and it can remember.
         expect(toolNames(first)).toContain('remember');
         expect(toolNames(first)).not.toContain('write');
-        expect((await ui.request('member.memory', { memberId: 'scout' })).text).toContain('README.md是项目说明');
+        expect(
+            (await ui.request('member.memory', { memberId: 'scout', scope: 'project', projectId: project.id })).text,
+        ).toContain('README.md是项目说明');
         expect(changed).toContain('scout');
 
         // The next conversation knows it; another tier's member works on that tier's model.

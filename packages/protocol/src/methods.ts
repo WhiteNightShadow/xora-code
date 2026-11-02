@@ -500,12 +500,33 @@ export const methods = {
         params: z.object({ projectId: IdSchema.optional(), memberId: z.string() }).strict(),
         result: ok,
     },
+    /**
+     * One part of a member's memory (06 §21): `member` its general notes, `project` its notes in a project, `team`
+     * the notes all members share in a project. `projects` lists the projects it has notes in.
+     */
     'member.memory': {
-        params: z.object({ memberId: z.string() }).strict(),
-        result: z.object({ text: z.string(), updatedAt: z.number().optional() }),
+        params: z
+            .object({
+                memberId: z.string(),
+                scope: z.enum(['member', 'project', 'team']).optional(),
+                projectId: IdSchema.optional(),
+            })
+            .strict(),
+        result: z.object({
+            text: z.string(),
+            updatedAt: z.number().optional(),
+            projects: z.array(z.object({ projectId: z.string(), name: z.string(), chars: z.number() })).optional(),
+        }),
     },
     'member.setMemory': {
-        params: z.object({ memberId: z.string(), text: z.string().max(50_000) }).strict(),
+        params: z
+            .object({
+                memberId: z.string(),
+                text: z.string().max(50_000),
+                scope: z.enum(['member', 'project', 'team']).optional(),
+                projectId: IdSchema.optional(),
+            })
+            .strict(),
         result: ok,
     },
     'member.saveRoutine': {

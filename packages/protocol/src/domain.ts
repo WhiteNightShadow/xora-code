@@ -865,7 +865,8 @@ export const MemberSchema = z.object({
     customized: z.boolean(),
     /** The file that defines it, when there is one. */
     file: z.string().optional(),
-    memory: z.object({ chars: z.number(), updatedAt: z.number().optional() }),
+    /** All its own notes (general and per project); `projects`: the projects it has notes in. */
+    memory: z.object({ chars: z.number(), updatedAt: z.number().optional(), projects: z.number().optional() }),
     routines: z.array(MemberRoutineSchema),
 });
 export type Member = z.infer<typeof MemberSchema>;

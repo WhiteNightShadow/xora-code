@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -53,6 +53,13 @@ import type { HostToolProvider, TurnService } from './turns.ts';
 
 /** The part of a member's memory a prompt carries; the most recent notes are kept. */
 export const MEMORY_PROMPT_CHARS = 8_000;
+/** What a prompt carries of each part (06 §21): the member's general notes, its notes in the project, the team's. */
+export const MEMORY_PROMPT_PARTS = { member: 2_500, project: 4_000, team: 3_000 } as const;
+/** What `recall` returns at most. */
+const RECALL_RESULTS = 15;
+export const RECALL_TOOL = 'recall';
+/** Where a note goes (06 §21): the member's general notes, its notes in the project, or the team's in the project. */
+export type MemoryScope = 'member' | 'project' | 'team';
 /** A memory file stays under this: a new note pushes out the oldest ones. */
 export const MEMORY_FILE_CHARS = 16_000;
 /** The longest note `remember` takes. */
@@ -97,13 +104,25 @@ const TEXT = bilingual(
         subscriptionOnly: (tier: string) =>
             `例行任务没人看着，只用按量计费的模型（api、本地或自定义）；${tier}档和默认模型都是订阅额度：在设置里给这个档位连一个按量计费的模型`,
         memoryTitle: (name: string) => `记忆：${name}`,
-        memory: (name: string, project: string | undefined, notes: string) =>
+        memory: (part: MemoryParts) =>
             [
-                `这是${name}的长期记忆：以前干活时你自己用remember记下的笔记，每条开头是记下它的项目和日期${project ? `（现在在项目“${project}”里）` : ''}。别的项目里记的不一定适用于这里；笔记和现在看到的事实对不上时以事实为准，并用remember改掉过时的那条。`,
+                `这是${part.name}的长期记忆：以前干活时你自己用remember记下的笔记，每条开头是记下它的项目和日期。这里只带了和现在这个项目${part.project ? `“${part.project}”` : ''}有关的三部分：`,
                 '',
-                notes,
+                '【通用】各项目都适用的做法和偏好：',
+                part.member,
                 '',
-                '学到以后还用得上的事，就用remember记一条：项目里的事实（怎么构建和测试、目录和约定）、用户的偏好和要求、试过行得通或行不通的做法。每条一句话，单独看也能懂。不记密钥、token、密码，也不记只跟这一次有关的细节。',
+                `【本项目】你在${part.project ? `“${part.project}”` : '这个项目'}里记的：`,
+                part.own,
+                '',
+                '【团队】团队在这个项目里共享的笔记，团队里每个成员都能读写：',
+                part.team,
+                '',
+                part.others.length > 0
+                    ? `你在别的项目（${part.others.join('、')}）也有笔记，别的成员也有自己的笔记：需要时用recall查，结果会写明是谁在哪个项目记的。`
+                    : '别的成员也有自己的笔记，需要时用recall查，结果会写明是谁在哪个项目记的。',
+                '别的项目里记的不一定适用于这里；笔记和现在看到的事实对不上时以事实为准，并用remember改掉过时的那条。',
+                '',
+                '学到以后还用得上的事，就用remember记一条，scope选：project（默认，这个项目里的事实：怎么构建和测试、目录和约定）、member（各项目都适用的偏好和做法）、team（团队里别的成员也该知道的项目事实）。每条一句话，单独看也能懂。不记密钥、token、密码，也不记只跟这一次有关的细节。',
             ].join('\n'),
         noNotes: '（还没有笔记）',
         olderOmitted: '（更早的笔记没有放进来）',
@@ -114,6 +133,16 @@ const TEXT = bilingual(
             '把以后干活还用得上的事记进你的长期记忆，下次干活时会带上：项目里的事实（怎么构建和测试、目录和约定）、用户的偏好和要求、试过行得通或行不通的做法。每条一句话，单独看也能懂。不要记密钥、token、密码，也不要记只跟这一次有关的细节。记错或过时的，用replaces指出要换掉的那条。',
         rememberNote: '要记的一句话，最多500字',
         rememberReplaces: '要换掉的那条笔记里的一段原文；不填就是新加一条',
+        rememberScope:
+            'project（默认）：这个项目里的事实；member：各项目都适用的偏好和做法；team：团队里别的成员也该知道的项目事实',
+        recallTool:
+            '在长期记忆里查笔记：你自己在各个项目记的、团队共享的，也包括别的成员记的。结果写明是谁在哪个项目、哪天记的；别处记的不一定适用于这里。',
+        recallQuery: '要查的事，几个关键词就行',
+        recallMember: '只查这个成员记的（名字或id）；不填就查所有人',
+        recallNone: (query: string) => `记忆里没有和“${query}”有关的笔记`,
+        recallHeader: (count: number) => `找到${count}条：`,
+        teamLabel: '团队',
+        projectNeeded: '这部分记忆属于某个项目：给出projectId',
         noted: '记下了。',
         replaced: '换掉了原来那条。',
         already: '这条已经记过了。',
@@ -164,13 +193,25 @@ const TEXT = bilingual(
         subscriptionOnly: (tier) =>
             `Nobody watches a routine, so it only uses pay-as-you-go models (api, local or custom); the ${tier} tier and the default model are subscription quotas: connect a pay-as-you-go model for the tier in Settings`,
         memoryTitle: (name) => `Memory: ${name}`,
-        memory: (name, project, notes) =>
+        memory: (part) =>
             [
-                `This is ${name}'s long-term memory: notes you wrote yourself with remember while working before, each starting with the project and the date it was written in${project ? ` (you are in the project "${project}" now)` : ''}. A note from another project may not apply here; when a note does not match what you see now, trust what you see and correct the note with remember.`,
+                `This is ${part.name}'s long-term memory: notes you wrote yourself with remember while working before, each starting with the project and the date. Only the three parts that matter in the project you are in now${part.project ? ` ("${part.project}")` : ''} are here:`,
                 '',
-                notes,
+                '[General] how you work and what the user prefers, in every project:',
+                part.member,
                 '',
-                'When you learn something that will matter again, write a note with remember: facts about the project (how to build and test it, its layout and conventions), the user’s preferences and requirements, approaches that worked or failed. One sentence each, clear on its own. Never note keys, tokens or passwords, or details that only matter this once.',
+                `[This project] your notes in ${part.project ? `"${part.project}"` : 'this project'}:`,
+                part.own,
+                '',
+                '[Team] notes the team shares in this project; every member reads and writes them:',
+                part.team,
+                '',
+                part.others.length > 0
+                    ? `You also have notes in other projects (${part.others.join(', ')}), and other members have their own: look them up with recall when you need them; each result says who wrote it in which project.`
+                    : 'Other members have their own notes: look them up with recall when you need them; each result says who wrote it in which project.',
+                'A note from another project may not apply here; when a note does not match what you see now, trust what you see and correct the note with remember.',
+                '',
+                'When you learn something that will matter again, write it down with remember and pick its scope: project (the default: facts about this project, how to build and test it, its layout and conventions), member (preferences and ways of working that hold in every project) or team (facts about the project the other members should know too). One sentence, clear on its own. Never note keys, tokens or passwords, or details that only matter this once.',
             ].join('\n'),
         noNotes: '(no notes yet)',
         olderOmitted: '(older notes are left out)',
@@ -181,6 +222,16 @@ const TEXT = bilingual(
             'Writes something that will matter again into your long-term memory, which you get with every task: facts about the project (how to build and test it, its layout and conventions), the user’s preferences and requirements, approaches that worked or failed. One sentence, clear on its own. Never note keys, tokens or passwords, or details that only matter this once. To correct a wrong or outdated note, name it with replaces.',
         rememberNote: 'The note: one sentence, at most 500 characters',
         rememberReplaces: 'Some words of the note it replaces; leave it out to add a new note',
+        rememberScope:
+            'project (default): facts about this project; member: preferences and ways of working for every project; team: facts about the project the other members should know too',
+        recallTool:
+            'Looks up notes in long-term memory: yours from every project, the team’s, and other members’. Each result says who wrote it in which project and when; a note from elsewhere may not apply here.',
+        recallQuery: 'What to look for, a few words',
+        recallMember: 'Only the notes of this member (name or id); everyone’s when left out',
+        recallNone: (query) => `No note in memory is about "${query}"`,
+        recallHeader: (count) => `${count} found:`,
+        teamLabel: 'team',
+        projectNeeded: 'This part of the memory belongs to a project: give projectId',
         noted: 'Noted.',
         replaced: 'Replaced the old note.',
         already: 'That is noted already.',
@@ -335,6 +386,23 @@ export function parseRoutineKey(key: string): { memberId: string; routineId: str
 }
 
 /** A member's folder: its id when that is a safe file name, else a hash of it. */
+/** A project's memory file name: project ids are safe as they are; anything else is hashed. */
+function projectStem(projectId: string): string {
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(projectId) && !projectId.includes('..')
+        ? projectId
+        : `x-${createHash('sha256').update(projectId).digest('hex').slice(0, 16)}`;
+}
+
+/** Display names of the project files in a memory folder (`names.json`), for projects the app no longer knows. */
+async function readNames(dir: string): Promise<Record<string, string>> {
+    try {
+        const parsed: unknown = JSON.parse(await readFile(path.join(dir, 'names.json'), 'utf8'));
+        return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
+    } catch {
+        return {};
+    }
+}
+
 function folderName(id: string): string {
     return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(id) && !id.includes('..')
         ? id
@@ -431,12 +499,59 @@ function rememberTool(): HostToolProvider['tools'][number] {
             properties: {
                 note: { type: 'string', description: text.rememberNote },
                 replaces: { type: 'string', description: text.rememberReplaces },
+                scope: { type: 'string', enum: ['project', 'member', 'team'], description: text.rememberScope },
             },
             required: ['note'],
             additionalProperties: false,
         },
         kind: 'other',
     };
+}
+
+function recallTool(): HostToolProvider['tools'][number] {
+    const text = textOf(TEXT);
+    return {
+        name: RECALL_TOOL,
+        description: text.recallTool,
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: text.recallQuery },
+                member: { type: 'string', description: text.recallMember },
+            },
+            required: ['query'],
+            additionalProperties: false,
+        },
+        kind: 'read',
+    };
+}
+
+/** The parts of a member's memory its prompt carries (06 §21). */
+interface MemoryParts {
+    readonly name: string;
+    readonly project: string | undefined;
+    readonly member: string;
+    readonly own: string;
+    readonly team: string;
+    readonly others: readonly string[];
+}
+
+/** Words of a query to look for: its words, and for Chinese runs their pairs of characters too. */
+function queryTerms(query: string): string[] {
+    const terms = new Set<string>();
+    for (const word of query.toLowerCase().split(/[\s,，、。;；:：/]+/)) {
+        if (!word) continue;
+        terms.add(word);
+        if (/[\u3400-\u9fff]/.test(word) && word.length > 2) {
+            for (let index = 0; index + 2 <= word.length; index++) terms.add(word.slice(index, index + 2));
+        }
+    }
+    return [...terms];
+}
+
+/** A note's date from its `[project date]` tag, for ranking newer notes first. */
+function noteDate(line: string): string {
+    return /\[[^\]\n]*?(\d{4}-\d{2}-\d{2})\]/.exec(line)?.[1] ?? '';
 }
 
 function readRecord(value: unknown): RoutineRecord | undefined {
@@ -468,6 +583,8 @@ export class MemberService {
     readonly #queues = new Map<string, Promise<unknown>>();
     /** Names of the projects seen, for memory layers built where only the id is at hand. */
     readonly #projectNames = new Map<string, string>();
+    /** Members whose memory file was looked at for notes to move into project files (06 §21). */
+    readonly #migrated = new Set<string>();
     #enabledRoutines = 0;
 
     constructor(deps: MemberDeps) {
@@ -722,73 +839,243 @@ export class MemberService {
         return next;
     }
 
-    // Memory -------------------------------------------------------------------------------------------------
+    // Memory (06 §19, §21) ---------------------------------------------------------------------------------
 
+    /** Its general notes: how it works and what the user prefers, in every project. */
     #memoryFile(memberId: string): string {
         return path.join(this.#deps.membersDir, folderName(memberId), 'memory.md');
     }
 
-    async memory(memberId: string): Promise<{ text: string; updatedAt?: number }> {
-        const file = this.#memoryFile(memberId);
-        try {
-            const [text, info] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
-            return { text, updatedAt: Math.round(info.mtimeMs) };
-        } catch {
-            return { text: '' };
+    /** Its notes in one project. */
+    #projectMemoryFile(memberId: string, projectId: string): string {
+        return path.join(this.#projectsDir(memberId), `${projectStem(projectId)}.md`);
+    }
+
+    #projectsDir(memberId: string): string {
+        return path.join(this.#deps.membersDir, folderName(memberId), 'projects');
+    }
+
+    #teamDir(): string {
+        return path.join(this.#deps.orgsDir, 'default', 'memory');
+    }
+
+    /** The notes every member of the team shares in one project. */
+    #teamMemoryFile(projectId: string): string {
+        return path.join(this.#teamDir(), `${projectStem(projectId)}.md`);
+    }
+
+    /** Keeps the display name of a project's memory file, so it reads well after the project is gone. */
+    async #nameFile(dir: string, stem: string, name: string): Promise<void> {
+        await this.#serial(`names:${dir}`, async () => {
+            const names = await readNames(dir);
+            if (names[stem] === name) return;
+            await writeAtomic(path.join(dir, 'names.json'), `${JSON.stringify({ ...names, [stem]: name }, null, 2)}\n`);
+        });
+    }
+
+    #label(names: Record<string, string>, stem: string): string {
+        return names[stem] ?? this.#projectName(stem) ?? stem;
+    }
+
+    #scopeFile(memberId: string, scope: MemoryScope, projectId: string | undefined): string {
+        if (scope === 'member') {
+            return this.#memoryFile(memberId);
         }
-    }
-
-    /** The user edits or clears a member's memory. */
-    async setMemory(memberId: string, text: string): Promise<void> {
-        const file = this.#memoryFile(memberId);
-        const tidy = text.replace(/\r\n?/g, '\n').trim();
-        await this.#serial(`memory:${memberId}`, () =>
-            tidy ? writeAtomic(file, `${tidy}\n`) : rm(file, { force: true }),
-        );
-        this.#changed(memberId);
-    }
-
-    async #memoryStats(memberId: string): Promise<Member['memory']> {
-        const memory = await this.memory(memberId);
-        const chars = memory.text.trim().length;
-        return { chars, ...(chars > 0 && memory.updatedAt !== undefined ? { updatedAt: memory.updatedAt } : {}) };
+        if (!projectId) {
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).projectNeeded);
+        }
+        return scope === 'team' ? this.#teamMemoryFile(projectId) : this.#projectMemoryFile(memberId, projectId);
     }
 
     /**
-     * Gives a member's thread its memory, read afresh for every turn, and the `remember` tool (06 §19): its
+     * One part of a member's memory, with the projects it has notes in. Notes of the earlier single file that name
+     * a project the app knows move to that project first (06 §21).
+     */
+    async memory(
+        memberId: string,
+        scope: MemoryScope = 'member',
+        projectId?: string,
+    ): Promise<{
+        text: string;
+        updatedAt?: number;
+        projects: Array<{ projectId: string; name: string; chars: number }>;
+    }> {
+        await this.#migrate(memberId);
+        const file = this.#scopeFile(memberId, scope, projectId);
+        const projects = await this.#memoryProjects(memberId);
+        try {
+            const [text, info] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
+            return { text, updatedAt: Math.round(info.mtimeMs), projects };
+        } catch {
+            return { text: '', projects };
+        }
+    }
+
+    /** The user edits or clears one part of a member's memory. */
+    async setMemory(memberId: string, text: string, scope: MemoryScope = 'member', projectId?: string): Promise<void> {
+        await this.#migrate(memberId);
+        const file = this.#scopeFile(memberId, scope, projectId);
+        const tidy = text.replace(/\r\n?/g, '\n').trim();
+        await this.#serial(`memory:${file}`, () => (tidy ? writeAtomic(file, `${tidy}\n`) : rm(file, { force: true })));
+        this.#changed(memberId);
+    }
+
+    /** The projects a member has notes in, by size. */
+    async #memoryProjects(memberId: string): Promise<Array<{ projectId: string; name: string; chars: number }>> {
+        const dir = this.#projectsDir(memberId);
+        const files = await readdir(dir).catch(() => [] as string[]);
+        const names = await readNames(dir);
+        const out: Array<{ projectId: string; name: string; chars: number }> = [];
+        for (const file of files.filter((entry) => entry.endsWith('.md'))) {
+            const projectId = file.slice(0, -3);
+            const text = await readFile(path.join(dir, file), 'utf8').catch(() => '');
+            if (text.trim()) {
+                out.push({ projectId, name: this.#label(names, projectId), chars: text.trim().length });
+            }
+        }
+        return out.sort((a, b) => b.chars - a.chars);
+    }
+
+    async #memoryStats(memberId: string): Promise<Member['memory']> {
+        await this.#migrate(memberId);
+        const files = [
+            this.#memoryFile(memberId),
+            ...(await this.#memoryProjects(memberId)).map((project) =>
+                this.#projectMemoryFile(memberId, project.projectId),
+            ),
+        ];
+        let chars = 0;
+        let updatedAt: number | undefined;
+        let projects = 0;
+        for (const file of files) {
+            try {
+                const [text, info] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
+                const size = text.trim().length;
+                if (size === 0) continue;
+                chars += size;
+                if (file !== this.#memoryFile(memberId)) projects += 1;
+                updatedAt = Math.max(updatedAt ?? 0, Math.round(info.mtimeMs));
+            } catch {
+                // Not there yet.
+            }
+        }
+        return {
+            chars,
+            ...(chars > 0 && updatedAt !== undefined ? { updatedAt } : {}),
+            ...(projects > 0 ? { projects } : {}),
+        };
+    }
+
+    /**
+     * The single memory file of 06 §19 kept every note with a `[project date]` tag: the notes of a project the app
+     * knows go to that project's file, once, and the rest stay as the general notes (06 §21).
+     */
+    #migrate(memberId: string): Promise<void> {
+        if (this.#migrated.has(memberId)) {
+            return Promise.resolve();
+        }
+        this.#migrated.add(memberId);
+        const file = this.#memoryFile(memberId);
+        return this.#serial(`memory:${file}`, async () => {
+            const saved = await readFile(file, 'utf8').catch(() => '');
+            if (!saved.trim()) return;
+            const projects = await this.#deps.projects.list().catch(() => []);
+            const byName = new Map(projects.map((project) => [project.name, project.id]));
+            const kept: string[] = [];
+            // By project: an id the app knows, else the name the note carries (a project removed since).
+            const moved = new Map<string, { name: string; lines: string[] }>();
+            for (const line of saved.replace(/\r\n?/g, '\n').split('\n')) {
+                if (!line.trim()) continue;
+                const name = /^\s*[-*]\s*\[([^\]\n]*?)\s+\d{4}-\d{2}-\d{2}\]/.exec(line)?.[1]?.trim();
+                if (!name) {
+                    kept.push(line);
+                    continue;
+                }
+                const key = byName.get(name) ?? `~${name}`;
+                const entry = moved.get(key) ?? { name, lines: [] };
+                entry.lines.push(line);
+                moved.set(key, entry);
+            }
+            if (moved.size === 0) return;
+            for (const [key, entry] of moved) {
+                const target = this.#projectMemoryFile(memberId, key);
+                const before = await readFile(target, 'utf8').catch(() => '');
+                const existing = before.split('\n').filter((line) => line.trim() !== '');
+                const merged = [...existing, ...entry.lines.filter((line) => !existing.includes(line))];
+                await writeAtomic(target, `${merged.join('\n')}\n`);
+                await this.#nameFile(this.#projectsDir(memberId), projectStem(key), entry.name);
+            }
+            await (kept.length > 0 ? writeAtomic(file, `${kept.join('\n')}\n`) : rm(file, { force: true }));
+            this.#deps.log.info(`member ${memberId}: moved notes of ${moved.size} project(s) out of memory.md`);
+        });
+    }
+
+    /**
+     * Gives a member's thread its memory, read afresh for every turn, with `remember` and `recall` (06 §19, §21): its
      * conversations and routine runs, workflow steps, team tasks and the subagents started for it.
      */
     withMemory(provider: HostToolProvider, agent: Pick<AgentSpec, 'id' | 'name'>, projectId: string): HostToolProvider {
         const own = provider.layers ?? [];
         const name = memberName(agent);
+        void this.#migrate(agent.id);
         const layer = () => this.#memoryLayer(agent.id, name, projectId);
         return {
             ...provider,
-            tools: [...provider.tools.filter((tool) => tool.name !== REMEMBER_TOOL), rememberTool()],
+            tools: [
+                ...provider.tools.filter((tool) => tool.name !== REMEMBER_TOOL && tool.name !== RECALL_TOOL),
+                rememberTool(),
+                recallTool(),
+            ],
             get layers() {
                 return [...own, layer()];
             },
             handle: (tool, input, signal) =>
                 tool === REMEMBER_TOOL
                     ? this.#remember(agent.id, projectId, input)
-                    : provider.handle(tool, input, signal),
+                    : tool === RECALL_TOOL
+                      ? this.#recall(agent.id, projectId, input)
+                      : provider.handle(tool, input, signal),
         };
     }
 
     #memoryLayer(memberId: string, name: string, projectId: string): Layer {
         const text = textOf(TEXT);
-        let saved = '';
+        const part = (file: string, limit: number) => {
+            let saved = '';
+            try {
+                saved = readFileSync(file, 'utf8');
+            } catch {
+                // No notes yet.
+            }
+            const recent = recentNotes(saved, limit);
+            return recent.text ? `${recent.omitted ? `${text.olderOmitted}\n` : ''}${recent.text}` : text.noNotes;
+        };
+        let others: string[] = [];
         try {
-            saved = readFileSync(this.#memoryFile(memberId), 'utf8');
+            const dir = this.#projectsDir(memberId);
+            let names: Record<string, string> = {};
+            try {
+                names = JSON.parse(readFileSync(path.join(dir, 'names.json'), 'utf8')) as Record<string, string>;
+            } catch {
+                // No names kept.
+            }
+            others = readdirSync(dir)
+                .filter((entry) => entry.endsWith('.md') && entry !== `${projectStem(projectId)}.md`)
+                .map((entry) => this.#label(names, entry.slice(0, -3)));
         } catch {
-            // No memory yet.
+            // No project notes.
         }
-        const recent = recentNotes(saved, MEMORY_PROMPT_CHARS);
-        const notes = recent.text ? `${recent.omitted ? `${text.olderOmitted}\n` : ''}${recent.text}` : text.noNotes;
         return {
             id: 'member_memory',
             title: text.memoryTitle(name),
-            text: text.memory(name, this.#projectName(projectId), notes),
+            text: text.memory({
+                name,
+                project: this.#projectName(projectId),
+                member: part(this.#memoryFile(memberId), MEMORY_PROMPT_PARTS.member),
+                own: part(this.#projectMemoryFile(memberId, projectId), MEMORY_PROMPT_PARTS.project),
+                team: part(this.#teamMemoryFile(projectId), MEMORY_PROMPT_PARTS.team),
+                others,
+            }),
         };
     }
 
@@ -811,11 +1098,18 @@ export class MemberService {
         if (note.length > NOTE_CHARS) return { content: text.noteTooLong(note.length), isError: true };
         if (redact(note) !== note) return { content: text.noteSecret, isError: true };
         const replaces = typeof args.replaces === 'string' ? oneLine(args.replaces) : '';
+        const scope: MemoryScope = args.scope === 'member' || args.scope === 'team' ? args.scope : 'project';
         const project = await this.#deps.projects.get(projectId).catch(() => undefined);
         if (project) this.#projectNames.set(project.id, project.name);
-        const tag = `[${project?.name ?? this.#projectName(projectId) ?? projectId} ${today(this.#now())}]`;
-        const file = this.#memoryFile(memberId);
-        const result = await this.#serial(`memory:${memberId}`, async (): Promise<HostToolResult> => {
+        const projectLabel = project?.name ?? this.#projectName(projectId) ?? projectId;
+        // A general note holds in every project: its tag is the date alone.
+        const tag = scope === 'member' ? `[${today(this.#now())}]` : `[${projectLabel} ${today(this.#now())}]`;
+        await this.#migrate(memberId);
+        const file = this.#scopeFile(memberId, scope, projectId);
+        if (scope !== 'member') {
+            await this.#nameFile(path.dirname(file), projectStem(projectId), projectLabel);
+        }
+        const result = await this.#serial(`memory:${file}`, async (): Promise<HostToolResult> => {
             const saved = await readFile(file, 'utf8').catch(() => '');
             const lines = saved
                 .replace(/\r\n?/g, '\n')
@@ -842,10 +1136,84 @@ export class MemberService {
             return { content: dropped > 0 ? `${message} ${text.dropped(dropped)}` : message };
         });
         if (!result.isError) {
-            this.#deps.log.info(`member ${memberId} remembered a note in ${projectId}`);
+            this.#deps.log.info(`member ${memberId} remembered a ${scope} note in ${projectId}`);
             this.#changed(memberId);
         }
         return result;
+    }
+
+    /**
+     * `recall` (06 §21): notes about a query from the member's general and project notes, the team's and the other
+     * members', ranked by the words they share with it, the member's own and this project's first, then the newest.
+     */
+    async #recall(memberId: string, projectId: string, input: unknown): Promise<HostToolResult> {
+        const text = textOf(TEXT);
+        const args = (input !== null && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+        const query = typeof args.query === 'string' ? oneLine(args.query) : '';
+        if (!query) return { content: text.recallQuery, isError: true };
+        const terms = queryTerms(query);
+        const wanted = typeof args.member === 'string' ? args.member.trim().toLowerCase() : '';
+        const roster = await this.list(projectId).catch(() => [] as Member[]);
+        const names = new Map(roster.map((member) => [member.id, member.name]));
+        const who = wanted
+            ? roster.find((member) => member.id.toLowerCase() === wanted || member.name.toLowerCase() === wanted)?.id
+            : undefined;
+        const sources: Array<{ file: string; who: string; project: string | undefined; boost: number }> = [];
+        const members = await readdir(this.#deps.membersDir).catch(() => [] as string[]);
+        for (const folder of members) {
+            if (who !== undefined && folder !== folderName(who)) continue;
+            const mine = folder === folderName(memberId);
+            const label = names.get(folder) ?? folder;
+            sources.push({ file: this.#memoryFile(folder), who: label, project: undefined, boost: mine ? 2 : 0 });
+            const dir = path.join(this.#deps.membersDir, folder, 'projects');
+            const labels = await readNames(dir);
+            for (const file of (await readdir(dir).catch(() => [] as string[])).filter((entry) =>
+                entry.endsWith('.md'),
+            )) {
+                const stem = file.slice(0, -3);
+                sources.push({
+                    file: path.join(dir, file),
+                    who: label,
+                    project: this.#label(labels, stem),
+                    boost: (mine ? 2 : 0) + (stem === projectStem(projectId) ? 1 : 0),
+                });
+            }
+        }
+        if (who === undefined) {
+            const teamDir = this.#teamDir();
+            const labels = await readNames(teamDir);
+            for (const file of (await readdir(teamDir).catch(() => [] as string[])).filter((entry) =>
+                entry.endsWith('.md'),
+            )) {
+                const stem = file.slice(0, -3);
+                sources.push({
+                    file: path.join(teamDir, file),
+                    who: text.teamLabel,
+                    project: this.#label(labels, stem),
+                    boost: 1 + (stem === projectStem(projectId) ? 1 : 0),
+                });
+            }
+        }
+        const found: Array<{ line: string; score: number; date: string }> = [];
+        for (const source of sources) {
+            const saved = await readFile(source.file, 'utf8').catch(() => '');
+            for (const line of saved.split('\n')) {
+                const words = noteText(line).toLowerCase();
+                if (!words) continue;
+                const hits = terms.filter((term) => words.includes(term)).length;
+                if (hits === 0) continue;
+                const where = source.project ? `${source.who} · ${source.project}` : source.who;
+                found.push({
+                    line: `- (${where}) ${line.replace(/^\s*[-*]\s*/, '')}`,
+                    score: hits * 3 + source.boost,
+                    date: noteDate(line),
+                });
+            }
+        }
+        if (found.length === 0) return { content: text.recallNone(query) };
+        found.sort((a, b) => b.score - a.score || b.date.localeCompare(a.date));
+        const top = found.slice(0, RECALL_RESULTS);
+        return { content: [text.recallHeader(top.length), ...top.map((item) => shorten(item.line, 400))].join('\n') };
     }
 
     // Working as a member ------------------------------------------------------------------------------------
@@ -1253,9 +1621,9 @@ export function registerMemberHandlers(peer: UiPeer, members: MemberService): vo
         await members.remove(memberId, projectId);
         return { ok: true } as const;
     });
-    peer.handle('member.memory', ({ memberId }) => members.memory(memberId));
-    peer.handle('member.setMemory', async ({ memberId, text }) => {
-        await members.setMemory(memberId, text);
+    peer.handle('member.memory', ({ memberId, scope, projectId }) => members.memory(memberId, scope, projectId));
+    peer.handle('member.setMemory', async ({ memberId, text, scope, projectId }) => {
+        await members.setMemory(memberId, text, scope, projectId);
         return { ok: true } as const;
     });
     peer.handle('member.saveRoutine', ({ memberId, routine }) => members.saveRoutine(memberId, routine));

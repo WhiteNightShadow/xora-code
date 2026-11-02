@@ -500,3 +500,9 @@
         transition: none;
     }
 }
+
+/* Which part of the memory is shown (06 §21). */
+.member-memory__parts {
+    max-width: 320px;
+    margin-bottom: var(--xk-space-2);
+}

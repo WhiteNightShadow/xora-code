@@ -128,23 +128,52 @@ function MemberCard({ member }: { member: Member }) {
 }
 
 /** The user's memory text of a member, with an editor and a way to clear it. */
+/** Which part of a member's memory is shown (06 §21): `member`, `project:<id>` or `team:<id>`. */
+type MemoryPart = string;
+
+function partRequest(part: MemoryPart): { scope: 'member' | 'project' | 'team'; projectId?: string } {
+    const [scope, projectId] = part.split(':', 2) as ['member' | 'project' | 'team', string | undefined];
+    return projectId ? { scope, projectId } : { scope: 'member' };
+}
+
 function MemorySection({ member }: { member: Member }) {
     const s = useStrings();
-    const [memory, setMemory] = useState<{ text: string; updatedAt?: number } | undefined>();
+    const current = useApp((state) => state.projects.find((item) => item.id === state.selectedProjectId));
+    const [part, setPart] = useState<MemoryPart>(current ? `project:${current.id}` : 'member');
+    const [memory, setMemory] = useState<
+        { text: string; updatedAt?: number; projects?: Array<{ projectId: string; name: string }> } | undefined
+    >();
     const [editing, setEditing] = useState<string | undefined>();
     // Reloads whenever the member reports a change (it remembered something, the user edited it).
     // biome-ignore lint/correctness/useExhaustiveDependencies: the memory's size and time say it changed
     useEffect(() => {
         let live = true;
-        host.call('member.memory', { memberId: member.id })
+        host.call('member.memory', { memberId: member.id, ...partRequest(part) })
             .then((value) => live && setMemory(value))
             .catch(() => live && setMemory({ text: '' }));
         return () => {
             live = false;
         };
-    }, [member.id, member.memory.chars, member.memory.updatedAt]);
+    }, [member.id, member.memory.chars, member.memory.updatedAt, part]);
+    const parts = [
+        ...(current
+            ? [{ value: `project:${current.id}`, label: format(s.members.memoryProject, { project: current.name }) }]
+            : []),
+        { value: 'member', label: s.members.memoryGeneral },
+        ...(current
+            ? [{ value: `team:${current.id}`, label: format(s.members.memoryTeam, { project: current.name }) }]
+            : []),
+        ...(memory?.projects ?? [])
+            .filter((project) => project.projectId !== current?.id)
+            .map((project) => ({
+                value: `project:${project.projectId}`,
+                label: format(s.members.memoryProject, { project: project.name }),
+            })),
+    ];
     const save = async (text: string) => {
-        const done = await attempt(() => host.call('member.setMemory', { memberId: member.id, text }));
+        const done = await attempt(() =>
+            host.call('member.setMemory', { memberId: member.id, text, ...partRequest(part) }),
+        );
         if (done) {
             setMemory({ text, updatedAt: Date.now() });
             setEditing(undefined);
@@ -158,6 +187,9 @@ function MemorySection({ member }: { member: Member }) {
                 {s.members.memory}
                 <span className="wf-hint">{s.members.memoryHint}</span>
             </h3>
+            <div className="member-memory__parts">
+                <Select label={s.members.memory} value={part} options={parts} onChange={setPart} />
+            </div>
             {memory === undefined ? (
                 <Spinner />
             ) : text ? (
