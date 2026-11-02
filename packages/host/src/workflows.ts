@@ -64,7 +64,7 @@ import type { ApprovalOutcome, ApprovalService, FollowsMode } from './approvals.
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
 import type { HostToolResult } from './engines/manager.ts';
-import { readForPreview, resolveInside, unfence } from './files.ts';
+import { readForPreview, relativeTo, resolveInside, unfence } from './files.ts';
 import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
@@ -2764,7 +2764,7 @@ export class WorkflowService {
                 if (!namesFile(named)) continue;
                 try {
                     const file = await resolveInside(root, named);
-                    const relative = path.relative(root, file).split(path.sep).join('/');
+                    const relative = await relativeTo(root, file);
                     if ((await stat(file)).isFile() && !found.some((item) => item.path === relative)) {
                         found.push({ path: relative, step: stepTitle(step) });
                     }

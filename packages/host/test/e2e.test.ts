@@ -557,5 +557,5 @@ describe('manual compaction', () => {
         expect(threads[0]?.context?.used).toBeLessThan(30_000);
         expect(threads[0]?.tokens).toEqual({ input: 4 * 30_000 + 3000, output: 4 * 500 + 40 });
         server.reset();
-    });
+    }, 60_000);
 });

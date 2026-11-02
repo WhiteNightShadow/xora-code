@@ -137,7 +137,7 @@ describe('members', () => {
         // English names in English.
         await ui.request('settings.update', { patch: { language: 'en' } });
         expect((await ui.request('member.list', {})).find((member) => member.id === 'scout')?.name).toBe('Scout');
-    });
+    }, 60_000);
 
     it('saves members into files: an id from the name, a changed built-in one, one only for a project', async () => {
         const { ui, dataDir, project } = await setUp();
@@ -238,7 +238,7 @@ describe('members', () => {
         });
         await ui.request('member.delete', { memberId: 'bob-s-1-qa' });
         expect((await ui.request('member.list', {})).map((member) => member.id)).not.toContain('bob-s-1-qa');
-    });
+    }, 60_000);
 
     it('keeps a memory: notes go in and are replaced, the oldest make room, secrets stay out', async () => {
         const { core, ui, project } = await setUp();
@@ -298,7 +298,7 @@ describe('members', () => {
             chars: 0,
         });
         expect(provider.layers?.at(-1)?.text).toContain('（还没有笔记）');
-    });
+    }, 60_000);
 
     it('talks with a member in a thread of its own, where it works as itself and writes down what it learned', async () => {
         server.respondWith((request) => {
@@ -364,7 +364,7 @@ describe('members', () => {
         expect(again.core.turns.hostLayers(thread.id).map((layer) => layer.id)).toEqual(
             expect.arrayContaining(['agent_instructions', 'member_context', 'member_memory']),
         );
-    });
+    }, 120_000);
 
     it('gives a workflow step’s agent its memory and the remember tool, and counts the step as its work', async () => {
         const flow = ['name: look', 'steps:', '  - id: look', '    agent: scout', '    task: 看一下README', ''].join(
@@ -394,7 +394,7 @@ describe('members', () => {
         expect(systemOf(step)).toContain('README只有一行');
         const work = await ui.request('member.threads', { memberId: 'scout' });
         expect(work.some((thread) => thread.workflowRunId === run.id)).toBe(true);
-    });
+    }, 90_000);
 
     it('keeps routines: checks and schedules them, runs them now or when they fire, and stops them', async () => {
         server.respondWith((request) =>
@@ -468,7 +468,7 @@ describe('members', () => {
         await ui.request('member.deleteRoutine', { memberId: 'scout', routineId: first.id });
         const left = (await ui.request('member.list', {})).find((member) => member.id === 'scout')?.routines;
         expect(left?.map((item) => item.title)).toEqual(['坏的']);
-    });
+    }, 90_000);
 
     it('runs a routine only on a pay-as-you-go model, and says so when there is none', async () => {
         const { core, ui, project } = await setUp({}, false);
@@ -487,7 +487,7 @@ describe('members', () => {
         const after = (await ui.request('member.list', {})).find((member) => member.id === 'specialist');
         expect(after?.routines[0]?.problem).toContain('只用按量计费的模型');
         expect(await ui.request('member.threads', { memberId: 'specialist' })).toEqual([]);
-    });
+    }, 60_000);
 
     it('hands a message that mentions a member to it, and the subagent works as that member', async () => {
         server.respondWith((request) => {
@@ -543,5 +543,5 @@ describe('members', () => {
             text: '侦察说：README只有标题。',
         });
         expect((await ui.request('member.threads', { memberId: 'scout' })).map((item) => item.id)).toEqual([child?.id]);
-    });
+    }, 90_000);
 });

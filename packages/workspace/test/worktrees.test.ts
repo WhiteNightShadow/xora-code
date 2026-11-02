@@ -212,7 +212,8 @@ describe('allocatePort', () => {
     });
 
     it('gives concurrent requests different ports', async () => {
-        const range: [number, number] = [45300, 45301];
+        // Room for a port another program on the machine holds.
+        const range: [number, number] = [45300, 45399];
         const ports = await Promise.all([allocatePort('concurrent-1', range), allocatePort('concurrent-2', range)]);
         expect(new Set(ports).size).toBe(2);
         releasePort('concurrent-1');

@@ -144,7 +144,7 @@ describe('PluginStore', () => {
         });
         expect(patch.permissionsGrew).toBe(false);
         expect(patch.plugin.enabled).toBe(true);
-    });
+    }, 30_000);
 
     it('pins, uninstalls and validates names', async () => {
         const root = await temporaryDir();

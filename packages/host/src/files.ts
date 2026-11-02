@@ -1,7 +1,7 @@
 import { readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { bilingual, RpcError, RpcErrorCode } from '@xora/protocol';
-import { checkPathAccess, walk } from '@xora/tools';
+import { checkPathAccess, realpathLoose, walk } from '@xora/tools';
 import { textOf } from './text.ts';
 
 const TEXT = bilingual(
@@ -36,10 +36,20 @@ export async function resolveInside(root: string, target: string): Promise<strin
     return access.realPath;
 }
 
+/**
+ * `file` (a real path, as `resolveInside` returns it) relative to `root`, `/`-separated. The root is resolved the
+ * same way first: on Windows a folder can be known by its 8.3 short name (`C:\Users\RUNNER~1\…`) while the real path
+ * spells it out.
+ */
+export async function relativeTo(root: string, file: string): Promise<string> {
+    const realRoot = await realpathLoose(root).catch(() => root);
+    return path.relative(realRoot, file).split(path.sep).join('/');
+}
+
 export async function readForPreview(root: string, target: string) {
     const file = await resolveInside(root, target);
     const info = await stat(file);
-    const relative = path.relative(root, file).split(path.sep).join('/');
+    const relative = await relativeTo(root, file);
     if (info.size > MAX_PREVIEW_BYTES) {
         return { path: relative, kind: 'too_large' as const, size: info.size };
     }
