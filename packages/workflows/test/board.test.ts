@@ -212,6 +212,47 @@ describe('lifecycle', () => {
         expect(errorCode(tasks.escalate('T1', 'economy', 'down'))).toBe('invalid_tier');
     });
 
+    it('goes on with the next stage after a partial deliverable that moved forward', () => {
+        const tasks = board();
+        value(tasks.add(cardInput()));
+        value(tasks.claim('T1', 'coder-1'));
+        value(
+            tasks.submit(
+                'T1',
+                'coder-1',
+                deliverable({ status: 'partial', summary: 'send works', remaining: ['verify', 'expiry'] }),
+            ),
+        );
+        expect(tasks.get('T1')?.deliverable?.remaining).toEqual(['verify', 'expiry']);
+        const next = value(tasks.continue('T1', 'stage 1: send works'));
+        expect(next).toMatchObject({ status: 'in_progress', owner: 'coder-1', retries: 0 });
+        expect(next.attempts.map((attempt) => attempt.outcome)).toEqual(['progress']);
+        expect(shouldEscalate(next.attempts)).toEqual({ action: 'none' });
+        expect(errorCode(tasks.continue('T1', 'again'))).toBe('invalid_transition');
+
+        // A stage that moved forward ends a run of failures: two more failures are needed to escalate.
+        value(tasks.submit('T1', 'coder-1', deliverable()));
+        const failed = value(tasks.reject('T1', 'still failing'));
+        expect(shouldEscalate(failed.attempts)).toEqual({ action: 'retry', failures: 1 });
+        value(tasks.submit('T1', 'coder-1', deliverable({ status: 'partial', summary: 'verify works' })));
+        value(tasks.continue('T1', 'stage 2: verify works'));
+        value(tasks.submit('T1', 'coder-1', deliverable()));
+        expect(shouldEscalate(value(tasks.reject('T1', 'expiry still failing')).attempts)).toEqual({
+            action: 'retry',
+            failures: 1,
+        });
+        value(tasks.submit('T1', 'coder-1', deliverable()));
+        const done = value(tasks.accept('T1'));
+        expect(done.status).toBe('done');
+        expect(done.attempts.map((attempt) => attempt.outcome)).toEqual([
+            'progress',
+            'fail',
+            'progress',
+            'fail',
+            'pass',
+        ]);
+    });
+
     it('records an executor escalation and hands flagship failures to the supervisor', () => {
         const tasks = board();
         value(tasks.add(cardInput({ tier: 'flagship' })));

@@ -128,6 +128,7 @@ export const TEAM_TOOLS = {
         'send_message',
         'ledger_update',
         'request_review',
+        'task_guide',
     ],
     member: ['deliver', 'escalate', 'ask_supervisor', 'challenge'],
 } as const;

@@ -291,10 +291,12 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
         setTrusting(false);
         if (done) load();
     };
-    const runs = Object.values(allRuns)
+    const [showArchived, setShowArchived] = useState(false);
+    const projectRuns = Object.values(allRuns)
         .filter((run) => run.projectId === projectId && !run.parentRunId)
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, 20);
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+    const runs = projectRuns.filter((run) => !run.archived).slice(0, 20);
+    const archivedRuns = projectRuns.filter((run) => run.archived);
     const create = () => useApp.setState({ workflowDraftFor: projectId });
     return (
         <div className="wf-board">
@@ -372,6 +374,27 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
                                     {s.workflow.reasons[run.reason]} · {relativeTime(run.updatedAt)}
                                     {run.cost.amount > 0 ? ` · ${formatMoney(run.cost)}` : ''}
                                 </span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+                {archivedRuns.length > 0 && (
+                    <button type="button" className="project__archived" onClick={() => setShowArchived(!showArchived)}>
+                        {format(s.workflow.archivedRuns, { count: archivedRuns.length })}
+                    </button>
+                )}
+                {showArchived && (
+                    <div className="wf-board__runs">
+                        {archivedRuns.map((run) => (
+                            <button
+                                key={run.id}
+                                type="button"
+                                className="wf-board__run"
+                                onClick={() => useApp.setState({ workflowRunId: run.id, workflowsFor: undefined })}
+                            >
+                                <Badge tone={runTone(run.status)}>{s.workflow.statuses[run.status]}</Badge>
+                                <span className="wf-board__run-title">{run.title}</span>
+                                <span className="wf-board__run-meta">{relativeTime(run.updatedAt)}</span>
                             </button>
                         ))}
                     </div>

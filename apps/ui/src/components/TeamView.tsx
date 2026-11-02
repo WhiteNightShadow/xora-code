@@ -2,11 +2,13 @@ import type { TeamRun, TeamTask } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
-import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
+import { attempt, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import '../task.css';
-import { Badge, Empty, Field, formatMoney, Modal, Select, Spinner } from './primitives.tsx';
+import { Badge, Empty, Field, formatMoney, IconButton, Modal, relativeTime, Select, Spinner } from './primitives.tsx';
+import { RunActions } from './RunActions.tsx';
 
 const COLUMNS: Array<{ key: string; statuses: string[] }> = [
     { key: 'pending', statuses: ['pending', 'ready'] },
@@ -34,13 +36,29 @@ function TaskCard({ task }: { task: TeamTask }) {
                 <Badge tone="accent">{s.team.tiers[task.tier as keyof typeof s.team.tiers] ?? task.tier}</Badge>
                 <span>{task.category}</span>
                 {task.attempts > 1 && <span>{format(s.team.attempts, { count: task.attempts })}</span>}
+                {task.stage && <span>{format(s.team.stage, { count: task.stage })}</span>}
+                {task.remaining && task.remaining.length > 0 && (
+                    <span>{format(s.team.remaining, { count: task.remaining.length })}</span>
+                )}
                 {task.cost && <span>{formatMoney(task.cost)}</span>}
+                {task.watch && (
+                    <Badge tone="warn">
+                        {s.team.watchName}：
+                        {(s.team.watchRules as Record<string, string>)[task.watch.rule] ?? task.watch.rule}
+                    </Badge>
+                )}
             </div>
             {task.verdict && task.verdict.verdict !== 'pass' && (
                 <div className="task-card__verdict">
                     {task.verdict.reasons.slice(0, 2).join('；')}
                     {task.verdict.outOfOwnership.length > 0 &&
                         ` · ${s.team.outOfOwnership}${task.verdict.outOfOwnership.join(', ')}`}
+                </div>
+            )}
+            {task.guidance && (
+                <div className="task-card__guidance">
+                    {s.team.guidance}
+                    {task.guidance}
                 </div>
             )}
             {task.dependsOn.length > 0 && (
@@ -63,7 +81,14 @@ function Conversation({ run }: { run: TeamRun }) {
     const [to, setTo] = useState('supervisor');
     const [text, setText] = useState('');
     const [busy, setBusy] = useState(false);
-    const name = (who: string) => (who === 'user' ? s.team.user : who === 'supervisor' ? s.team.supervisorName : who);
+    const name = (who: string) =>
+        who === 'user'
+            ? s.team.user
+            : who === 'supervisor'
+              ? s.team.supervisorName
+              : who === 'host'
+                ? s.team.watchName
+                : who;
     const send = async () => {
         setBusy(true);
         const updated = await attempt(() => host.call('team.message', { runId: run.id, to, text }));
@@ -88,7 +113,15 @@ function Conversation({ run }: { run: TeamRun }) {
                             <div className="conversation__head">
                                 <Badge
                                     tone={
-                                        entry.kind === 'challenge' ? 'error' : entry.kind === 'user' ? 'ok' : 'accent'
+                                        entry.kind === 'challenge'
+                                            ? 'error'
+                                            : entry.kind === 'watch'
+                                              ? 'warn'
+                                              : entry.kind === 'user'
+                                                ? 'ok'
+                                                : entry.kind === 'stage'
+                                                  ? 'muted'
+                                                  : 'accent'
                                     }
                                 >
                                     {s.team.kinds[entry.kind]}
@@ -127,6 +160,121 @@ function Conversation({ run }: { run: TeamRun }) {
                     </div>
                 </div>
             )}
+        </div>
+    );
+}
+
+const TEAM_TERMINAL = ['done', 'failed', 'cancelled'];
+
+/** The project's team board (03): its team runs, running ones first, archived ones apart, and a new run. */
+export function TeamBoard({ projectId }: { projectId: string }) {
+    const s = useStrings();
+    const project = useApp((state) => state.projects.find((item) => item.id === projectId));
+    const allRuns = useApp((state) => state.teamRuns);
+    const [showArchived, setShowArchived] = useState(false);
+    const load = () => {
+        void host
+            .call('team.list', { projectId })
+            .then((runs) =>
+                useApp.setState((state) => ({
+                    teamRuns: { ...state.teamRuns, ...Object.fromEntries(runs.map((run) => [run.id, run])) },
+                })),
+            )
+            .catch((error) => toast(errorMessage(error), 'error'));
+    };
+    useEffect(load, [projectId]);
+    const runs = Object.values(allRuns)
+        .filter((run) => run.projectId === projectId)
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+    const running = runs.filter((run) => !TEAM_TERMINAL.includes(run.status));
+    const finished = runs.filter((run) => TEAM_TERMINAL.includes(run.status) && !run.archived);
+    const archived = runs.filter((run) => TEAM_TERMINAL.includes(run.status) && run.archived);
+    const start = () => useApp.setState({ teamStartFor: projectId });
+    const row = (run: TeamRun) => {
+        const done = run.tasks.filter((task) => task.status === 'done').length;
+        const working = run.tasks.filter((task) =>
+            ['assigned', 'in_progress', 'in_review'].includes(task.status),
+        ).length;
+        return (
+            <div key={run.id} className="team-board__run">
+                <button
+                    type="button"
+                    className="team-board__open"
+                    onClick={() => useApp.setState({ teamRunId: run.id, teamsFor: undefined })}
+                >
+                    <Badge tone={run.status === 'done' ? 'ok' : run.status === 'failed' ? 'error' : 'accent'}>
+                        {s.team.statuses[run.status]}
+                    </Badge>
+                    <span className="team-board__goal">{run.goal}</span>
+                    <span className="team-board__meta">
+                        {run.tasks.length > 0 && format(s.team.progressCount, { done, total: run.tasks.length })}
+                        {working > 0 && ` · ${format(s.team.membersWorking, { count: working })}`}
+                        {` · ${relativeTime(run.updatedAt)}`}
+                        {run.cost.amount > 0 ? ` · ${formatMoney(run.cost)}` : ''}
+                    </span>
+                </button>
+                {TEAM_TERMINAL.includes(run.status) && (
+                    <div className="row team-board__actions">
+                        <RunActions kind="team" runId={run.id} archived={Boolean(run.archived)} />
+                    </div>
+                )}
+            </div>
+        );
+    };
+    return (
+        <div className="wf-board team-board">
+            <header className="wf-board__header">
+                <div className="wf-board__title">
+                    <h1>{s.sidebar.teams}</h1>
+                    <span className="wf-board__project">{project?.name}</span>
+                </div>
+                <div className="row">
+                    <IconButton icon="refresh" label={s.common.refresh} onClick={load} />
+                    <button type="button" className="button" onClick={() => openMembers()}>
+                        <Icon name="users" size={14} /> {s.sidebar.members}
+                    </button>
+                    <button type="button" className="button button--primary" onClick={start}>
+                        <Icon name="plus" size={14} /> {s.team.newRun}
+                    </button>
+                </div>
+            </header>
+            <div className="wf-board__body">
+                <p className="wf-board__intro">{s.team.boardHint}</p>
+                {runs.length === 0 ? (
+                    <div className="wf-board__empty">
+                        <Icon name="users" size={22} />
+                        <p>{s.team.noRuns}</p>
+                        <button type="button" className="button button--primary" onClick={start}>
+                            <Icon name="plus" size={14} /> {s.team.newRun}
+                        </button>
+                    </div>
+                ) : (
+                    <>
+                        {running.length > 0 && (
+                            <>
+                                <h3 className="wf-board__heading">{s.team.running}</h3>
+                                <div className="team-board__runs">{running.map(row)}</div>
+                            </>
+                        )}
+                        {finished.length > 0 && (
+                            <>
+                                <h3 className="wf-board__heading">{s.team.finished}</h3>
+                                <div className="team-board__runs">{finished.map(row)}</div>
+                            </>
+                        )}
+                        {archived.length > 0 && (
+                            <button
+                                type="button"
+                                className="project__archived"
+                                onClick={() => setShowArchived(!showArchived)}
+                            >
+                                {format(s.team.archivedRuns, { count: archived.length })}
+                            </button>
+                        )}
+                        {showArchived && <div className="team-board__runs">{archived.map(row)}</div>}
+                    </>
+                )}
+            </div>
         </div>
     );
 }
@@ -232,7 +380,7 @@ export function TeamView({ runId }: { runId: string }) {
                             {s.team.resume}
                         </button>
                     )}
-                    {!['done', 'failed', 'cancelled'].includes(run.status) && (
+                    {!TEAM_TERMINAL.includes(run.status) && (
                         <button
                             type="button"
                             className="button button--small button--danger"
@@ -240,6 +388,9 @@ export function TeamView({ runId }: { runId: string }) {
                         >
                             {s.team.stop}
                         </button>
+                    )}
+                    {TEAM_TERMINAL.includes(run.status) && (
+                        <RunActions kind="team" runId={runId} archived={Boolean(run.archived)} />
                     )}
                 </div>
             </header>
@@ -619,7 +770,18 @@ function TaskOverview({ run, onReport }: { run: TeamRun; onReport: () => void })
                                         <code>{task.id}</code>
                                         {task.assignee && <span>{task.assignee}</span>}
                                         <span>{s.team.tiers[task.tier as keyof typeof s.team.tiers] ?? task.tier}</span>
+                                        {task.stage && <span>{format(s.team.stage, { count: task.stage })}</span>}
+                                        {task.remaining && task.remaining.length > 0 && (
+                                            <span>{format(s.team.remaining, { count: task.remaining.length })}</span>
+                                        )}
                                         {task.cost && <span>{formatMoney(task.cost)}</span>}
+                                        {task.watch && (
+                                            <Badge tone="warn">
+                                                {s.team.watchName}：
+                                                {(s.team.watchRules as Record<string, string>)[task.watch.rule] ??
+                                                    task.watch.rule}
+                                            </Badge>
+                                        )}
                                     </div>
                                     <div className="conclusion-card__body">
                                         {deliverable?.summary ? (
@@ -633,6 +795,19 @@ function TaskOverview({ run, onReport }: { run: TeamRun; onReport: () => void })
                                     {files.length > 0 && (
                                         <div className="conclusion-card__files">
                                             {format(s.team.changedFiles, { files: files.slice(0, 6).join('、') })}
+                                        </div>
+                                    )}
+                                    {working && task.remaining && task.remaining.length > 0 && (
+                                        <ul className="conclusion-card__remaining">
+                                            {task.remaining.slice(0, 4).map((item) => (
+                                                <li key={item}>{item}</li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                    {task.guidance && (
+                                        <div className="conclusion-card__guidance">
+                                            {s.team.guidance}
+                                            {task.guidance}
                                         </div>
                                     )}
                                     <footer>

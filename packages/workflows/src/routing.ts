@@ -174,7 +174,8 @@ export function pickReviewerModel(
     return first ? { model: first, crossFamily: false } : undefined;
 }
 
-export type AttemptOutcome = 'pass' | 'fail' | 'escalate';
+/** `progress`: a stage of the card was handed in and moved it forward; the same executor goes on (06 §20). */
+export type AttemptOutcome = 'pass' | 'fail' | 'escalate' | 'progress';
 
 /** One dispatch of a task and how acceptance went. */
 export interface AttemptRecord {
@@ -212,7 +213,7 @@ export function shouldEscalate(
     maxFailures: number = MAX_FAILED_ACCEPTANCES,
 ): EscalationDecision {
     const last = history.at(-1);
-    if (!last || last.outcome === 'pass') {
+    if (!last || last.outcome === 'pass' || last.outcome === 'progress') {
         return { action: 'none' };
     }
     if (last.by === 'supervisor') {

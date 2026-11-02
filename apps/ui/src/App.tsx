@@ -3,7 +3,7 @@ import { DispatchDialog, MembersPage } from './components/MembersView.tsx';
 import { NewThreadDialog } from './components/NewThreadDialog.tsx';
 import { Spinner } from './components/primitives.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
-import { TeamStartDialog, TeamView } from './components/TeamView.tsx';
+import { TeamBoard, TeamStartDialog, TeamView } from './components/TeamView.tsx';
 import { ThreadView } from './components/ThreadView.tsx';
 import { Welcome } from './components/Welcome.tsx';
 import { WorkflowRunView } from './components/WorkflowRunView.tsx';
@@ -40,10 +40,11 @@ export function App() {
     const teamStartFor = useApp((state) => state.teamStartFor);
     const workflowRunId = useApp((state) => state.workflowRunId);
     const workflowsFor = useApp((state) => state.workflowsFor);
+    const teamsFor = useApp((state) => state.teamsFor);
     const workflowDraftFor = useApp((state) => state.workflowDraftFor);
     const membersOpen = useApp((state) => state.membersOpen);
     const dispatchTo = useApp((state) => state.dispatchTo);
-    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor || membersOpen);
+    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor || teamsFor || membersOpen);
     const splitIds = useApp((state) => state.split);
     const threads = useApp((state) => state.threads);
     const split = splitIds.map((id) => threads[id]).filter((item) => item !== undefined);
@@ -74,6 +75,8 @@ export function App() {
                     <WorkflowRunView key={workflowRunId} runId={workflowRunId} />
                 ) : workflowsFor ? (
                     <WorkflowBoard key={workflowsFor} projectId={workflowsFor} />
+                ) : teamsFor ? (
+                    <TeamBoard key={teamsFor} projectId={teamsFor} />
                 ) : membersOpen ? (
                     <MembersPage />
                 ) : split.length > 1 ? (

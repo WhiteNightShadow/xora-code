@@ -663,6 +663,14 @@ export const TeamTaskSchema = z.object({
     ownership: z.array(z.string()),
     acceptance: z.array(z.unknown()),
     attempts: z.number(),
+    /** The stage the member is on or ended with, once it handed in a partial deliverable (06 §20). */
+    stage: z.number().optional(),
+    /** What is left, from the latest partial deliverable, while the task runs. */
+    remaining: z.array(z.string()).optional(),
+    /** The supervisor's latest guidance on the task. */
+    guidance: z.string().optional(),
+    /** The host's latest watch report on the running member: `repeat`, `spin` or `silent`. */
+    watch: z.object({ rule: z.string(), at: z.number() }).optional(),
     deliverable: z.unknown().optional(),
     verdict: z
         .object({ verdict: z.string(), reasons: z.array(z.string()), outOfOwnership: z.array(z.string()) })
@@ -695,6 +703,8 @@ export const TeamRunSchema = z.object({
     mode: z.enum(['standard', 'hypotheses']).optional(),
     /** The earlier run of the project this one continues. */
     continues: z.string().optional(),
+    /** Moved to the archive by the user: listed apart. */
+    archived: z.boolean().optional(),
     /** The supervisor's last message of each turn, newest last: what it reports to the user. */
     feedback: z.array(z.object({ ts: z.number(), text: z.string() })).optional(),
     /** Messages between the user, the supervisor and the members (06 §7), oldest first. */
@@ -705,7 +715,8 @@ export const TeamRunSchema = z.object({
                 from: z.string(),
                 to: z.string(),
                 text: z.string(),
-                kind: z.enum(['message', 'question', 'answer', 'user', 'challenge']),
+                /** `stage`: a member handed in part of its card; `guide`: the supervisor's task_guide; `watch`: the host's watch (06 §20). */
+                kind: z.enum(['message', 'question', 'answer', 'user', 'challenge', 'stage', 'guide', 'watch']),
             }),
         )
         .optional(),
@@ -864,6 +875,8 @@ export const WorkflowRunSchema = z.object({
     reason: z.enum(['manual', 'schedule', 'files', 'git', 'webhook', 'parent']),
     /** Started by a trigger: API channels only, with a budget (06 §12). */
     unattended: z.boolean(),
+    /** Moved to the archive by the user: listed apart. */
+    archived: z.boolean().optional(),
     inputs: z.record(z.string(), WorkflowScalarSchema),
     /** Why the run is queued, paused, failed or cancelled. */
     note: z.string().optional(),

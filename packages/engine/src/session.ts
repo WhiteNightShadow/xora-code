@@ -107,6 +107,8 @@ export class EngineSession {
     mcp: McpManager | undefined;
     /** State at the start of each host turn that can still be rewound to, in order. */
     readonly #turns = new Map<string, TurnMark>();
+    /** Messages the host sent into the running turn (06 §20), taken before the next model request. */
+    readonly #steering: string[] = [];
     #abort: AbortController | undefined;
     #artifactCounter = 0;
 
@@ -177,6 +179,20 @@ export class EngineSession {
 
     cancel(): void {
         this.#abort?.abort();
+    }
+
+    /** Queues a message for the running turn; false when no turn runs (the host keeps it for the next one). */
+    steer(text: string): boolean {
+        if (!this.busy) {
+            return false;
+        }
+        this.#steering.push(text);
+        return true;
+    }
+
+    /** The queued steering messages, oldest first; the queue is empty afterwards. */
+    takeSteering(): string[] {
+        return this.#steering.splice(0);
     }
 
     configure(config: SessionConfig): void {

@@ -3821,6 +3821,19 @@ button.tool__header:hover {
     color: var(--xk-error);
 }
 
+/* The supervisor's latest guidance on the card (06 §20). */
+.task-card__guidance {
+    padding: 4px 8px;
+    border-radius: var(--xk-radius-sm);
+    background: var(--xk-accent-subtle);
+    font-size: var(--xk-text-2xs);
+    color: var(--xk-text);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
 .progress-list {
     margin: 0;
     padding-left: 20px;

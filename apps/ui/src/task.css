@@ -237,6 +237,28 @@
     line-height: var(--xk-leading-relaxed);
 }
 
+/* What is left of a card handed in in stages, and the supervisor's guidance on it (06 §20). */
+.conclusion-card__remaining {
+    margin: 0;
+    padding-left: 18px;
+    font-size: var(--xk-text-xs);
+    line-height: 1.6;
+    color: var(--xk-text-muted);
+}
+
+.conclusion-card__guidance {
+    padding: var(--xk-space-1) var(--xk-space-2);
+    border-left: 2px solid var(--xk-accent);
+    background: var(--xk-accent-subtle);
+    border-radius: var(--xk-radius-sm);
+    font-size: var(--xk-text-xs);
+    line-height: 1.6;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
 .conclusion-card footer {
     display: flex;
     align-items: center;

@@ -352,7 +352,8 @@ export function deliveryReport(input: DeliveryReportInput): string {
             return {
                 card: item.card,
                 status: item.status,
-                retries: item.attempts.filter((attempt) => attempt.outcome !== 'pass').length,
+                retries: item.attempts.filter((attempt) => attempt.outcome === 'fail' || attempt.outcome === 'escalate')
+                    .length,
                 deliverable: delivered.get(item.card.id) ?? item.deliverable,
                 note: item.note,
             };

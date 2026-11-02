@@ -78,6 +78,8 @@ interface AppState {
     /** Team run shown in the main area instead of a thread. */
     teamRunId: string | undefined;
     teamStartFor: string | undefined;
+    /** Project whose team board is shown in the main area. */
+    teamsFor: string | undefined;
     workflowRuns: Record<string, WorkflowRun>;
     /** Workflow run shown in the main area instead of a thread. */
     workflowRunId: string | undefined;
@@ -123,6 +125,7 @@ export const useApp = create<AppState>(() => ({
     teamRuns: {},
     teamRunId: undefined,
     teamStartFor: undefined,
+    teamsFor: undefined,
     workflowRuns: {},
     workflowRunId: undefined,
     workflowsFor: undefined,
@@ -317,6 +320,18 @@ function listen(): void {
     host.on('usage.changed', () => set((state) => ({ usageVersion: state.usageVersion + 1 })));
     host.on('ui.focusThread', ({ threadId }) => void selectThread(threadId));
     host.on('team.changed', ({ run }) => set((state) => ({ teamRuns: { ...state.teamRuns, [run.id]: run } })));
+    host.on('team.removed', ({ runId }) =>
+        set((state) => {
+            const { [runId]: _gone, ...teamRuns } = state.teamRuns;
+            return { teamRuns, ...(state.teamRunId === runId ? { teamRunId: undefined } : {}) };
+        }),
+    );
+    host.on('workflow.removed', ({ runId }) =>
+        set((state) => {
+            const { [runId]: _gone, ...workflowRuns } = state.workflowRuns;
+            return { workflowRuns, ...(state.workflowRunId === runId ? { workflowRunId: undefined } : {}) };
+        }),
+    );
     host.on('workflow.changed', ({ run }) =>
         set((state) => ({ workflowRuns: { ...state.workflowRuns, [run.id]: run } })),
     );
@@ -341,6 +356,7 @@ export function openMembers(memberId?: string): void {
         teamRunId: undefined,
         workflowRunId: undefined,
         workflowsFor: undefined,
+        teamsFor: undefined,
     });
     void loadMembers(get().selectedProjectId);
 }
@@ -372,6 +388,19 @@ export async function startApp(): Promise<void> {
 export function openWorkflowBoard(projectId: string): void {
     set({
         workflowsFor: projectId,
+        teamsFor: undefined,
+        teamRunId: undefined,
+        workflowRunId: undefined,
+        selectedProjectId: projectId,
+        membersOpen: false,
+    });
+}
+
+/** The project's team board in the main area: its team runs, archived ones apart, and a new run. */
+export function openTeamBoard(projectId: string): void {
+    set({
+        teamsFor: projectId,
+        workflowsFor: undefined,
         teamRunId: undefined,
         workflowRunId: undefined,
         selectedProjectId: projectId,
@@ -386,6 +415,7 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         !current.teamRunId &&
         !current.workflowRunId &&
         !current.workflowsFor &&
+        !current.teamsFor &&
         !current.membersOpen
     ) {
         return;
@@ -396,6 +426,7 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         teamRunId: undefined,
         workflowRunId: undefined,
         workflowsFor: undefined,
+        teamsFor: undefined,
         membersOpen: false,
         reviewTurnId: undefined,
         ...(thread ? { selectedProjectId: thread.projectId } : {}),

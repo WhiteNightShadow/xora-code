@@ -112,6 +112,7 @@ import {
     supervisorBrief,
     systemLayers,
     TaskAssignInput,
+    TaskGuideInput,
     TaskListInput,
     TaskUpdateInput,
     type TeamMode,
@@ -144,6 +145,21 @@ const OUTPUT_TAIL = 4_000;
 const BROADCAST_MS = 200;
 const WAKE_DELAY_MS = 300;
 const QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+/** Stages one executor thread may hand in before another partial deliverable counts as a failed round (06 §20). */
+const MAX_STAGES = 4;
+/** How long a stage review waits for the supervisor's task_guide before the host decides by itself (06 §20). */
+const GUIDE_TIMEOUT_MS = 10 * 60 * 1000;
+/** Watch rules on a running executor (06 §20): the same call this many times in a row… */
+const WATCH_REPEATS = 3;
+/** …this many model requests without changing a file (writable cards)… */
+const WATCH_SPIN_REQUESTS = 30;
+/** …or no sign of life for this long. */
+const WATCH_SILENCE_MS = 15 * 60 * 1000;
+/** Steps of the executor a watch report shows the supervisor. */
+const WATCH_STEPS = 8;
+/** How the host's lines for stage reviews and watch reports start; turns that only handle them stay internal. */
+const STAGE_REVIEW = 'Stage review of';
+const WATCH_REPORT = 'Watch:';
 /** Conversation entries kept with a run (06 §7). */
 const CONVERSATION_LIMIT = 400;
 /** Challenges one investigation card may send in a competing-hypotheses run. */
@@ -216,7 +232,24 @@ interface TaskHost {
     /** Files changed by a task that works in the project folder. */
     changed?: string[];
     integrated?: boolean;
+    /** Stages handed in on the current executor thread (06 §20). */
+    stages?: number;
+    /** What the latest stage measured, to tell whether the next one moved forward. */
+    lastStage?: { passing: number; remaining: number };
+    /** Files the executor changed in the turns of the current stage. */
+    stageChanged?: number;
+    /** What is left, from the latest partial deliverable. */
+    remaining?: string[];
+    /** The supervisor's latest guidance on the task (task_guide). */
+    guidance?: string;
+    /** The supervisor stops the running executor (task_guide escalate or stop); read when its turn ends cancelled. */
+    stopping?: { decision: 'escalate' | 'stop'; reason: string };
+    /** The latest watch report on the running executor. */
+    watch?: { rule: WatchRule; at: number };
 }
+
+/** Watch rules (06 §20): the same call again and again, requests without a file change, no sign of life. */
+type WatchRule = 'repeat' | 'spin' | 'silent';
 
 /** The host's bookkeeping for one run, persisted as `host_json`. */
 interface RunHost {
@@ -255,6 +288,8 @@ interface RunHost {
     feedback?: Array<{ ts: number; text: string }>;
     /** The earlier run of the project this one continues. */
     continues?: string;
+    /** Moved to the archive by the user. */
+    archived?: boolean;
     /** Every message of the run, for the team conversation view (06 §7). */
     conversation?: ConversationEntry[];
     tasks: Record<string, TaskHost>;
@@ -271,7 +306,19 @@ interface ConversationEntry {
     readonly from: string;
     readonly to: string;
     readonly text: string;
-    readonly kind: 'message' | 'question' | 'answer' | 'user' | 'challenge';
+    readonly kind: 'message' | 'question' | 'answer' | 'user' | 'challenge' | 'stage' | 'guide' | 'watch';
+}
+
+/** The supervisor's task_guide decision (06 §20). */
+interface GuideDecision {
+    readonly decision: 'continue' | 'escalate' | 'stop';
+    readonly guidance?: string;
+}
+
+/** A stage review waiting for the supervisor's task_guide. */
+interface PendingGuide {
+    delivered: boolean;
+    readonly resolve: (decision: GuideDecision | undefined) => void;
 }
 
 interface Question {
@@ -288,6 +335,10 @@ interface RunState {
     /** Tasks whose host loop is running. */
     readonly working: Set<string>;
     readonly questions: Map<string, Question>;
+    /** Stage reviews waiting for the supervisor's task_guide, by task (06 §20). */
+    readonly guides: Map<string, PendingGuide>;
+    /** The supervisor's current turn only handles stage reviews and watch reports: its words are not feedback. */
+    internalTurn: boolean;
     abort: AbortController;
     supervisorStarting: boolean;
     reviewingPlan: boolean;
@@ -376,6 +427,7 @@ const TEXT = bilingual(
             `- ${card.id} ${card.title}（${card.category}，${tierLabel(tier, 'zh-CN')}档，${card.workspace}${card.dependsOn.length > 0 ? `，依赖${card.dependsOn.join('、')}` : ''}）验收：${checks}`,
         planBudget: (limit: number, currency: string) => `预算：${limit}${currency}`,
         runEnded: '运行已经结束，消息不会送达',
+        stopToDelete: '运行还没结束，先停止再删除',
         noTask: (id: string) => `没有任务${id}`,
         taskEnded: (id: string) => `任务${id}已经结束，可以发给主管`,
         blocker: (id: string, held: boolean, status: string) => `${id}${held ? '（主管接手）' : ''}：${status}`,
@@ -435,6 +487,14 @@ const TEXT = bilingual(
         noFinalChecks: '没有可以在项目里重跑的验收命令。',
         finalCheck: (run: string, ran: boolean, exit: number | null) =>
             `- \`${run}\`：${!ran ? '没有运行' : exit === 0 ? '通过' : `退出码${exit ?? '无'}`}`,
+        stageEntry: (stage: number, summary: string, left: number, progress: boolean) =>
+            `第${stage}阶段：${summary}${left > 0 ? `（还剩${left}项）` : ''}${progress ? '' : '；这一阶段没有进展'}`,
+        watch: (owner: string, rule: WatchRule) =>
+            rule === 'repeat'
+                ? `巡检：${owner}连续${WATCH_REPEATS}次做了一模一样的调用`
+                : rule === 'spin'
+                  ? `巡检：${owner}连续${WATCH_SPIN_REQUESTS}次请求模型都没有改文件`
+                  : `巡检：${owner}已经${WATCH_SILENCE_MS / 60_000}分钟没有动静`,
     },
     {
         projectMissing: (folder) => `The project folder does not exist: ${folder}`,
@@ -475,6 +535,7 @@ const TEXT = bilingual(
             `- ${card.id} ${card.title} (${card.category}, ${tierLabel(tier, 'en')} tier, ${card.workspace}${card.dependsOn.length > 0 ? `, depends on ${card.dependsOn.join(', ')}` : ''}). Acceptance: ${checks}`,
         planBudget: (limit, currency) => `Budget: ${money(limit, currency, 'en')}`,
         runEnded: 'The run has ended, so the message cannot be delivered',
+        stopToDelete: 'The run is still going; stop it before deleting it',
         noTask: (id) => `There is no task ${id}`,
         taskEnded: (id) => `Task ${id} has ended; you can write to the supervisor instead`,
         blocker: (id, held, status) => `${id}${held ? ' (held by the supervisor)' : ''}: ${status}`,
@@ -535,6 +596,14 @@ const TEXT = bilingual(
         noFinalChecks: 'No acceptance command can be run again in the project.',
         finalCheck: (run, ran, exit) =>
             `- \`${run}\`: ${!ran ? 'not run' : exit === 0 ? 'passed' : `exit code ${exit ?? 'none'}`}`,
+        stageEntry: (stage, summary, left, progress) =>
+            `Stage ${stage}: ${summary}${left > 0 ? ` (${left} left)` : ''}${progress ? '' : '; no progress in this stage'}`,
+        watch: (owner, rule) =>
+            rule === 'repeat'
+                ? `Watch: ${owner} made the same call ${WATCH_REPEATS} times in a row`
+                : rule === 'spin'
+                  ? `Watch: ${owner} made ${WATCH_SPIN_REQUESTS} model requests without changing a file`
+                  : `Watch: ${owner} has shown no activity for ${WATCH_SILENCE_MS / 60_000} minutes`,
     },
 );
 
@@ -554,6 +623,21 @@ function round(amount: number): number {
 
 function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+}
+
+/** An escalation the supervisor asked for (06 §20): one tier up, or to the supervisor after flagship. */
+function forcedEscalation(tier: Tier): EscalationDecision {
+    const to = nextTier(tier);
+    return to
+        ? { action: 'escalate', from: tier, to, reason: 'requested' }
+        : { action: 'supervisor', reason: 'requested' };
+}
+
+/** One executor step for a watch report: the tool, its input in short, how it ended. */
+function stepLine(item: ItemOf<'tool_call'>): string {
+    const input = item.input === undefined ? '' : ` ${shorten(JSON.stringify(item.input), 160)}`;
+    const output = item.output ? `: ${shorten(item.output, 160)}` : '';
+    return `${item.name ?? item.title}${input} → ${item.status}${output}`;
 }
 
 function boardError(error: BoardError): string {
@@ -734,6 +818,47 @@ export class TeamService {
         return this.#view(await this.#require(runId));
     }
 
+    /** Moves a run to the archive, or back. */
+    async archive(runId: string, archived: boolean): Promise<TeamRunView> {
+        await this.#ready;
+        const state = await this.#require(runId);
+        state.host.archived = archived ? true : undefined;
+        this.#save(state);
+        return this.#view(state);
+    }
+
+    /** Deletes a run that is over: its threads, any worktree left, its board and its record (`team.removed`). */
+    async delete(runId: string): Promise<void> {
+        await this.#ready;
+        const state = await this.#require(runId);
+        if (!TERMINAL.has(state.host.status)) {
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stopToDelete);
+        }
+        const project = await this.#deps.projects.get(state.host.projectId).catch(() => undefined);
+        if (project) {
+            for (const taskId of Object.keys(state.host.tasks)) {
+                await this.#dropWorktree(state, taskId, project);
+            }
+        }
+        for (const threadId of new Set(this.#threadsOf(state))) {
+            const thread = this.#deps.threads.find(threadId);
+            if (!thread) {
+                continue;
+            }
+            if (this.#deps.turns.isRunning(threadId)) {
+                this.#deps.turns.cancel(threadId);
+            }
+            this.#deps.approvals.clearSession(threadId);
+            void this.#deps.turns.endSession(thread, 'delete').catch(() => undefined);
+            this.#deps.threads.delete(threadId);
+        }
+        if (state.wakeTimer) clearTimeout(state.wakeTimer);
+        if (state.broadcastTimer) clearTimeout(state.broadcastTimer);
+        this.#runs.delete(runId);
+        await this.#store.deleteRun(runId);
+        this.#deps.bus.broadcast('team.removed', { runId });
+    }
+
     /** Cancels every running turn of the run; finished tasks stay done. */
     async stop(runId: string): Promise<TeamRunView> {
         await this.#ready;
@@ -757,6 +882,9 @@ export class TeamService {
             question.answer('The run was stopped.');
         }
         state.questions.clear();
+        for (const guide of [...state.guides.values()]) {
+            guide.resolve(undefined);
+        }
         for (const task of state.board.list()) {
             if (task.status !== 'done' && task.status !== 'cancelled') {
                 state.board.cancel(task.card.id, text.runStopped);
@@ -890,6 +1018,9 @@ export class TeamService {
             for (const question of state.questions.values()) {
                 question.answer('The app is shutting down.');
             }
+            for (const guide of [...state.guides.values()]) {
+                guide.resolve(undefined);
+            }
         }
         for (const [turnId, resolve] of [...this.#waiters]) {
             resolve({ threadId: '', turnId, outcome: 'cancelled', lastText: '', changedFiles: [], requests: 0 });
@@ -918,6 +1049,8 @@ export class TeamService {
             host,
             working: new Set(),
             questions: new Map(),
+            guides: new Map(),
+            internalTurn: false,
             abort: new AbortController(),
             supervisorStarting: false,
             reviewingPlan: false,
@@ -1212,7 +1345,11 @@ export class TeamService {
                 dependsOn: [...task.card.dependsOn],
                 ownership: [...task.card.ownership],
                 acceptance: [...task.card.acceptance],
-                attempts: task.attempts.length + (active ? 1 : 0),
+                attempts: task.attempts.filter((attempt) => attempt.outcome !== 'progress').length + (active ? 1 : 0),
+                ...(info?.stages ? { stage: info.stages + 1 } : {}),
+                ...(active && info?.remaining && info.remaining.length > 0 ? { remaining: [...info.remaining] } : {}),
+                ...(info?.guidance ? { guidance: info.guidance } : {}),
+                ...(active && info?.watch ? { watch: { ...info.watch } } : {}),
                 ...(task.deliverable ? { deliverable: task.deliverable } : {}),
                 ...(info?.verdict ? { verdict: info.verdict } : {}),
                 cost: cost === undefined ? null : { amount: round(cost), currency: costs.currency },
@@ -1229,6 +1366,7 @@ export class TeamService {
             ...(host.warnings.length > 0 ? { warnings: [...host.warnings] } : {}),
             mode: host.mode ?? 'standard',
             ...(host.continues ? { continues: host.continues } : {}),
+            ...(host.archived ? { archived: true } : {}),
             feedback: [...(host.feedback ?? [])],
             conversation: [...(host.conversation ?? [])],
             supervisorThreadId: host.supervisorThreadId,
@@ -1422,10 +1560,15 @@ export class TeamService {
         const lines = host.inbox.splice(0);
         // Every open question has its line in the inbox; it counts as asked once the turn carrying it starts.
         const asked = [...state.questions.values()].filter((question) => !question.delivered);
+        const reviews = [...state.guides.values()].filter((guide) => !guide.delivered);
         try {
+            state.internalTurn = lines.every((line) => line.startsWith(STAGE_REVIEW) || line.startsWith(WATCH_REPORT));
             if (await this.#startSupervisor(state, wakeText(lines, state.board))) {
                 for (const question of asked) {
                     question.delivered = true;
+                }
+                for (const review of reviews) {
+                    review.delivered = true;
                 }
             } else {
                 host.inbox.unshift(...lines);
@@ -1455,8 +1598,17 @@ export class TeamService {
                 );
             }
         }
-        // Its last words of the turn are its feedback to the user, also after the run ended.
-        const said = event.lastText.trim();
+        // Stage reviews it saw in this turn without a task_guide: the host decides (06 §20).
+        for (const [taskId, guide] of [...state.guides]) {
+            if (guide.delivered) {
+                state.guides.delete(taskId);
+                guide.resolve(undefined);
+            }
+        }
+        // Its last words of the turn are its feedback to the user, also after the run ended; not those of a turn
+        // that only handled stage reviews and watch reports (06 §20).
+        const said = state.internalTurn ? '' : event.lastText.trim();
+        state.internalTurn = false;
         if (said) {
             host.feedback = [...(host.feedback ?? []), { ts: Date.now(), text: shorten(said, 8000) }].slice(
                 -FEEDBACK_KEPT,
@@ -1807,6 +1959,8 @@ export class TeamService {
                 return this.#ledgerUpdate(state, input);
             case 'request_review':
                 return this.#requestReview(state, input);
+            case 'task_guide':
+                return this.#guide(state, input);
             default:
                 return fail(`Unknown team tool ${name}.`);
         }
@@ -2001,7 +2155,7 @@ export class TeamService {
         return ok(JSON.stringify({ status: state.host.status, tasks }, null, 2));
     }
 
-    #sendMessage(state: RunState, input: unknown): HostToolResult {
+    async #sendMessage(state: RunState, input: unknown): Promise<HostToolResult> {
         const parsed = SendMessageInput.safeParse(input);
         if (!parsed.success) {
             return fail(`Invalid arguments: ${formatIssues(parsed.error.issues).join('; ')}`);
@@ -2028,11 +2182,28 @@ export class TeamService {
         if (task.status === 'done' || task.status === 'cancelled' || task.status === 'failed') {
             return fail(`Task ${taskId} is ${task.status}; nobody reads messages for it. Create or update a task.`);
         }
-        const info = this.#taskHost(state, taskId);
-        info.messages = [...(info.messages ?? []), `From the supervisor: ${text}`];
         this.#record(state, { from: 'supervisor', to: taskId, text, kind: 'message' });
+        const when = await this.#deliver(state, taskId, `From the supervisor: ${text}`);
         this.#save(state);
-        return ok(`Queued for ${taskId}: the member reads it at its next turn.`);
+        return ok(
+            when === 'now'
+                ? `Sent to ${taskId}: the member reads it at its next step.`
+                : `Queued for ${taskId}: the member reads it at its next turn.`,
+        );
+    }
+
+    /**
+     * A message for the member working a task: into its running turn when the engine takes it (06 §20), else
+     * queued for its next turn.
+     */
+    async #deliver(state: RunState, taskId: string, text: string): Promise<'now' | 'next'> {
+        const info = this.#taskHost(state, taskId);
+        const threadId = info.threadId;
+        if (threadId && this.#deps.turns.isRunning(threadId) && (await this.#deps.turns.steer(threadId, text))) {
+            return 'now';
+        }
+        info.messages = [...(info.messages ?? []), text];
+        return 'next';
     }
 
     /** One line of the team conversation (06 §7); the oldest go once there are too many. */
@@ -2106,8 +2277,7 @@ export class TeamService {
             state.questions.delete(to);
             question.answer(`The user answers: ${text}`);
         } else {
-            const info = this.#taskHost(state, to);
-            info.messages = [...(info.messages ?? []), `From the user: ${text}`];
+            await this.#deliver(state, to, `From the user: ${text}`);
         }
         state.host.inbox.push(`The user wrote to ${to}: ${shorten(text, 300)}`);
         this.#save(state);
@@ -2544,6 +2714,12 @@ export class TeamService {
                     return;
                 }
                 prompt = await this.#prepare(state, taskId, agent);
+                // A new executor thread starts its own stages (06 §20).
+                const fresh = this.#taskHost(state, taskId);
+                fresh.stages = 0;
+                fresh.lastStage = undefined;
+                fresh.stageChanged = 0;
+                fresh.watch = undefined;
             } else if (mode === 'continue') {
                 prompt = state.host.tasks[taskId]?.pending ?? RESUME_PROMPT;
             }
@@ -2564,15 +2740,19 @@ export class TeamService {
                     if (!ended) {
                         return;
                     }
+                    const info = this.#taskHost(state, taskId);
+                    info.stageChanged = (info.stageChanged ?? 0) + ended.changedFiles.length;
                     if (
                         ended.stopReason === 'max_turn_requests' &&
                         this.#turnsLeft(state, taskId) <= 0 &&
-                        !this.#taskHost(state, taskId).delivered
+                        !info.delivered
                     ) {
-                        this.#outOfTurns(state, taskId, true, ended.lastText);
-                        return;
-                    }
-                    if (!(await this.#submit(state, taskId, ended))) {
+                        // 06 §20: a stage that changed files is reviewed like a partial deliverable.
+                        if (!((info.stageChanged ?? 0) > 0 && this.#submitOutOfTurns(state, taskId, ended.lastText))) {
+                            this.#outOfTurns(state, taskId, true, ended.lastText);
+                            return;
+                        }
+                    } else if (!(await this.#submit(state, taskId, ended))) {
                         return;
                     }
                     prompt = undefined;
@@ -2621,7 +2801,13 @@ export class TeamService {
         info.pending = undefined;
         this.#save(state);
         for (;;) {
-            const ended = await this.#turn(threadId, text);
+            const unwatch = this.#watch(state, taskId, threadId);
+            let ended: TurnEnded;
+            try {
+                ended = await this.#turn(threadId, text);
+            } finally {
+                unwatch();
+            }
             info.turns = (info.turns ?? 0) + ended.requests;
             this.#save(state);
             if (!this.#live(state) || state.board.get(taskId)?.status === 'cancelled') {
@@ -2634,6 +2820,13 @@ export class TeamService {
                 return ended;
             }
             if (ended.outcome === 'cancelled') {
+                const stopping = info.stopping;
+                info.stopping = undefined;
+                if (stopping) {
+                    this.#stopRunning(state, taskId, stopping, ended.lastText);
+                    this.#save(state);
+                    return undefined;
+                }
                 state.board.block(taskId, textOf(TEXT).executorCancelled);
                 this.#recordProgress(state, false, `${taskId}: the executor's turn was cancelled`, `cancel:${taskId}`);
                 this.#wake(
@@ -2918,6 +3111,9 @@ export class TeamService {
                 commands.push(result);
             }
         }
+        if (deliverable.status === 'partial') {
+            return this.#stage(state, taskId, deliverable, commands, changedFiles);
+        }
         // Reviews cost model time: they only run once the commands and the evidence hold up.
         const commandCard = { ...card, acceptance: card.acceptance.filter((check) => check.type === 'command') };
         let judgement: Judgement = judge(commandCard, deliverable, commands, [], { changedFiles });
@@ -3038,6 +3234,402 @@ export class TeamService {
         }
         this.#escalate(state, taskId, decision, { judgement });
         return undefined;
+    }
+
+    // Stages, guidance and the watch (06 §20) ------------------------------------------------------------
+
+    /**
+     * A partial deliverable is a stage (06 §20): the acceptance commands show how far it got, the supervisor reviews
+     * it with task_guide, and the same executor goes on in its thread with the guidance. A stage without progress,
+     * or one past MAX_STAGES, is a failed round. Returns the executor's next prompt, or undefined when the loop ends.
+     */
+    async #stage(
+        state: RunState,
+        taskId: string,
+        deliverable: Deliverable,
+        commands: readonly CommandResult[],
+        changedFiles: readonly string[],
+    ): Promise<string | undefined> {
+        const { board } = state;
+        const task = board.get(taskId);
+        if (!task) {
+            return undefined;
+        }
+        const info = this.#taskHost(state, taskId);
+        const commandCard = {
+            ...task.card,
+            acceptance: task.card.acceptance.filter((check) => check.type === 'command'),
+        };
+        const measured = judge(commandCard, { ...deliverable, status: 'done' }, commands, [], { changedFiles });
+        const total = measured.checks.length;
+        const passing = measured.checks.filter((check) => check.status === 'passed').length;
+        const left = deliverable.remaining.length;
+        const changed = info.stageChanged ?? 0;
+        const stage = (info.stages ?? 0) + 1;
+        const before = info.lastStage;
+        const progress = before
+            ? passing > before.passing || (left > 0 && left < before.remaining) || changed > 0
+            : changed > 0 || passing > 0 || deliverable.evidence.length > 0;
+        const goesOn = progress && stage <= MAX_STAGES;
+        const owner = info.agentId ?? taskId;
+        info.remaining = [...deliverable.remaining];
+        this.#record(state, {
+            from: taskId,
+            to: 'supervisor',
+            text: textOf(TEXT).stageEntry(stage, shorten(deliverable.summary, 300), left, progress),
+            kind: 'stage',
+        });
+        const review = [
+            `${STAGE_REVIEW} ${taskId} (stage ${stage}, ${owner} at ${task.tier}): ${shorten(deliverable.summary, 600)}`,
+            left > 0
+                ? `Still to do:\n${deliverable.remaining.map((item) => `- ${shorten(item, 200)}`).join('\n')}`
+                : 'It listed nothing as left.',
+            total > 0 ? `Acceptance commands: ${passing} of ${total} pass.` : 'The card has no acceptance command.',
+            changed > 0 ? `It changed ${changed} file(s) in this stage.` : 'It changed no file in this stage.',
+            goesOn
+                ? 'The host sees progress.'
+                : progress
+                  ? `That was stage ${stage}: past ${MAX_STAGES} stages, going on counts as a failed round.`
+                  : 'The host sees no progress since the last stage: going on counts as a failed round.',
+            `Decide with task_guide on ${taskId}: continue with concrete guidance for the next stage, escalate, or stop. ` +
+                `Without a decision the member ${goesOn ? 'goes on with what is left' : 'gets the failure feedback'}.`,
+        ].join('\n');
+        const decided = await this.#reviewStage(state, taskId, review);
+        if (!this.#live(state) || board.get(taskId)?.status !== 'in_review') {
+            return undefined;
+        }
+        const guidance = decided?.guidance?.trim() || undefined;
+        if (decided?.decision === 'stop') {
+            board.block(
+                taskId,
+                `stopped by the supervisor after stage ${stage}${guidance ? `: ${shorten(guidance, 200)}` : ''}`,
+            );
+            this.#recordProgress(
+                state,
+                false,
+                `${taskId} stopped by the supervisor after stage ${stage}`,
+                `stop:${taskId}`,
+            );
+            this.#save(state);
+            return undefined;
+        }
+        if (decided?.decision === 'escalate') {
+            const rejected = board.reject(taskId, `the supervisor escalated it after stage ${stage}`);
+            if (rejected.ok) {
+                this.#escalate(state, taskId, forcedEscalation(rejected.value.tier), {
+                    reason: guidance ?? `the supervisor escalated it after stage ${stage}`,
+                });
+            }
+            this.#save(state);
+            return undefined;
+        }
+        info.stages = stage;
+        info.lastStage = { passing, remaining: left };
+        info.stageChanged = 0;
+        info.watch = undefined;
+        if (goesOn) {
+            const next = board.continue(taskId, `stage ${stage}: ${shorten(deliverable.summary, 200)}`);
+            if (!next.ok) {
+                return undefined;
+            }
+            info.verdict = undefined;
+            // A stage that moved forward gets a fresh turn budget; MAX_STAGES bounds the card.
+            info.turns = 0;
+            this.#recordProgress(
+                state,
+                true,
+                `${taskId} stage ${stage}: ${shorten(deliverable.summary, 200)}`,
+                `stage:${taskId}:${stage}`,
+                { nextAssignee: info.agentId, ...(guidance ? { instruction: shorten(guidance, 300) } : {}) },
+            );
+            this.#save(state);
+            return [
+                `Stage ${stage} of ${taskId} is reviewed.`,
+                ...(guidance ? [`From the supervisor: ${guidance}`] : []),
+                ...(left > 0 ? [`Still to do: ${deliverable.remaining.join('; ')}.`] : []),
+                `Go on from where you stopped${total > 0 ? ` (${passing} of ${total} acceptance commands pass now)` : ''}. ` +
+                    'Deliver done when every acceptance check passes, or partial again with what is left.',
+            ].join('\n');
+        }
+        // No progress, or past the stage limit: a failed round, with the supervisor's guidance first.
+        const reasons = [
+            `the deliverable is partial: ${deliverable.summary}`,
+            progress ? `stage ${stage} is past the limit of ${MAX_STAGES} stages` : 'no progress since the last stage',
+        ];
+        const judgement: Judgement = { ...measured, verdict: 'fail', reasons: [...reasons, ...measured.reasons] };
+        info.verdict = {
+            verdict: 'fail',
+            reasons: [...judgement.reasons],
+            outOfOwnership: [...judgement.outOfOwnership],
+        };
+        const rejected = board.reject(taskId, reasons.join('; '));
+        if (!rejected.ok) {
+            return undefined;
+        }
+        const decision = shouldEscalate(rejected.value.attempts);
+        if (decision.action === 'retry') {
+            this.#recordProgress(
+                state,
+                false,
+                `${taskId} stage ${stage} without progress (${decision.failures})`,
+                `reject:${taskId}`,
+                { nextAssignee: info.agentId, instruction: shorten(guidance ?? reasons.join('; '), 300) },
+            );
+            this.#save(state);
+            const feedback = retryFeedback(judgement, { failures: decision.failures });
+            return guidance ? `From the supervisor: ${guidance}\n\n${feedback}` : feedback;
+        }
+        this.#escalate(state, taskId, decision, { judgement });
+        this.#save(state);
+        return undefined;
+    }
+
+    /** Waits for the supervisor's task_guide on a stage (06 §20); undefined when it does not decide in time. */
+    #reviewStage(state: RunState, taskId: string, text: string): Promise<GuideDecision | undefined> {
+        if (!this.#active(state)) {
+            return Promise.resolve(undefined);
+        }
+        return new Promise((resolve) => {
+            let settled = false;
+            const settle = (decision: GuideDecision | undefined) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (state.guides.get(taskId) === entry) state.guides.delete(taskId);
+                resolve(decision);
+            };
+            const entry: PendingGuide = { delivered: false, resolve: settle };
+            const timer = setTimeout(() => settle(undefined), GUIDE_TIMEOUT_MS);
+            state.guides.get(taskId)?.resolve(undefined);
+            state.guides.set(taskId, entry);
+            this.#wake(state, text);
+        });
+    }
+
+    /**
+     * task_guide (06 §20): decides a waiting stage review, or steers a running executor: guidance reaches it at its
+     * next step; escalate and stop end its turn first.
+     */
+    async #guide(state: RunState, input: unknown): Promise<HostToolResult> {
+        const parsed = TaskGuideInput.safeParse(input);
+        if (!parsed.success) {
+            return fail(`Invalid arguments: ${formatIssues(parsed.error.issues).join('; ')}`);
+        }
+        const { taskId, decision } = parsed.data;
+        const guidance = parsed.data.guidance?.trim() || undefined;
+        const task = state.board.get(taskId);
+        if (!task) {
+            return fail(`No task ${taskId}; use a task id from task_list.`);
+        }
+        const info = this.#taskHost(state, taskId);
+        const decided = (): void => {
+            if (guidance) {
+                info.guidance = shorten(guidance, 2000);
+            }
+            this.#record(state, {
+                from: 'supervisor',
+                to: taskId,
+                text: guidance ? `${decision}: ${guidance}` : decision,
+                kind: 'guide',
+            });
+        };
+        const pending = state.guides.get(taskId);
+        if (pending) {
+            state.guides.delete(taskId);
+            decided();
+            pending.resolve({ decision, ...(guidance ? { guidance } : {}) });
+            this.#save(state);
+            return ok(
+                decision === 'continue'
+                    ? `${taskId} goes on with its next stage.`
+                    : decision === 'escalate'
+                      ? `${taskId} goes one tier up.`
+                      : `${taskId} is blocked until you change, reassign or cancel it.`,
+            );
+        }
+        const threadId = info.threadId;
+        const running =
+            threadId !== undefined &&
+            this.#deps.turns.isRunning(threadId) &&
+            (task.status === 'assigned' || task.status === 'in_progress');
+        if (!running || threadId === undefined) {
+            return fail(
+                `${taskId} is ${task.status} and no stage of it waits for review; use task_update, task_assign or send_message.`,
+            );
+        }
+        decided();
+        if (decision === 'continue') {
+            if (!guidance) {
+                this.#save(state);
+                return ok(`${taskId} carries on.`);
+            }
+            const when = await this.#deliver(state, taskId, `From the supervisor: ${guidance}`);
+            this.#save(state);
+            return ok(
+                when === 'now'
+                    ? `${taskId} gets it at its next step.`
+                    : `Queued for ${taskId}: it reads it at its next turn.`,
+            );
+        }
+        info.stopping = {
+            decision,
+            reason: guidance ?? (decision === 'escalate' ? 'escalated by the supervisor' : 'stopped by the supervisor'),
+        };
+        this.#save(state);
+        this.#deps.turns.cancel(threadId);
+        return ok(
+            decision === 'escalate'
+                ? `${taskId}: its member stops now and the card goes one tier up.`
+                : `${taskId}: its member stops now; the card is blocked until you change, reassign or cancel it.`,
+        );
+    }
+
+    /** The supervisor ended a running executor's turn with task_guide (06 §20): one tier up with what it did, or blocked. */
+    #stopRunning(
+        state: RunState,
+        taskId: string,
+        stopping: { decision: 'escalate' | 'stop'; reason: string },
+        lastText: string,
+    ): void {
+        const { board } = state;
+        const task = board.get(taskId);
+        if (!task || task.status === 'cancelled') {
+            return;
+        }
+        if (stopping.decision === 'stop') {
+            board.block(taskId, `stopped by the supervisor: ${shorten(stopping.reason, 200)}`);
+            this.#recordProgress(state, false, `${taskId} stopped by the supervisor`, `stop:${taskId}`);
+            return;
+        }
+        if (task.owner && (task.status === 'assigned' || task.status === 'in_progress')) {
+            const said = shorten(lastText, 600);
+            const submitted = board.submit(
+                taskId,
+                task.owner,
+                DeliverableSchema.parse({
+                    taskId,
+                    status: 'partial',
+                    summary: `Stopped by the supervisor: ${shorten(stopping.reason, 300)}`,
+                    ...(said ? { evidence: [{ type: 'note', text: `Its last message: ${said}` }] } : {}),
+                }),
+            );
+            if (submitted.ok) {
+                board.reject(taskId, stopping.reason);
+            }
+        }
+        this.#escalate(state, taskId, forcedEscalation(task.tier), { reason: stopping.reason });
+    }
+
+    /** 06 §20: the stage's turn budget ran out after files changed; what it did goes to review as a partial stage. */
+    #submitOutOfTurns(state: RunState, taskId: string, lastText: string): boolean {
+        const task = state.board.get(taskId);
+        const info = this.#taskHost(state, taskId);
+        if (!task?.owner || (task.status !== 'assigned' && task.status !== 'in_progress')) {
+            return false;
+        }
+        const said = shorten(lastText, 600);
+        const submitted = state.board.submit(
+            taskId,
+            task.owner,
+            DeliverableSchema.parse({
+                taskId,
+                status: 'partial',
+                summary:
+                    `The executor used up the turn budget of this stage (${info.turns ?? 0} of ` +
+                    `${this.#turnLimit(state, taskId)} model requests) before delivering.`,
+                evidence: [{ type: 'diff' }, ...(said ? [{ type: 'note', text: `Its last message: ${said}` }] : [])],
+                remaining: info.remaining ?? [],
+            }),
+        );
+        if (!submitted.ok) {
+            return false;
+        }
+        this.#save(state);
+        return true;
+    }
+
+    /**
+     * Watches a running executor turn (06 §20): the same call again and again, model requests without a file change
+     * (writable cards), or no sign of life is reported to the supervisor once per rule and turn.
+     */
+    #watch(state: RunState, taskId: string, threadId: string): () => void {
+        const writable = state.board.get(taskId)?.card.workspace !== 'readonly';
+        const steps: string[] = [];
+        let last = '';
+        let same = 0;
+        let sinceChange = 0;
+        let lastSign = Date.now();
+        const fired = new Set<WatchRule>();
+        const report = (rule: WatchRule) => {
+            if (fired.has(rule) || !this.#live(state) || this.#disposed) {
+                return;
+            }
+            fired.add(rule);
+            this.#watchReport(state, taskId, rule, steps);
+        };
+        const unobserve = this.#deps.turns.observe(threadId, (observation) => {
+            lastSign = Date.now();
+            if (observation.type === 'request') {
+                sinceChange += 1;
+                if (writable && sinceChange >= WATCH_SPIN_REQUESTS) {
+                    report('spin');
+                }
+                return;
+            }
+            if (observation.type !== 'tool') {
+                return;
+            }
+            const { item } = observation;
+            const signature = `${item.name ?? item.title}\u0000${JSON.stringify(item.input ?? null)}`;
+            same = signature === last ? same + 1 : 1;
+            last = signature;
+            steps.push(stepLine(item));
+            if (steps.length > WATCH_STEPS) {
+                steps.shift();
+            }
+            if (
+                item.status === 'completed' &&
+                (item.kind === 'edit' || item.kind === 'delete' || item.kind === 'move')
+            ) {
+                sinceChange = 0;
+            }
+            if (same >= WATCH_REPEATS) {
+                report('repeat');
+            }
+        });
+        const timer = setInterval(() => {
+            if (Date.now() - lastSign >= WATCH_SILENCE_MS) {
+                report('silent');
+            }
+        }, 60_000);
+        return () => {
+            unobserve();
+            clearInterval(timer);
+        };
+    }
+
+    #watchReport(state: RunState, taskId: string, rule: WatchRule, steps: readonly string[]): void {
+        const info = this.#taskHost(state, taskId);
+        const owner = info.agentId ?? taskId;
+        info.watch = { rule, at: Date.now() };
+        const what =
+            rule === 'repeat'
+                ? `made the same call ${WATCH_REPEATS} times in a row`
+                : rule === 'spin'
+                  ? `made ${WATCH_SPIN_REQUESTS} model requests without changing a file`
+                  : `has shown no activity for ${WATCH_SILENCE_MS / 60_000} minutes`;
+        this.#record(state, { from: 'host', to: taskId, text: textOf(TEXT).watch(owner, rule), kind: 'watch' });
+        this.#recordProgress(state, false, `${taskId}: ${owner} ${what}`, `watch:${taskId}:${rule}`);
+        this.#wake(
+            state,
+            [
+                `${WATCH_REPORT} ${owner} on ${taskId} ${what} (${info.turns ?? 0} of ${this.#turnLimit(state, taskId)} model requests of this stage used before this turn).`,
+                ...(steps.length > 0 ? ['Its last steps:', ...steps.map((step) => `- ${step}`)] : []),
+                `Decide with task_guide on ${taskId}: continue with guidance it gets at its next step, continue without ` +
+                    'guidance to let it be, escalate, or stop.',
+            ].join('\n'),
+        );
+        this.#save(state);
     }
 
     /** A reviewer of another model family reads the work in the executor's workspace (06 §3 rule 6). */
@@ -3434,6 +4026,11 @@ export function registerTeamHandlers(
     peer.handle('team.list', ({ projectId }) => team.list(projectId));
     peer.handle('team.get', ({ runId }) => team.get(runId));
     peer.handle('team.stop', ({ runId }) => team.stop(runId));
+    peer.handle('team.archive', ({ runId, archived }) => team.archive(runId, archived));
+    peer.handle('team.delete', async ({ runId }) => {
+        await team.delete(runId);
+        return { ok: true as const };
+    });
     peer.handle('team.resume', ({ runId, budget }) => team.resume(runId, budget));
     peer.handle('team.roster', ({ projectId }) => team.roster(projectId));
     peer.handle('team.message', ({ runId, to, text }) => team.message(runId, to, text));

@@ -372,6 +372,10 @@ export const methods = {
     'team.list': { params: z.object({ projectId: IdSchema.optional() }).strict(), result: z.array(TeamRunSchema) },
     'team.get': { params: z.object({ runId: z.string() }).strict(), result: TeamRunSchema },
     'team.stop': { params: z.object({ runId: z.string() }).strict(), result: TeamRunSchema },
+    /** Moves a run to the archive, or back; the sidebar and the team board list archived runs apart. */
+    'team.archive': { params: z.object({ runId: z.string(), archived: z.boolean() }).strict(), result: TeamRunSchema },
+    /** Deletes a run that is over, with its threads and any worktree left; `team.removed` follows. */
+    'team.delete': { params: z.object({ runId: z.string() }).strict(), result: ok },
     /** Continues a paused run (after a restart, a spent budget or a declined delivery), optionally with more budget. */
     'team.resume': {
         params: z.object({ runId: z.string(), budget: z.number().positive().optional() }).strict(),
@@ -418,6 +422,13 @@ export const methods = {
     },
     'workflow.get': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
     'workflow.stop': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
+    /** Moves a run to the archive, or back. */
+    'workflow.archiveRun': {
+        params: z.object({ runId: z.string(), archived: z.boolean() }).strict(),
+        result: WorkflowRunSchema,
+    },
+    /** Deletes a run that is over, with its sub-runs and threads; `workflow.removed` follows. */
+    'workflow.deleteRun': { params: z.object({ runId: z.string() }).strict(), result: ok },
     /** Writes the brief of a run that is over again, or for the first time; it arrives with `workflow.changed`. */
     'workflow.brief': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
     /** Opens a thread that answers a question about a run, with its brief, steps and outputs as context. */
@@ -800,7 +811,9 @@ export const notifications = {
     'terminal.output': z.object({ terminalId: z.string(), data: z.string() }),
     'terminal.exit': z.object({ terminalId: z.string(), exitCode: z.number().nullable() }),
     'team.changed': z.object({ run: TeamRunSchema }),
+    'team.removed': z.object({ runId: z.string() }),
     'workflow.changed': z.object({ run: WorkflowRunSchema }),
+    'workflow.removed': z.object({ runId: z.string() }),
     /** A member, its memory or its routines changed. */
     'member.changed': z.object({ memberId: z.string() }),
     'extension.changed': z.object({}),

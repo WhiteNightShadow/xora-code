@@ -724,6 +724,28 @@ export class TaskBoard {
     }
 
     /**
+     * A stage of the task was handed in and moved it forward (06 §20): the same owner goes on with the next stage.
+     * Recorded as a `progress` attempt, which ends a run of failed ones for {@link shouldEscalate}.
+     */
+    continue(taskId: string, note: string): BoardResult<BoardTask> {
+        const task = this.#tasks.get(taskId);
+        if (!task) {
+            return this.#unknown(taskId);
+        }
+        if (task.status !== 'in_review') {
+            return fail(
+                'invalid_transition',
+                `task ${taskId} is ${task.status}; only a task in review can go on to its next stage`,
+                taskId,
+            );
+        }
+        this.#emit({ type: 'attempt', taskId, attempt: this.#attempt(task, 'progress') });
+        this.#emit({ type: 'status', taskId, from: 'in_review', to: 'in_progress', reason: note });
+        this.#flush();
+        return ok(this.#require(taskId));
+    }
+
+    /**
      * Re-dispatches a task one or more tiers up, or hands it to the supervisor (06 §9). The claim is released
      * and the task is ready again.
      */
@@ -937,7 +959,7 @@ export class TaskBoard {
 
 const AttemptSchema = z.object({
     tier: TierSchema,
-    outcome: z.enum(['pass', 'fail', 'escalate']),
+    outcome: z.enum(['pass', 'fail', 'escalate', 'progress']),
     by: z.enum(['executor', 'supervisor']).optional(),
     escalateTo: TierSchema.optional(),
     agentId: z.string().optional(),

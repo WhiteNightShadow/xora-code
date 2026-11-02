@@ -157,6 +157,7 @@ const TEXT = bilingual(
         offPeakNow: '到了空闲时段',
         stoppedByUser: '用户停止了运行',
         notPaused: '只有暂停的运行可以继续',
+        stopToDelete: '运行还没结束，先停止再删除',
         stillOverBudget: '预算还是不够：追加预算后再继续',
         runContinued: '继续运行',
         pausedByRestart: '应用重启时这次运行还没结束，已暂停；继续后从没做完的步骤接着做',
@@ -338,6 +339,7 @@ const TEXT = bilingual(
         offPeakNow: 'Off-peak hours have started',
         stoppedByUser: 'Stopped by the user',
         notPaused: 'Only a paused run can continue',
+        stopToDelete: 'The run is still going; stop it before deleting it',
         stillOverBudget: 'The budget is still not enough: add to it, then continue',
         runContinued: 'Run continued',
         pausedByRestart:
@@ -509,6 +511,8 @@ interface RunRecord {
     startsAt?: number;
     /** The permissions the user gave the run; absent on runs from before it existed, which is `default`. */
     mode?: WorkflowRunMode;
+    /** Moved to the archive by the user. */
+    archived?: boolean;
     steps: Record<string, StepState>;
     /** The report for whoever ordered the run (06 §11), once it is over. */
     brief?: WorkflowBrief;
@@ -1355,6 +1359,56 @@ export class WorkflowService {
             this.#finish(state, 'cancelled', textOf(TEXT).stoppedByUser);
         }
         return this.#view(state);
+    }
+
+    /** Moves a run to the archive, or back. */
+    async archiveRun(runId: string, archived: boolean): Promise<WorkflowRunView> {
+        await this.#ready;
+        const state = this.#require(runId);
+        state.record.archived = archived ? true : undefined;
+        this.#save(state);
+        return this.#view(state);
+    }
+
+    /**
+     * Deletes a run that is over, with its sub-workflow runs and every thread it opened (`workflow.removed`). Team
+     * runs a step started stay: they are listed and deleted on their own.
+     */
+    async deleteRun(runId: string): Promise<void> {
+        await this.#ready;
+        const state = this.#require(runId);
+        if (!TERMINAL.has(state.record.status)) {
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).stopToDelete);
+        }
+        for (const step of Object.values(state.record.steps)) {
+            if (step.childRunId && this.#load(step.childRunId)) {
+                await this.deleteRun(step.childRunId).catch((error: unknown) =>
+                    this.#deps.log.warn(`workflow: could not delete sub-run ${step.childRunId}: ${String(error)}`),
+                );
+            }
+        }
+        const { threads, turns, approvals } = this.#deps;
+        const owned = new Set<string>([
+            state.record.threadId,
+            ...Object.values(state.record.steps).flatMap((step) => step.threadIds),
+            ...threads
+                .list({ projectId: state.record.projectId, includeArchived: true })
+                .filter((thread) => thread.workflowRunId === runId)
+                .map((thread) => thread.id),
+        ]);
+        for (const threadId of owned) {
+            const thread = threads.find(threadId);
+            if (!thread) continue;
+            if (turns.isRunning(threadId)) turns.cancel(threadId);
+            approvals.clearSession(threadId);
+            void turns.endSession(thread, 'delete').catch(() => undefined);
+            threads.delete(threadId);
+        }
+        if (state.startTimer) clearTimeout(state.startTimer);
+        if (state.broadcastTimer) clearTimeout(state.broadcastTimer);
+        this.#runs.delete(runId);
+        this.#deps.db.run('delete from workflow_runs where id = ?', [runId]);
+        this.#deps.bus.broadcast('workflow.removed', { runId });
     }
 
     /** Continues a paused run from the steps that had not finished, optionally with a new budget. */
@@ -2821,6 +2875,7 @@ export class WorkflowService {
             status: record.status,
             reason: record.trigger.reason,
             unattended: record.unattended,
+            ...(record.archived ? { archived: true } : {}),
             inputs: record.inputs,
             ...(record.note ? { note: record.note } : {}),
             warnings: record.warnings,
@@ -2864,6 +2919,11 @@ export function registerWorkflowHandlers(
     peer.handle('workflow.runs', ({ projectId }) => workflows.runs(projectId));
     peer.handle('workflow.get', ({ runId }) => workflows.get(runId));
     peer.handle('workflow.stop', ({ runId }) => workflows.stop(runId));
+    peer.handle('workflow.archiveRun', ({ runId, archived }) => workflows.archiveRun(runId, archived));
+    peer.handle('workflow.deleteRun', async ({ runId }) => {
+        await workflows.deleteRun(runId);
+        return { ok: true as const };
+    });
     peer.handle('workflow.brief', ({ runId }) => workflows.brief(runId));
     peer.handle('workflow.ask', ({ runId, question }) => workflows.ask(runId, question));
     peer.handle('workflow.resume', ({ runId, budget }) => workflows.resume(runId, budget));

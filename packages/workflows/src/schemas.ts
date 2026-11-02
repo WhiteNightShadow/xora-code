@@ -117,6 +117,8 @@ export const DeliverableSchema = z
         evidence: z.array(EvidenceSchema).default([]),
         risks: textList(),
         openQuestions: textList(),
+        /** What is left when the status is `partial`, one item each: the supervisor reviews the stage (06 §20). */
+        remaining: textList(),
         escalate: EscalationSchema.nullable().default(null),
         /** As reported by the agent; the host's metering is authoritative and may overwrite it. */
         usage: z.object({ cost: z.number().nonnegative(), currency: CurrencySchema }).optional(),
@@ -231,6 +233,7 @@ const DELIVERABLE_KEYS = [
     'evidence',
     'risks',
     'openQuestions',
+    'remaining',
     'escalate',
     'usage',
 ] as const;
@@ -523,6 +526,7 @@ function normalizeDeliverable(raw: Record<string, unknown>, taskId: string | und
         evidence: asArray(raw.evidence).map(normalizeEvidence),
         risks: stringList(raw.risks),
         openQuestions: stringList(raw.openQuestions ?? raw.questions),
+        remaining: stringList(raw.remaining ?? raw.todo ?? raw.left),
         escalate: normalizeEscalation(raw.escalate ?? raw.escalation, raw.summary),
         // Self-reported usage is informational; a malformed one is dropped rather than failing the deliverable.
         usage: isRecord(usage) && typeof usage.cost === 'number' && usage.cost >= 0 ? usage : undefined,

@@ -182,6 +182,17 @@ describe('escalation', () => {
         });
     });
 
+    it('lets a stage that moved forward end a run of failures', () => {
+        expect(shouldEscalate([{ tier: 'economy', outcome: 'progress' }])).toEqual({ action: 'none' });
+        expect(
+            shouldEscalate([
+                { tier: 'economy', outcome: 'fail' },
+                { tier: 'economy', outcome: 'progress' },
+                { tier: 'economy', outcome: 'fail' },
+            ]),
+        ).toEqual({ action: 'retry', failures: 1 });
+    });
+
     it('needs failures in a row at the same tier', () => {
         expect(shouldEscalate([])).toEqual({ action: 'none' });
         expect(

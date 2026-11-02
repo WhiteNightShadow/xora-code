@@ -171,6 +171,21 @@ export const LedgerUpdateInput = z.object({
         .describe('Your own progress check, recorded in the progress ledger'),
 });
 export const RequestReviewInput = z.object({ taskId: z.string().min(1), focus: z.string().optional() });
+/** The supervisor's decision on a stage review or a watch report (06 §20). */
+export const TaskGuideInput = z.object({
+    taskId: z.string().min(1),
+    decision: z
+        .enum(['continue', 'escalate', 'stop'])
+        .describe(
+            'continue: the member goes on (with your guidance, if any); escalate: one tier up with what it found; ' +
+                'stop: the card is blocked until you change, reassign or cancel it',
+        ),
+    guidance: z
+        .string()
+        .max(4000)
+        .optional()
+        .describe('What to do next and what to leave out, concretely; a running member gets it at its next step'),
+});
 export const ChallengeInput = z.object({
     to: z.string().min(1).describe('Task id of the investigation card you challenge'),
     text: z.string().min(1).max(4000).describe('What does not hold up in its reasoning or evidence, and why'),
@@ -245,6 +260,14 @@ export const SUPERVISOR_TOOLS: readonly ToolSpec[] = [
             'Have a reviewer of another model family check a task’s latest deliverable; the verdict arrives in a ' +
             'team update.',
         parameters: jsonSchema(RequestReviewInput),
+        kind: 'other',
+    },
+    {
+        name: 'task_guide',
+        description:
+            'Decide on a stage review (a member handed in part of its card) or a watch report (a running member ' +
+            'repeats itself, spends without changing anything or went silent), or steer a running member yourself.',
+        parameters: jsonSchema(TaskGuideInput),
         kind: 'other',
     },
 ];

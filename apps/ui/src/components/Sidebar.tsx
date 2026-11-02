@@ -7,6 +7,7 @@ import {
     openMembers,
     openProject,
     openSettings,
+    openTeamBoard,
     openWorkflowBoard,
     selectThread,
     useApp,
@@ -144,15 +145,18 @@ function ProjectGroup({
     const teamRunId = useApp((state) => state.teamRunId);
     const workflowRunId = useApp((state) => state.workflowRunId);
     const workflowsFor = useApp((state) => state.workflowsFor);
+    const teamsFor = useApp((state) => state.teamsFor);
     const allRuns = useApp((state) => state.teamRuns);
     const allWorkflowRuns = useApp((state) => state.workflowRuns);
-    const runs = Object.values(allRuns)
-        .filter((run) => run.projectId === project.id)
+    const projectRuns = Object.values(allRuns).filter((run) => run.projectId === project.id);
+    const runningTeams = projectRuns.filter((run) => !['done', 'failed', 'cancelled'].includes(run.status)).length;
+    const runs = projectRuns
+        .filter((run) => !run.archived)
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .slice(0, 5);
     // Sub-workflows are reached through their parent run.
     const workflowRuns = Object.values(allWorkflowRuns)
-        .filter((run) => run.projectId === project.id && !run.parentRunId)
+        .filter((run) => run.projectId === project.id && !run.parentRunId && !run.archived)
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .slice(0, 5);
     // Team members' and workflow steps' threads are reached through their run, not listed one by one; subagents'
@@ -223,6 +227,17 @@ function ProjectGroup({
             {open && (
                 <button
                     type="button"
+                    className={`run-row project__board${teamsFor === project.id && !teamRunId && !workflowRunId ? ' is-selected' : ''}`}
+                    onClick={() => openTeamBoard(project.id)}
+                >
+                    <Icon name="users" size={12} />
+                    <span className="thread-row__title">{s.sidebar.teams}</span>
+                    {runningTeams > 0 && <span className="thread-row__meta">{runningTeams}</span>}
+                </button>
+            )}
+            {open && (
+                <button
+                    type="button"
                     className={`run-row project__board${workflowsFor === project.id && !teamRunId && !workflowRunId ? ' is-selected' : ''}`}
                     onClick={() => openWorkflowBoard(project.id)}
                 >
@@ -242,6 +257,7 @@ function ProjectGroup({
                                     workflowRunId: run.id,
                                     teamRunId: undefined,
                                     workflowsFor: undefined,
+                                    teamsFor: undefined,
                                 })
                             }
                         >
@@ -264,6 +280,7 @@ function ProjectGroup({
                                     teamRunId: run.id,
                                     workflowRunId: undefined,
                                     workflowsFor: undefined,
+                                    teamsFor: undefined,
                                 })
                             }
                         >

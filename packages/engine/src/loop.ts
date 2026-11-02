@@ -328,6 +328,8 @@ export class TurnRunner {
 
     async run(prompt: readonly acp.ContentBlock[]): Promise<StopReason> {
         const session = this.#session;
+        // Steering the previous turn accepted but ended before taking (cancelled, out of requests) comes first.
+        this.#steer();
         session.append(toUserMessage(prompt, session));
         let requests = 0;
         for (;;) {
@@ -356,6 +358,7 @@ export class TurnRunner {
                 if (this.#stopped) {
                     return 'cancelled';
                 }
+                this.#steer();
                 continue;
             }
             switch (outcome.stopReason) {
@@ -367,9 +370,23 @@ export class TurnRunner {
                 case 'pause':
                     continue;
                 default:
+                    // A message that arrived while the model wrote its answer is answered in the same turn.
+                    if (this.#steer()) {
+                        continue;
+                    }
                     return 'end_turn';
             }
         }
+    }
+
+    /** Appends the messages the host sent into this turn (06 §20) as one user message; true when there were any. */
+    #steer(): boolean {
+        const notes = this.#session.takeSteering();
+        if (notes.length === 0) {
+            return false;
+        }
+        this.#session.append({ role: 'user', content: notes.map((note) => ({ type: 'text' as const, text: note })) });
+        return true;
     }
 
     /** Compaction levels 2 and 3 when the context crosses 60% and 80% of the budget. */

@@ -319,6 +319,16 @@ async function promptBlocks(
     return blocks;
 }
 
+/**
+ * What a watcher of a thread sees while its turns run (06 §20, the team's watch): each finished tool call, each
+ * model request that completed, and any other sign of life (streamed text, a started tool call).
+ */
+export type TurnObservation =
+    | { readonly type: 'tool'; readonly item: ItemOf<'tool_call'> }
+    | { readonly type: 'request' }
+    | { readonly type: 'activity' };
+export type TurnObserver = (observation: TurnObservation) => void;
+
 /** State of one running turn: in-flight items and accumulated usage. */
 class RunningTurn {
     readonly threadId: string;
@@ -370,6 +380,7 @@ class RunningTurn {
 export class TurnService {
     readonly #deps: TurnDeps;
     readonly #running = new Map<string, RunningTurn>();
+    readonly #observers = new Map<string, Set<TurnObserver>>();
     /** Turns being run, so that dispose can let cancelled ones record their end before the database closes. */
     readonly #runs = new Set<Promise<void>>();
     #disposed = false;
@@ -404,6 +415,70 @@ export class TurnService {
 
     live(threadId: string): Item[] {
         return [...(this.#running.get(threadId)?.live.values() ?? [])];
+    }
+
+    /** Watches a thread's turns until the returned function is called (06 §20). */
+    observe(threadId: string, observer: TurnObserver): () => void {
+        let set = this.#observers.get(threadId);
+        if (!set) {
+            set = new Set();
+            this.#observers.set(threadId, set);
+        }
+        const own = set;
+        own.add(observer);
+        return () => {
+            own.delete(observer);
+            if (own.size === 0 && this.#observers.get(threadId) === own) {
+                this.#observers.delete(threadId);
+            }
+        };
+    }
+
+    #observed(threadId: string, observation: TurnObservation): void {
+        for (const observer of this.#observers.get(threadId) ?? []) {
+            try {
+                observer(observation);
+            } catch (error) {
+                this.#deps.log.warn(
+                    `turn observer of ${threadId}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
+        }
+    }
+
+    /**
+     * Sends a message into the running turn of a thread (06 §20): the xora engine takes it before its next model
+     * request, and the thread shows it as a user message. False when no turn runs or the engine does not take it
+     * (an external agent); the caller then keeps it for the next turn.
+     */
+    async steer(threadId: string, text: string): Promise<boolean> {
+        const running = this.#running.get(threadId);
+        if (!running?.process || !running.sessionId || running.abort.signal.aborted) {
+            return false;
+        }
+        let accepted = false;
+        try {
+            const reply = (await running.process.agent.request('_xora/session/steer', {
+                sessionId: running.sessionId,
+                text,
+            })) as { accepted?: unknown } | undefined;
+            accepted = reply?.accepted === true;
+        } catch {
+            accepted = false;
+        }
+        if (!accepted || this.#running.get(threadId) !== running) {
+            return accepted;
+        }
+        this.#closeText(running);
+        this.#persist(running, {
+            id: newId('i'),
+            turnId: running.turnId,
+            ts: Date.now(),
+            type: 'user_message',
+            text,
+            attachments: [],
+        });
+        return true;
     }
 
     /**
@@ -1181,6 +1256,12 @@ export class TurnService {
         } else {
             running.live.set(item.id, item);
         }
+        if (this.#observers.has(running.threadId)) {
+            this.#observed(
+                running.threadId,
+                item.type === 'tool_call' && kind === 'item.completed' ? { type: 'tool', item } : { type: 'activity' },
+            );
+        }
     }
 
     #closeText(running: RunningTurn): void {
@@ -1200,6 +1281,9 @@ export class TurnService {
     }
 
     #delta(running: RunningTurn, stream: 'agent_message' | 'reasoning', text: string): void {
+        if (this.#observers.has(running.threadId)) {
+            this.#observed(running.threadId, { type: 'activity' });
+        }
         if (stream === 'agent_message') {
             if (running.reasoning) {
                 const item = running.reasoning;
@@ -1449,6 +1533,7 @@ export class TurnService {
             }
             if (request.usage) {
                 running.requests++;
+                this.#observed(running.threadId, { type: 'request' });
                 running.inputTokens += request.usage.inputTokens;
                 running.cachedTokens += request.usage.cachedTokens;
                 running.outputTokens += request.usage.outputTokens;

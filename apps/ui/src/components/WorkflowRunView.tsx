@@ -9,6 +9,7 @@ import { Choices, Popover } from './Controls.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import { Badge, Empty, formatMoney, Modal, Spinner } from './primitives.tsx';
+import { RunActions } from './RunActions.tsx';
 import { RUN_MODE_ICONS, runModeChoices, runTone } from './WorkflowView.tsx';
 import '../task.css';
 import '../workflow-run.css';
@@ -1187,6 +1188,9 @@ export function WorkflowRunView({ runId }: { runId: string }) {
                         >
                             {s.workflow.stop}
                         </button>
+                    )}
+                    {['completed', 'failed', 'cancelled'].includes(run.status) && !run.parentRunId && (
+                        <RunActions kind="workflow" runId={runId} archived={Boolean(run.archived)} />
                     )}
                 </div>
             </header>

@@ -26,6 +26,8 @@ interface Harness {
     hostToolCalls: Array<{ name: string; input: unknown }>;
     readonly hookCalls: Array<{ event: string; payload: Record<string, unknown> }>;
     hookReply: (event: string, payload: Record<string, unknown>) => Record<string, unknown>;
+    /** Runs while the engine waits for a host tool, so the turn is still running. */
+    duringHostTool?: (name: string) => Promise<void>;
     close(): void;
 }
 
@@ -60,8 +62,9 @@ function harness(dataDir = mkdtempSync(path.join(tmpdir(), 'xora-engine-'))): Ha
         .onRequest(
             '_xora/tool/call',
             z.object({ sessionId: z.string(), name: z.string(), input: z.unknown() }),
-            ({ params }) => {
+            async ({ params }) => {
                 state.hostToolCalls.push({ name: params.name, input: params.input });
+                await result.duringHostTool?.(params.name);
                 return { content: `host handled ${params.name}` };
             },
         )
@@ -308,6 +311,43 @@ describe('xora engine over ACP', () => {
         const declared = firstBody?.tools?.find((tool) => tool.function.name === 'team_dispatch');
         expect(declared?.function.parameters).toMatchObject({ properties: { taskIds: { type: 'array' } } });
         expect(h.permissions).toHaveLength(0);
+        h.close();
+    });
+
+    it('takes a message sent into the running turn before its next model request', async () => {
+        server.reset();
+        server.respondWith((request) =>
+            lastRole(request.body) === 'user' && server.requests.length > 1
+                ? openaiText('switched to the second approach')
+                : lastRole(request.body) === 'tool'
+                  ? openaiText('should not be reached')
+                  : openaiToolCalls([{ name: 'team_probe', arguments: '{}' }]),
+        );
+        const h = harness();
+        const sessionId = await newSession(h, workspace(), {
+            hostTools: [{ name: 'team_probe', description: 'Probe', parameters: { type: 'object', properties: {} } }],
+        });
+        // No turn runs yet: the engine does not take it, so the host keeps it for the next turn.
+        const idle = await h.client.request('_xora/session/steer', { sessionId, text: 'too early' });
+        expect(idle).toEqual({ accepted: false });
+        const accepted: unknown[] = [];
+        h.duringHostTool = async () => {
+            accepted.push(
+                await h.client.request('_xora/session/steer', { sessionId, text: 'From the supervisor: stop; try B' }),
+            );
+        };
+        const response = await h.client.request('session/prompt', {
+            sessionId,
+            prompt: [{ type: 'text', text: 'try A' }],
+        });
+        expect(response.stopReason).toBe('end_turn');
+        expect(accepted).toEqual([{ accepted: true }]);
+        // The second request carries the tool result and then the message, as a user message.
+        const second = server.requests[1]?.body as { messages: Array<{ role: string; content: unknown }> };
+        expect(second.messages.at(-2)?.role).toBe('tool');
+        expect(second.messages.at(-1)).toMatchObject({ role: 'user' });
+        expect(JSON.stringify(second.messages.at(-1)?.content)).toContain('From the supervisor: stop; try B');
+        expect(server.requests).toHaveLength(2);
         h.close();
     });
 
