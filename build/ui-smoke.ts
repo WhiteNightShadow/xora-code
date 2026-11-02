@@ -590,6 +590,11 @@ try {
     await routine.getByRole('button', { name: '现在跑一次' }).click();
     await page.locator('.thread-header h1', { hasText: '例行：冒烟早检' }).waitFor();
     await step(page, '例行任务可以马上跑一次');
+    // A routine on a schedule keeps the app in the tray when its window closes; switched off, it no longer does.
+    await page.locator('.thread-header .member-chip').click();
+    await routine.locator('.toggle input').uncheck();
+    await page.locator('.routine.is-off', { hasText: '冒烟早检' }).waitFor();
+    await step(page, '停用例行任务');
 } catch (error) {
     reportFailure(error);
     console.error(

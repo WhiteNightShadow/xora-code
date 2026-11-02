@@ -585,7 +585,7 @@ export class MemberService {
         const after = await this.#roster(project);
         if (!after.org.roster.some((item) => item.id === memberId)) {
             await this.#serial(`routines:${memberId}`, () => rm(this.#routinesFile(memberId), { force: true }));
-            this.#deps.onRoutinesChanged?.();
+            await this.#routinesChanged();
         }
         this.#changed(memberId);
     }
@@ -1056,7 +1056,7 @@ export class MemberService {
             if (index >= 0) records[index] = record;
             else records.push(record);
         });
-        this.#deps.onRoutinesChanged?.();
+        await this.#routinesChanged();
         this.#changed(memberId);
         return this.#member(memberId, usable?.id);
     }
@@ -1069,7 +1069,7 @@ export class MemberService {
             }
             return records.splice(index, 1)[0];
         });
-        this.#deps.onRoutinesChanged?.();
+        await this.#routinesChanged();
         this.#changed(memberId);
         const project = await this.#deps.projects.get(removed?.projectId ?? '').catch(() => undefined);
         return this.#member(memberId, project && !project.missing ? project.id : undefined);
@@ -1118,9 +1118,18 @@ export class MemberService {
         return targets;
     }
 
-    /** Routines on a schedule as of the last sync: they keep the app running in the background. */
+    /** Routines on a schedule as of the last change or sync: they keep the app running in the background. */
     get enabledRoutines(): number {
         return this.#enabledRoutines;
+    }
+
+    /**
+     * After a change: the count is right before the call answers (closing the window right after switching the
+     * last routine off quits the app), and the trigger service gets the schedules.
+     */
+    async #routinesChanged(): Promise<void> {
+        await this.triggerTargets().catch((error: unknown) => this.#deps.log.warn(`routines: ${errorText(error)}`));
+        this.#deps.onRoutinesChanged?.();
     }
 
     /**
