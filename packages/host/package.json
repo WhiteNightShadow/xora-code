@@ -1,6 +1,6 @@
 {
   "name": "@xora/host",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Xora Code host process: owns state, decides permissions and serves the UI over MessagePort",

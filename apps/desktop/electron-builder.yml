@@ -37,8 +37,10 @@ electronFuses:
   grantFileProtocolExtraPrivileges: false
   # Unsigned builds: flipping fuses breaks the ad-hoc signature, which Apple silicon requires.
   resetAdHocDarwinSignature: true
+# Icons: build-resources/icon.svg rendered by build/make-icons.ts (macOS keeps Apple's margins; Windows and Linux
+# fill the square).
 mac:
-  icon: build-resources/icon.png
+  icon: build-resources/icon.icns
   category: public.app-category.developer-tools
   # Unsigned preview builds until a Developer ID certificate is available.
   identity: null
@@ -50,7 +52,7 @@ mac:
     - target: zip
       arch: [arm64, x64]
 win:
-  icon: build-resources/icon.png
+  icon: build-resources/icon.ico
   files:
     - "!node_modules/node-pty/prebuilds/{darwin,linux}-*/**"
     - "!**/*.pdb"
@@ -67,7 +69,7 @@ nsis:
 toolsets:
   appimage: "1.0.3"
 linux:
-  icon: build-resources/icon.png
+  icon: build-resources/icon-linux.png
   executableName: xora-code
   category: Development
   maintainer: Xora Code contributors <WhiteNightShadow@users.noreply.github.com>

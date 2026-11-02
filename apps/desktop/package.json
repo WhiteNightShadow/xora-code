@@ -1,7 +1,7 @@
 {
   "name": "@xora/desktop",
   "productName": "Xora Code",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0",
   "private": true,
   "description": "Xora Code desktop shell: bootstrap, preload scripts and packaging",
   "author": {

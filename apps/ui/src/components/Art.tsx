@@ -31,7 +31,7 @@ export function LogoMark({ size = 24, className }: { size?: number; className?: 
                 strokeLinecap="round"
                 strokeLinejoin="round"
             />
-            <circle cx="18.6" cy="5.4" r="1.25" fill="#fff" opacity="0.85" />
+            <circle cx="18.6" cy="5.4" r="1.3" fill="#ffd27a" />
         </svg>
     );
 }

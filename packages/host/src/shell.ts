@@ -58,8 +58,8 @@ export class MemoryShell implements ShellApi {
 
     constructor(info: Partial<ShellInfo> & { dataDir: string }) {
         this.#info = {
-            shellVersion: '1.0.0-alpha.1',
-            bundleVersion: '1.0.0-alpha.1',
+            shellVersion: '1.0.0',
+            bundleVersion: '1.0.0',
             bundleDir: '',
             execPath: process.execPath,
             shellModulesDir: '',

@@ -22,7 +22,7 @@ interface ParentPort {
     off(event: 'message', listener: (message: ParentPortMessage) => void): void;
 }
 
-const version = process.env.XORA_ENGINE_VERSION ?? '1.0.0-alpha.1';
+const version = process.env.XORA_ENGINE_VERSION ?? '1.0.0';
 const dataDir = process.env.XORA_ENGINE_DATA ?? path.join(homedir(), '.xora-engine');
 const parentPort = (process as unknown as { parentPort?: ParentPort }).parentPort;
 

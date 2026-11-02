@@ -145,12 +145,24 @@ const BUNDLES: Readonly<Record<string, { readonly suffix: string; readonly break
     'factory-broken': { suffix: '', breakHost: true },
 };
 
+/**
+ * The version of a drill bundle. After a pre-release the suffix extends it (`1.0.0-alpha.1.drill.2`); after a release
+ * it becomes a pre-release of the next patch (`1.0.1-drill.2`): bundle versions must be semver, and the online update
+ * only takes a version newer than the running one. An empty suffix is the build's own version.
+ */
+function drillVersion(base: string, suffix: string): string {
+    if (!suffix) return base;
+    if (base.includes('-')) return `${base}${suffix}`;
+    const [major = 0, minor = 0, patch = 0] = (base.split('+')[0] ?? base).split('.').map(Number);
+    return `${major}.${minor}.${patch + 1}-${suffix.replace(/^\./, '')}`;
+}
+
 /** Makes and signs the bundles; make-bundle.ts (and the signing key) only load here, never on a test machine. */
 async function makeBundles(root: string, base: string): Promise<Record<string, DrillBundle>> {
     const { makeBundle } = await import('./make-bundle.ts');
     const made: Record<string, DrillBundle> = {};
     for (const [name, { suffix, breakHost }] of Object.entries(BUNDLES)) {
-        made[name] = await makeBundle({ out: path.join(root, name), version: `${base}${suffix}`, breakHost });
+        made[name] = await makeBundle({ out: path.join(root, name), version: drillVersion(base, suffix), breakHost });
     }
     return made;
 }
@@ -162,7 +174,7 @@ async function loadBundles(from: string, root: string, base: string): Promise<Re
     for (const [name, { suffix }] of Object.entries(BUNDLES)) {
         const dir = path.join(root, name);
         const manifest = JSON.parse(await readFile(path.join(dir, 'manifest.json'), 'utf8')) as BundleManifest;
-        if (manifest.version !== `${base}${suffix}`) {
+        if (manifest.version !== drillVersion(base, suffix)) {
             throw new Error(`${name} is ${manifest.version}, made for another build than ${base}`);
         }
         loaded[name] = { dir, manifest };
