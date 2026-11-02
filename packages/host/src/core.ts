@@ -258,6 +258,10 @@ export class HostCore {
             log: this.log,
             orgsDir: this.paths.orgsDir,
             membersDir: this.paths.membersDir,
+            skillLibraryDir: this.paths.skillLibraryDir,
+            approvals: this.approvals,
+            // The organization assistant's GitHub search goes through the host's fetch (tests give a fake one).
+            ...(options.fetch ? { hub: { fetch: options.fetch } } : {}),
             onRoutinesChanged: () => this.#syncTriggers(),
         });
         this.subagents = new SubagentService({

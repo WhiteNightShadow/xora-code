@@ -133,6 +133,7 @@ const AGENT_KEYS = new Set([
     'category',
     'tier',
     'model',
+    'skills',
     'description',
     'tools',
     'mode',
@@ -257,6 +258,13 @@ function applyAgentFile(
         description: asText(data.description) ?? kept?.description,
         prompt: prompt !== '' ? prompt : (kept?.prompt ?? template?.prompt ?? ''),
         tools: tools ?? kept?.tools,
+        ...(data.skills !== undefined
+            ? asTextList(data.skills).length > 0
+                ? { skills: asTextList(data.skills) }
+                : {}
+            : kept?.skills
+              ? { skills: kept.skills }
+              : {}),
         mode:
             (asEnum(PERMISSION_MODES, data.mode, 'mode', warn) as PermissionMode | undefined) ??
             kept?.mode ??

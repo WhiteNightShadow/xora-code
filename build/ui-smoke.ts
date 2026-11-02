@@ -483,6 +483,20 @@ try {
         await stop.click();
         await page.locator('.team .badge', { hasText: /已停止|已暂停|失败/ }).waitFor();
     }
+    // A run that is over can be archived; the project's team board lists it apart and can delete it (03).
+    await page.locator('.team').getByRole('button', { name: '归档', exact: true }).click();
+    await page.locator('.project__board', { hasText: '团队' }).first().click();
+    await page
+        .locator('.team-board')
+        .getByRole('button', { name: /已归档/ })
+        .click();
+    const archivedRun = page.locator('.team-board__run', { hasText: '把hello.txt整理一下' });
+    await archivedRun.waitFor();
+    await step(page, '团队看板列出归档的运行');
+    await archivedRun.getByRole('button', { name: '删除', exact: true }).click();
+    await page.locator('.modal').getByRole('button', { name: '删除', exact: true }).click();
+    await archivedRun.waitFor({ state: 'detached' });
+    await step(page, '结束的团队运行能删除');
 
     // M5: the project's workflow board; "new workflow" asks for a description (not sent here).
     await mkdir(path.join(repo, '.xora', 'workflows'), { recursive: true });
@@ -490,7 +504,7 @@ try {
         path.join(repo, '.xora', 'workflows', 'tidy.yaml'),
         'name: tidy\ntitle: 整理文件\nsteps:\n  - id: done\n    gate: human\n    message: 整理好了吗\n',
     );
-    await page.locator('.project__board').first().click();
+    await page.locator('.project__board', { hasText: '工作流' }).first().click();
     await page.locator('.wf-board').getByRole('button', { name: '新建工作流', exact: true }).click();
     await page.locator('.modal textarea').pressSequentially('每天跑一遍测试');
     if ((await page.locator('.modal textarea').inputValue()) !== '每天跑一遍测试') {
@@ -596,6 +610,12 @@ try {
     await routine.locator('.toggle').click();
     await page.locator('.routine.is-off', { hasText: '冒烟早检' }).waitFor();
     await step(page, '停用例行任务');
+    // Designing a member in a conversation starts from what the user needs (06 §21; not sent here).
+    await page.locator('.sidebar__nav', { hasText: '成员' }).click();
+    await page.getByRole('button', { name: '对话建人', exact: true }).click();
+    await page.locator('.modal textarea').waitFor();
+    await page.locator('.modal').getByRole('button', { name: '取消', exact: true }).click();
+    await step(page, '成员页能对话建人');
 } catch (error) {
     reportFailure(error);
     console.error(

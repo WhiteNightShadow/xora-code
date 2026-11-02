@@ -506,3 +506,11 @@
     max-width: 320px;
     margin-bottom: var(--xk-space-2);
 }
+
+/* A member's skills from the skill library (06 §21). */
+.member-detail__skills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: var(--xk-space-2);
+}

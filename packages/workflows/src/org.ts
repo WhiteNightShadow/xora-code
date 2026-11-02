@@ -75,6 +75,8 @@ export interface AgentSpec {
     readonly prompt: string;
     /** Tool whitelist the host enforces; absent means {@link ROLE_TOOLS} of the role. */
     readonly tools?: readonly string[];
+    /** Skills of the skill library it brings to its work (06 §21), by name. */
+    readonly skills?: readonly string[];
     readonly mode: PermissionMode;
     /** Only the supervisor delegates (06 §9: no recursive delegation). */
     readonly canDelegate: boolean;

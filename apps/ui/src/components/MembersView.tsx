@@ -587,6 +587,15 @@ function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Mem
                     </h1>
                     <div className="member-detail__meta">{roleLine(member, s)}</div>
                     {description && <p className="member-detail__desc">{description}</p>}
+                    {member.skills && member.skills.length > 0 && (
+                        <div className="member-detail__skills">
+                            {member.skills.map((skill) => (
+                                <Badge key={skill} tone="accent">
+                                    {skill}
+                                </Badge>
+                            ))}
+                        </div>
+                    )}
                 </div>
                 <div className="row member-detail__actions">
                     <button
@@ -690,6 +699,8 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
                     ...(description.trim() ? { description: description.trim() } : {}),
                     prompt,
                     ...(base.tools ? { tools: [...base.tools] } : {}),
+                    // The form does not edit skills: a member keeps the ones it has (06 §21).
+                    ...(existing?.skills ? { skills: [...existing.skills] } : {}),
                 },
             }),
         );
@@ -806,11 +817,75 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
 }
 
 /** The members page in the main area (06 §19): every member as a card, or one member in full. */
+/**
+ * 06 §21: "design a member in a conversation": the user says what they need, and the organization assistant asks,
+ * finds skills on GitHub, installs the ones the user approves and saves the member, in a thread of its own.
+ */
+function AssistantDialog({ onClose }: { onClose: () => void }) {
+    const s = useStrings();
+    const projects = useApp((state) => state.projects);
+    const selected = useApp((state) => state.selectedProjectId);
+    const [projectId, setProjectId] = useState(selected ?? projects[0]?.id ?? '');
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const start = async () => {
+        setBusy(true);
+        const thread = await attempt(() =>
+            host.call('member.assistant', { projectId, text: text.trim() }, { timeoutMs: 120_000 }),
+        );
+        setBusy(false);
+        if (thread) {
+            useApp.setState((state) => ({ threads: { ...state.threads, [thread.id]: thread } }));
+            onClose();
+            await selectThread(thread.id);
+        }
+    };
+    return (
+        <Modal title={s.members.assistant} onClose={onClose}>
+            <div className="dialog">
+                <Field label={s.members.assistantAsk} hint={s.members.assistantHint}>
+                    <textarea
+                        className="textarea"
+                        rows={4}
+                        value={text}
+                        placeholder={s.members.assistantPlaceholder}
+                        onChange={(event) => setText(event.target.value)}
+                    />
+                </Field>
+                {projects.length > 1 && (
+                    <Field label={s.members.assistantProject}>
+                        <Select
+                            label={s.members.assistantProject}
+                            value={projectId}
+                            options={projects.map((project) => ({ value: project.id, label: project.name }))}
+                            onChange={setProjectId}
+                        />
+                    </Field>
+                )}
+                <div className="row">
+                    <button
+                        type="button"
+                        className="button button--primary"
+                        disabled={busy || !text.trim() || !projectId}
+                        onClick={() => void start()}
+                    >
+                        {busy ? <Spinner /> : null} {s.members.assistantStart}
+                    </button>
+                    <button type="button" className="button" onClick={onClose}>
+                        {s.common.cancel}
+                    </button>
+                </div>
+            </div>
+        </Modal>
+    );
+}
+
 export function MembersPage() {
     const s = useStrings();
     const members = useApp((state) => state.members);
     const memberId = useApp((state) => state.memberId);
     const [editing, setEditing] = useState<Editing | undefined>();
+    const [assisting, setAssisting] = useState(false);
     const selected = memberId ? members.find((member) => member.id === memberId) : undefined;
     return (
         <div className="members">
@@ -823,9 +898,14 @@ export function MembersPage() {
                             <h1>{s.members.title}</h1>
                             <p className="members__intro">{s.members.intro}</p>
                         </div>
-                        <button type="button" className="button button--primary" onClick={() => setEditing({})}>
-                            <Icon name="plus" size={14} /> {s.members.create}
-                        </button>
+                        <div className="row">
+                            <button type="button" className="button" onClick={() => setEditing({})}>
+                                <Icon name="plus" size={14} /> {s.members.create}
+                            </button>
+                            <button type="button" className="button button--primary" onClick={() => setAssisting(true)}>
+                                <Icon name="message" size={14} /> {s.members.assistant}
+                            </button>
+                        </div>
                     </header>
                     {members.length === 0 ? (
                         <Empty>
@@ -841,6 +921,7 @@ export function MembersPage() {
                 </>
             )}
             {editing && <MemberEditor editing={editing} onClose={() => setEditing(undefined)} />}
+            {assisting && <AssistantDialog onClose={() => setAssisting(false)} />}
         </div>
     );
 }

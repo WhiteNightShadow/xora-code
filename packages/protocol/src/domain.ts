@@ -859,6 +859,8 @@ export const MemberSchema = z.object({
     prompt: z.string(),
     /** Its tool whitelist; absent means its role's. */
     tools: z.array(z.string()).optional(),
+    /** Skills of the skill library it brings to its work (06 §21). */
+    skills: z.array(z.string()).optional(),
     /** Built in, the user's (every project, `<data>/orgs/default/agents/`) or the project's (`.xora/agents/`). */
     source: z.enum(['builtin', 'user', 'project']),
     /** A built-in member the user changed: a file of the user's overrides it. */

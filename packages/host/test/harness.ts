@@ -55,7 +55,7 @@ export function hosts(engineEntry: () => string) {
     const shells = new Map<string, MemoryShell>();
     const open: Harness[] = [];
     return {
-        async start(dataDir: string): Promise<Harness> {
+        async start(dataDir: string, extra: { readonly fetch?: typeof fetch } = {}): Promise<Harness> {
             const shell = shells.get(dataDir) ?? new MemoryShell({ dataDir });
             shells.set(dataDir, shell);
             const core = await HostCore.create({
@@ -66,6 +66,7 @@ export function hosts(engineEntry: () => string) {
                 engineEntry: engineEntry(),
                 skipShellEnv: true,
                 log: quiet,
+                ...extra,
             });
             const channel = new MessageChannel();
             const hostSide = core.connectUi(domPortTransport(channel.port1));

@@ -489,6 +489,8 @@ export const methods = {
                         description: z.string().max(500).optional(),
                         prompt: z.string().max(20_000),
                         tools: z.array(z.string()).optional(),
+                        /** Skills of the skill library, by name (06 §21). */
+                        skills: z.array(z.string().max(64)).max(20).optional(),
                     })
                     .strict(),
             })
@@ -504,6 +506,11 @@ export const methods = {
      * One part of a member's memory (06 §21): `member` its general notes, `project` its notes in a project, `team`
      * the notes all members share in a project. `projects` lists the projects it has notes in.
      */
+    /** 06 §21: opens a conversation with the organization assistant, which designs and changes members with skills. */
+    'member.assistant': {
+        params: z.object({ projectId: IdSchema, text: z.string().min(1).max(20_000) }).strict(),
+        result: ThreadMetaSchema,
+    },
     'member.memory': {
         params: z
             .object({

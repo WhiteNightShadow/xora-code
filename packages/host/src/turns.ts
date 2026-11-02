@@ -413,6 +413,11 @@ export class TurnService {
         return this.#running.has(threadId);
     }
 
+    /** The id of the turn running in a thread, for cards a host tool shows in it. */
+    currentTurn(threadId: string): string | undefined {
+        return this.#running.get(threadId)?.turnId;
+    }
+
     live(threadId: string): Item[] {
         return [...(this.#running.get(threadId)?.live.values() ?? [])];
     }

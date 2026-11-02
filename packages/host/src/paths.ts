@@ -16,6 +16,8 @@ export interface HostPaths {
     readonly orgsDir: string;
     /** Each member's memory and routines (06 §19), `members/<id>/`. */
     readonly membersDir: string;
+    /** Skills installed from GitHub for members (06 §21); not a source every thread gets. */
+    readonly skillLibraryDir: string;
     /** The user's own workflows, runnable in any project (06 §11). */
     readonly workflowsDir: string;
     readonly logsDir: string;
@@ -37,6 +39,7 @@ export function hostPaths(root: string): HostPaths {
         extensionsDir: path.join(root, 'extensions'),
         orgsDir: path.join(root, 'orgs'),
         membersDir: path.join(root, 'members'),
+        skillLibraryDir: path.join(root, 'skill-library'),
         workflowsDir: path.join(root, 'workflows'),
         logsDir: path.join(root, 'logs'),
     };

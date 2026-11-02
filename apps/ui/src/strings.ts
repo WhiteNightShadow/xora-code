@@ -856,6 +856,13 @@ const zh = {
         title: '成员',
         intro: '团队里的每个成员都有自己的职责、模型档位和权限，还有一份它自己记的长期记忆。可以直接派活、在任何线程里@它，或者给它设例行任务；工作流和团队也用这些成员。',
         create: '新建成员',
+        assistant: '对话建人',
+        assistantAsk: '要什么样的成员',
+        assistantHint:
+            '组织助手会问清楚，再去github找专业的skill给你挑；你在卡片上同意后才安装（固定版本，默认只读不运行脚本），最后建好成员。也能说“把某某改成……”',
+        assistantPlaceholder: '比如：一个会抓网页、懂反爬的成员，用经济档模型',
+        assistantProject: '在哪个项目里谈',
+        assistantStart: '开始',
         back: '全部成员',
         details: '详情',
         builtin: '内置',
@@ -1878,6 +1885,14 @@ const en: Widen<Strings> = {
         title: 'Members',
         intro: 'Every member of the team has a job, a model tier and permissions, and a long-term memory it keeps itself. Hand one work directly, @ it in any thread, or give it routines; workflows and teams use the same members.',
         create: 'New member',
+        assistant: 'Design in a chat',
+        assistantAsk: 'What member do you need',
+        assistantHint:
+            'The organization assistant asks what it needs, finds expert skills on GitHub for you to pick, installs them once you approve each on a card (pinned, read-only by default), then saves the member. It can change a member too.',
+        assistantPlaceholder:
+            'For example: a member who scrapes web pages and knows anti-bot measures, on the economy tier',
+        assistantProject: 'Project to talk in',
+        assistantStart: 'Start',
         back: 'All members',
         details: 'Details',
         builtin: 'Built in',
