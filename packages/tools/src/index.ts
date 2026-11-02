@@ -15,6 +15,16 @@ export {
     highRiskOfCommand,
     highRiskOfTool,
 } from './high-risk.ts';
+export {
+    collapseSpace,
+    declaredCharset,
+    decodeEntities,
+    type HtmlElement,
+    type HtmlNode,
+    htmlToMarkdown,
+    type PageText,
+    parseHtml,
+} from './html.ts';
 export { createJobRegistry, type ManagedJobRegistry, ShellJob } from './jobs.ts';
 export { type DiagnosticsReport, LspClient } from './lsp/client.ts';
 export { type EditReport, formatEditNote, LSP_EDIT_NOTE, newDiagnostics } from './lsp/format.ts';
@@ -39,6 +49,16 @@ export {
 } from './lsp/manager.ts';
 export type { Diagnostic } from './lsp/protocol.ts';
 export { DEFAULT_SERVERS, type ServerCommand, type ServerSpec } from './lsp/servers.ts';
+export {
+    checkDestination,
+    isPrivateAddress,
+    parseWebUrl,
+    WEB_MAX_BYTES,
+    WEB_MAX_REDIRECTS,
+    WEB_TIMEOUT_MS,
+    WEB_USER_AGENT,
+    WebError,
+} from './net.ts';
 export {
     checkPathAccess,
     checkPathSyntax,
@@ -97,6 +117,18 @@ export { LIST_MAX_ENTRIES, type ListInput, listTool } from './tools/list.ts';
 export { LSP_MAX_FILES, type LspInput, lspTool } from './tools/lsp.ts';
 export { READ_DEFAULT_LIMIT, READ_MAX_LINE_CHARS, type ReadInput, readTool } from './tools/read.ts';
 export { renderTodos, type TodoInput, todoTool } from './tools/todo.ts';
+export {
+    parseBingRss,
+    parseDuckDuckGoHtml,
+    type SearchResult,
+    WEB_FETCH_MAX_CHARS,
+    WEB_SEARCH_DEFAULT_RESULTS,
+    WEB_SEARCH_MAX_RESULTS,
+    type WebFetchInput,
+    type WebSearchInput,
+    webFetchTool,
+    webSearchTool,
+} from './tools/web.ts';
 export { type WriteInput, writeTool } from './tools/write.ts';
 export { truncateLine, truncateMiddle } from './truncate.ts';
 export type * from './types.ts';

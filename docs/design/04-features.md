@@ -37,7 +37,7 @@
 | read、list、glob、grep | 读文件、列目录、按模式找文件、ripgrep搜索 | 放行 |
 | edit、write、apply_patch | 精确替换、写文件、兼容codex的patch格式 | 询问；自动编辑模式下放行 |
 | bash | 在pty里执行，支持超时和后台任务；输出过长时截断，完整输出存为artifact | 询问；只读命令白名单放行 |
-| web_fetch、web_search | 抓网页并转成markdown；搜索走厂商的服务端工具或配置好的搜索api | 按域名询问 |
+| web_fetch、web_search | web_fetch抓http(s)网页：html转成markdown（有main或article时只取它们，去掉脚本、样式和导航），json格式化，其他文本原样，图片、pdf等二进制文件不读；一次最多返回约2万字符，更长的整篇存为artifact，可以用read、grep看，或带start接着取；拒绝本机和内网地址（跳转后的地址也查）和带账号密码的网址。web_search不用key：先查bing rss，失败、没有结果或结果跟查询不沾边时改查duckduckgo。还没做：配置的搜索api、厂商的服务端搜索工具 | 按域名询问；全权模式下放行 |
 | browser | 驱动内置预览：打开、截图、点击、读dom、看控制台 | 询问 |
 | git | status、diff、log、commit、branch；危险操作单独询问 | 只读部分放行 |
 | lsp | 诊断、定义、引用、悬停、符号（见下面的“语言服务器”） | 放行 |

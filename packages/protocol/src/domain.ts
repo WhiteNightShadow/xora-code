@@ -383,7 +383,10 @@ export const RuleSchema = z.object({
     projectId: z.string().optional(),
     /** Tool name, or `*` for any tool. */
     tool: z.string(),
-    /** Command prefix for shell tools, path glob for file tools, `*` for any input. */
+    /**
+     * Command prefix for shell tools, path glob for file tools, a domain for fetches (its subdomains too), `*` for
+     * any input.
+     */
     pattern: z.string(),
     decision: z.enum(['allow', 'ask', 'deny']),
     createdAt: z.number(),

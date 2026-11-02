@@ -17,6 +17,8 @@ export interface CallFacts {
     readonly readOnly: boolean;
     readonly command?: string;
     readonly readOnlyCommand?: boolean;
+    /** Where a fetch goes: rules and "allow for this session" match its host name and the domains above it. */
+    readonly url?: string;
     /** Absolute paths the call touches. */
     readonly paths: readonly string[];
     readonly outside: readonly string[];
@@ -134,7 +136,8 @@ export function risksOf(facts: CallFacts): Risk[] {
         if (facts.readOnlyCommand !== true) {
             risks.add('unknown_command');
         }
-    } else if (!facts.readOnly || WRITE_KINDS.has(facts.kind)) {
+    } else if (facts.kind !== 'fetch' && (!facts.readOnly || WRITE_KINDS.has(facts.kind))) {
+        // A fetch only reads from the network; it is never read-only to the engine, so that it always asks.
         risks.add('write');
     }
     if (facts.kind === 'delete') {
@@ -158,17 +161,52 @@ export function risksOf(facts: CallFacts): Risk[] {
     return [...risks];
 }
 
-/** The pattern an "always allow" rule records for this call: a command prefix or `*`. */
+/** The host name a URL goes to, lower-cased and without a final dot; the URL as given when it does not parse. */
+export function urlHost(url: string): string {
+    try {
+        const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
+        if (host !== '') {
+            return host;
+        }
+    } catch {
+        // Not a URL: matched as written.
+    }
+    return url.trim();
+}
+
+/** Whether `host` is the domain `pattern` names or below it; `*.example.com` reads as `example.com`. */
+function hostMatches(host: string, pattern: string): boolean {
+    const domain = pattern.trim().toLowerCase().replace(/^\*\./, '').replace(/\.$/, '');
+    return domain !== '' && (host === domain || host.endsWith(`.${domain}`));
+}
+
+/** The pattern an "always allow" rule records for this call: a command prefix, a fetch's host name, or `*`. */
 export function rulePattern(facts: CallFacts): string {
     if (facts.command) {
         const words = facts.command.trim().split(/\s+/).slice(0, 2);
         return words.join(' ');
+    }
+    if (facts.url !== undefined) {
+        return urlHost(facts.url);
     }
     return '*';
 }
 
 export function sessionKey(facts: CallFacts): string {
     return `${facts.toolName}:${rulePattern(facts)}`;
+}
+
+/** Whether "allow for this session" covers the call: the same key, or for a fetch a domain above its host. */
+function sessionAllowed(facts: CallFacts, allows: ReadonlySet<string>): boolean {
+    if (allows.has(sessionKey(facts))) {
+        return true;
+    }
+    if (facts.url === undefined) {
+        return false;
+    }
+    const host = urlHost(facts.url);
+    const prefix = `${facts.toolName}:`;
+    return [...allows].some((key) => key.startsWith(prefix) && hostMatches(host, key.slice(prefix.length)));
 }
 
 function ruleMatches(rule: Rule, facts: CallFacts, context: PolicyContext): boolean {
@@ -184,6 +222,9 @@ function ruleMatches(rule: Rule, facts: CallFacts, context: PolicyContext): bool
     if (facts.command !== undefined) {
         const command = facts.command.trim();
         return command === rule.pattern || command.startsWith(`${rule.pattern} `);
+    }
+    if (facts.url !== undefined) {
+        return hostMatches(urlHost(facts.url), rule.pattern);
     }
     if (facts.paths.length === 0) {
         return false;
@@ -281,7 +322,7 @@ export function decide(facts: CallFacts, context: PolicyContext): PolicyResult {
     if (allow) {
         return { decision: 'allow', risks, reason: text.ruleAllow, ruleId: allow.id };
     }
-    if (context.sessionAllows.has(sessionKey(facts))) {
+    if (sessionAllowed(facts, context.sessionAllows)) {
         return { decision: 'allow', risks, reason: text.sessionAllow };
     }
     return { decision: base.decision, risks, reason: base.reason };

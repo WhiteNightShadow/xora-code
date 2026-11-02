@@ -158,6 +158,43 @@ async function runDone(ui: Ui, runId: string) {
     }, `run ${runId}`);
 }
 
+/** A scout that fetches a page; a page on this machine, so that web_fetch refuses it without going anywhere. */
+const RESEARCH = `
+name: research
+steps:
+  - id: look
+    agent: scout
+    task: 看一下状态页
+`;
+const STATUS_PAGE = 'http://127.0.0.1:9/status';
+
+/** The scout fetches the status page, then hands in what it got. */
+function fetchingScout(request: { body: unknown }): MockTurn | undefined {
+    const chat = body(request);
+    if (!chat) return undefined;
+    const last = chat.messages.at(-1);
+    if (last?.role !== 'tool') {
+        return call({ name: 'web_fetch', arguments: { url: STATUS_PAGE } });
+    }
+    return lastCall(chat) === 'web_fetch'
+        ? call({ name: 'step_result', arguments: { summary: textOf(last.content).slice(0, 300) } })
+        : say('done');
+}
+
+/** The tool calls named `name` in the run's step threads. */
+async function stepToolCalls(ui: Ui, runId: string, name: string): Promise<ItemOf<'tool_call'>[]> {
+    const threads = await ui.request('thread.list', { includeArchived: true });
+    const calls: ItemOf<'tool_call'>[] = [];
+    for (const thread of threads.filter((item) => item.workflowRunId === runId && item.taskId)) {
+        const snapshot = await ui.request('thread.read', { threadId: thread.id });
+        for (const event of snapshot.events) {
+            const item = event.kind === 'item.completed' ? (event.payload as { item: Item }).item : undefined;
+            if (item?.type === 'tool_call' && item.name === name) calls.push(item);
+        }
+    }
+    return calls;
+}
+
 /** The run's step threads by step id: their modes. */
 async function stepModes(ui: Ui, runId: string): Promise<Record<string, string>> {
     const threads = await ui.request('thread.list', { includeArchived: true });
@@ -305,6 +342,44 @@ steps:
             expect.objectContaining({ approvalId: card.id, status: 'allowed', decidedBy: 'policy' }),
         ]);
     }, 60_000);
+
+    it("lets a full-access run's read-only agents fetch without asking; other runs ask about the domain", async () => {
+        server.respondWith(fetchingScout);
+        const { ui, project } = await setUp({ '.xora/workflows/research.yaml': RESEARCH });
+        const seen = approveAll(ui, [], new Set(['web_fetch']));
+        await ui.request('project.trust', { projectId: project.id, trusted: true });
+
+        const full = await ui.request('workflow.start', {
+            projectId: project.id,
+            key: 'project:research',
+            mode: 'full',
+        });
+        expect(await runDone(ui, full.id)).toMatchObject({ status: 'completed' });
+        expect(seen.map((approval) => approval.toolName)).toEqual([]);
+        // The scout stayed read-only, and its fetch ran: web_fetch itself refused the address on this machine.
+        expect(await stepModes(ui, full.id)).toEqual({ look: 'plan' });
+        expect(await stepToolCalls(ui, full.id, 'web_fetch')).toEqual([
+            expect.objectContaining({
+                status: 'failed',
+                output: expect.stringContaining('127.0.0.1 is a local or private network address'),
+            }),
+        ]);
+
+        const asked = await ui.request('workflow.start', { projectId: project.id, key: 'project:research' });
+        const card = await waitFor(() => seen.find((approval) => approval.toolName === 'web_fetch'), 'fetch card');
+        expect(card).toMatchObject({
+            toolKind: 'fetch',
+            summary: STATUS_PAGE,
+            risks: ['network'],
+            alwaysScopes: ['project', 'global'],
+        });
+        // "Always allow" remembers the domain.
+        await ui.request('approval.respond', { approvalId: card.id, decision: 'allow_always', scope: 'project' });
+        expect(await runDone(ui, asked.id)).toMatchObject({ status: 'completed' });
+        expect((await ui.request('rules.list', {})).map((rule) => [rule.tool, rule.pattern, rule.decision])).toEqual([
+            ['web_fetch', '127.0.0.1', 'allow'],
+        ]);
+    }, 120_000);
 });
 
 // Threads -------------------------------------------------------------------------------------------------------

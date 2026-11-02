@@ -189,6 +189,7 @@ interface ChatMessage {
 interface ChatBody {
     readonly model: string;
     readonly messages: readonly ChatMessage[];
+    readonly tools?: ReadonlyArray<{ function: { name: string; parameters?: unknown } }>;
 }
 
 function textOf(content: unknown): string {
@@ -754,5 +755,78 @@ steps:
         expect(messages.at(-1)?.text).toBe('checked: OK: hello(agent)');
         const [info] = await host.ui.request('workflow.list', { projectId: project.id });
         expect(info).toMatchObject({ key: 'project:greet', steps: [{ id: 'hello', type: 'agent' }] });
+    }, 120_000);
+
+    it('fails a step its agent hands in as blocked, with the reason, without asking for its outputs', async () => {
+        const research = `
+name: research
+steps:
+  - id: check
+    agent: reviewer
+    task: 看看现状
+  - id: look
+    agent: scout
+    needs: [check]
+    task: 查一下上游项目最新的发布说明
+    outputs: [notes]
+    onFailure: { retries: 0, escalate: false }
+  - id: write
+    agent: writer
+    needs: [look]
+    task: "根据{{steps.look.outputs.notes}}写更新说明"
+`;
+        const repo = gitRepo({ 'research.yaml': research });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            if (body.messages.at(-1)?.role === 'tool') return say('handed in');
+            switch (agentOf(body)) {
+                case 'Reviewer':
+                    return call({ name: 'step_result', arguments: { summary: 'nothing to note' } });
+                case 'Scout':
+                    return call({
+                        name: 'step_result',
+                        arguments: { summary: '没有查到', blocked: '上游仓库的发布页打不开' },
+                    });
+                default:
+                    return say('ok');
+            }
+        });
+        const host = await startHost(dataDir);
+        approve(host.ui, [], new Set());
+        await connectCustom(host.ui);
+        const project = await host.ui.request('project.add', { path: repo });
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        const before = server.requests.length;
+        const run = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:research' });
+        const done = await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run.id });
+            return current.status === 'completed' || current.status === 'failed' ? current : undefined;
+        }, 'blocked run');
+        expect(done.status).toBe('failed');
+        expect(done.note).toBe('步骤look失败：受阻：上游仓库的发布页打不开');
+        expect(done.steps.map((step) => [step.id, step.status])).toEqual([
+            ['check', 'succeeded'],
+            ['look', 'failed'],
+            ['write', 'cancelled'],
+        ]);
+        expect(done.steps[1]).toMatchObject({ note: '受阻：上游仓库的发布页打不开', attempts: 1 });
+
+        const bodies = server.requests.slice(before).map((request) => request.body as ChatBody);
+        // Handed in as blocked: nobody asked the scout for the outputs it did not give.
+        expect(bodies.some((body) => JSON.stringify(body.messages).includes('还缺这些outputs'))).toBe(false);
+        const scout = bodies.find((body) => agentOf(body) === 'Scout');
+        expect(textOf(scout?.messages.at(-1)?.content)).toContain('在blocked里写明原因');
+        expect(scout?.tools?.find((tool) => tool.function.name === 'step_result')?.function.parameters).toMatchObject({
+            properties: { blocked: { type: 'string' } },
+        });
+        // The role lists decide who may go on the web: the scout may, the reviewer may not.
+        const names = (body: ChatBody | undefined) => body?.tools?.map((tool) => tool.function.name) ?? [];
+        expect(names(scout)).toEqual(expect.arrayContaining(['web_fetch', 'web_search']));
+        const reviewer = bodies.find((body) => agentOf(body) === 'Reviewer');
+        expect(names(reviewer)).toContain('read');
+        expect(names(reviewer)).not.toContain('web_fetch');
+        expect(names(reviewer)).not.toContain('web_search');
     }, 120_000);
 });

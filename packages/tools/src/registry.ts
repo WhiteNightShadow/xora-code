@@ -8,6 +8,7 @@ import { listTool } from './tools/list.ts';
 import { lspTool } from './tools/lsp.ts';
 import { readTool } from './tools/read.ts';
 import { todoTool } from './tools/todo.ts';
+import { webFetchTool, webSearchTool } from './tools/web.ts';
 import { writeTool } from './tools/write.ts';
 import type { AnyTool } from './types.ts';
 
@@ -31,6 +32,8 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): AnyTool[]
         bashTool,
         bashOutputTool,
         bashKillTool,
+        webFetchTool,
+        webSearchTool,
         todoTool,
     ];
 }

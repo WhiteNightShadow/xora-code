@@ -46,6 +46,8 @@ describe('createDefaultTools', () => {
             'bash',
             'bash_output',
             'bash_kill',
+            'web_fetch',
+            'web_search',
             'todo',
         ]);
     });
@@ -56,6 +58,9 @@ describe('createDefaultTools', () => {
         expect(byName.get('apply_patch')?.kind).toBe('edit');
         expect(byName.get('bash')?.kind).toBe('execute');
         expect(byName.get('grep')?.kind).toBe('search');
+        // The web tools always ask the host, which decides by mode and by domain.
+        expect(byName.get('web_fetch')?.kind).toBe('fetch');
+        expect(byName.get('web_search')?.kind).toBe('fetch');
     });
 
     it('resolves targets against the working directory', () => {
@@ -71,6 +76,7 @@ describe('createDefaultTools', () => {
         expect(byName.get('list')?.targets({}, ctx)).toEqual([cwd]);
         expect(byName.get('grep')?.targets({ pattern: 'x' }, ctx)).toEqual([cwd]);
         expect(byName.get('todo')?.targets({ items: [] }, ctx)).toEqual([]);
+        expect(byName.get('web_fetch')?.targets({ url: 'https://example.com/' }, ctx)).toEqual([]);
     });
 });
 

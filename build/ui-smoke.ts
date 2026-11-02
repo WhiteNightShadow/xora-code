@@ -86,11 +86,26 @@ git('config', 'user.name', 'Smoke');
 await writeFile(path.join(repo, 'hello.txt'), 'hello\n');
 git('add', '.');
 git('commit', '-q', '-m', 'init');
-// A user workflow (any project, no trust needed): a read-only command, then a human gate.
+// A user workflow (any project, no trust needed): a command and an agent that hands in a file, then a human gate.
 await mkdir(path.join(dataDir, 'workflows'), { recursive: true });
 await writeFile(
     path.join(dataDir, 'workflows', 'smoke.yaml'),
-    'name: smoke\ntitle: 冒烟工作流\nsteps:\n  - id: status\n    run: git branch xora-smoke\n  - id: confirm\n    needs: [status]\n    gate: human\n    message: 冒烟确认\n',
+    [
+        'name: smoke',
+        'title: 冒烟工作流',
+        'steps:',
+        '  - id: status',
+        '    run: git branch xora-smoke',
+        '  - id: note',
+        '    agent: scout',
+        '    task: 交回hello.txt',
+        '    outputs: [report, facts]',
+        '  - id: confirm',
+        '    needs: [status, note]',
+        '    gate: human',
+        '    message: 冒烟确认',
+        '',
+    ].join('\n'),
 );
 
 const server = await startMockModelServer();
@@ -106,7 +121,25 @@ server.respondWith((request) => {
         // Let the server answer `/models` itself.
         return undefined;
     }
-    const messages = (request.body as { messages?: Array<{ role: string }> } | undefined)?.messages ?? [];
+    const body = request.body as
+        | { messages?: Array<{ role: string }>; tools?: Array<{ function?: { name?: string } }> }
+        | undefined;
+    const messages = body?.messages ?? [];
+    // A workflow step's agent hands its result in.
+    if (body?.tools?.some((tool) => tool.function?.name === 'step_result')) {
+        return messages.at(-1)?.role === 'tool'
+            ? openaiText('交回了。')
+            : openaiToolCalls([
+                  {
+                      name: 'step_result',
+                      arguments: JSON.stringify({
+                          summary: '交回了hello.txt',
+                          // Long, like real findings: the card folds it until it is opened.
+                          outputs: { report: 'hello.txt', facts: '1. hello.txt只有一行。'.repeat(60) },
+                      }),
+                  },
+              ]);
+    }
     if (messages.at(-1)?.role === 'tool') {
         return openaiText('已经把hello.txt改成hello world。');
     }
@@ -469,16 +502,32 @@ try {
         throw new Error('the deleted workflow file is still there');
     }
     await step(page, '看板上能信任项目、删除工作流');
-    // Run a workflow from the board; its command and its human gate are answered in the run view.
+    // Run a workflow from the board; its command and its human gate are answered in the run view, whose flow
+    // draws the steps as they go.
     const card = page.locator('.workflow-card', { hasText: '冒烟工作流' });
     await card.getByRole('button', { name: '运行', exact: true }).click();
     await card.getByRole('button', { name: '开始运行', exact: true }).click();
-    const command = page.locator('.workflow__approval', { hasText: 'git branch xora-smoke' });
+    await page.locator('.flow-node').nth(2).waitFor();
+    const command = page.locator('.team__approvals .approval', { hasText: 'git branch xora-smoke' });
     await command.getByRole('button', { name: '允许', exact: true }).click();
-    const gate = page.locator('.workflow__approval', { hasText: '冒烟确认' });
-    await gate.getByRole('button', { name: '允许', exact: true }).click();
+    const gate = page.locator('.team__approvals .approval', { hasText: '冒烟确认' });
+    await page.locator('.flow-node.is-waiting', { hasText: 'confirm' }).waitFor();
+    await step(page, '工作流停在人工关卡，执行流标出等你确认的一步');
+    await gate.getByRole('button', { name: '确认，继续', exact: true }).click();
     await page.locator('.team__goal .badge', { hasText: '完成' }).waitFor();
+    if ((await page.locator('.flow-node.is-succeeded').count()) !== 3) {
+        throw new Error('the flow does not show all three steps done');
+    }
     await step(page, '工作流运行到人工关卡，确认后完成');
+    // The file a step handed in opens in place.
+    await page.locator('.wf-file', { hasText: 'hello.txt' }).click();
+    await page.locator('.wf-preview__text', { hasText: 'hello' }).waitFor();
+    await step(page, '运行概览能直接查看产出的文件');
+    await page.keyboard.press('Escape');
+    await page.getByRole('tab', { name: '看板', exact: true }).click();
+    const done = page.locator('.board__column', { hasText: '完成' }).locator('.task-card');
+    await done.nth(2).waitFor();
+    await step(page, '运行看板按状态分列步骤');
 } catch (error) {
     reportFailure(error);
     console.error(

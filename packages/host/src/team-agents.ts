@@ -75,6 +75,8 @@ const BUILTIN_TOOLS = [
     'bash',
     'bash_output',
     'bash_kill',
+    'web_fetch',
+    'web_search',
     'todo',
 ];
 /** Built-ins that come with a whitelisted one. */

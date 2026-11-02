@@ -719,6 +719,11 @@ export class TurnRunner {
             call.name === 'bash' && typeof (call.input as { command?: unknown }).command === 'string'
                 ? (call.input as { command: string }).command
                 : undefined;
+        // The address a fetch goes to: the host asks, and remembers answers, per domain (10 §3).
+        const url =
+            call.kind === 'fetch' && typeof (call.input as { url?: unknown } | undefined)?.url === 'string'
+                ? (call.input as { url: string }).url
+                : undefined;
         const response = await this.#io.requestPermission({
             toolCall: {
                 toolCallId: call.id,
@@ -741,6 +746,7 @@ export class TurnRunner {
                     outside,
                     sensitive,
                     ...(command !== undefined ? { command, readOnlyCommand: isReadOnlyCommand(command) } : {}),
+                    ...(url !== undefined ? { url } : {}),
                     ...(hook?.ask ? { hookDecision: 'ask' } : hook?.allowed ? { hookDecision: 'allow' } : {}),
                 },
             },

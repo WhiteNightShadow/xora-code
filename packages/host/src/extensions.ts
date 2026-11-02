@@ -367,7 +367,7 @@ const CLAUDE_TOOL_NAMES: Readonly<Record<string, string>> = {
     grep: 'Grep',
     list: 'LS',
     todo: 'TodoWrite',
-    fetch: 'WebFetch',
+    web_fetch: 'WebFetch',
     web_search: 'WebSearch',
 };
 

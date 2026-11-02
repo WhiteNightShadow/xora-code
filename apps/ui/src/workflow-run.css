@@ -1,0 +1,509 @@
+/* Workflow run view (WorkflowRunView.tsx): the flow of steps, files handed in, step conclusions, file preview. */
+
+/* Flow ---------------------------------------------------------------------------------------------------------- */
+
+.wf-flow-card h3 {
+    flex-wrap: wrap;
+}
+
+.wf-flow-card__hint {
+    margin-left: auto;
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-regular);
+    color: var(--xk-text-faint);
+}
+
+.flow {
+    overflow-x: auto;
+    padding: 4px 2px 8px;
+}
+
+.flow__canvas {
+    position: relative;
+    margin: 0 auto;
+}
+
+.flow__edges {
+    position: absolute;
+    inset: 0;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.flow__edge {
+    fill: none;
+    stroke: var(--xk-border-strong);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 4;
+}
+
+.flow__edge.is-done {
+    stroke: var(--xk-ok);
+    stroke-dasharray: none;
+    opacity: 0.75;
+}
+
+.flow__edge.is-active {
+    stroke: var(--xk-accent);
+    stroke-dasharray: 6 5;
+    animation: flow-dash 0.9s linear infinite;
+}
+
+.flow__arrow {
+    fill: var(--xk-border-strong);
+}
+
+.flow__arrow.is-done {
+    fill: var(--xk-ok);
+}
+
+.flow__arrow.is-active {
+    fill: var(--xk-accent);
+}
+
+.flow-node {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--xk-border);
+    border-radius: 10px;
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-xs);
+    color: var(--xk-text);
+    text-align: left;
+    cursor: pointer;
+    transition:
+        transform var(--xk-duration-base) var(--xk-ease-out),
+        box-shadow var(--xk-duration-base) var(--xk-ease-out),
+        border-color var(--xk-duration-base) var(--xk-ease-out);
+    animation: xk-fade-up var(--xk-duration-base) var(--xk-ease-out) backwards;
+}
+
+.flow-node:hover {
+    transform: translateY(-1px);
+    border-color: var(--xk-border-strong);
+    box-shadow: var(--xk-shadow-md);
+}
+
+.flow-node:focus-visible {
+    outline: 2px solid var(--xk-accent);
+    outline-offset: 2px;
+}
+
+.flow-node__icon {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text-faint);
+}
+
+.flow-node__text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.flow-node__title,
+.flow-node__meta {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.flow-node__title {
+    font-size: var(--xk-text-sm);
+    font-weight: var(--xk-weight-medium);
+}
+
+.flow-node__meta {
+    font-size: var(--xk-text-2xs);
+    color: var(--xk-text-muted);
+}
+
+.flow-node.is-succeeded {
+    border-color: var(--xk-ok-border);
+}
+
+.flow-node.is-succeeded .flow-node__icon {
+    background: var(--xk-ok-subtle);
+    color: var(--xk-ok);
+}
+
+.flow-node.is-running {
+    border-color: var(--xk-accent);
+    box-shadow: 0 0 0 3px var(--xk-accent-subtle);
+}
+
+.flow-node.is-running .flow-node__icon {
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+}
+
+.flow-node.is-waiting,
+.flow-node.is-asking {
+    border-color: var(--xk-warn-border);
+    box-shadow: 0 0 0 3px var(--xk-warn-subtle);
+}
+
+.flow-node.is-waiting .flow-node__icon,
+.flow-node.is-asking .flow-node__icon {
+    background: var(--xk-warn-subtle);
+    color: var(--xk-warn);
+    animation: xk-pulse 1.8s ease-in-out infinite;
+}
+
+.flow-node.is-failed {
+    border-color: var(--xk-error-border);
+}
+
+.flow-node.is-failed .flow-node__icon {
+    background: var(--xk-error-subtle);
+    color: var(--xk-error);
+}
+
+.flow-node.is-skipped,
+.flow-node.is-cancelled {
+    border-style: dashed;
+    background: var(--xk-bg-subtle);
+    box-shadow: none;
+}
+
+.flow-node.is-skipped .flow-node__title,
+.flow-node.is-cancelled .flow-node__title {
+    color: var(--xk-text-muted);
+}
+
+.progress-bar__fill.is-failed {
+    background: linear-gradient(90deg, var(--xk-accent), var(--xk-error));
+}
+
+/* Files handed in --------------------------------------------------------------------------------------------- */
+
+.wf-files__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.wf-file {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--xk-border-subtle);
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text);
+    font-size: var(--xk-text-sm);
+    text-align: left;
+    cursor: pointer;
+    transition:
+        background var(--xk-duration-fast) var(--xk-ease-out),
+        border-color var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.wf-file:hover {
+    background: var(--xk-bg-hover);
+    border-color: var(--xk-border);
+}
+
+.wf-file > .icon,
+.wf-file > svg {
+    flex: none;
+    color: var(--xk-accent-text);
+}
+
+.wf-file__path {
+    font-family: var(--xk-font-mono);
+    font-size: var(--xk-text-code);
+    overflow-wrap: anywhere;
+}
+
+.wf-file__from {
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+}
+
+.wf-file__open {
+    margin-left: auto;
+    flex: none;
+    color: var(--xk-accent-text);
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-medium);
+}
+
+/* Step conclusions -------------------------------------------------------------------------------------------- */
+
+.wf-conclusions {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    align-items: start;
+}
+
+.wf-step-card {
+    scroll-margin: 80px;
+}
+
+.wf-step-card.is-running {
+    border-color: var(--xk-accent);
+}
+
+.wf-step-card.is-asking,
+.wf-step-card.is-waiting {
+    border-color: var(--xk-warn-border);
+}
+
+.wf-step-card.is-failed {
+    border-color: var(--xk-error-border);
+}
+
+.wf-step-card.is-skipped,
+.wf-step-card.is-cancelled {
+    border-style: dashed;
+}
+
+.wf-step-card.is-picked {
+    border-color: var(--xk-accent);
+    box-shadow: 0 0 0 3px var(--xk-accent-subtle);
+}
+
+.wf-step-card__deps {
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-faint);
+}
+
+.wf-step-card__note {
+    padding: 6px 10px;
+    border-radius: var(--xk-radius-sm);
+    background: var(--xk-bg-subtle);
+    font-size: var(--xk-text-sm);
+    line-height: var(--xk-leading-normal);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.wf-step-card__note.is-failed {
+    background: var(--xk-error-subtle);
+    color: var(--xk-error);
+}
+
+.wf-step-card__note.is-skipped {
+    background: var(--xk-warn-subtle);
+    color: var(--xk-warn);
+}
+
+/* Long conclusions stay folded, fading out, until the card opens. */
+.wf-step-card__more {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-2);
+    max-height: 168px;
+    overflow: hidden;
+}
+
+.wf-step-card__more:not(.is-open)::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 40px;
+    background: linear-gradient(transparent, var(--xk-bg-elevated));
+    pointer-events: none;
+}
+
+.wf-step-card__more.is-open {
+    max-height: none;
+}
+
+.wf-step-card__more .conclusion-card__body {
+    overflow-wrap: anywhere;
+}
+
+.wf-pill.is-succeeded {
+    background: var(--xk-ok-subtle);
+    color: var(--xk-ok);
+}
+
+.wf-pill.is-running {
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+}
+
+.wf-pill.is-waiting,
+.wf-pill.is-asking {
+    background: var(--xk-warn-subtle);
+    color: var(--xk-warn);
+}
+
+.wf-pill.is-failed {
+    background: var(--xk-error-subtle);
+    color: var(--xk-error);
+}
+
+/* Outputs and inputs as name and value. */
+.wf-outputs {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.wf-outputs__row {
+    display: grid;
+    grid-template-columns: minmax(64px, max-content) minmax(0, 1fr);
+    gap: 2px 10px;
+    font-size: var(--xk-text-sm);
+    line-height: var(--xk-leading-normal);
+}
+
+.wf-outputs dt {
+    font-family: var(--xk-font-mono);
+    font-size: var(--xk-text-code);
+    color: var(--xk-text-muted);
+}
+
+.wf-outputs dd {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.wf-file-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 8px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--xk-accent-text);
+    font-family: var(--xk-font-mono);
+    font-size: var(--xk-text-code);
+    cursor: pointer;
+}
+
+.wf-file-link:hover {
+    text-decoration: underline;
+}
+
+.wf-inputs {
+    margin-top: var(--xk-space-2);
+    font-size: var(--xk-text-sm);
+}
+
+.wf-inputs > summary {
+    cursor: pointer;
+    color: var(--xk-text-muted);
+    width: max-content;
+}
+
+.wf-inputs > summary:hover {
+    color: var(--xk-text);
+}
+
+.wf-inputs > .wf-outputs {
+    margin-top: var(--xk-space-2);
+    padding: 10px 12px;
+    border: 1px solid var(--xk-border-subtle);
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-subtle);
+}
+
+/* Board cards and the timeline -------------------------------------------------------------------------------- */
+
+/* Five columns fit the main area of a laptop window; narrower ones scroll. */
+.board.wf-run-board {
+    grid-template-columns: repeat(5, minmax(150px, 1fr));
+}
+
+.wf-card-text {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: var(--xk-text-xs);
+    line-height: var(--xk-leading-normal);
+    color: var(--xk-text-muted);
+    overflow-wrap: anywhere;
+}
+
+.progress-timeline__item.is-ok::before {
+    background: var(--xk-ok);
+}
+
+.progress-timeline__item.is-error::before {
+    background: var(--xk-error);
+}
+
+.progress-timeline__item.is-accent::before {
+    background: var(--xk-accent);
+}
+
+/* File preview ------------------------------------------------------------------------------------------------- */
+
+.wf-preview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-3);
+    min-height: 200px;
+}
+
+.wf-preview__doc {
+    font-size: var(--xk-text-md);
+    line-height: var(--xk-leading-relaxed);
+    overflow-wrap: anywhere;
+}
+
+.wf-preview__text {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-sunken);
+    font-family: var(--xk-font-mono);
+    font-size: var(--xk-text-code);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.wf-preview__image {
+    max-width: 100%;
+    border-radius: var(--xk-radius-md);
+}
+
+.wf-preview__note {
+    margin: 0;
+    color: var(--xk-text-muted);
+}
+
+@keyframes flow-dash {
+    to {
+        stroke-dashoffset: -11;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .flow-node,
+    .flow__edge.is-active,
+    .flow-node.is-waiting .flow-node__icon,
+    .flow-node.is-asking .flow-node__icon {
+        animation: none;
+    }
+
+    .flow-node,
+    .wf-file {
+        transition: none;
+    }
+}

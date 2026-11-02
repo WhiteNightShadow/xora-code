@@ -32,7 +32,7 @@ import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
+import { type CallFacts, highRiskLabel, highRiskOf, type PolicyResult } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { PromptService } from './prompts.ts';
 import type { ReviewService } from './review.ts';
@@ -208,6 +208,12 @@ export interface HostToolProvider {
      * absent means every tool of the project's servers. Servers none of them can match are not started.
      */
     readonly mcpTools?: readonly string[];
+    /**
+     * Whether fetches the thread's mode would ask about go ahead without a card, read at every call: a workflow run
+     * with full access lets its read-only agents look things up on the web. A rule that asks or denies, a path
+     * outside the workspace, a secret or a high-risk action still decides as usual.
+     */
+    allowFetch?(): boolean;
     handle(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
 }
 
@@ -1475,6 +1481,21 @@ export class TurnService {
         );
     }
 
+    /**
+     * A fetch the thread's host tools let through (see {@link HostToolProvider.allowFetch}): only when the question
+     * comes from the mode itself, not from a rule, a path outside the workspace, a secret or a high-risk action.
+     */
+    #fetchAllowed(threadId: string, facts: CallFacts, policy: PolicyResult): boolean {
+        return (
+            facts.kind === 'fetch' &&
+            policy.ruleId === undefined &&
+            facts.outside.length === 0 &&
+            facts.sensitive.length === 0 &&
+            !facts.highRisk &&
+            this.#hostTools.get(threadId)?.allowFetch?.() === true
+        );
+    }
+
     async #facts(running: RunningTurn, request: acp.RequestPermissionRequest): Promise<CallFacts> {
         const meta = xoraMeta(request._meta);
         const kind = toolKind(request.toolCall.kind);
@@ -1488,6 +1509,13 @@ export class TurnService {
         const paths = Array.isArray(meta?.targets)
             ? (meta.targets as string[])
             : (request.toolCall.locations ?? []).map((location) => location.path);
+        // The xora engine names the address of a fetch; an external agent's fetch usually has it in its input.
+        const url =
+            typeof meta?.url === 'string'
+                ? meta.url
+                : kind === 'fetch' && typeof rawInput?.url === 'string'
+                  ? rawInput.url
+                  : undefined;
         const roots = [running.cwd];
         let outside: string[];
         let sensitive: string[];
@@ -1526,6 +1554,7 @@ export class TurnService {
                               : isReadOnlyCommand(command),
                   }
                 : {}),
+            ...(url !== undefined ? { url } : {}),
             paths,
             outside,
             sensitive,
@@ -1587,6 +1616,12 @@ export class TurnService {
             !facts.highRisk
         ) {
             decision = 'allow';
+        } else if (
+            decision === 'ask' &&
+            hookDecision !== 'ask' &&
+            this.#fetchAllowed(running.threadId, facts, policy)
+        ) {
+            decision = 'allow';
         }
         if (decision === 'allow') {
             return select(true);
@@ -1600,7 +1635,9 @@ export class TurnService {
             return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : file;
         });
         const summary =
-            facts.command ?? (shown.length > 0 ? shown.join('\n') : (request.toolCall.title ?? facts.toolName));
+            facts.command ??
+            facts.url ??
+            (shown.length > 0 ? shown.join('\n') : (request.toolCall.title ?? facts.toolName));
         const title = request.toolCall.title ?? facts.toolName;
         let approvalItem: ItemOf<'approval'> | undefined;
         const outcome = await new Promise<Awaited<ReturnType<ApprovalService['request']>>>((resolve) => {

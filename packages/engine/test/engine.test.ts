@@ -185,6 +185,38 @@ describe('xora engine over ACP', () => {
         h.close();
     });
 
+    it('offers the web tools and asks before a fetch, naming its address', async () => {
+        server.reset();
+        server.respondWith((request) =>
+            lastRole(request.body) === 'tool'
+                ? openaiText('not fetched')
+                : openaiToolCalls([
+                      { name: 'web_fetch', arguments: JSON.stringify({ url: 'https://docs.example.com/guide' }) },
+                  ]),
+        );
+        const h = harness();
+        // Denied, so nothing goes out to the network.
+        h.answer = 'deny';
+        const sessionId = await newSession(h, workspace());
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'read the guide' }] });
+        const offered = (server.requests[0]?.body as { tools?: Array<{ function: { name: string } }> } | undefined)
+            ?.tools;
+        expect(offered?.map((tool) => tool.function.name)).toEqual(expect.arrayContaining(['web_fetch', 'web_search']));
+        expect(h.permissions).toHaveLength(1);
+        expect(h.permissions[0]?.toolCall).toMatchObject({
+            kind: 'fetch',
+            title: 'Fetch https://docs.example.com/guide',
+        });
+        expect(h.permissions[0]?._meta).toMatchObject({
+            xora: { toolName: 'web_fetch', readOnly: false, url: 'https://docs.example.com/guide' },
+        });
+        const toolMessage = (
+            server.requests.at(-1)?.body as { messages?: Array<{ role: string; content: string }> } | undefined
+        )?.messages?.at(-1);
+        expect(toolMessage?.content).toContain('The user denied this web_fetch call.');
+        h.close();
+    });
+
     it('feeds a denial back to the model and does not write', async () => {
         server.reset();
         server.respondWith((request) =>

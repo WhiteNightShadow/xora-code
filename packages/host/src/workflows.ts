@@ -176,6 +176,7 @@ const TEXT = bilingual(
             `还缺这些outputs：${missing.join('、')}。调用step_result补交，不要重做工作。`,
         askResult: '你还没有调用step_result。调用它交回summary和outputs，不要重做工作。',
         outputsMissing: (missing: readonly string[]) => `没有交出outputs：${missing.join('、')}`,
+        blocked: (reason: string) => `受阻：${reason}`,
         notPassed: (step: string) => `没有通过：${step}`,
         retryPrompt: (failure: string) => `上一次没有通过：${failure}\n\n继续完成这一步，完成后再调用step_result。`,
         escalated: (step: string) => `升档：${step}`,
@@ -194,7 +195,8 @@ const TEXT = bilingual(
             `之后我会运行验收命令\`${command}\`（引用的outputs用你交回的值代入），${
                 expectFail ? '它应该失败（退出码非0）' : '退出码为0才算通过'
             }。`,
-        promptScope: '只做这一步的事；做不到时说明原因，照样调用step_result。',
+        promptScope:
+            '只做这一步的事。做不到时（缺工具、工具被拒绝、要用的输入或文件不存在等）不要当作完成交差：调用step_result，在blocked里写明原因。',
         verifyLabel: '验收',
         verifyRefused: (command: string) => `验收命令被权限规则拒绝或没有被批准：${command}`,
         verifyFailed: (command: string, exit: number | null, expectPass: boolean, output: string) =>
@@ -298,6 +300,7 @@ const TEXT = bilingual(
         askResult:
             'You have not called step_result yet. Call it to hand in the summary and outputs; do not redo the work.',
         outputsMissing: (missing) => `Outputs not handed in: ${missing.join(', ')}`,
+        blocked: (reason) => `Blocked: ${reason}`,
         notPassed: (step) => `Did not pass: ${step}`,
         retryPrompt: (failure) =>
             `The last attempt did not pass: ${failure}\n\nKeep working on this step, then call step_result again.`,
@@ -317,7 +320,8 @@ const TEXT = bilingual(
             `Then I will run the verification command \`${command}\` (with the outputs it refers to filled in from what you hand in); ${
                 expectFail ? 'it should fail (a non-zero exit code)' : 'it passes only with exit code 0'
             }.`,
-        promptScope: 'Do only what this step asks. If you cannot, say why and call step_result all the same.',
+        promptScope:
+            'Do only what this step asks. If you cannot do it (a tool is missing or was refused, an input or file it needs does not exist, and so on), do not hand it in as done: call step_result with the reason in `blocked`.',
         verifyLabel: 'Verification',
         verifyRefused: (command) =>
             `The verification command was denied by a permission rule or not approved: ${command}`,
@@ -379,11 +383,19 @@ interface RunState {
     /** Steps whose host loop is running. */
     readonly working: Set<string>;
     /** `step_result` hand-ins of the current agent turn, by step id. */
-    readonly results: Map<string, { summary: string; outputs: Record<string, string> }>;
+    readonly results: Map<string, StepHandIn>;
     pumping: boolean;
     again: boolean;
     startTimer: ReturnType<typeof setTimeout> | undefined;
     broadcastTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** What an agent handed in with `step_result`. */
+interface StepHandIn {
+    readonly summary: string;
+    readonly outputs: Record<string, string>;
+    /** Why the agent could not do the step; the step fails with it. */
+    readonly blocked?: string;
 }
 
 /** How a step's host loop ended; `pending` puts it back for later (the run was paused). */
@@ -513,13 +525,16 @@ const STEP_RESULT_TOOL: HostToolProvider['tools'][number] = {
     name: 'step_result',
     description:
         'Hand in the result of this workflow step: `summary` says what you did and where the evidence is, `outputs` ' +
-        'holds the values the step declares (strings). Call it once at the end, then end your turn; the host runs ' +
-        'the verification, if any.',
+        'holds the values the step declares (strings). If you could not do what the step asks (a tool you need is ' +
+        'missing or was refused, an input or file it names does not exist, and so on), set `blocked` to the reason ' +
+        'instead of reporting the step as done: the step then fails with that reason. Call it once at the end, then ' +
+        'end your turn; the host runs the verification, if any.',
     parameters: {
         type: 'object',
         properties: {
             summary: { type: 'string' },
             outputs: { type: 'object', additionalProperties: { type: 'string' } },
+            blocked: { type: 'string', description: 'Why the step could not be done; leave it out when it was done' },
         },
         required: ['summary'],
         additionalProperties: false,
@@ -1833,7 +1848,8 @@ export class WorkflowService {
             } else {
                 let result = state.results.get(step.id);
                 let missing = step.outputs.filter((name) => !result?.outputs[name]);
-                if (!result || missing.length > 0) {
+                // A step the agent says it could not do is not asked for its outputs again.
+                if (result?.blocked === undefined && (!result || missing.length > 0)) {
                     const ask = result ? textOf(TEXT).askMissing(missing) : textOf(TEXT).askResult;
                     const repaired = await this.#turn(threadId, ask);
                     if (!this.#live(state)) return this.#interrupted(state);
@@ -1844,7 +1860,9 @@ export class WorkflowService {
                 }
                 summary = result?.summary ?? shorten(ended.lastText, SUMMARY_LIMIT);
                 outputs = result?.outputs ?? {};
-                if (missing.length > 0) {
+                if (result?.blocked !== undefined) {
+                    failure = textOf(TEXT).blocked(result.blocked);
+                } else if (missing.length > 0) {
                     failure = textOf(TEXT).outputsMissing(missing);
                 } else if (step.verify) {
                     current.outputs = outputs;
@@ -1916,18 +1934,24 @@ export class WorkflowService {
             // Like team members (06 §8): the agent's MCP allowlist, and a person approves every high-risk action.
             mcpTools: mcpToolsOf(agent),
             highRiskApproval: true,
+            // With full access the run's read-only agents may look things up on the web without a card each time.
+            allowFetch: () => state.record.mode === 'full',
             layers: systemLayers(state.record.org, agent),
             handle: async (name, input) => {
                 if (name !== 'step_result') {
                     return fail(`Unknown tool ${name}`);
                 }
-                const value = input as { summary?: unknown; outputs?: unknown } | null;
-                if (typeof value?.summary !== 'string' || !value.summary.trim()) {
+                const value = input as { summary?: unknown; outputs?: unknown; blocked?: unknown } | null;
+                const blocked =
+                    typeof value?.blocked === 'string' && value.blocked.trim() ? value.blocked.trim() : undefined;
+                const summary =
+                    typeof value?.summary === 'string' && value.summary.trim() ? value.summary.trim() : blocked;
+                if (summary === undefined) {
                     return fail('`summary` is required.');
                 }
                 const outputs: Record<string, string> = {};
                 const ignored: string[] = [];
-                if (value.outputs && typeof value.outputs === 'object' && !Array.isArray(value.outputs)) {
+                if (value?.outputs && typeof value.outputs === 'object' && !Array.isArray(value.outputs)) {
                     for (const [key, raw] of Object.entries(value.outputs as Record<string, unknown>)) {
                         if (!declared.has(key)) {
                             ignored.push(key);
@@ -1936,7 +1960,10 @@ export class WorkflowService {
                         }
                     }
                 }
-                state.results.set(step.id, { summary: value.summary.trim(), outputs });
+                state.results.set(step.id, { summary, outputs, ...(blocked !== undefined ? { blocked } : {}) });
+                if (blocked !== undefined) {
+                    return ok('Recorded as blocked: the step fails with this reason. End your turn now.');
+                }
                 const missing = step.outputs.filter((key) => !outputs[key]);
                 return ok(
                     [

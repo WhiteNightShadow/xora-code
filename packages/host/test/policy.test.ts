@@ -1,6 +1,15 @@
 import type { PermissionMode, Rule } from '@xora/protocol';
 import { describe, expect, it } from 'vitest';
-import { type CallFacts, decide, highRiskOf, type PolicyContext, rulePattern, sessionKey } from '../src/policy.ts';
+import {
+    type CallFacts,
+    decide,
+    highRiskOf,
+    type PolicyContext,
+    risksOf,
+    rulePattern,
+    sessionKey,
+    urlHost,
+} from '../src/policy.ts';
 
 const root = '/work/project';
 
@@ -47,6 +56,9 @@ const command = facts({
     paths: [],
 });
 const fetchCall = facts({ toolName: 'web_fetch', kind: 'fetch', readOnly: true, paths: [] });
+/** A fetch as the xora engine reports it: never read-only, with its address. */
+const fetchPage = (url: string): CallFacts =>
+    facts({ toolName: 'web_fetch', kind: 'fetch', readOnly: false, url, paths: [] });
 
 /**
  * Permission contract (10 §2): every mode × call category. "Ask" outcomes are the ones a user must see; a
@@ -58,6 +70,11 @@ const TABLE: Array<[string, CallFacts, Record<PermissionMode, 'allow' | 'ask' | 
     ['read-only command', readOnlyCommand, { ask: 'allow', auto_edit: 'allow', plan: 'allow', full: 'allow' }],
     ['other command', command, { ask: 'ask', auto_edit: 'ask', plan: 'deny', full: 'allow' }],
     ['network fetch', fetchCall, { ask: 'ask', auto_edit: 'ask', plan: 'ask', full: 'allow' }],
+    [
+        'fetch of a page',
+        fetchPage('https://docs.example.com/guide'),
+        { ask: 'ask', auto_edit: 'ask', plan: 'ask', full: 'allow' },
+    ],
     [
         'read outside workspace',
         facts({ paths: ['/etc/hosts'], outside: ['/etc/hosts'] }),
@@ -234,5 +251,68 @@ describe('risks', () => {
             context('ask'),
         );
         expect(result.risks).toEqual(expect.arrayContaining(['execute', 'unknown_command', 'outside_workspace']));
+    });
+});
+
+describe('fetches (10 §3: rules match by domain)', () => {
+    const rule = (decision: Rule['decision'], pattern: string, tool = 'web_fetch'): Rule => ({
+        id: `${decision}-${pattern}`,
+        scope: 'global',
+        tool,
+        pattern,
+        decision,
+        createdAt: 0,
+    });
+    const docs = fetchPage('https://Docs.Example.com./guide?x=1');
+
+    it('remember the host name of the page', () => {
+        expect(urlHost('https://Docs.Example.com./guide')).toBe('docs.example.com');
+        expect(urlHost('http://[::1]:8080/')).toBe('[::1]');
+        expect(urlHost('not a url')).toBe('not a url');
+        expect(rulePattern(docs)).toBe('docs.example.com');
+        expect(sessionKey(docs)).toBe('web_fetch:docs.example.com');
+        // A search names no page: its allowance covers every search.
+        expect(rulePattern(facts({ toolName: 'web_search', kind: 'fetch', readOnly: false, paths: [] }))).toBe('*');
+    });
+
+    it('match a rule for the domain or a domain above it, never a look-alike', () => {
+        const rules = [rule('allow', 'example.com')];
+        expect(decide(docs, context('ask', rules))).toMatchObject({ decision: 'allow', ruleId: 'allow-example.com' });
+        expect(decide(fetchPage('https://example.com/'), context('plan', rules)).decision).toBe('allow');
+        for (const url of ['https://notexample.com/', 'https://example.com.evil.net/', 'https://example.org/']) {
+            expect(decide(fetchPage(url), context('ask', rules)).decision, url).toBe('ask');
+        }
+        expect(decide(docs, context('ask', [rule('allow', '*.example.com')])).decision).toBe('allow');
+        expect(decide(docs, context('ask', [rule('allow', 'other.example.com')])).decision).toBe('ask');
+        // Another tool's rule does not apply; a rule for any tool does.
+        expect(decide(docs, context('ask', [rule('allow', 'example.com', 'web_search')])).decision).toBe('ask');
+        expect(decide(docs, context('ask', [rule('allow', 'example.com', '*')])).decision).toBe('allow');
+    });
+
+    it('obey deny and ask rules for a domain in every mode', () => {
+        expect(decide(docs, context('full', [rule('deny', 'example.com')]))).toMatchObject({
+            decision: 'deny',
+            ruleId: 'deny-example.com',
+        });
+        expect(decide(docs, context('full', [rule('ask', 'docs.example.com')]))).toMatchObject({
+            decision: 'ask',
+            ruleId: 'ask-docs.example.com',
+        });
+    });
+
+    it('allow for the session the domain asked about and the domains below it', () => {
+        const allowed = [sessionKey(fetchPage('https://example.com/a'))];
+        expect(decide(fetchPage('https://example.com/b'), context('ask', [], allowed)).decision).toBe('allow');
+        expect(decide(fetchPage('https://api.example.com/v1'), context('plan', [], allowed)).decision).toBe('allow');
+        expect(decide(fetchPage('https://example.net/'), context('ask', [], allowed)).decision).toBe('ask');
+        expect(
+            decide({ ...fetchPage('https://example.com/'), toolName: 'other_fetch' }, context('ask', [], allowed))
+                .decision,
+        ).toBe('ask');
+    });
+
+    it('warn about the network, not about writing', () => {
+        expect(risksOf(docs)).toEqual(['network']);
+        expect(decide(docs, context('ask')).risks).toEqual(['network']);
     });
 });
