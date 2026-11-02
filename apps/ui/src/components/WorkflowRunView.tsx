@@ -4,7 +4,7 @@ import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
 import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format, type Strings } from '../strings.ts';
-import { absolutePath, filesIn, flowLevels, runFiles } from '../workflow-run.ts';
+import { absolutePath, briefSections, filesIn, flowLevels, type RunFile, runFiles, stepGist } from '../workflow-run.ts';
 import { Choices, Popover } from './Controls.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
@@ -120,6 +120,15 @@ function StepLink({ step }: { step: WorkflowStepRun }) {
             {s.workflow.openStep}
         </button>
     ) : null;
+}
+
+/** A step's status as a small icon: a spinner while it works, a warning sign while it waits for you. */
+function StatusIcon({ step, held }: { step: WorkflowStepRun; held: boolean }) {
+    return step.status === 'running' && !held ? (
+        <Spinner size={12} />
+    ) : (
+        <Icon name={held ? 'alert' : STATUS_ICONS[step.status]} size={13} />
+    );
 }
 
 /** The steps as a flow from left to right: a column per depth of dependency, a line for each dependency. */
@@ -255,11 +264,7 @@ function FlowGraph({
                                 onClick={() => onPick(step.id)}
                             >
                                 <span className="flow-node__icon">
-                                    {step.status === 'running' && !held ? (
-                                        <Spinner size={12} />
-                                    ) : (
-                                        <Icon name={held ? 'alert' : STATUS_ICONS[step.status]} size={13} />
-                                    )}
+                                    <StatusIcon step={step} held={held} />
                                 </span>
                                 <span className="flow-node__text">
                                     <span className="flow-node__title">{step.title}</span>
@@ -327,7 +332,7 @@ function RunApprovals({ run }: { run: WorkflowRun }) {
     );
 }
 
-/** A step's outputs as name and value; long values stay folded until the card opens. */
+/** A step's outputs as name and value; a value that names files opens them in place. */
 function Outputs({
     step,
     root,
@@ -368,8 +373,11 @@ function Outputs({
     );
 }
 
-/** One step's conclusion: status, who did it, how long and at what cost, what it handed in, why it failed. */
-function StepCard({
+/**
+ * One stage of the process in a line, the second layer under the brief: status, who did it, the gist of what it
+ * concluded. Opened, it shows everything the step handed in.
+ */
+function StageRow({
     step,
     root,
     held,
@@ -385,64 +393,325 @@ function StepCard({
     onPreview: (path: string) => void;
 }) {
     const s = useStrings();
-    const [open, setOpen] = useState(false);
+    const [expanded, setExpanded] = useState(false);
+    useEffect(() => {
+        if (picked) setExpanded(true);
+    }, [picked]);
+    const open = expanded || picked;
     const took = stepTime(step, now);
-    const long =
-        (step.summary?.length ?? 0) > 280 ||
-        Object.values(step.outputs).some((value) => value.length > 160) ||
-        Object.keys(step.outputs).length > 3;
-    const working = step.status === 'running';
+    const gist =
+        stepGist(step) ||
+        (held
+            ? s.workflow.stepAsking
+            : step.status === 'running'
+              ? s.team.working
+              : step.status === 'pending'
+                ? s.team.waiting
+                : s.workflow.noSummary);
     return (
-        <article
+        <li
             id={`wf-step-${step.id}`}
-            className={`conclusion-card wf-step-card is-${step.status}${held ? ' is-asking' : ''}${picked ? ' is-picked' : ''}`}
+            className={`wf-stage is-${step.status}${held ? ' is-asking' : ''}${picked ? ' is-picked' : ''}`}
         >
-            <header>
-                <span className="conclusion-card__title">{step.title}</span>
-                <span className={`status-pill wf-pill is-${held ? 'asking' : step.status}`}>
-                    {held ? s.workflow.stepAsking : s.workflow.stepStatuses[step.status]}
+            <button type="button" className="wf-stage__row" aria-expanded={open} onClick={() => setExpanded(!open)}>
+                <span className="wf-stage__icon">
+                    <StatusIcon step={step} held={held} />
+                </span>
+                <span className="wf-stage__main">
+                    <span className="wf-stage__title">
+                        {step.title}
+                        <span className="wf-stage__who">{typeLabel(step, s)}</span>
+                    </span>
+                    <span className="wf-stage__gist">{gist}</span>
+                </span>
+                <span className="wf-stage__side">
+                    {took !== undefined && <span>{spell(took, s)}</span>}
+                    {step.cost && step.cost.amount > 0 && <span>{formatMoney(step.cost)}</span>}
+                </span>
+                <Icon name="chevronRight" size={14} className="wf-stage__chevron" />
+            </button>
+            {open && (
+                <div className="wf-stage__detail">
+                    {step.note && <div className={`wf-note is-${step.status}`}>{step.note}</div>}
+                    {step.summary && (
+                        <div className="conclusion-card__body">
+                            <Markdown text={step.summary} />
+                        </div>
+                    )}
+                    <Outputs step={step} root={root} onPreview={onPreview} />
+                    <div className="wf-stage__foot">
+                        {step.needs.length > 0 && (
+                            <span>{format(s.team.dependsOn, { ids: step.needs.join(', ') })}</span>
+                        )}
+                        {step.attempts > 1 && <span>{format(s.workflow.attempts, { count: step.attempts })}</span>}
+                        <StepLink step={step} />
+                    </div>
+                </div>
+            )}
+        </li>
+    );
+}
+
+interface Progress {
+    /** Steps done, with the skipped and failed ones. */
+    readonly steps: string;
+    readonly time: string;
+    /** Spent, against the budget when there is one. */
+    readonly cost: string;
+    /** Share of the steps that are settled, 0 to 1. */
+    readonly ratio: number;
+}
+
+/** How far the run got, in words: steps, time and money. */
+function progressOf(run: WorkflowRun, now: number, s: Strings): Progress {
+    const total = run.steps.length;
+    const count = (status: StepStatus) => run.steps.filter((step) => step.status === status).length;
+    const extra = [
+        ...(count('skipped') > 0 ? [format(s.workflow.skippedCount, { count: count('skipped') })] : []),
+        ...(count('failed') > 0 ? [format(s.workflow.failedCount, { count: count('failed') })] : []),
+    ];
+    const elapsed = (OVER.has(run.status) ? (run.endedAt ?? run.updatedAt) : now) - run.createdAt;
+    return {
+        steps:
+            format(s.workflow.progress, { done: count('succeeded'), total }) +
+            (extra.length > 0 ? format(s.workflow.progressExtra, { list: extra.join(s.workflow.listSep) }) : ''),
+        time: format(s.team.elapsed, { time: spell(elapsed, s) }),
+        cost: `${s.thread.cost} ${formatMoney(run.cost)}${run.budget ? ` / ${formatMoney(run.budget)}` : ''}`,
+        ratio: total > 0 ? run.steps.filter((step) => SETTLED.has(step.status)).length / total : 0,
+    };
+}
+
+function ProgressBar({ run, progress }: { run: WorkflowRun; progress: Progress }) {
+    return (
+        <div className="progress-bar" aria-hidden="true">
+            <div
+                className={`progress-bar__fill${run.status === 'failed' ? ' is-failed' : ''}`}
+                style={{ width: `${Math.round(progress.ratio * 100)}%` }}
+            />
+        </div>
+    );
+}
+
+/** The first layer while the run goes on: what it is doing, what waits for you, how far it got. */
+function LiveCard({ run, asking, progress }: { run: WorkflowRun; asking: Set<string>; progress: Progress }) {
+    const s = useStrings();
+    const held = (step: WorkflowStepRun) =>
+        step.status === 'waiting' || (step.status === 'running' && asking.has(step.id));
+    const doing = run.steps.filter((step) => step.status === 'running' && !held(step)).map((step) => step.title);
+    const waiting = run.steps.filter(held).map((step) => step.title);
+    return (
+        <section className="overview-card wf-brief is-live" aria-label={s.workflow.briefTitle}>
+            <header className="wf-brief__head">
+                <h3>
+                    {run.status === 'running' && <Spinner />}
+                    {s.workflow.statuses[run.status]}
+                </h3>
+                <span className="wf-brief__meta">
+                    <span>{progress.steps}</span>
+                    <span>{progress.time}</span>
+                    <span>{progress.cost}</span>
                 </span>
             </header>
-            <div className="conclusion-card__meta">
-                {step.title !== step.id && <code>{step.id}</code>}
-                <span>{typeLabel(step, s)}</span>
-                {step.attempts > 1 && <span>{format(s.workflow.attempts, { count: step.attempts })}</span>}
-                {took !== undefined && <span>{spell(took, s)}</span>}
-                {step.cost && step.cost.amount > 0 && <span>{formatMoney(step.cost)}</span>}
-            </div>
-            {step.needs.length > 0 && (
-                <div className="wf-step-card__deps">{format(s.team.dependsOn, { ids: step.needs.join(', ') })}</div>
+            <ProgressBar run={run} progress={progress} />
+            {doing.length > 0 && (
+                <p className="wf-brief__line">{format(s.workflow.doing, { steps: doing.join(s.workflow.listSep) })}</p>
             )}
-            {step.note && <div className={`wf-step-card__note is-${step.status}`}>{step.note}</div>}
-            <div className={`wf-step-card__more${open || !long ? ' is-open' : ''}`}>
-                {step.summary ? (
-                    <div className="conclusion-card__body">
-                        <Markdown text={step.summary} />
-                    </div>
-                ) : (
-                    !step.note && (
-                        <p className={`overview-muted${working ? ' overview-pulse' : ''}`}>
-                            {working
-                                ? s.team.working
-                                : step.status === 'pending'
-                                  ? s.team.waiting
-                                  : s.workflow.noSummary}
-                        </p>
-                    )
-                )}
-                <Outputs step={step} root={root} onPreview={onPreview} />
-            </div>
-            <footer>
-                {long ? (
-                    <button type="button" className="link" onClick={() => setOpen(!open)}>
-                        {open ? s.workflow.showLess : s.workflow.showMore}
+            {waiting.length > 0 && (
+                <p className="wf-brief__line is-warn">
+                    {format(s.workflow.waitingYou, { steps: waiting.join(s.workflow.listSep) })}
+                </p>
+            )}
+            <p className="overview-muted">{s.workflow.briefLater}</p>
+        </section>
+    );
+}
+
+/**
+ * The first layer once the run is over, written for whoever ordered it: what came of it, what is wrong, what to do
+ * next, and the files it handed in. How each step got there is one level down.
+ */
+function BriefCard({
+    run,
+    files,
+    progress,
+    onPreview,
+}: {
+    run: WorkflowRun;
+    files: readonly RunFile[];
+    progress: Progress;
+    onPreview: (path: string) => void;
+}) {
+    const s = useStrings();
+    const brief = run.brief;
+    const sections = brief?.status === 'ready' && brief.text ? briefSections(brief.text) : undefined;
+    const write = () =>
+        void attempt(() => host.call('workflow.brief', { runId: run.id })).then(
+            (updated) =>
+                updated &&
+                useApp.setState((state) => ({ workflowRuns: { ...state.workflowRuns, [updated.id]: updated } })),
+        );
+    return (
+        <section className={`overview-card wf-brief is-${run.status}`} aria-label={s.workflow.briefTitle}>
+            <header className="wf-brief__head">
+                <h3>{s.workflow.briefTitle}</h3>
+                <span className="wf-brief__meta">
+                    <Badge tone={runTone(run.status)}>{s.workflow.statuses[run.status]}</Badge>
+                    <span>{progress.steps}</span>
+                    <span>{progress.time}</span>
+                    <span>{progress.cost}</span>
+                </span>
+            </header>
+            {brief === undefined ? (
+                <div className="wf-brief__empty">
+                    <p>{s.workflow.briefMissing}</p>
+                    <button type="button" className="button button--small button--primary" onClick={write}>
+                        {s.workflow.briefWrite}
                     </button>
-                ) : (
-                    <span />
-                )}
-                <StepLink step={step} />
-            </footer>
-        </article>
+                </div>
+            ) : brief.status === 'writing' ? (
+                <div className="wf-brief__writing" aria-busy="true">
+                    <p className="overview-muted overview-pulse">{s.workflow.briefWriting}</p>
+                    <span className="wf-skeleton" />
+                    <span className="wf-skeleton" />
+                    <span className="wf-skeleton is-short" />
+                </div>
+            ) : brief.status === 'failed' ? (
+                <div className="wf-brief__empty">
+                    <p className="wf-brief__failed">{format(s.workflow.briefFailed, { note: brief.note ?? '' })}</p>
+                    <button type="button" className="button button--small" onClick={write}>
+                        {s.workflow.briefRetry}
+                    </button>
+                </div>
+            ) : sections ? (
+                <>
+                    <div className="wf-brief__conclusion">
+                        <Markdown text={sections.conclusion} />
+                    </div>
+                    <div className="wf-brief__grid">
+                        <div className="wf-brief__block is-problems">
+                            <h4>
+                                <Icon name="alert" size={14} />
+                                {s.workflow.problems}
+                            </h4>
+                            {sections.problems.length === 0 ? (
+                                <p className="overview-muted">{s.workflow.noProblems}</p>
+                            ) : (
+                                <ul>
+                                    {sections.problems.map((item) => (
+                                        <li key={item}>
+                                            <Markdown text={item} />
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                        <div className="wf-brief__block is-next">
+                            <h4>
+                                <Icon name="send" size={14} />
+                                {s.workflow.nextSteps}
+                            </h4>
+                            {sections.next.length === 0 ? (
+                                <p className="overview-muted">{s.workflow.noNextSteps}</p>
+                            ) : (
+                                <ol>
+                                    {sections.next.map((item) => (
+                                        <li key={item}>
+                                            <Markdown text={item} />
+                                        </li>
+                                    ))}
+                                </ol>
+                            )}
+                        </div>
+                    </div>
+                </>
+            ) : (
+                <div className="wf-brief__conclusion">
+                    <Markdown text={brief.text ?? ''} />
+                </div>
+            )}
+            {files.length > 0 && (
+                <div className="wf-brief__files">
+                    <span className="wf-brief__files-label">{s.workflow.deliverables}</span>
+                    {files.map((file) => (
+                        <button
+                            key={file.path}
+                            type="button"
+                            className="wf-file-chip"
+                            title={file.from}
+                            onClick={() => onPreview(file.path)}
+                        >
+                            <Icon name="file" size={13} />
+                            {file.path}
+                        </button>
+                    ))}
+                </div>
+            )}
+            {brief?.status === 'ready' && (
+                <footer className="wf-brief__foot">
+                    <time>
+                        {format(s.workflow.briefAt, {
+                            time: new Date(brief.at).toLocaleString(undefined, { hour12: false }),
+                        })}
+                    </time>
+                    <button type="button" className="link" onClick={write}>
+                        {s.workflow.briefRewrite}
+                    </button>
+                </footer>
+            )}
+        </section>
+    );
+}
+
+/** Asks about the run: a new thread answers with the run's record and files at hand. */
+function AskBox({ run }: { run: WorkflowRun }) {
+    const s = useStrings();
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const send = async () => {
+        const question = text.trim();
+        if (!question || busy) return;
+        setBusy(true);
+        const thread = await attempt(() =>
+            host.call('workflow.ask', { runId: run.id, question }, { timeoutMs: 120_000 }),
+        );
+        setBusy(false);
+        if (thread) {
+            setText('');
+            useApp.setState((state) => ({ threads: { ...state.threads, [thread.id]: thread } }));
+            openThread(thread.id);
+        }
+    };
+    return (
+        <section className="overview-card wf-ask" aria-label={s.workflow.askTitle}>
+            <h3>
+                <Icon name="message" size={15} />
+                {s.workflow.askTitle}
+                <span className="wf-hint">{s.workflow.askHint}</span>
+            </h3>
+            <textarea
+                className="textarea"
+                rows={2}
+                value={text}
+                placeholder={s.workflow.askPlaceholder}
+                onChange={(event) => setText(event.target.value)}
+                onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        void send();
+                    }
+                }}
+            />
+            <div className="row">
+                <button
+                    type="button"
+                    className="button button--primary"
+                    disabled={busy || !text.trim()}
+                    onClick={() => void send()}
+                >
+                    {busy ? <Spinner /> : null} {s.workflow.askButton}
+                </button>
+            </div>
+        </section>
     );
 }
 
@@ -494,7 +763,35 @@ function runEvents(run: WorkflowRun, s: Strings): RunEvent[] {
         .map(({ event }) => event);
 }
 
-/** The run at a glance (the default tab): the flow, progress, files handed in, each step's conclusion, a timeline. */
+function RunTimeline({ run }: { run: WorkflowRun }) {
+    const s = useStrings();
+    const [showAll, setShowAll] = useState(false);
+    const events = runEvents(run, s);
+    return (
+        <section className="overview-section" aria-label={s.workflow.timeline}>
+            <h3>{s.workflow.timeline}</h3>
+            <ol className="progress-timeline">
+                {(showAll ? events : events.slice(0, 8)).map((event) => (
+                    <li key={`${event.ts}:${event.text}`} className={`progress-timeline__item is-${event.tone}`}>
+                        <time>{new Date(event.ts).toLocaleTimeString(undefined, { hour12: false })}</time>
+                        <span>{event.text}</span>
+                    </li>
+                ))}
+            </ol>
+            {!showAll && events.length > 8 && (
+                <button type="button" className="link" onClick={() => setShowAll(true)}>
+                    {format(s.team.showAll, { count: events.length })}
+                </button>
+            )}
+        </section>
+    );
+}
+
+/**
+ * The run in layers (the default tab): first the result — the brief once it is over, what goes on while it runs —
+ * then the process, folded once the run is over: the flow and each stage's conclusion in a line, every detail a
+ * click further. A question about the run opens a thread that answers it.
+ */
 function RunOverview({
     run,
     asking,
@@ -513,99 +810,55 @@ function RunOverview({
     const s = useStrings();
     const project = useApp((state) => state.projects.find((item) => item.id === run.projectId));
     const root = project?.path ?? '';
-    const [showAll, setShowAll] = useState(false);
-    const total = run.steps.length;
-    const count = (status: StepStatus) => run.steps.filter((step) => step.status === status).length;
-    const done = count('succeeded');
-    const settled = run.steps.filter((step) => SETTLED.has(step.status)).length;
+    const over = OVER.has(run.status);
+    const [showProcess, setShowProcess] = useState<boolean | undefined>();
+    // A step picked on the flow or the board opens the process and stays open.
+    useEffect(() => {
+        if (picked !== undefined) setShowProcess(true);
+    }, [picked]);
+    const processOpen = picked !== undefined || (showProcess ?? !over);
+    const progress = progressOf(run, now, s);
     const files = runFiles(run, root);
-    const events = runEvents(run, s);
-    const elapsed = (OVER.has(run.status) ? (run.endedAt ?? run.updatedAt) : now) - run.createdAt;
-    const extra = [
-        ...(count('skipped') > 0 ? [format(s.workflow.skippedCount, { count: count('skipped') })] : []),
-        ...(count('failed') > 0 ? [format(s.workflow.failedCount, { count: count('failed') })] : []),
-    ];
     return (
         <div className="task-overview">
-            <section className="overview-card wf-flow-card" aria-label={s.workflow.flowTitle}>
-                <h3>
-                    {s.workflow.flowTitle}
-                    <span className="wf-flow-card__hint">{s.workflow.flowHint}</span>
-                </h3>
-                <FlowGraph run={run} asking={asking} now={now} onPick={onPick} />
-                <div className="overview-progress__row">
-                    <span>
-                        {format(s.workflow.progress, { done, total })}
-                        {extra.length > 0 ? `（${extra.join('，')}）` : ''}
-                    </span>
-                    <span>{format(s.team.elapsed, { time: spell(elapsed, s) })}</span>
-                    <span>
-                        {s.thread.cost} {formatMoney(run.cost)}
-                        {run.budget ? ` / ${formatMoney(run.budget)}` : ''}
-                    </span>
-                </div>
-                <div className="progress-bar" aria-hidden="true">
-                    <div
-                        className={`progress-bar__fill${run.status === 'failed' ? ' is-failed' : ''}`}
-                        style={{ width: `${total > 0 ? Math.round((settled / total) * 100) : 0}%` }}
-                    />
-                </div>
-            </section>
-
-            {files.length > 0 && (
-                <section className="overview-card wf-files" aria-label={s.workflow.deliverables}>
-                    <h3>
-                        <Icon name="file" size={15} />
-                        {s.workflow.deliverables}
-                    </h3>
-                    <ul className="wf-files__list">
-                        {files.map((file) => (
-                            <li key={file.path}>
-                                <button type="button" className="wf-file" onClick={() => onPreview(file.path)}>
-                                    <Icon name="file" size={14} />
-                                    <span className="wf-file__path">{file.path}</span>
-                                    <span className="wf-file__from">{file.from}</span>
-                                    <span className="wf-file__open">{s.workflow.view}</span>
-                                </button>
-                            </li>
-                        ))}
-                    </ul>
-                </section>
+            {over ? (
+                <BriefCard run={run} files={files} progress={progress} onPreview={onPreview} />
+            ) : (
+                <LiveCard run={run} asking={asking} progress={progress} />
             )}
-
-            <section className="overview-section" aria-label={s.workflow.conclusions}>
-                <h3>{s.workflow.conclusions}</h3>
-                <div className="conclusion-grid wf-conclusions">
-                    {run.steps.map((step) => (
-                        <StepCard
-                            key={step.id}
-                            step={step}
-                            root={root}
-                            held={asking.has(step.id) && step.status === 'running'}
-                            picked={picked === step.id}
-                            now={now}
-                            onPreview={onPreview}
-                        />
-                    ))}
-                </div>
-            </section>
-
-            <section className="overview-section" aria-label={s.workflow.timeline}>
-                <h3>{s.workflow.timeline}</h3>
-                <ol className="progress-timeline">
-                    {(showAll ? events : events.slice(0, 8)).map((event) => (
-                        <li key={`${event.ts}:${event.text}`} className={`progress-timeline__item is-${event.tone}`}>
-                            <time>{new Date(event.ts).toLocaleTimeString(undefined, { hour12: false })}</time>
-                            <span>{event.text}</span>
-                        </li>
-                    ))}
-                </ol>
-                {!showAll && events.length > 8 && (
-                    <button type="button" className="link" onClick={() => setShowAll(true)}>
-                        {format(s.team.showAll, { count: events.length })}
-                    </button>
+            <section className="overview-section wf-process" aria-label={s.workflow.process}>
+                <button
+                    type="button"
+                    className="wf-process__toggle"
+                    aria-expanded={processOpen}
+                    onClick={() => setShowProcess(!processOpen)}
+                >
+                    <Icon name="chevronRight" size={14} className="wf-process__chevron" />
+                    <span className="wf-process__title">{s.workflow.process}</span>
+                    <span className="wf-process__summary">{processOpen ? s.workflow.processHint : progress.steps}</span>
+                </button>
+                {processOpen && (
+                    <>
+                        <div className="overview-card wf-flow-card">
+                            <FlowGraph run={run} asking={asking} now={now} onPick={onPick} />
+                        </div>
+                        <ol className="wf-stages">
+                            {run.steps.map((step) => (
+                                <StageRow
+                                    key={step.id}
+                                    step={step}
+                                    root={root}
+                                    held={asking.has(step.id) && step.status === 'running'}
+                                    picked={picked === step.id}
+                                    now={now}
+                                    onPreview={onPreview}
+                                />
+                            ))}
+                        </ol>
+                    </>
                 )}
             </section>
+            <AskBox run={run} />
         </div>
     );
 }
@@ -706,9 +959,7 @@ function StepDetail({
                     <Markdown text={step.summary} />
                 </div>
             )}
-            <div className="wf-step-card__more is-open">
-                <Outputs step={step} root={root} onPreview={onPreview} />
-            </div>
+            <Outputs step={step} root={root} onPreview={onPreview} />
         </li>
     );
 }
@@ -959,11 +1210,14 @@ export function WorkflowRunView({ runId }: { runId: string }) {
             )}
             {tab === 'board' && <RunBoard run={run} asking={asking} now={now} onPick={pick} />}
             {tab === 'steps' && (
-                <ol className="workflow-steps">
-                    {run.steps.map((step) => (
-                        <StepDetail key={step.id} step={step} root={root} onPreview={setPreview} />
-                    ))}
-                </ol>
+                <>
+                    <ol className="workflow-steps">
+                        {run.steps.map((step) => (
+                            <StepDetail key={step.id} step={step} root={root} onPreview={setPreview} />
+                        ))}
+                    </ol>
+                    <RunTimeline run={run} />
+                </>
             )}
             {preview !== undefined && <FilePreview run={run} path={preview} onClose={() => setPreview(undefined)} />}
         </div>

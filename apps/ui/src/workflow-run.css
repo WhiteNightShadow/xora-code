@@ -1,17 +1,421 @@
-/* Workflow run view (WorkflowRunView.tsx): the flow of steps, files handed in, step conclusions, file preview. */
+/*
+ * Workflow run view (WorkflowRunView.tsx), in layers: the conclusion (or what goes on while it runs), then the
+ * process folded under it — the flow and a line per stage — and a box to ask about the run; file preview.
+ */
 
-/* Flow ---------------------------------------------------------------------------------------------------------- */
+/* Conclusion ---------------------------------------------------------------------------------------------------- */
 
-.wf-flow-card h3 {
-    flex-wrap: wrap;
+.wf-brief {
+    gap: var(--xk-space-3);
+    border-left: 3px solid var(--xk-accent);
 }
 
-.wf-flow-card__hint {
-    margin-left: auto;
+.wf-brief.is-completed {
+    border-left-color: var(--xk-ok);
+}
+
+.wf-brief.is-failed {
+    border-left-color: var(--xk-error);
+}
+
+.wf-brief.is-cancelled {
+    border-left-color: var(--xk-border-strong);
+}
+
+.wf-brief__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+}
+
+.wf-brief__head h3 {
+    margin-right: auto;
+    font-size: var(--xk-text-lg);
+}
+
+.wf-brief__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+.wf-brief__conclusion {
+    font-size: var(--xk-text-md);
+    line-height: var(--xk-leading-relaxed);
+    overflow-wrap: anywhere;
+}
+
+.wf-brief__conclusion .markdown > :first-child {
+    margin-top: 0;
+}
+
+.wf-brief__conclusion .markdown > :last-child {
+    margin-bottom: 0;
+}
+
+.wf-brief__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: var(--xk-space-3);
+}
+
+.wf-brief__block {
+    padding: 10px 14px 12px;
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-subtle);
+    border: 1px solid var(--xk-border-subtle);
+}
+
+.wf-brief__block.is-problems {
+    background: var(--xk-warn-subtle);
+    border-color: var(--xk-warn-border);
+}
+
+.wf-brief__block.is-next {
+    background: var(--xk-accent-subtle);
+    border-color: color-mix(in srgb, var(--xk-accent) 25%, transparent);
+}
+
+.wf-brief__block h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 6px;
+    font-size: var(--xk-text-sm);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.wf-brief__block.is-problems h4 {
+    color: var(--xk-warn);
+}
+
+.wf-brief__block.is-next h4 {
+    color: var(--xk-accent-text);
+}
+
+.wf-brief__block ul,
+.wf-brief__block ol {
+    margin: 0;
+    padding-left: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: var(--xk-text-sm);
+    line-height: var(--xk-leading-normal);
+    overflow-wrap: anywhere;
+}
+
+.wf-brief__line {
+    margin: 0;
+    font-size: var(--xk-text-sm);
+}
+
+.wf-brief__line.is-warn {
+    color: var(--xk-warn);
+    font-weight: var(--xk-weight-medium);
+}
+
+.wf-brief__empty {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--xk-space-3);
+}
+
+.wf-brief__empty p {
+    margin: 0;
+    color: var(--xk-text-muted);
+}
+
+.wf-brief__failed {
+    color: var(--xk-error);
+}
+
+.wf-brief__writing {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.wf-brief__writing p {
+    margin: 0;
+}
+
+.wf-skeleton {
+    display: block;
+    height: 12px;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--xk-bg-subtle), var(--xk-bg-sunken), var(--xk-bg-subtle));
+    background-size: 200% 100%;
+    animation: wf-shimmer 1.4s ease-in-out infinite;
+}
+
+.wf-skeleton.is-short {
+    width: 60%;
+}
+
+.wf-brief__files {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+}
+
+.wf-brief__files-label {
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+.wf-file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    padding: 4px 10px;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-bg-elevated);
+    color: var(--xk-accent-text);
+    font-family: var(--xk-font-mono);
+    font-size: var(--xk-text-code);
+    cursor: pointer;
+    overflow-wrap: anywhere;
+    transition:
+        background var(--xk-duration-fast) var(--xk-ease-out),
+        border-color var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.wf-file-chip:hover {
+    background: var(--xk-bg-hover);
+    border-color: var(--xk-border-strong);
+}
+
+.wf-brief__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--xk-space-2);
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-faint);
+}
+
+.wf-brief__block li .markdown p {
+    margin: 0;
+}
+
+/* Process ------------------------------------------------------------------------------------------------------- */
+
+.wf-process__toggle {
+    align-self: flex-start;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 2px 0;
+    border: 0;
+    background: none;
+    color: var(--xk-text);
+    text-align: left;
+    cursor: pointer;
+}
+
+.wf-process__chevron {
+    color: var(--xk-text-muted);
+    transition: transform var(--xk-duration-base) var(--xk-ease-out);
+}
+
+.wf-process__toggle[aria-expanded="true"] .wf-process__chevron {
+    transform: rotate(90deg);
+}
+
+.wf-process__title {
+    font-size: var(--xk-text-md);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.wf-process__summary,
+.wf-hint {
     font-size: var(--xk-text-xs);
     font-weight: var(--xk-weight-regular);
     color: var(--xk-text-faint);
 }
+
+.wf-hint {
+    margin-left: auto;
+}
+
+.wf-stages {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg-elevated);
+    overflow: hidden;
+}
+
+.wf-stage {
+    scroll-margin: 80px;
+}
+
+.wf-stage + .wf-stage {
+    border-top: 1px solid var(--xk-border-subtle);
+}
+
+.wf-stage.is-picked {
+    background: var(--xk-accent-subtle);
+}
+
+.wf-stage__row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border: 0;
+    background: none;
+    color: var(--xk-text);
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.wf-stage__row:hover {
+    background: var(--xk-bg-hover);
+}
+
+.wf-stage__icon {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text-faint);
+}
+
+.wf-stage.is-succeeded .wf-stage__icon {
+    background: var(--xk-ok-subtle);
+    color: var(--xk-ok);
+}
+
+.wf-stage.is-running .wf-stage__icon {
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+}
+
+.wf-stage.is-waiting .wf-stage__icon,
+.wf-stage.is-asking .wf-stage__icon {
+    background: var(--xk-warn-subtle);
+    color: var(--xk-warn);
+}
+
+.wf-stage.is-failed .wf-stage__icon {
+    background: var(--xk-error-subtle);
+    color: var(--xk-error);
+}
+
+.wf-stage__main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.wf-stage__title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 8px;
+    font-size: var(--xk-text-sm);
+    font-weight: var(--xk-weight-medium);
+}
+
+.wf-stage__who {
+    font-size: var(--xk-text-2xs);
+    font-weight: var(--xk-weight-regular);
+    color: var(--xk-text-faint);
+}
+
+.wf-stage__gist {
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.wf-stage.is-failed .wf-stage__gist {
+    color: var(--xk-error);
+}
+
+.wf-stage.is-skipped .wf-stage__gist {
+    color: var(--xk-warn);
+}
+
+.wf-stage__side {
+    flex: none;
+    display: flex;
+    gap: 10px;
+    font-size: var(--xk-text-2xs);
+    color: var(--xk-text-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+.wf-stage__chevron {
+    flex: none;
+    color: var(--xk-text-faint);
+    transition: transform var(--xk-duration-base) var(--xk-ease-out);
+}
+
+.wf-stage__row[aria-expanded="true"] .wf-stage__chevron {
+    transform: rotate(90deg);
+}
+
+.wf-stage__detail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-2);
+    padding: 2px 14px 14px 48px;
+    animation: xk-fade-in var(--xk-duration-base) var(--xk-ease-out) both;
+}
+
+.wf-stage__detail .conclusion-card__body {
+    overflow-wrap: anywhere;
+}
+
+.wf-stage__foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-faint);
+}
+
+.wf-stage__foot > .link {
+    margin-left: auto;
+}
+
+/* Asking about the run ----------------------------------------------------------------------------------------- */
+
+.wf-ask h3 {
+    flex-wrap: wrap;
+}
+
+.wf-ask textarea {
+    width: 100%;
+    resize: vertical;
+}
+
+/* Flow ---------------------------------------------------------------------------------------------------------- */
 
 .flow {
     overflow-x: auto;
@@ -185,105 +589,9 @@
     background: linear-gradient(90deg, var(--xk-accent), var(--xk-error));
 }
 
-/* Files handed in --------------------------------------------------------------------------------------------- */
+/* Step details ------------------------------------------------------------------------------------------------ */
 
-.wf-files__list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.wf-file {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    border: 1px solid var(--xk-border-subtle);
-    border-radius: var(--xk-radius-md);
-    background: var(--xk-bg-subtle);
-    color: var(--xk-text);
-    font-size: var(--xk-text-sm);
-    text-align: left;
-    cursor: pointer;
-    transition:
-        background var(--xk-duration-fast) var(--xk-ease-out),
-        border-color var(--xk-duration-fast) var(--xk-ease-out);
-}
-
-.wf-file:hover {
-    background: var(--xk-bg-hover);
-    border-color: var(--xk-border);
-}
-
-.wf-file > .icon,
-.wf-file > svg {
-    flex: none;
-    color: var(--xk-accent-text);
-}
-
-.wf-file__path {
-    font-family: var(--xk-font-mono);
-    font-size: var(--xk-text-code);
-    overflow-wrap: anywhere;
-}
-
-.wf-file__from {
-    color: var(--xk-text-faint);
-    font-size: var(--xk-text-xs);
-}
-
-.wf-file__open {
-    margin-left: auto;
-    flex: none;
-    color: var(--xk-accent-text);
-    font-size: var(--xk-text-xs);
-    font-weight: var(--xk-weight-medium);
-}
-
-/* Step conclusions -------------------------------------------------------------------------------------------- */
-
-.wf-conclusions {
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    align-items: start;
-}
-
-.wf-step-card {
-    scroll-margin: 80px;
-}
-
-.wf-step-card.is-running {
-    border-color: var(--xk-accent);
-}
-
-.wf-step-card.is-asking,
-.wf-step-card.is-waiting {
-    border-color: var(--xk-warn-border);
-}
-
-.wf-step-card.is-failed {
-    border-color: var(--xk-error-border);
-}
-
-.wf-step-card.is-skipped,
-.wf-step-card.is-cancelled {
-    border-style: dashed;
-}
-
-.wf-step-card.is-picked {
-    border-color: var(--xk-accent);
-    box-shadow: 0 0 0 3px var(--xk-accent-subtle);
-}
-
-.wf-step-card__deps {
-    font-size: var(--xk-text-xs);
-    color: var(--xk-text-faint);
-}
-
-.wf-step-card__note {
+.wf-note {
     padding: 6px 10px;
     border-radius: var(--xk-radius-sm);
     background: var(--xk-bg-subtle);
@@ -293,64 +601,14 @@
     overflow-wrap: anywhere;
 }
 
-.wf-step-card__note.is-failed {
+.wf-note.is-failed {
     background: var(--xk-error-subtle);
     color: var(--xk-error);
 }
 
-.wf-step-card__note.is-skipped {
+.wf-note.is-skipped {
     background: var(--xk-warn-subtle);
     color: var(--xk-warn);
-}
-
-/* Long conclusions stay folded, fading out, until the card opens. */
-.wf-step-card__more {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: var(--xk-space-2);
-    max-height: 168px;
-    overflow: hidden;
-}
-
-.wf-step-card__more:not(.is-open)::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 40px;
-    background: linear-gradient(transparent, var(--xk-bg-elevated));
-    pointer-events: none;
-}
-
-.wf-step-card__more.is-open {
-    max-height: none;
-}
-
-.wf-step-card__more .conclusion-card__body {
-    overflow-wrap: anywhere;
-}
-
-.wf-pill.is-succeeded {
-    background: var(--xk-ok-subtle);
-    color: var(--xk-ok);
-}
-
-.wf-pill.is-running {
-    background: var(--xk-accent-subtle);
-    color: var(--xk-accent-text);
-}
-
-.wf-pill.is-waiting,
-.wf-pill.is-asking {
-    background: var(--xk-warn-subtle);
-    color: var(--xk-warn);
-}
-
-.wf-pill.is-failed {
-    background: var(--xk-error-subtle);
-    color: var(--xk-error);
 }
 
 /* Outputs and inputs as name and value. */
@@ -488,6 +746,15 @@
     color: var(--xk-text-muted);
 }
 
+@keyframes wf-shimmer {
+    from {
+        background-position: 100% 0;
+    }
+    to {
+        background-position: -100% 0;
+    }
+}
+
 @keyframes flow-dash {
     to {
         stroke-dashoffset: -11;
@@ -498,12 +765,17 @@
     .flow-node,
     .flow__edge.is-active,
     .flow-node.is-waiting .flow-node__icon,
-    .flow-node.is-asking .flow-node__icon {
+    .flow-node.is-asking .flow-node__icon,
+    .wf-skeleton,
+    .wf-stage__detail {
         animation: none;
     }
 
     .flow-node,
-    .wf-file {
+    .wf-file-chip,
+    .wf-stage__row,
+    .wf-stage__chevron,
+    .wf-process__chevron {
         transition: none;
     }
 }

@@ -125,6 +125,12 @@ server.respondWith((request) => {
         | { messages?: Array<{ role: string }>; tools?: Array<{ function?: { name?: string } }> }
         | undefined;
     const messages = body?.messages ?? [];
+    // The brief of a finished run: a request without tools that asks for the three headings.
+    if (!body?.tools?.length && JSON.stringify(messages).includes('## 结论')) {
+        return openaiText(
+            '## 结论\n冒烟工作流跑完了，交回了hello.txt。\n\n## 问题\n- 无\n\n## 下一步\n- 打开hello.txt看一眼',
+        );
+    }
     // A workflow step's agent hands its result in.
     if (body?.tools?.some((tool) => tool.function?.name === 'step_result')) {
         return messages.at(-1)?.role === 'tool'
@@ -515,19 +521,36 @@ try {
     await step(page, '工作流停在人工关卡，执行流标出等你确认的一步');
     await gate.getByRole('button', { name: '确认，继续', exact: true }).click();
     await page.locator('.team__goal .badge', { hasText: '完成' }).waitFor();
-    if ((await page.locator('.flow-node.is-succeeded').count()) !== 3) {
-        throw new Error('the flow does not show all three steps done');
+    // Once it is over, the run opens on its conclusion; the process is folded under it.
+    await page.locator('.wf-brief__conclusion', { hasText: '冒烟工作流跑完了' }).waitFor();
+    await step(page, '运行结束后先给出结论：结果、问题、下一步');
+    await page.locator('.wf-process__toggle').click();
+    // The flow is drawn once its width is known.
+    await page.locator('.flow-node.is-succeeded').nth(2).waitFor();
+    if (
+        (await page.locator('.flow-node.is-succeeded').count()) !== 3 ||
+        (await page.locator('.wf-stage').count()) !== 3
+    ) {
+        throw new Error('the process does not show all three steps done');
     }
-    await step(page, '工作流运行到人工关卡，确认后完成');
-    // The file a step handed in opens in place.
-    await page.locator('.wf-file', { hasText: 'hello.txt' }).click();
+    await page.locator('.wf-stage', { hasText: 'note' }).locator('.wf-stage__row').click();
+    await page.locator('.wf-stage__detail', { hasText: '交回了hello.txt' }).waitFor();
+    await step(page, '展开过程：每个环节一行，点开看细节');
+    // The file a step handed in opens in place, from the conclusion.
+    await page.locator('.wf-brief .wf-file-chip', { hasText: 'hello.txt' }).click();
     await page.locator('.wf-preview__text', { hasText: 'hello' }).waitFor();
-    await step(page, '运行概览能直接查看产出的文件');
+    await step(page, '结论里能直接查看产出的文件');
     await page.keyboard.press('Escape');
     await page.getByRole('tab', { name: '看板', exact: true }).click();
     const done = page.locator('.board__column', { hasText: '完成' }).locator('.task-card');
     await done.nth(2).waitFor();
     await step(page, '运行看板按状态分列步骤');
+    // A question about the run opens a thread that has the run's record.
+    await page.getByRole('tab', { name: '概览', exact: true }).click();
+    await page.locator('.wf-ask textarea').fill('hello.txt里写的是什么？');
+    await page.locator('.wf-ask').getByRole('button', { name: '提问', exact: true }).click();
+    await page.locator('.user-message', { hasText: 'hello.txt里写的是什么？' }).waitFor();
+    await step(page, '追问会开一个带着运行记录的线程');
 } catch (error) {
     reportFailure(error);
     console.error(

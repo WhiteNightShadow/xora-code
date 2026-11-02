@@ -789,6 +789,20 @@ export const WorkflowStepRunSchema = z.object({
 });
 export type WorkflowStepRun = z.infer<typeof WorkflowStepRunSchema>;
 
+/**
+ * The report for whoever ordered a run (06 §11): what came of it, what is wrong, what to do next, without the
+ * steps. Written once the run is over.
+ */
+export const WorkflowBriefSchema = z.object({
+    status: z.enum(['writing', 'ready', 'failed']),
+    /** Markdown under three headings: `## 结论`, `## 问题`, `## 下一步` (`## Conclusion`, `## Problems`, `## Next steps`). */
+    text: z.string().optional(),
+    /** Why it could not be written. */
+    note: z.string().optional(),
+    at: z.number(),
+});
+export type WorkflowBrief = z.infer<typeof WorkflowBriefSchema>;
+
 export const WorkflowRunSchema = z.object({
     id: z.string(),
     projectId: z.string(),
@@ -813,6 +827,8 @@ export const WorkflowRunSchema = z.object({
     cost: MoneySchema,
     /** Absent on runs from before it existed: `default`. */
     mode: WorkflowRunModeSchema.optional(),
+    /** Absent until the run is over, and on runs from before briefs existed. */
+    brief: WorkflowBriefSchema.optional(),
     createdAt: z.number(),
     updatedAt: z.number(),
     endedAt: z.number().optional(),

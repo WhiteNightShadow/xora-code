@@ -86,3 +86,69 @@ export function absolutePath(project: Pick<Project, 'path'> | undefined, file: s
     const separator = windows ? '\\' : '/';
     return `${project.path.replace(/[\\/]+$/, '')}${separator}${windows ? file.replaceAll('/', '\\') : file}`;
 }
+
+export interface BriefSections {
+    readonly conclusion: string;
+    readonly problems: readonly string[];
+    readonly next: readonly string[];
+}
+
+const BRIEF_HEADINGS: ReadonlyArray<{ key: keyof BriefSections; pattern: RegExp }> = [
+    { key: 'conclusion', pattern: /^(结论|conclusions?)$/i },
+    { key: 'problems', pattern: /^(问题|problems?|issues?)$/i },
+    { key: 'next', pattern: /^(下一步|next steps?)$/i },
+];
+
+/** A section's list items: bullets and numbered lines, each with its continuation lines; "none" means no items. */
+function briefItems(lines: readonly string[]): string[] {
+    const items: string[] = [];
+    for (const line of lines) {
+        const item = /^\s*(?:[-*•]|\d+[.)、])\s+(.*)$/.exec(line);
+        if (item) {
+            items.push(item[1] ?? '');
+        } else if (line.trim() && items.length > 0) {
+            items[items.length - 1] = `${items.at(-1)} ${line.trim()}`;
+        } else if (line.trim()) {
+            items.push(line.trim());
+        }
+    }
+    return items.map((item) => item.trim()).filter((item) => item && !/^(无|没有|none\.?|n\/a)$/i.test(item));
+}
+
+/**
+ * The three parts of a run's brief, split on its headings (in either language); `undefined` when it has no
+ * conclusion heading, so the caller shows the text as it is.
+ */
+export function briefSections(text: string): BriefSections | undefined {
+    const parts: Record<keyof BriefSections, string[]> = { conclusion: [], problems: [], next: [] };
+    let current: keyof BriefSections | undefined;
+    let found = false;
+    for (const line of text.split(/\r?\n/)) {
+        const heading = /^#{1,6}\s*(.+?)\s*#*\s*$/.exec(line)?.[1]?.replace(/[：:]$/, '');
+        const known = heading ? BRIEF_HEADINGS.find((item) => item.pattern.test(heading)) : undefined;
+        if (known) {
+            current = known.key;
+            found ||= known.key === 'conclusion';
+            continue;
+        }
+        if (current) parts[current].push(line);
+    }
+    if (!found) return undefined;
+    return {
+        conclusion: parts.conclusion.join('\n').trim(),
+        problems: briefItems(parts.problems),
+        next: briefItems(parts.next),
+    };
+}
+
+/** A step's conclusion in one line: the first sentence of its note or summary, without markdown. */
+export function stepGist(step: Pick<WorkflowStepRun, 'note' | 'summary'>, max = 90): string {
+    const text = (step.note ?? step.summary ?? '')
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/[#>*_`|]/g, '')
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const sentence = /^(.+?[。！？!?]|.+?\.(?=\s|$))/.exec(text)?.[1] ?? text;
+    return sentence.length > max ? `${sentence.slice(0, max - 1)}…` : sentence;
+}

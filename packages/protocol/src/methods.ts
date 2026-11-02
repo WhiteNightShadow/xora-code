@@ -417,6 +417,13 @@ export const methods = {
     },
     'workflow.get': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
     'workflow.stop': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
+    /** Writes the brief of a run that is over again, or for the first time; it arrives with `workflow.changed`. */
+    'workflow.brief': { params: z.object({ runId: z.string() }).strict(), result: WorkflowRunSchema },
+    /** Opens a thread that answers a question about a run, with its brief, steps and outputs as context. */
+    'workflow.ask': {
+        params: z.object({ runId: z.string(), question: z.string().min(1).max(4000) }).strict(),
+        result: ThreadMetaSchema,
+    },
     /** Continues a paused run (after a restart or a spent budget), optionally with more budget. */
     'workflow.resume': {
         params: z.object({ runId: z.string(), budget: z.number().positive().optional() }).strict(),

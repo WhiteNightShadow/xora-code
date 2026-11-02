@@ -13,6 +13,7 @@ import {
     RpcPeer,
 } from '@xora/protocol';
 import {
+    errorTurn,
     type MockModelServer,
     type MockTurn,
     type OpenAiToolCall,
@@ -177,6 +178,34 @@ steps:
     task: 第二步
 `;
 
+const REPORT = `
+name: report
+title: 写周报
+steps:
+  - id: hold
+    gate: human
+    message: 开始写吗？
+  - id: write
+    agent: writer
+    needs: [hold]
+    task: 把这周的测试结果写进report.md
+    outputs: [report]
+`;
+
+/** What the writer puts into report.md, which it hands in as an output. */
+const REPORT_TEXT = '本周3个失败的测试都修好了，还剩1个不稳定的测试没查清。';
+
+const BRIEF = [
+    '## 结论',
+    '周报写好了：report.md。',
+    '',
+    '## 问题',
+    '- 1个不稳定的测试没查清',
+    '',
+    '## 下一步',
+    '- 查清那个不稳定的测试',
+].join('\n');
+
 // The scripted agents ------------------------------------------------------------------------------------
 
 const USAGE = { prompt_tokens: 3000, completion_tokens: 400 };
@@ -198,9 +227,17 @@ function textOf(content: unknown): string {
     return '';
 }
 
+function systemText(body: ChatBody | undefined): string {
+    return textOf(body?.messages?.find((message) => message.role === 'system')?.content);
+}
+
 function agentOf(body: ChatBody | undefined): string {
-    const system = textOf(body?.messages?.find((message) => message.role === 'system')?.content);
-    return /<agent_instructions title="agent：([^"]+)"/.exec(system)?.[1] ?? 'none';
+    return /<agent_instructions title="agent：([^"]+)"/.exec(systemText(body))?.[1] ?? 'none';
+}
+
+/** The request for a run's brief: the host asks it of the run's lead, no agent of the roster. */
+function isBrief(body: ChatBody | undefined): boolean {
+    return systemText(body).includes('你是这次工作流运行的负责人');
 }
 
 function lastCall(body: ChatBody): string | undefined {
@@ -240,6 +277,24 @@ function respond(request: { body: unknown }): MockTurn | undefined {
         default:
             return say('ok');
     }
+}
+
+/** The writer writes report.md and hands it in; the lead's brief is {@link BRIEF}. */
+function reporter(request: { body: unknown }): MockTurn | undefined {
+    const body = request.body as ChatBody | undefined;
+    if (!body?.messages) {
+        return undefined;
+    }
+    if (isBrief(body)) {
+        return say(BRIEF);
+    }
+    if (agentOf(body) === 'Writer') {
+        return writer(body, 'report.md', `${REPORT_TEXT}\n`, {
+            summary: 'wrote report.md',
+            outputs: { report: 'report.md' },
+        });
+    }
+    return say('ok');
 }
 
 /** Answers approval cards like a user, except the tools in `hold`. */
@@ -375,7 +430,12 @@ describe('workflow runs', () => {
             ['review', 'succeeded', 1],
         ]);
         expect(readFileSync(path.join(repo, 'fixed.txt'), 'utf8')).toBe('ok\n');
-        const agents = server.requests.slice(before).map((request) => agentOf(request.body as ChatBody | undefined));
+        // The brief written once the run is over comes from the run's lead, not an agent of the roster.
+        const agents = server.requests
+            .slice(before)
+            .map((request) => request.body as ChatBody | undefined)
+            .filter((body) => !isBrief(body))
+            .map(agentOf);
         expect(new Set(agents)).toEqual(new Set(['Coder', 'Reviewer']));
 
         // Step threads belong to the run; the run's own thread holds the notices and cards.
@@ -828,5 +888,164 @@ steps:
         expect(names(reviewer)).toContain('read');
         expect(names(reviewer)).not.toContain('web_fetch');
         expect(names(reviewer)).not.toContain('web_search');
+    }, 120_000);
+
+    it('writes a brief once a run is over, from its record and the files it handed in, counted in its cost', async () => {
+        const repo = gitRepo({ 'report.yaml': REPORT });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        server.respondWith(reporter);
+        const host = await startHost(dataDir);
+        const seen: Approval[] = [];
+        approve(host.ui, seen, new Set(['workflow_gate']));
+        await connectCustom(host.ui);
+        const project = await host.ui.request('project.add', { path: repo });
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        const before = server.requests.length;
+        const run = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:report' });
+
+        // Nothing to report while the run goes on.
+        const gate = await waitFor(() => seen.find((approval) => approval.toolName === 'workflow_gate'), 'gate card');
+        await expect(host.ui.request('workflow.brief', { runId: run.id })).rejects.toThrow(
+            '运行还没结束：结束后才能写结论',
+        );
+        await host.ui.request('approval.respond', { approvalId: gate.id, decision: 'allow_once' });
+        const done = await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run.id });
+            return current.brief?.status === 'ready' ? current : undefined;
+        }, 'brief');
+        expect(done.status).toBe('completed');
+        expect(done.brief?.text).toBe(BRIEF);
+
+        // The run's lead writes it under the three headings, from the record and the text of the file handed in.
+        const briefs = server.requests
+            .slice(before)
+            .map((request) => request.body as ChatBody | undefined)
+            .filter(isBrief);
+        expect(briefs).toHaveLength(1);
+        expect(systemText(briefs[0])).toMatch(/## 结论[\s\S]*## 问题[\s\S]*## 下一步/);
+        const material = textOf(briefs[0]?.messages.at(-1)?.content);
+        expect(material).toContain('工作流：写周报（report）');
+        expect(material).toContain('总结：wrote report.md');
+        expect(material).toContain(`<file path="report.md" step="write">\n${REPORT_TEXT}\n</file>`);
+
+        // Its request counts in the run's cost, besides the steps'.
+        const usage = await host.ui.request('usage.thread', { threadId: run.threadId });
+        expect(usage.requests.map((request) => request.agentPath)).toEqual(['workflow-brief']);
+        expect(usage.totals.cost.amount).toBeGreaterThan(0);
+        const steps = done.steps.reduce((sum, step) => sum + (step.cost?.amount ?? 0), 0);
+        expect(done.cost.amount).toBeCloseTo(steps + usage.totals.cost.amount, 5);
+
+        // Written again on demand: it says so at once, and the new one comes from a request of its own.
+        const again = await host.ui.request('workflow.brief', { runId: run.id });
+        expect(again.brief?.status).toBe('writing');
+        await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run.id });
+            return current.brief?.status === 'ready' || undefined;
+        }, 'brief written again');
+        expect(server.requests.slice(before).filter((request) => isBrief(request.body as ChatBody))).toHaveLength(2);
+    }, 120_000);
+
+    it('writes no brief for a stopped run, and says why one failed or was cut off by a quit', async () => {
+        const hold = 'name: hold\nsteps:\n  - id: wait\n    gate: human\n    message: 继续吗？\n';
+        const quick = 'name: quick\nsteps:\n  - id: look\n    agent: reviewer\n    task: 看看现状\n';
+        const repo = gitRepo({ 'hold.yaml': hold, 'quick.yaml': quick });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        server.respondWith((request) =>
+            isBrief(request.body as ChatBody | undefined)
+                ? errorTurn(400, { error: { message: 'brief refused' } })
+                : respond(request),
+        );
+        const host = await startHost(dataDir);
+        const seen: Approval[] = [];
+        approve(host.ui, seen, new Set(['workflow_gate']));
+        await connectCustom(host.ui);
+        const project = await host.ui.request('project.add', { path: repo });
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        const before = server.requests.length;
+
+        // Stopped while its gate waited: the user knows what happened, there is nothing to report.
+        const held = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:hold' });
+        await waitFor(() => seen.find((approval) => approval.toolName === 'workflow_gate'), 'gate card');
+        const stopped = await host.ui.request('workflow.stop', { runId: held.id });
+        expect(stopped.status).toBe('cancelled');
+        expect(stopped.brief).toBeUndefined();
+
+        // The model call fails: the brief says why, the run stays completed.
+        const run = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:quick' });
+        const done = await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run.id });
+            return current.brief && current.brief.status !== 'writing' ? current : undefined;
+        }, 'failed brief');
+        expect(done.status).toBe('completed');
+        expect(done.brief).toMatchObject({ status: 'failed', note: 'brief refused' });
+        expect(done.brief?.text).toBeUndefined();
+        // Only the completed run asked for one.
+        const briefs = () => server.requests.slice(before).filter((request) => isBrief(request.body as ChatBody));
+        expect(briefs()).toHaveLength(1);
+        expect((await host.ui.request('workflow.get', { runId: held.id })).brief).toBeUndefined();
+
+        // The app quits while a brief is being written: next time it shows as cut off, and can be written again.
+        let release: () => void = () => undefined;
+        const answered = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        server.respondWith(async (request) => {
+            if (!isBrief(request.body as ChatBody | undefined)) return respond(request);
+            await answered;
+            return say(BRIEF);
+        });
+        const cut = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:quick' });
+        await waitFor(() => briefs().length === 2, 'brief request');
+        expect((await host.ui.request('workflow.get', { runId: cut.id })).brief?.status).toBe('writing');
+        await harnesses.pop()?.close();
+        const restarted = await startHost(dataDir);
+        expect((await restarted.ui.request('workflow.get', { runId: cut.id })).brief).toMatchObject({
+            status: 'failed',
+            note: '写到一半应用关了，重新生成就好',
+        });
+        release();
+        await restarted.ui.request('workflow.brief', { runId: cut.id });
+        const rewritten = await waitFor(async () => {
+            const current = await restarted.ui.request('workflow.get', { runId: cut.id });
+            return current.brief?.status === 'ready' ? current : undefined;
+        }, 'brief written after the restart');
+        expect(rewritten.brief?.text).toBe(BRIEF);
+    }, 120_000);
+
+    it('answers a question about a run in a read-only thread that has the run as its context', async () => {
+        const repo = gitRepo({ 'report.yaml': REPORT });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-workflow-data-'));
+        server.respondWith(reporter);
+        const host = await startHost(dataDir);
+        approve(host.ui, [], new Set());
+        await connectCustom(host.ui);
+        const project = await host.ui.request('project.add', { path: repo });
+        await host.ui.request('project.trust', { projectId: project.id, trusted: true });
+        const run = await host.ui.request('workflow.start', { projectId: project.id, key: 'project:report' });
+        await waitFor(async () => {
+            const current = await host.ui.request('workflow.get', { runId: run.id });
+            return current.brief?.status === 'ready' || undefined;
+        }, 'brief');
+
+        const question = '还有哪个测试没查清？';
+        const thread = await host.ui.request('workflow.ask', { runId: run.id, question });
+        expect(thread).toMatchObject({ projectId: project.id, title: '追问：写周报', mode: 'plan' });
+        expect(thread.workflowRunId).toBeUndefined();
+        await waitFor(async () => {
+            const snapshot = await host.ui.request('thread.read', { threadId: thread.id });
+            return snapshot.events.some((event) => event.kind === 'turn.completed') || undefined;
+        }, 'answer');
+
+        // Its first request: the brief, the steps and the files handed in, then the question.
+        const first = server.requests
+            .map((request) => request.body as ChatBody | undefined)
+            .find((body) => body?.messages && textOf(body.messages.at(-1)?.content).includes(question));
+        const context = systemText(first);
+        expect(context).toContain('用户在追问工作流运行“写周报”');
+        expect(context).toContain(`<brief>\n${BRIEF}\n</brief>`);
+        expect(context).toContain('总结：wrote report.md');
+        expect(context).toContain('产出report：report.md');
+        expect(context).toContain('<handed_in_files>\n- report.md（write）\n</handed_in_files>');
+        expect(isBrief(first)).toBe(false);
     }, 120_000);
 });

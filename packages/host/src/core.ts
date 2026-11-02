@@ -305,6 +305,7 @@ export class HostCore {
                     git();
                 };
             },
+            userAgent,
         });
         this.triggers.onFire((fire) => this.#onTrigger(fire));
         this.distill = new DistillService({
