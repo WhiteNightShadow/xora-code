@@ -360,8 +360,20 @@ export const methods = {
                 mode: z.enum(['standard', 'hypotheses']).optional(),
                 /** A finished run of the project this one continues: its supervisor gets that run's goal and report. */
                 continues: z.string().optional(),
+                /**
+                 * What members may do without asking (06 §21): `full` by default; `default` keeps each member's own
+                 * mode. High-risk actions always ask the user; at L3 nobody watches, so `full` becomes `auto_edit`.
+                 */
+                permission: WorkflowRunModeSchema.optional(),
+                /** Members working at the same time in this run; the team setting by default. */
+                parallel: z.number().int().min(1).max(8).optional(),
             })
             .strict(),
+        result: TeamRunSchema,
+    },
+    /** Changes what the members of a running team may do without asking; waiting approvals are decided again. */
+    'team.setPermission': {
+        params: z.object({ runId: z.string(), permission: WorkflowRunModeSchema }).strict(),
         result: TeamRunSchema,
     },
     /** The user writes to the supervisor (`supervisor`) or to a member (a task id) of a running team. */

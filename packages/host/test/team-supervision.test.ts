@@ -65,14 +65,23 @@ afterAll(async () => {
     await server?.close();
 });
 
-async function startRun(goal: string) {
+async function startRun(
+    goal: string,
+    options: { permission?: 'default' | 'auto_edit' | 'full'; hold?: ReadonlySet<string> } = {},
+) {
     const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-supervision-data-'));
     const { ui } = await host.start(dataDir);
-    approveAll(ui);
+    const seen = approveAll(ui, [], options.hold);
     await connectMock(ui, server);
     const repo = gitRepo();
     const project = await ui.request('project.add', { path: repo });
-    const started = await ui.request('team.start', { projectId: project.id, goal, autonomy: 'L2', budget: 50 });
+    const started = await ui.request('team.start', {
+        projectId: project.id,
+        goal,
+        autonomy: 'L2',
+        budget: 50,
+        ...(options.permission ? { permission: options.permission } : {}),
+    });
     const done = await waitFor(
         async () => {
             const run = await ui.request('team.get', { runId: started.id });
@@ -81,7 +90,30 @@ async function startRun(goal: string) {
         'run done',
         90_000,
     );
-    return { ui, repo, done };
+    return { ui, repo, done, seen, started };
+}
+
+/** A coder that writes a.txt with a shell command, then hands it in. */
+function shellCoder(body: ChatBody): MockTurn {
+    const last = body.messages.at(-1);
+    if (last?.role === 'tool' && lastCall(body) === 'bash') {
+        return call({
+            name: 'deliver',
+            arguments: {
+                status: 'done',
+                summary: 'wrote a.txt',
+                changes: [{ file: 'a.txt', kind: 'added' }],
+                evidence: [{ type: 'diff' }],
+            },
+        });
+    }
+    if (last?.role === 'tool') {
+        return say('Handed in.');
+    }
+    return call({
+        name: 'bash',
+        arguments: { command: `node -e "require('fs').writeFileSync('a.txt','one\\n')"` },
+    });
 }
 
 describe('supervision loop', () => {
@@ -245,5 +277,80 @@ describe('supervision loop', () => {
         const read = await ui.request('thread.read', { threadId });
         expect(JSON.stringify(read.events)).toContain(STEER);
         expect(done.feedback?.map((entry) => entry.text)).not.toContain('Steered T1.');
+    }, 120_000);
+
+    it('lets members act without a card by default; high-risk actions are not involved', async () => {
+        server.reset();
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            const last = body.messages.at(-1);
+            switch (agentOf(body)) {
+                case 'Supervisor':
+                    if (last?.role !== 'tool' && textOf(last?.content).includes('<team_goal>')) {
+                        return call({ name: 'task_create', arguments: { tasks: [card(ONLY_A, ['a.txt'])] } });
+                    }
+                    return say('Noted.');
+                case 'Coder':
+                    return shellCoder(body);
+                default:
+                    return say('ok');
+            }
+        });
+        const { repo, done, seen, started } = await startRun('写a.txt');
+        expect(started.permission).toBe('full');
+        expect(done.status).toBe('done');
+        expect(existsSync(path.join(repo, 'a.txt'))).toBe(true);
+        // The member's command needed no card; only the delivery of an L2 run asks the user.
+        expect(seen.filter((approval) => approval.toolName === 'bash')).toEqual([]);
+    }, 120_000);
+
+    it('has the supervisor approve a member’s ordinary command when members only edit files', async () => {
+        server.reset();
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            const last = body.messages.at(-1);
+            switch (agentOf(body)) {
+                case 'Supervisor': {
+                    if (last?.role === 'tool') {
+                        return say(lastCall(body) === 'approval_decide' ? 'Approved.' : 'Planned.');
+                    }
+                    const input = textOf(last?.content);
+                    if (input.includes('<team_goal>')) {
+                        return call({ name: 'task_create', arguments: { tasks: [card(ONLY_A, ['a.txt'])] } });
+                    }
+                    const asked = /Approval request (\S+):/.exec(input);
+                    if (asked) {
+                        return call({
+                            name: 'approval_decide',
+                            arguments: { approvalId: asked[1], decision: 'allow', reason: 'the card needs a.txt' },
+                        });
+                    }
+                    return say('Noted.');
+                }
+                case 'Coder':
+                    return shellCoder(body);
+                default:
+                    return say('ok');
+            }
+        });
+        // The user never answers the member's command: the supervisor does.
+        const { ui, repo, done, seen } = await startRun('写a.txt', {
+            permission: 'auto_edit',
+            hold: new Set(['bash']),
+        });
+        expect(done.status).toBe('done');
+        expect(existsSync(path.join(repo, 'a.txt'))).toBe(true);
+        expect(seen.filter((approval) => approval.toolName === 'bash')).toHaveLength(1);
+        expect(
+            done.conversation?.filter((entry) => entry.kind === 'approval').map((entry) => [entry.from, entry.text]),
+        ).toEqual([
+            ['T1', `node -e "require('fs').writeFileSync('a.txt','one\\n')"`],
+            ['supervisor', '主管批准：the card needs a.txt'],
+        ]);
+        const read = await ui.request('thread.read', { threadId: done.tasks[0]?.threadId as string });
+        expect(JSON.stringify(read.events)).toContain('"decidedBy":"supervisor"');
+        expect(done.feedback?.map((entry) => entry.text)).not.toContain('Approved.');
     }, 120_000);
 });

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import {
+    type Approval,
     bilingual,
     type HostMethods,
     type HostNotifications,
@@ -15,6 +16,7 @@ import {
     type TeamRun as TeamRunView,
     type TeamTask as TeamTaskView,
     type ToolKind,
+    type WorkflowRunMode,
 } from '@xora/protocol';
 import type { XoraDatabase } from '@xora/storage';
 import { type HighRisk, type HighRiskAction, isReadOnlyCommand } from '@xora/tools';
@@ -89,6 +91,7 @@ import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import {
+    ApprovalDecideInput,
     AskInput,
     agentFor,
     ChallengeInput,
@@ -160,6 +163,9 @@ const WATCH_STEPS = 8;
 /** How the host's lines for stage reviews and watch reports start; turns that only handle them stay internal. */
 const STAGE_REVIEW = 'Stage review of';
 const WATCH_REPORT = 'Watch:';
+const APPROVAL_REQUEST = 'Approval request';
+/** Risks of a member's call that only the user approves (06 §21). */
+const KEPT_FOR_USER: ReadonlySet<Risk> = new Set(['network', 'outside_workspace', 'sensitive_file', 'external_agent']);
 /** Conversation entries kept with a run (06 §7). */
 const CONVERSATION_LIMIT = 400;
 /** Challenges one investigation card may send in a competing-hypotheses run. */
@@ -290,6 +296,10 @@ interface RunHost {
     continues?: string;
     /** Moved to the archive by the user. */
     archived?: boolean;
+    /** What members may do without asking (06 §21); absent on runs from before it existed, which is `default`. */
+    permission?: WorkflowRunMode;
+    /** Members working at the same time; the team setting when absent. */
+    parallel?: number;
     /** Every message of the run, for the team conversation view (06 §7). */
     conversation?: ConversationEntry[];
     tasks: Record<string, TaskHost>;
@@ -306,7 +316,7 @@ interface ConversationEntry {
     readonly from: string;
     readonly to: string;
     readonly text: string;
-    readonly kind: 'message' | 'question' | 'answer' | 'user' | 'challenge' | 'stage' | 'guide' | 'watch';
+    readonly kind: 'message' | 'question' | 'answer' | 'user' | 'challenge' | 'stage' | 'guide' | 'watch' | 'approval';
 }
 
 /** The supervisor's task_guide decision (06 §20). */
@@ -337,6 +347,8 @@ interface RunState {
     readonly questions: Map<string, Question>;
     /** Stage reviews waiting for the supervisor's task_guide, by task (06 §20). */
     readonly guides: Map<string, PendingGuide>;
+    /** Members' approval cards handed to the supervisor (06 §21): approval id → task id. */
+    readonly delegated: Map<string, string>;
     /** The supervisor's current turn only handles stage reviews and watch reports: its words are not feedback. */
     internalTurn: boolean;
     abort: AbortController;
@@ -487,6 +499,7 @@ const TEXT = bilingual(
         noFinalChecks: '没有可以在项目里重跑的验收命令。',
         finalCheck: (run: string, ran: boolean, exit: number | null) =>
             `- \`${run}\`：${!ran ? '没有运行' : exit === 0 ? '通过' : `退出码${exit ?? '无'}`}`,
+        supervisorDecided: (allowed: boolean) => (allowed ? '主管批准：' : '主管拒绝：'),
         stageEntry: (stage: number, summary: string, left: number, progress: boolean) =>
             `第${stage}阶段：${summary}${left > 0 ? `（还剩${left}项）` : ''}${progress ? '' : '；这一阶段没有进展'}`,
         watch: (owner: string, rule: WatchRule) =>
@@ -596,6 +609,7 @@ const TEXT = bilingual(
         noFinalChecks: 'No acceptance command can be run again in the project.',
         finalCheck: (run, ran, exit) =>
             `- \`${run}\`: ${!ran ? 'not run' : exit === 0 ? 'passed' : `exit code ${exit ?? 'none'}`}`,
+        supervisorDecided: (allowed) => (allowed ? 'Approved by the supervisor: ' : 'Denied by the supervisor: '),
         stageEntry: (stage, summary, left, progress) =>
             `Stage ${stage}: ${summary}${left > 0 ? ` (${left} left)` : ''}${progress ? '' : '; no progress in this stage'}`,
         watch: (owner, rule) =>
@@ -623,6 +637,35 @@ function round(amount: number): number {
 
 function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+}
+
+const MODE_ORDER: readonly PermissionMode[] = ['plan', 'ask', 'auto_edit', 'full'];
+
+/**
+ * The permissions a run gives its members (06 §21). Nobody watches an L3 run until its report, so full access
+ * there is capped at editing files, as for routines.
+ */
+function runPermission(wanted: WorkflowRunMode, autonomy: AutonomyLevel): WorkflowRunMode {
+    return autonomy === 'L3' && wanted === 'full' ? 'auto_edit' : wanted;
+}
+
+/**
+ * A member's thread mode: read-only cards plan; writable ones get at least editing, and at least what the run
+ * gives (a run's permissions only ever add to a member's own).
+ */
+function memberMode(own: PermissionMode, writable: boolean, run: WorkflowRunMode | undefined): PermissionMode {
+    if (!writable) {
+        return 'plan';
+    }
+    const base: PermissionMode = own === 'plan' ? 'auto_edit' : own;
+    if (run === undefined || run === 'default') {
+        return base;
+    }
+    return MODE_ORDER.indexOf(base) >= MODE_ORDER.indexOf(run) ? base : run;
+}
+
+function clampParallel(value: number): number {
+    return Math.min(MAX_PARALLEL, Math.max(MIN_PARALLEL, Math.round(value)));
 }
 
 /** An escalation the supervisor asked for (06 §20): one tier up, or to the supervisor after flagship. */
@@ -678,6 +721,7 @@ export class TeamService {
         this.#store = new SqliteTeamStore(deps.db);
         this.#commandTimeoutMs = deps.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
         this.#ready = this.#recover().catch((error) => deps.log.warn(`team: recovery failed: ${errorText(error)}`));
+        deps.approvals.onRequested((approval, facts) => this.#delegate(approval, facts));
     }
 
     // Public API ------------------------------------------------------------------------------------------
@@ -690,6 +734,10 @@ export class TeamService {
         mode?: TeamMode;
         /** An earlier run of the project, finished, that this one continues. */
         continues?: string;
+        /** What members may do without asking (06 §21); `full` by default. */
+        permission?: WorkflowRunMode;
+        /** Members working at the same time; the team setting by default. */
+        parallel?: number;
     }): Promise<TeamRunView> {
         await this.#ready;
         const { projects, settings, threads } = this.#deps;
@@ -775,6 +823,8 @@ export class TeamService {
             inbox: [],
             ...(input.mode === 'hypotheses' ? { mode: 'hypotheses' as const } : {}),
             ...(before ? { continues: before.run.id } : {}),
+            permission: runPermission(input.permission ?? 'full', autonomy),
+            ...(input.parallel !== undefined ? { parallel: clampParallel(input.parallel) } : {}),
             tasks: {},
             reviewThreads: [],
             actions: [],
@@ -791,7 +841,10 @@ export class TeamService {
                       ...(before.host.report ? { report: before.host.report } : {}),
                   }
                 : undefined;
-            await this.#startSupervisor(state, supervisorBrief(goal, run, this.#maxParallel(), host.mode, previous));
+            await this.#startSupervisor(
+                state,
+                supervisorBrief(goal, run, this.#maxParallel(state), host.mode, previous),
+            );
         } catch (error) {
             this.#setStatus(state, 'failed', textOf(TEXT).supervisorNotStarted(errorText(error)));
             throw error;
@@ -816,6 +869,35 @@ export class TeamService {
     async get(runId: string): Promise<TeamRunView> {
         await this.#ready;
         return this.#view(await this.#require(runId));
+    }
+
+    /**
+     * What members may do without asking (06 §21): the threads of members at work get the new mode, and their
+     * waiting approvals are decided again; high-risk actions still wait for the user.
+     */
+    async setPermission(runId: string, permission: WorkflowRunMode): Promise<TeamRunView> {
+        await this.#ready;
+        const state = await this.#require(runId);
+        if (TERMINAL.has(state.host.status)) {
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).runEnded);
+        }
+        state.host.permission = runPermission(permission, state.run.autonomy);
+        for (const task of state.board.list({ status: ['assigned', 'in_progress', 'in_review', 'blocked'] })) {
+            const info = state.host.tasks[task.card.id];
+            const agent = info?.specId ? findAgent(state.host.org, info.specId) : undefined;
+            const thread = info?.threadId ? this.#deps.threads.find(info.threadId) : undefined;
+            if (!agent || !thread) {
+                continue;
+            }
+            const mode = memberMode(agent.mode, task.card.workspace !== 'readonly', state.host.permission);
+            if (thread.mode !== mode) {
+                this.#deps.threads.update(thread.id, { mode });
+                this.#deps.threads.append(thread.id, 'thread.config', { mode });
+                this.#deps.approvals.reconsider(thread.id, mode);
+            }
+        }
+        this.#save(state);
+        return this.#view(state);
     }
 
     /** Moves a run to the archive, or back. */
@@ -1050,6 +1132,7 @@ export class TeamService {
             working: new Set(),
             questions: new Map(),
             guides: new Map(),
+            delegated: new Map(),
             internalTurn: false,
             abort: new AbortController(),
             supervisorStarting: false,
@@ -1230,10 +1313,12 @@ export class TeamService {
         );
     }
 
-    /** Members working at once in one run: the setting, read at every dispatch so a change applies right away. */
-    #maxParallel(): number {
-        const wanted = this.#deps.settings.get().team.maxParallel;
-        return Math.min(MAX_PARALLEL, Math.max(MIN_PARALLEL, Math.round(wanted)));
+    /**
+     * Members working at once in one run: the run's own number, else the setting, read at every dispatch so a change
+     * applies right away.
+     */
+    #maxParallel(state: RunState): number {
+        return clampParallel(state.host.parallel ?? this.#deps.settings.get().team.maxParallel);
     }
 
     // Models and costs -----------------------------------------------------------------------------------
@@ -1367,6 +1452,8 @@ export class TeamService {
             mode: host.mode ?? 'standard',
             ...(host.continues ? { continues: host.continues } : {}),
             ...(host.archived ? { archived: true } : {}),
+            permission: host.permission ?? 'default',
+            parallel: this.#maxParallel(state),
             feedback: [...(host.feedback ?? [])],
             conversation: [...(host.conversation ?? [])],
             supervisorThreadId: host.supervisorThreadId,
@@ -1562,7 +1649,10 @@ export class TeamService {
         const asked = [...state.questions.values()].filter((question) => !question.delivered);
         const reviews = [...state.guides.values()].filter((guide) => !guide.delivered);
         try {
-            state.internalTurn = lines.every((line) => line.startsWith(STAGE_REVIEW) || line.startsWith(WATCH_REPORT));
+            state.internalTurn = lines.every(
+                (line) =>
+                    line.startsWith(STAGE_REVIEW) || line.startsWith(WATCH_REPORT) || line.startsWith(APPROVAL_REQUEST),
+            );
             if (await this.#startSupervisor(state, wakeText(lines, state.board))) {
                 for (const question of asked) {
                     question.delivered = true;
@@ -1961,6 +2051,8 @@ export class TeamService {
                 return this.#requestReview(state, input);
             case 'task_guide':
                 return this.#guide(state, input);
+            case 'approval_decide':
+                return this.#approvalDecide(state, input);
             default:
                 return fail(`Unknown team tool ${name}.`);
         }
@@ -2505,7 +2597,7 @@ export class TeamService {
     #dispatch(state: RunState): void {
         const { board, host } = state;
         const running = board.list({ status: ['assigned', 'in_progress'] }).length;
-        let free = this.#maxParallel() - running;
+        let free = this.#maxParallel(state) - running;
         if (free <= 0) {
             return;
         }
@@ -2569,7 +2661,7 @@ export class TeamService {
             }
         }
         const owner = task.owner ?? `${agent.id}-${taskId}`;
-        const mode: PermissionMode = !writable ? 'plan' : agent.mode === 'plan' ? 'auto_edit' : agent.mode;
+        const mode = memberMode(agent.mode, writable, state.host.permission);
         const thread = this.#createThread(state, {
             title: `${taskId}·${shorten(card.title, 30)}`,
             role: agent.role,
@@ -3484,6 +3576,90 @@ export class TeamService {
         );
     }
 
+    /**
+     * 06 §21, the +1 leader: in a run whose members edit files, a member's ordinary command inside its own worktree
+     * goes to the supervisor as well. The card stays the user's too; the first answer counts. Network, paths outside
+     * the workspace, sensitive files, external agents and high-risk actions are the user's alone.
+     */
+    #delegate(approval: Approval, facts: CallFacts): void {
+        if (this.#disposed) {
+            return;
+        }
+        for (const state of this.#runs.values()) {
+            const entry = Object.entries(state.host.tasks).find(([, info]) => info.threadId === approval.threadId);
+            if (!entry) {
+                continue;
+            }
+            const [taskId, info] = entry;
+            const handOver =
+                this.#active(state) &&
+                state.host.permission === 'auto_edit' &&
+                info.location === 'worktree' &&
+                !facts.highRisk &&
+                facts.outside.length === 0 &&
+                facts.sensitive.length === 0 &&
+                !facts.external &&
+                facts.url === undefined &&
+                !approval.risks.some((risk) => KEPT_FOR_USER.has(risk));
+            if (!handOver) {
+                return;
+            }
+            state.delegated.set(approval.id, taskId);
+            const owner = info.agentId ?? taskId;
+            this.#record(state, {
+                from: taskId,
+                to: 'supervisor',
+                text: approval.command ?? approval.title,
+                kind: 'approval',
+            });
+            this.#wake(
+                state,
+                `${APPROVAL_REQUEST} ${approval.id}: ${owner} on ${taskId} wants to ${approval.title}` +
+                    `${approval.command ? `: \`${shorten(approval.command, 400)}\`` : ''} in its own worktree ` +
+                    `(risks: ${approval.risks.join(', ') || 'none'}). It reaches no network, nothing outside the ` +
+                    'workspace and no sensitive file, and is not a high-risk action. Answer with approval_decide: ' +
+                    'allow it when the card needs it, deny it otherwise, with a short reason.',
+            );
+            this.#save(state);
+            return;
+        }
+    }
+
+    #approvalDecide(state: RunState, input: unknown): HostToolResult {
+        const parsed = ApprovalDecideInput.safeParse(input);
+        if (!parsed.success) {
+            return fail(`Invalid arguments: ${formatIssues(parsed.error.issues).join('; ')}`);
+        }
+        const { approvalId, decision, reason } = parsed.data;
+        const taskId = state.delegated.get(approvalId);
+        if (!taskId) {
+            return fail(`No approval ${approvalId} waits for you in this run.`);
+        }
+        state.delegated.delete(approvalId);
+        if (!this.#deps.approvals.isPending(approvalId)) {
+            return ok(`${approvalId} was answered already.`);
+        }
+        try {
+            this.#deps.approvals.respond(
+                approvalId,
+                decision === 'allow' ? 'allow_once' : 'deny',
+                undefined,
+                `${textOf(TEXT).supervisorDecided(decision === 'allow')}${reason}`,
+                'supervisor',
+            );
+        } catch {
+            return ok(`${approvalId} was answered already.`);
+        }
+        this.#record(state, {
+            from: 'supervisor',
+            to: taskId,
+            text: `${textOf(TEXT).supervisorDecided(decision === 'allow')}${reason}`,
+            kind: 'approval',
+        });
+        this.#save(state);
+        return ok(decision === 'allow' ? `Allowed for ${taskId}.` : `Denied for ${taskId}; its member reads why.`);
+    }
+
     /** The supervisor ended a running executor's turn with task_guide (06 §20): one tier up with what it did, or blocked. */
     #stopRunning(
         state: RunState,
@@ -4027,6 +4203,7 @@ export function registerTeamHandlers(
     peer.handle('team.get', ({ runId }) => team.get(runId));
     peer.handle('team.stop', ({ runId }) => team.stop(runId));
     peer.handle('team.archive', ({ runId, archived }) => team.archive(runId, archived));
+    peer.handle('team.setPermission', ({ runId, permission }) => team.setPermission(runId, permission));
     peer.handle('team.delete', async ({ runId }) => {
         await team.delete(runId);
         return { ok: true as const };

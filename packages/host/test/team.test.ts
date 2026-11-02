@@ -347,6 +347,8 @@ describe('agent team run', () => {
             goal: '写a.txt和b.txt',
             autonomy: 'L1',
             budget: 50,
+            // Each member's own mode: the acceptance command asks the user once (06 §21 gives full access by default).
+            permission: 'default',
         });
         expect(started.status).toBe('planning');
         expect(started.supervisorThreadId).toBeDefined();

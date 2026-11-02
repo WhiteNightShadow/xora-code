@@ -4,11 +4,13 @@ import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
 import { attempt, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import '../task.css';
 import { Badge, Empty, Field, formatMoney, IconButton, Modal, relativeTime, Select, Spinner } from './primitives.tsx';
 import { RunActions } from './RunActions.tsx';
+import { RUN_MODE_ICONS } from './WorkflowView.tsx';
 
 const COLUMNS: Array<{ key: string; statuses: string[] }> = [
     { key: 'pending', statuses: ['pending', 'ready'] },
@@ -381,6 +383,50 @@ export function TeamView({ runId }: { runId: string }) {
                         </button>
                     )}
                     {!TEAM_TERMINAL.includes(run.status) && (
+                        <Popover
+                            label={`${s.team.permission}：${s.team.permissions[run.permission ?? 'default']}`}
+                            placement="down"
+                            align="end"
+                            className="picker"
+                            triggerClassName={`picker__trigger mode-chip is-${run.permission ?? 'default'}`}
+                            trigger={
+                                <>
+                                    <Icon name={RUN_MODE_ICONS[run.permission ?? 'default']} size={13} />
+                                    {s.team.permissions[run.permission ?? 'default']}
+                                    <Icon name="chevronDown" size={12} className="picker__chevron" />
+                                </>
+                            }
+                        >
+                            {(close) => (
+                                <>
+                                    <div className="popover__title">{s.team.permission}</div>
+                                    <Choices
+                                        value={run.permission ?? 'default'}
+                                        options={(['full', 'auto_edit', 'default'] as const).map((value) => ({
+                                            value,
+                                            label: s.team.permissions[value],
+                                            hint: s.team.permissionHints[value],
+                                            icon: RUN_MODE_ICONS[value],
+                                            ...(value === 'full' ? { tone: 'warn' as const } : {}),
+                                        }))}
+                                        onPick={(permission) => {
+                                            close();
+                                            void attempt(() =>
+                                                host.call('team.setPermission', { runId, permission }),
+                                            ).then(
+                                                (updated) =>
+                                                    updated &&
+                                                    useApp.setState((state) => ({
+                                                        teamRuns: { ...state.teamRuns, [updated.id]: updated },
+                                                    })),
+                                            );
+                                        }}
+                                    />
+                                </>
+                            )}
+                        </Popover>
+                    )}
+                    {!TEAM_TERMINAL.includes(run.status) && (
                         <button
                             type="button"
                             className="button button--small button--danger"
@@ -504,6 +550,10 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
     const [autonomy, setAutonomy] = useState<'L0' | 'L1' | 'L2' | 'L3'>(last?.teamAutonomy ?? 'L1');
     const [mode, setMode] = useState<'standard' | 'hypotheses'>(last?.teamMode ?? 'standard');
     const [budget, setBudget] = useState(last?.teamBudget ? String(last.teamBudget) : '');
+    // 06 §21: members act without asking unless the user picks otherwise; high-risk actions always ask.
+    const [permission, setPermission] = useState<'default' | 'auto_edit' | 'full'>(last?.teamPermission ?? 'full');
+    const defaultParallel = useApp((state) => state.settings?.team.maxParallel ?? 3);
+    const [parallel, setParallel] = useState(String(defaultParallel));
     const [busy, setBusy] = useState(false);
     const close = () => useApp.setState({ teamStartFor: undefined });
     const start = async () => {
@@ -511,7 +561,15 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
         const run = await attempt(() =>
             host.call(
                 'team.start',
-                { projectId, goal, autonomy, mode, ...(Number(budget) > 0 ? { budget: Number(budget) } : {}) },
+                {
+                    projectId,
+                    goal,
+                    autonomy,
+                    mode,
+                    permission,
+                    parallel: Number(parallel),
+                    ...(Number(budget) > 0 ? { budget: Number(budget) } : {}),
+                },
                 { timeoutMs: 120_000 },
             ),
         );
@@ -555,6 +613,32 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
                             label: `${level}：${s.team.levels[level]}`,
                         }))}
                         onChange={setAutonomy}
+                    />
+                </Field>
+                <Field
+                    label={s.team.permission}
+                    hint={
+                        autonomy === 'L3' && permission === 'full'
+                            ? s.team.permissionL3
+                            : s.team.permissionHints[permission]
+                    }
+                >
+                    <Select
+                        label={s.team.permission}
+                        value={permission}
+                        options={(['full', 'auto_edit', 'default'] as const).map((value) => ({
+                            value,
+                            label: s.team.permissions[value],
+                        }))}
+                        onChange={setPermission}
+                    />
+                </Field>
+                <Field label={s.team.parallel} hint={s.team.parallelHint}>
+                    <Select
+                        label={s.team.parallel}
+                        value={parallel}
+                        options={['1', '2', '3', '4', '5', '6', '7', '8'].map((value) => ({ value, label: value }))}
+                        onChange={setParallel}
                     />
                 </Field>
                 <Field label={s.goal.budget}>

@@ -939,6 +939,7 @@ export class HostCore {
                     teamAutonomy: params.autonomy ?? run.autonomy,
                     teamMode: params.mode ?? 'standard',
                     teamBudget: params.budget ?? null,
+                    teamPermission: params.permission ?? 'full',
                 },
             }),
         );

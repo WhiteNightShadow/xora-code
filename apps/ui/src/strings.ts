@@ -465,6 +465,16 @@ const zh = {
         title: '团队',
         boardHint:
             '说一个目标，主管拆成任务、派给成员同时去做，阶段性的成果它会看过、指导着让成员接着做完，最后给你交付报告。',
+        permission: '权限范围',
+        permissions: { default: '按成员设定', auto_edit: '能改文件', full: '全权' },
+        permissionHints: {
+            default: '每个成员用自己的权限，跑命令时会问',
+            auto_edit: '成员直接改文件；跑普通命令由主管代你批，联网、工作区外、敏感文件才问你',
+            full: '成员在自己的工作区里直接做，不再逐个确认；推送、发布、删工作区外的文件、对外发消息、付款仍然问你',
+        },
+        permissionL3: 'L3没人看着，全权会降成能改文件',
+        parallel: '同时工作的成员',
+        parallelHint: '主管会尽量拆成能同时做的任务；互相依赖的任务只能一个接一个',
         newRun: '新建团队任务',
         running: '进行中',
         finished: '已结束',
@@ -568,6 +578,7 @@ const zh = {
             stage: '阶段',
             guide: '指导',
             watch: '巡检',
+            approval: '审批',
         },
         columns: { pending: '待派', running: '执行中', review: '验收中', done: '完成', blocked: '失败或阻塞' },
         statuses: {
@@ -1438,6 +1449,18 @@ const en: Widen<Strings> = {
         title: 'Team',
         boardHint:
             'Give a goal: the supervisor splits it into tasks members work at the same time, reviews each stage they hand in and guides them to the end, then reports.',
+        permission: 'Permissions',
+        permissions: { default: 'Each member’s own', auto_edit: 'Edit files', full: 'Full access' },
+        permissionHints: {
+            default: 'Each member keeps its own mode; commands ask',
+            auto_edit:
+                'Members edit files directly; the supervisor approves ordinary commands for you, and network, outside-the-workspace or sensitive-file actions ask you',
+            full: 'Members act in their own workspace without asking; pushing, publishing, deleting outside the workspace, messaging outside and payments still ask you',
+        },
+        permissionL3: 'Nobody watches an L3 run: full access becomes edit files',
+        parallel: 'Members at once',
+        parallelHint:
+            'The supervisor splits the goal into tasks that can run at once; dependent tasks run one after another',
         newRun: 'New team run',
         running: 'Running',
         finished: 'Finished',
@@ -1551,6 +1574,7 @@ const en: Widen<Strings> = {
             stage: 'Stage',
             guide: 'Guidance',
             watch: 'Watch',
+            approval: 'Approval',
         },
         columns: { pending: 'To do', running: 'Running', review: 'Review', done: 'Done', blocked: 'Failed or blocked' },
         statuses: {

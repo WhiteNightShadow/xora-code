@@ -504,6 +504,7 @@ describe('team runs', () => {
             teamMode: 'hypotheses',
             teamBudget: 5,
             workflowMode: 'default',
+            teamPermission: 'full',
         });
         await ui.request('team.stop', { runId: first.id });
         const second = await ui.request('team.start', { projectId: project.id, goal: '再查一查', autonomy: 'L1' });
@@ -512,6 +513,7 @@ describe('team runs', () => {
             teamMode: 'standard',
             teamBudget: null,
             workflowMode: 'default',
+            teamPermission: 'full',
         });
         await ui.request('team.stop', { runId: second.id });
         // The supervisor threads are the runs': the default thread mode stays.

@@ -25,9 +25,15 @@ export interface ApprovalOutcome {
     readonly status: 'allowed' | 'denied' | 'expired' | 'cancelled';
     readonly decision?: ApprovalDecision;
     readonly message?: string;
-    /** Set when no one answered the card: the thread's mode changed and a rule or the policy settled the call. */
-    readonly decidedBy?: 'rule' | 'policy';
+    /**
+     * Set when the user did not answer the card: the thread's mode changed and a rule or the policy settled the call,
+     * or a team's supervisor approved an ordinary command of its member (06 §21).
+     */
+    readonly decidedBy?: 'rule' | 'policy' | 'supervisor';
 }
+
+/** Told of every new approval card with the facts of its call, e.g. for a team to hand it to its supervisor. */
+export type ApprovalListener = (approval: Approval, facts: CallFacts) => void;
 
 /**
  * A tool call that follows its thread's mode: what deciding it again takes when the mode changes while it waits
@@ -80,6 +86,7 @@ export class ApprovalService {
     readonly #db: XoraDatabase;
     readonly #bus: Bus;
     readonly #pending = new Map<string, Pending>();
+    readonly #listeners = new Set<ApprovalListener>();
     /** Per-thread "本会话允许" keys. */
     readonly #sessionAllows = new Map<string, Set<string>>();
 
@@ -134,6 +141,21 @@ export class ApprovalService {
         return [...this.#pending.values()].map((pending) => pending.approval);
     }
 
+    /** Whether the card still waits for an answer. */
+    isPending(approvalId: string): boolean {
+        return this.#pending.has(approvalId);
+    }
+
+    /** The facts of a waiting card's call. */
+    factsOf(approvalId: string): CallFacts | undefined {
+        return this.#pending.get(approvalId)?.facts;
+    }
+
+    onRequested(listener: ApprovalListener): () => void {
+        this.#listeners.add(listener);
+        return () => this.#listeners.delete(listener);
+    }
+
     pendingFor(threadId: string): number {
         return [...this.#pending.values()].filter((pending) => pending.approval.threadId === threadId).length;
     }
@@ -163,10 +185,23 @@ export class ApprovalService {
             this.#pending.set(approval.id, { approval, facts, ...(follows ? { follows } : {}), resolve, timer });
             onCreated(approval);
             this.#bus.broadcast('approval.requested', { approval });
+            for (const listener of this.#listeners) {
+                try {
+                    listener(approval, facts);
+                } catch {
+                    // A listener's failure leaves the card to the user.
+                }
+            }
         });
     }
 
-    respond(approvalId: string, decision: ApprovalDecision, scope?: 'project' | 'global', message?: string): void {
+    respond(
+        approvalId: string,
+        decision: ApprovalDecision,
+        scope?: 'project' | 'global',
+        message?: string,
+        decidedBy?: 'supervisor',
+    ): void {
         const pending = this.#pending.get(approvalId);
         if (!pending) {
             throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).gone);
@@ -195,6 +230,7 @@ export class ApprovalService {
             status: decision === 'deny' ? 'denied' : 'allowed',
             decision,
             ...(message ? { message } : {}),
+            ...(decidedBy ? { decidedBy } : {}),
         });
     }
 

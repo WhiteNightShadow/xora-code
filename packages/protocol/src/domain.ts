@@ -277,7 +277,8 @@ export const ApprovalItemSchema = z.object({
     risks: z.array(RiskSchema),
     status: z.enum(['pending', 'allowed', 'denied', 'expired', 'cancelled']),
     decision: ApprovalDecisionSchema.optional(),
-    decidedBy: z.enum(['user', 'rule', 'policy']).optional(),
+    /** `supervisor`: a team's supervisor approved an ordinary command of its member (06 §21). */
+    decidedBy: z.enum(['user', 'rule', 'policy', 'supervisor']).optional(),
     message: z.string().optional(),
 });
 
@@ -524,6 +525,8 @@ export const SettingsSchema = z.object({
         teamMode: z.enum(['standard', 'hypotheses']),
         teamBudget: z.number().positive().nullable(),
         workflowMode: WorkflowRunModeSchema,
+        /** Absent until the first team run that sets it: `full`. */
+        teamPermission: WorkflowRunModeSchema.optional(),
     }),
 });
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -705,6 +708,10 @@ export const TeamRunSchema = z.object({
     continues: z.string().optional(),
     /** Moved to the archive by the user: listed apart. */
     archived: z.boolean().optional(),
+    /** What members may do without asking (06 §21). */
+    permission: z.enum(['default', 'auto_edit', 'full']).optional(),
+    /** Members working at the same time. */
+    parallel: z.number().optional(),
     /** The supervisor's last message of each turn, newest last: what it reports to the user. */
     feedback: z.array(z.object({ ts: z.number(), text: z.string() })).optional(),
     /** Messages between the user, the supervisor and the members (06 §7), oldest first. */
@@ -716,7 +723,17 @@ export const TeamRunSchema = z.object({
                 to: z.string(),
                 text: z.string(),
                 /** `stage`: a member handed in part of its card; `guide`: the supervisor's task_guide; `watch`: the host's watch (06 §20). */
-                kind: z.enum(['message', 'question', 'answer', 'user', 'challenge', 'stage', 'guide', 'watch']),
+                kind: z.enum([
+                    'message',
+                    'question',
+                    'answer',
+                    'user',
+                    'challenge',
+                    'stage',
+                    'guide',
+                    'watch',
+                    'approval',
+                ]),
             }),
         )
         .optional(),

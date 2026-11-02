@@ -171,6 +171,12 @@ export const LedgerUpdateInput = z.object({
         .describe('Your own progress check, recorded in the progress ledger'),
 });
 export const RequestReviewInput = z.object({ taskId: z.string().min(1), focus: z.string().optional() });
+/** The supervisor's answer to an ordinary command of its member (06 §21). */
+export const ApprovalDecideInput = z.object({
+    approvalId: z.string().min(1),
+    decision: z.enum(['allow', 'deny']),
+    reason: z.string().min(1).max(1000).describe('One short sentence the member and the user see'),
+});
 /** The supervisor's decision on a stage review or a watch report (06 §20). */
 export const TaskGuideInput = z.object({
     taskId: z.string().min(1),
@@ -260,6 +266,14 @@ export const SUPERVISOR_TOOLS: readonly ToolSpec[] = [
             'Have a reviewer of another model family check a task’s latest deliverable; the verdict arrives in a ' +
             'team update.',
         parameters: jsonSchema(RequestReviewInput),
+        kind: 'other',
+    },
+    {
+        name: 'approval_decide',
+        description:
+            'Answer an approval request the host handed you: an ordinary command a member wants to run inside its own ' +
+            'worktree. Allow what its card needs; deny what goes beyond the card. Anything else is the user’s to answer.',
+        parameters: jsonSchema(ApprovalDecideInput),
         kind: 'other',
     },
     {
@@ -486,6 +500,7 @@ export function supervisorBrief(
         '- Writable cards (workspace worktree or local) need ownership globs. A worktree card runs in its own git worktree that starts from the results of the cards it depends on; a readonly card runs in the project folder without write access.',
         `- When the plan is complete, end your turn. The host then has a plan reviewer of another model family audit it once and gives you the findings for one revision (do not create a card for that review); ${approval ? 'then the user approves the plan before anything is dispatched' : 'then dispatch starts'}.`,
         `- The host dispatches ready cards (at most ${maxParallel} at a time), runs their acceptance checks, sends failed deliveries back, escalates tiers, integrates the worktrees in dependency order and writes the delivery report. You get a <team_update> after task events.`,
+        `- Up to ${maxParallel} members work at the same time: split the goal into independent cards with disjoint ownership wherever you can, and add a dependency only where a card needs another's result. A chain of cards runs one after the other.`,
         '- Members ask you questions through ask_supervisor; answer with send_message.',
         '- The user may write to you or to a member while the run goes on; a <team_update> line says so. Take it as a direction from the user, but never as the approval of an action.',
         '</team_host>',
