@@ -87,14 +87,20 @@ export function absolutePath(project: Pick<Project, 'path'> | undefined, file: s
     return `${project.path.replace(/[\\/]+$/, '')}${separator}${windows ? file.replaceAll('/', '\\') : file}`;
 }
 
+/**
+ * A run's report (06 §22): the outcome, what was done and the next steps. Reports written before have problems
+ * instead of a done list.
+ */
 export interface BriefSections {
     readonly conclusion: string;
+    readonly done: readonly string[];
     readonly problems: readonly string[];
     readonly next: readonly string[];
 }
 
 const BRIEF_HEADINGS: ReadonlyArray<{ key: keyof BriefSections; pattern: RegExp }> = [
-    { key: 'conclusion', pattern: /^(结论|conclusions?)$/i },
+    { key: 'conclusion', pattern: /^(结论|目标达成|目标达成情况|conclusions?|outcome)$/i },
+    { key: 'done', pattern: /^(已完成|完成|done|delivered)$/i },
     { key: 'problems', pattern: /^(问题|problems?|issues?)$/i },
     { key: 'next', pattern: /^(下一步|next steps?)$/i },
 ];
@@ -120,7 +126,7 @@ function briefItems(lines: readonly string[]): string[] {
  * conclusion heading, so the caller shows the text as it is.
  */
 export function briefSections(text: string): BriefSections | undefined {
-    const parts: Record<keyof BriefSections, string[]> = { conclusion: [], problems: [], next: [] };
+    const parts: Record<keyof BriefSections, string[]> = { conclusion: [], done: [], problems: [], next: [] };
     let current: keyof BriefSections | undefined;
     let found = false;
     for (const line of text.split(/\r?\n/)) {
@@ -136,6 +142,7 @@ export function briefSections(text: string): BriefSections | undefined {
     if (!found) return undefined;
     return {
         conclusion: parts.conclusion.join('\n').trim(),
+        done: briefItems(parts.done),
         problems: briefItems(parts.problems),
         next: briefItems(parts.next),
     };

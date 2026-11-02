@@ -4,7 +4,8 @@ import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
 import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format, type Strings } from '../strings.ts';
-import { absolutePath, briefSections, filesIn, flowLevels, type RunFile, runFiles, stepGist } from '../workflow-run.ts';
+import { absolutePath, filesIn, flowLevels, type RunFile, runFiles, stepGist } from '../workflow-run.ts';
+import { BriefBody } from './BriefBody.tsx';
 import { Choices, Popover } from './Controls.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
@@ -544,7 +545,6 @@ function BriefCard({
 }) {
     const s = useStrings();
     const brief = run.brief;
-    const sections = brief?.status === 'ready' && brief.text ? briefSections(brief.text) : undefined;
     const write = () =>
         void attempt(() => host.call('workflow.brief', { runId: run.id })).then(
             (updated) =>
@@ -583,52 +583,8 @@ function BriefCard({
                         {s.workflow.briefRetry}
                     </button>
                 </div>
-            ) : sections ? (
-                <>
-                    <div className="wf-brief__conclusion">
-                        <Markdown text={sections.conclusion} />
-                    </div>
-                    <div className="wf-brief__grid">
-                        <div className="wf-brief__block is-problems">
-                            <h4>
-                                <Icon name="alert" size={14} />
-                                {s.workflow.problems}
-                            </h4>
-                            {sections.problems.length === 0 ? (
-                                <p className="overview-muted">{s.workflow.noProblems}</p>
-                            ) : (
-                                <ul>
-                                    {sections.problems.map((item) => (
-                                        <li key={item}>
-                                            <Markdown text={item} />
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
-                        </div>
-                        <div className="wf-brief__block is-next">
-                            <h4>
-                                <Icon name="send" size={14} />
-                                {s.workflow.nextSteps}
-                            </h4>
-                            {sections.next.length === 0 ? (
-                                <p className="overview-muted">{s.workflow.noNextSteps}</p>
-                            ) : (
-                                <ol>
-                                    {sections.next.map((item) => (
-                                        <li key={item}>
-                                            <Markdown text={item} />
-                                        </li>
-                                    ))}
-                                </ol>
-                            )}
-                        </div>
-                    </div>
-                </>
             ) : (
-                <div className="wf-brief__conclusion">
-                    <Markdown text={brief.text ?? ''} />
-                </div>
+                <BriefBody text={brief.text ?? ''} />
             )}
             {files.length > 0 && (
                 <div className="wf-brief__files">

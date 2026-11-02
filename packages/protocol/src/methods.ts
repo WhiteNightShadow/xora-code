@@ -22,6 +22,7 @@ import {
     PromptScopeSchema,
     RuleSchema,
     SettingsSchema,
+    StaffPresetSchema,
     TeamRunSchema,
     ThreadMetaSchema,
     UpdateStatusSchema,
@@ -367,10 +368,37 @@ export const methods = {
                 permission: WorkflowRunModeSchema.optional(),
                 /** Members working at the same time in this run; the team setting by default. */
                 parallel: z.number().int().min(1).max(8).optional(),
+                /**
+                 * The members who work in the run, each with its model, thinking level and permissions (06 §22);
+                 * the supervisor assigns cards only to them. Absent: the supervisor picks from all members.
+                 */
+                members: z
+                    .array(StaffPresetSchema.extend({ memberId: z.string() }).strict())
+                    .max(20)
+                    .optional(),
             })
             .strict(),
         result: TeamRunSchema,
     },
+    /**
+     * Sets who works a card that has not started, and with what model, thinking level and permissions (06 §22); an
+     * empty string clears a field back to the member's own.
+     */
+    'team.presetTask': {
+        params: z
+            .object({
+                runId: z.string(),
+                taskId: z.string(),
+                memberId: z.string().optional(),
+                model: z.string().max(200).optional(),
+                effort: z.union([EffortSchema, z.literal('')]).optional(),
+                mode: z.union([PermissionModeSchema, z.literal('')]).optional(),
+            })
+            .strict(),
+        result: TeamRunSchema,
+    },
+    /** Writes the report of a run that is over again; it arrives with `team.changed`. */
+    'team.brief': { params: z.object({ runId: z.string() }).strict(), result: TeamRunSchema },
     /** Changes what the members of a running team may do without asking; waiting approvals are decided again. */
     'team.setPermission': {
         params: z.object({ runId: z.string(), permission: WorkflowRunModeSchema }).strict(),
@@ -565,8 +593,16 @@ export const methods = {
         result: ThreadMetaSchema,
     },
     /** A conversation with a member in a project: a new thread where it works as itself, started with `text`. */
+    /** Hands a member work in a thread of its own; `model`, `effort` and `mode` set what it works with (06 §22). */
     'member.chat': {
-        params: z.object({ projectId: IdSchema, memberId: z.string(), text: z.string().min(1).max(20_000) }).strict(),
+        params: z
+            .object({
+                projectId: IdSchema,
+                memberId: z.string(),
+                text: z.string().min(1).max(20_000),
+            })
+            .merge(StaffPresetSchema)
+            .strict(),
         result: ThreadMetaSchema,
     },
     /** The threads a member works or worked in, in every project, newest first. */

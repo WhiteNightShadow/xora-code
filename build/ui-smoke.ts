@@ -126,9 +126,9 @@ server.respondWith((request) => {
         | undefined;
     const messages = body?.messages ?? [];
     // The brief of a finished run: a request without tools that asks for the three headings.
-    if (!body?.tools?.length && JSON.stringify(messages).includes('## 结论')) {
+    if (!body?.tools?.length && JSON.stringify(messages).includes('## 目标达成')) {
         return openaiText(
-            '## 结论\n冒烟工作流跑完了，交回了hello.txt。\n\n## 问题\n- 无\n\n## 下一步\n- 打开hello.txt看一眼',
+            '## 目标达成\n冒烟工作流跑完了，交回了hello.txt。\n\n## 已完成\n- 写好了hello.txt（`hello.txt`）\n\n## 下一步\n- 打开hello.txt看一眼',
         );
     }
     // A member asked to remember something writes it into its memory.

@@ -922,7 +922,7 @@ steps:
             .map((request) => request.body as ChatBody | undefined)
             .filter(isBrief);
         expect(briefs).toHaveLength(1);
-        expect(systemText(briefs[0])).toMatch(/## 结论[\s\S]*## 问题[\s\S]*## 下一步/);
+        expect(systemText(briefs[0])).toMatch(/## 目标达成[\s\S]*## 已完成[\s\S]*## 下一步/);
         const material = textOf(briefs[0]?.messages.at(-1)?.content);
         expect(material).toContain('工作流：写周报（report）');
         expect(material).toContain('总结：wrote report.md');

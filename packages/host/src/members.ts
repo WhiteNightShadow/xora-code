@@ -5,6 +5,7 @@ import path from 'node:path';
 import { renderSkillIndex } from '@xora/extensions';
 import {
     bilingual,
+    type Effort,
     type HostMethods,
     type HostNotifications,
     type ItemOf,
@@ -1388,7 +1389,15 @@ export class MemberService {
     }
 
     /** A conversation with a member: a new thread in the project where it works as itself, started with `text`. */
-    async chat(input: { projectId: string; memberId: string; text: string }): Promise<ThreadMeta> {
+    async chat(input: {
+        projectId: string;
+        memberId: string;
+        text: string;
+        /** What the user set for this job (06 §22); the member's own settings otherwise. */
+        model?: string | undefined;
+        effort?: Effort | undefined;
+        mode?: PermissionMode | undefined;
+    }): Promise<ThreadMeta> {
         const { threads, turns, log } = this.#deps;
         const text = textOf(TEXT);
         const project = await this.#project(input.projectId);
@@ -1397,21 +1406,22 @@ export class MemberService {
         if (!agent) {
             throw new RpcError(RpcErrorCode.NotFound, text.notInProject(input.memberId, project.name));
         }
+        const prefer = input.model ? [{ model: input.model }] : agent.models;
         const pick = pickTierModel(this.#deps, {
             org,
             project,
             tier: agent.tier,
             unattended: false,
             warnings: [],
-            ...(agent.models ? { prefer: agent.models } : {}),
+            ...(prefer ? { prefer } : {}),
         });
         const thread = threads.create({
             projectId: project.id,
             title: text.chatTitle(memberName(agent), shorten(input.text, 20)),
             engine: 'xora',
             model: pick.ref,
-            mode: agent.mode,
-            effort: pick.effort,
+            mode: input.mode ?? agent.mode,
+            effort: input.effort ?? pick.effort,
             extra: { agentId: agent.id, role: agent.role, tier: agent.tier },
         });
         turns.setHostTools(thread.id, this.provider(agent, org, project.id));

@@ -294,6 +294,7 @@ export class HostCore {
             turns: this.turns,
             orgsDir: this.paths.orgsDir,
             members: this.members,
+            userAgent,
         });
         // The webhook keeps its port across restarts, so the URL given out stays valid (06 §12).
         const webhookPort = Number(this.#value('webhookPort') ?? 0);

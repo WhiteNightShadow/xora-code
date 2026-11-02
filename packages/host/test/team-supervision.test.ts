@@ -122,6 +122,11 @@ describe('supervision loop', () => {
         server.respondWith((request) => {
             const body = request.body as ChatBody | undefined;
             if (!body?.messages) return undefined;
+            if (textOf(body.messages[0]?.content).includes('现在向下达任务的人交付结果')) {
+                return say(
+                    '## 目标达成\n已达成：两个文件都写好了。\n## 已完成\n- a.txt和b.txt（`a.txt`、`b.txt`）\n## 下一步\n- 无',
+                );
+            }
             const last = body.messages.at(-1);
             switch (agentOf(body)) {
                 case 'Supervisor': {
@@ -172,7 +177,7 @@ describe('supervision loop', () => {
             }
         });
 
-        const { repo, done } = await startRun('写a.txt和b.txt');
+        const { ui, repo, done } = await startRun('写a.txt和b.txt');
         expect(done.status).toBe('done');
         const task = done.tasks[0];
         expect(task).toMatchObject({ id: 'T1', status: 'done', stage: 2, attempts: 1 });
@@ -200,6 +205,18 @@ describe('supervision loop', () => {
         ]);
         // The turn that only reviewed the stage is not feedback to the user.
         expect(done.feedback?.map((entry) => entry.text)).not.toContain('Guided T1.');
+        // 06 §22: once over, the supervisor's model writes the report: outcome, done, next steps, from the record.
+        const reported = await waitFor(async () => {
+            const run = await ui.request('team.get', { runId: done.id });
+            return run.brief?.status === 'ready' ? run : undefined;
+        }, 'the report');
+        expect(reported.brief?.text).toContain('## 目标达成');
+        const material = server.requests
+            .map((request) => request.body as ChatBody)
+            .find((body) => textOf(body?.messages?.[0]?.content).includes('现在向下达任务的人交付结果'));
+        expect(userText(material as ChatBody)).toContain('- T1 Write the files: done');
+        expect(userText(material as ChatBody)).toContain('result: wrote b.txt');
+        expect(reported.report).toContain('# 交付报告');
     }, 120_000);
 
     it('reports a member that repeats itself and steers it at its next step', async () => {
@@ -352,5 +369,116 @@ describe('supervision loop', () => {
         const read = await ui.request('thread.read', { threadId: done.tasks[0]?.threadId as string });
         expect(JSON.stringify(read.events)).toContain('"decidedBy":"supervisor"');
         expect(done.feedback?.map((entry) => entry.text)).not.toContain('Approved.');
+    }, 120_000);
+
+    it('runs the members the user chose, with the model and settings set before a card starts', async () => {
+        server.reset();
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            const last = body.messages.at(-1);
+            switch (agentOf(body)) {
+                case 'Supervisor': {
+                    if (last?.role === 'tool' && lastCall(body) === 'task_create') {
+                        // A member the user did not choose is refused; the card goes to one who is in the run.
+                        return textOf(last.content).includes('Only these members work in this run')
+                            ? call({
+                                  name: 'task_create',
+                                  arguments: { tasks: [{ ...card(ONLY_A, ['a.txt']), assignee: 'coder' }] },
+                              })
+                            : say('Planned.');
+                    }
+                    if (last?.role !== 'tool' && textOf(last?.content).includes('<team_goal>')) {
+                        return call({
+                            name: 'task_create',
+                            arguments: { tasks: [{ ...card(ONLY_A, ['a.txt']), assignee: 'tester' }] },
+                        });
+                    }
+                    return say('Noted.');
+                }
+                case 'Coder': {
+                    if (last?.role === 'tool' && lastCall(body) === 'write') {
+                        return call({
+                            name: 'deliver',
+                            arguments: {
+                                status: 'done',
+                                summary: 'wrote a.txt',
+                                changes: [{ file: 'a.txt', kind: 'added' }],
+                                evidence: [{ type: 'diff' }],
+                            },
+                        });
+                    }
+                    if (last?.role === 'tool') return say('Handed in.');
+                    return call({ name: 'write', arguments: { path: 'a.txt', content: 'one\n' } });
+                }
+                default:
+                    return say('ok');
+            }
+        });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-supervision-data-'));
+        const { ui } = await host.start(dataDir);
+        // The plan waits for the user: the card is set while it waits.
+        approveAll(ui, [], new Set(['team_plan']));
+        await connectMock(ui, server);
+        const repo = gitRepo();
+        const project = await ui.request('project.add', { path: repo });
+        const started = await ui.request('team.start', {
+            projectId: project.id,
+            goal: '写a.txt',
+            autonomy: 'L1',
+            budget: 50,
+            members: [{ memberId: 'coder', model: 'kimi-k3', effort: 'low' }],
+        });
+        expect(started.members).toEqual([{ memberId: 'coder', name: '编码', model: 'kimi-k3', effort: 'low' }]);
+        const planned = await waitFor(async () => {
+            const run = await ui.request('team.get', { runId: started.id });
+            return run.tasks.length > 0 ? run : undefined;
+        }, 'a card');
+        // Before it starts, the card shows who works it and with what.
+        expect(planned.tasks[0]).toMatchObject({ memberId: 'coder', model: 'kimi-k3', effort: 'low', preset: true });
+        const preset = await ui.request('team.presetTask', {
+            runId: started.id,
+            taskId: 'T1',
+            effort: 'high',
+            mode: 'auto_edit',
+        });
+        expect(preset.tasks[0]).toMatchObject({
+            memberId: 'coder',
+            model: 'kimi-k3',
+            effort: 'high',
+            mode: 'auto_edit',
+        });
+        await expect(
+            ui.request('team.presetTask', { runId: started.id, taskId: 'T1', memberId: 'supervisor' }),
+        ).rejects.toThrow('没有能干活的成员supervisor');
+        const planCard = await waitFor(
+            async () => (await ui.request('approval.list', {})).find((approval) => approval.toolName === 'team_plan'),
+            'the plan card',
+        );
+        await ui.request('approval.respond', { approvalId: planCard.id, decision: 'allow_once' });
+        const done = await waitFor(
+            async () => {
+                const run = await ui.request('team.get', { runId: started.id });
+                return ['done', 'failed', 'cancelled', 'paused'].includes(run.status) ? run : undefined;
+            },
+            'run done',
+            90_000,
+        );
+        expect(done.status).toBe('done');
+        // It ran with what was set: the run's model for the member, the card's thinking level and permissions.
+        expect(done.tasks[0]).toMatchObject({ memberId: 'coder', model: 'kimi-k3', effort: 'high', mode: 'auto_edit' });
+        const coder = server.requests
+            .map((request) => request.body as ChatBody)
+            .find((body) => agentOf(body) === 'Coder');
+        expect(coder?.model).toBe('kimi-k3');
+        const supervisorBrief = server.requests
+            .map((request) => request.body as ChatBody)
+            .find((body) => agentOf(body) === 'Supervisor');
+        expect(userText(supervisorBrief as ChatBody)).toContain(
+            '- coder: executor (coding), model kimi-k3, thinking low',
+        );
+        await expect(ui.request('team.presetTask', { runId: started.id, taskId: 'T1', effort: 'low' })).rejects.toThrow(
+            'T1已经开始了',
+        );
     }, 120_000);
 });

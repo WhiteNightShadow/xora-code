@@ -653,6 +653,30 @@ export type HandoffResult = z.infer<typeof HandoffResultSchema>;
 // ---------------------------------------------------------------------------------------------------------
 // Agent teams (06)
 
+/**
+ * What a member works with in a team run, set before it starts (06 §22): a connected model's id, a thinking level
+ * and permissions. Absent fields fall back to the member's own settings and the run's permissions.
+ */
+export const StaffPresetSchema = z.object({
+    model: z.string().max(200).optional(),
+    effort: EffortSchema.optional(),
+    mode: PermissionModeSchema.optional(),
+});
+export type StaffPreset = z.infer<typeof StaffPresetSchema>;
+
+/**
+ * The report on a run that is over, for whoever ordered it (06 §22): markdown under `## 目标达成`, `## 已完成`,
+ * `## 下一步` (`## Outcome`, `## Done`, `## Next steps`). Briefs written before have `## 结论`, `## 问题`, `## 下一步`.
+ */
+export const RunBriefSchema = z.object({
+    status: z.enum(['writing', 'ready', 'failed']),
+    text: z.string().optional(),
+    /** Why it could not be written. */
+    note: z.string().optional(),
+    at: z.number(),
+});
+export type RunBrief = z.infer<typeof RunBriefSchema>;
+
 export const TeamTaskSchema = z.object({
     id: z.string(),
     title: z.string(),
@@ -674,6 +698,15 @@ export const TeamTaskSchema = z.object({
     guidance: z.string().optional(),
     /** The host's latest watch report on the running member: `repeat`, `spin` or `silent`. */
     watch: z.object({ rule: z.string(), at: z.number() }).optional(),
+    /**
+     * Who works it and with what (06 §22): before it starts, the member and settings it will get (`preset` when the
+     * user set them); once dispatched, what it runs with.
+     */
+    memberId: z.string().optional(),
+    model: z.string().optional(),
+    effort: EffortSchema.optional(),
+    mode: PermissionModeSchema.optional(),
+    preset: z.boolean().optional(),
     deliverable: z.unknown().optional(),
     verdict: z
         .object({ verdict: z.string(), reasons: z.array(z.string()), outOfOwnership: z.array(z.string()) })
@@ -712,6 +745,10 @@ export const TeamRunSchema = z.object({
     permission: z.enum(['default', 'auto_edit', 'full']).optional(),
     /** Members working at the same time. */
     parallel: z.number().optional(),
+    /** The members the user chose for the run, with their settings (06 §22); absent: the supervisor picks. */
+    members: z.array(StaffPresetSchema.extend({ memberId: z.string(), name: z.string() })).optional(),
+    /** The supervisor's report to the user once the run is over (06 §22); `report` keeps the details. */
+    brief: RunBriefSchema.optional(),
     /** The supervisor's last message of each turn, newest last: what it reports to the user. */
     feedback: z.array(z.object({ ts: z.number(), text: z.string() })).optional(),
     /** Messages between the user, the supervisor and the members (06 §7), oldest first. */
@@ -877,14 +914,7 @@ export type Member = z.infer<typeof MemberSchema>;
  * The report for whoever ordered a run (06 §11): what came of it, what is wrong, what to do next, without the
  * steps. Written once the run is over.
  */
-export const WorkflowBriefSchema = z.object({
-    status: z.enum(['writing', 'ready', 'failed']),
-    /** Markdown under three headings: `## 结论`, `## 问题`, `## 下一步` (`## Conclusion`, `## Problems`, `## Next steps`). */
-    text: z.string().optional(),
-    /** Why it could not be written. */
-    note: z.string().optional(),
-    at: z.number(),
-});
+export const WorkflowBriefSchema = RunBriefSchema;
 export type WorkflowBrief = z.infer<typeof WorkflowBriefSchema>;
 
 export const WorkflowRunSchema = z.object({

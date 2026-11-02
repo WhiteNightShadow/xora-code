@@ -420,3 +420,65 @@
         transition: none;
     }
 }
+
+/* Who works a card and with what (06 §22). */
+.conclusion-card__staff {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--xk-space-2);
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+/* The members a team run uses, chosen when it starts, each with its model, thinking and permissions (06 §22). */
+.team-staff {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 2px;
+}
+
+.team-staff__row {
+    border: 1px solid var(--xk-border-subtle);
+    border-radius: var(--xk-radius-sm);
+    padding: 6px 10px;
+}
+
+.team-staff__row.is-on {
+    border-color: color-mix(in srgb, var(--xk-accent) 40%, transparent);
+    background: var(--xk-accent-subtle);
+}
+
+.team-staff__who {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+    cursor: pointer;
+}
+
+.team-staff__who .muted {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--xk-text-xs);
+}
+
+.team-staff__settings {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--xk-space-2);
+    margin-top: 6px;
+}
+
+.team-report__details {
+    margin-top: var(--xk-space-3);
+}
+
+.team-report__details summary {
+    cursor: pointer;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}

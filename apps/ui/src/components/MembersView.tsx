@@ -935,12 +935,28 @@ export function DispatchDialog({ memberId }: { memberId: string }) {
     const [projectId, setProjectId] = useState(selectedProjectId ?? projects[0]?.id ?? '');
     const [text, setText] = useState('');
     const [busy, setBusy] = useState(false);
+    // 06 §22: what it works with on this job, set here; left as it is, the member's own.
+    const connected = useApp((state) => state.models);
+    const [model, setModel] = useState('');
+    const [effort, setEffort] = useState('');
+    const [mode, setMode] = useState('');
     const close = () => useApp.setState({ dispatchTo: undefined });
     const send = async () => {
         if (!text.trim() || !projectId || busy) return;
         setBusy(true);
         const thread = await attempt(() =>
-            host.call('member.chat', { projectId, memberId, text: text.trim() }, { timeoutMs: 120_000 }),
+            host.call(
+                'member.chat',
+                {
+                    projectId,
+                    memberId,
+                    text: text.trim(),
+                    ...(model ? { model } : {}),
+                    ...(effort ? { effort: effort as 'off' | 'low' | 'medium' | 'high' | 'max' } : {}),
+                    ...(mode ? { mode: mode as PermissionMode } : {}),
+                },
+                { timeoutMs: 120_000 },
+            ),
         );
         setBusy(false);
         if (thread) {
@@ -979,6 +995,47 @@ export function DispatchDialog({ memberId }: { memberId: string }) {
                         onChange={setProjectId}
                     />
                 </Field>
+                <div className="member-editor__row">
+                    <Field label={s.members.model}>
+                        <Select
+                            label={s.members.model}
+                            value={model}
+                            options={[
+                                { value: '', label: member.model ?? s.members.modelByTier },
+                                ...[...new Set(connected.map((option) => option.model.id))].map((id) => ({
+                                    value: id,
+                                    label: id,
+                                })),
+                            ]}
+                            onChange={setModel}
+                        />
+                    </Field>
+                    <Field label={s.team.staffEffort}>
+                        <Select
+                            label={s.team.staffEffort}
+                            value={effort}
+                            options={[
+                                { value: '', label: s.team.byMember },
+                                ...(['off', 'low', 'medium', 'high', 'max'] as const).map((value) => ({
+                                    value,
+                                    label: s.efforts[value],
+                                })),
+                            ]}
+                            onChange={setEffort}
+                        />
+                    </Field>
+                    <Field label={s.members.mode}>
+                        <Select
+                            label={s.members.mode}
+                            value={mode}
+                            options={[
+                                { value: '', label: s.members.modes[member.mode] },
+                                ...MODES.map((value) => ({ value, label: s.members.modes[value] })),
+                            ]}
+                            onChange={setMode}
+                        />
+                    </Field>
+                </div>
                 <div className="row">
                     <button
                         type="button"

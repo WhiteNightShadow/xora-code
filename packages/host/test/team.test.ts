@@ -420,9 +420,10 @@ describe('agent team run', () => {
         }, 'run done');
         expect(done.status).toBe('done');
         expect(again.map((approval) => approval.toolName)).toEqual(['team_delivery', 'acceptance']);
-        expect(server.requests.slice(before).map((request) => agentOf(request.body as ChatBody | undefined))).toEqual(
-            [],
-        );
+        // Nothing more for the team after the restart: the one request is the report for the user (06 §22).
+        expect(server.requests.slice(before).map((request) => agentOf(request.body as ChatBody | undefined))).toEqual([
+            'none',
+        ]);
         expect(readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('final\n');
         expect(readFileSync(path.join(repo, 'b.txt'), 'utf8')).toBe('next to a\n');
 

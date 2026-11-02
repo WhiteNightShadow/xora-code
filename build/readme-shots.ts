@@ -332,15 +332,15 @@ server.respondWith((request) => {
     const user = userText(body);
 
     // The brief of the finished workflow run.
-    if (!body.tools?.length && JSON.stringify(messages).includes('## 结论')) {
+    if (!body.tools?.length && JSON.stringify(messages).includes('## 目标达成')) {
         return openaiText(
             [
-                '## 结论',
+                '## 目标达成',
                 '可以发布：上次发布以来只改了订单金额的计算，`node --test`三条全过，审查没有阻塞问题。',
                 '',
-                '## 问题',
-                '- `applyCoupon`仍然用元做减法，叠加优惠时可能差一分钱',
-                '- 这次没有跑接口的端到端测试',
+                '## 已完成',
+                '- 订单金额改成按分计算，修掉了小数精度问题（`src/order.js`）',
+                '- 补了三条金额测试，全部通过（`test/order.test.js`）',
                 '',
                 '## 下一步',
                 '- 打`v0.4.1`标签并发布',

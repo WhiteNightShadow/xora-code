@@ -80,6 +80,12 @@
     border-color: color-mix(in srgb, var(--xk-accent) 25%, transparent);
 }
 
+/* What the run delivered (06 §22). */
+.wf-brief__block.is-done {
+    background: var(--xk-ok-subtle);
+    border-color: color-mix(in srgb, var(--xk-ok) 25%, transparent);
+}
+
 .wf-brief__block h4 {
     display: flex;
     align-items: center;
@@ -95,6 +101,10 @@
 
 .wf-brief__block.is-next h4 {
     color: var(--xk-accent-text);
+}
+
+.wf-brief__block.is-done h4 {
+    color: var(--xk-ok);
 }
 
 .wf-brief__block ul,

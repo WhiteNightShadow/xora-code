@@ -2,12 +2,13 @@ import type { TeamRun, TeamTask } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
-import { attempt, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
+import { attempt, loadMembers, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import '../task.css';
+import { BriefBody } from './BriefBody.tsx';
 import { Badge, Empty, Field, formatMoney, IconButton, Modal, relativeTime, Select, Spinner } from './primitives.tsx';
 import { RunActions } from './RunActions.tsx';
 import { RUN_MODE_ICONS } from './WorkflowView.tsx';
@@ -167,6 +168,153 @@ function Conversation({ run }: { run: TeamRun }) {
 }
 
 const TEAM_TERMINAL = ['done', 'failed', 'cancelled'];
+const EFFORTS = ['off', 'low', 'medium', 'high', 'max'] as const;
+const PERMISSIONS = ['plan', 'ask', 'auto_edit', 'full'] as const;
+
+/** The report of a run that is over (06 §22): the outcome, what was done and the next steps, written for the user. */
+function TeamBrief({ run }: { run: TeamRun }) {
+    const s = useStrings();
+    const brief = run.brief;
+    const rewrite = () =>
+        void attempt(() => host.call('team.brief', { runId: run.id })).then(
+            (updated) =>
+                updated && useApp.setState((state) => ({ teamRuns: { ...state.teamRuns, [updated.id]: updated } })),
+        );
+    if (!brief) return null;
+    return (
+        <section className={`overview-card wf-brief is-${run.status}`} aria-label={s.team.briefTitle}>
+            <header className="wf-brief__head">
+                <h3>{s.team.briefTitle}</h3>
+                {brief.status !== 'writing' && (
+                    <button type="button" className="button button--small" onClick={rewrite}>
+                        {s.team.briefRewrite}
+                    </button>
+                )}
+            </header>
+            {brief.status === 'writing' ? (
+                <div className="wf-brief__writing" aria-busy="true">
+                    <p className="overview-muted overview-pulse">{s.team.briefWriting}</p>
+                    <span className="wf-skeleton" />
+                    <span className="wf-skeleton" />
+                    <span className="wf-skeleton is-short" />
+                </div>
+            ) : brief.status === 'failed' ? (
+                <p className="wf-brief__failed">{format(s.team.briefFailed, { note: brief.note ?? '' })}</p>
+            ) : (
+                <BriefBody text={brief.text ?? ''} />
+            )}
+        </section>
+    );
+}
+
+/** Who works a card and with what (06 §22): member · model · thinking · permissions. */
+function staffLine(task: TeamTask, run: TeamRun, s: ReturnType<typeof useStrings>): string {
+    const member = run.members?.find((item) => item.memberId === task.memberId)?.name ?? task.memberId ?? '';
+    return [
+        member,
+        task.model ?? s.team.byTier,
+        task.effort ? s.efforts[task.effort] : undefined,
+        task.mode ? s.members.modes[task.mode] : undefined,
+    ]
+        .filter(Boolean)
+        .join(' · ');
+}
+
+/** Sets who works a card that has not started, and with what (06 §22). */
+function StaffEditor({ run, task, onClose }: { run: TeamRun; task: TeamTask; onClose: () => void }) {
+    const s = useStrings();
+    const members = useApp((state) => state.members).filter((member) => member.role !== 'supervisor');
+    const connected = useApp((state) => state.models);
+    const [memberId, setMemberId] = useState(task.memberId ?? '');
+    const [model, setModel] = useState(task.preset ? (task.model ?? '') : '');
+    const [effort, setEffort] = useState<string>(task.preset ? (task.effort ?? '') : '');
+    const [mode, setMode] = useState<string>(task.preset ? (task.mode ?? '') : '');
+    const [busy, setBusy] = useState(false);
+    const save = async () => {
+        setBusy(true);
+        const updated = await attempt(() =>
+            host.call('team.presetTask', {
+                runId: run.id,
+                taskId: task.id,
+                ...(memberId ? { memberId } : {}),
+                model,
+                effort: effort as (typeof EFFORTS)[number] | '',
+                mode: mode as (typeof PERMISSIONS)[number] | '',
+            }),
+        );
+        setBusy(false);
+        if (updated) {
+            useApp.setState((state) => ({ teamRuns: { ...state.teamRuns, [updated.id]: updated } }));
+            onClose();
+        }
+    };
+    return (
+        <Modal title={format(s.team.staffTitle, { task: `${task.id} ${task.title}` })} onClose={onClose}>
+            <div className="dialog">
+                <p className="muted">{s.team.staffHint}</p>
+                <Field label={s.team.staffMember}>
+                    <Select
+                        label={s.team.staffMember}
+                        value={memberId}
+                        options={members.map((member) => ({ value: member.id, label: member.name }))}
+                        onChange={setMemberId}
+                    />
+                </Field>
+                <div className="member-editor__row">
+                    <Field label={s.members.model}>
+                        <Select
+                            label={s.members.model}
+                            value={model}
+                            options={[
+                                { value: '', label: s.team.byMember },
+                                ...[...new Set(connected.map((option) => option.model.id))].map((id) => ({
+                                    value: id,
+                                    label: id,
+                                })),
+                            ]}
+                            onChange={setModel}
+                        />
+                    </Field>
+                    <Field label={s.team.staffEffort}>
+                        <Select
+                            label={s.team.staffEffort}
+                            value={effort}
+                            options={[
+                                { value: '', label: s.team.byMember },
+                                ...EFFORTS.map((value) => ({ value, label: s.efforts[value] })),
+                            ]}
+                            onChange={setEffort}
+                        />
+                    </Field>
+                    <Field label={s.members.mode}>
+                        <Select
+                            label={s.members.mode}
+                            value={mode}
+                            options={[
+                                { value: '', label: s.team.byRun },
+                                ...PERMISSIONS.map((value) => ({ value, label: s.members.modes[value] })),
+                            ]}
+                            onChange={setMode}
+                        />
+                    </Field>
+                </div>
+                <div className="row">
+                    <button
+                        type="button"
+                        className="button button--primary"
+                        disabled={busy || !memberId}
+                        onClick={() => void save()}
+                    >
+                        {busy ? <Spinner /> : null} {s.members.save}
+                    </button>
+                    <button type="button" className="button" onClick={onClose}>
+                        {s.common.cancel}
+                    </button>
+                </div>
+            </div>
+        </Modal>
+    );
+}
 
 /** The project's team board (03): its team runs, running ones first, archived ones apart, and a new run. */
 export function TeamBoard({ projectId }: { projectId: string }) {
@@ -537,7 +685,20 @@ export function TeamView({ runId }: { runId: string }) {
                     </tbody>
                 </table>
             )}
-            {tab === 'report' && (run.report ? <Markdown text={run.report} /> : <Empty>{s.team.noReport}</Empty>)}
+            {tab === 'report' &&
+                (run.report || run.brief ? (
+                    <div className="team-report">
+                        <TeamBrief run={run} />
+                        {run.report && (
+                            <details className="team-report__details">
+                                <summary>{s.team.reportDetails}</summary>
+                                <Markdown text={run.report} />
+                            </details>
+                        )}
+                    </div>
+                ) : (
+                    <Empty>{s.team.noReport}</Empty>
+                ))}
         </div>
     );
 }
@@ -554,6 +715,25 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
     const [permission, setPermission] = useState<'default' | 'auto_edit' | 'full'>(last?.teamPermission ?? 'full');
     const defaultParallel = useApp((state) => state.settings?.team.maxParallel ?? 3);
     const [parallel, setParallel] = useState(String(defaultParallel));
+    // 06 §22: the supervisor picks the members, or the user does, each with its model, thinking and permissions.
+    const members = useApp((state) => state.members).filter((member) => member.role !== 'supervisor');
+    const connected = useApp((state) => state.models);
+    const [staffMode, setStaffMode] = useState<'auto' | 'manual'>('auto');
+    const [staff, setStaff] = useState<Record<string, { model: string; effort: string; mode: string }>>({});
+    useEffect(() => {
+        if (members.length === 0) void loadMembers(projectId);
+    }, [members.length, projectId]);
+    const chosen = Object.entries(staff);
+    const toggle = (memberId: string) =>
+        setStaff((current) => {
+            const { [memberId]: present, ...rest } = current;
+            return present ? rest : { ...current, [memberId]: { model: '', effort: '', mode: '' } };
+        });
+    const setField = (memberId: string, field: 'model' | 'effort' | 'mode', value: string) =>
+        setStaff((current) => ({
+            ...current,
+            [memberId]: { ...(current[memberId] ?? { model: '', effort: '', mode: '' }), [field]: value },
+        }));
     const [busy, setBusy] = useState(false);
     const close = () => useApp.setState({ teamStartFor: undefined });
     const start = async () => {
@@ -568,6 +748,16 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
                     mode,
                     permission,
                     parallel: Number(parallel),
+                    ...(staffMode === 'manual' && chosen.length > 0
+                        ? {
+                              members: chosen.map(([memberId, preset]) => ({
+                                  memberId,
+                                  ...(preset.model ? { model: preset.model } : {}),
+                                  ...(preset.effort ? { effort: preset.effort as (typeof EFFORTS)[number] } : {}),
+                                  ...(preset.mode ? { mode: preset.mode as (typeof PERMISSIONS)[number] } : {}),
+                              })),
+                          }
+                        : {}),
                     ...(Number(budget) > 0 ? { budget: Number(budget) } : {}),
                 },
                 { timeoutMs: 120_000 },
@@ -633,6 +823,80 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
                         onChange={setPermission}
                     />
                 </Field>
+                <Field
+                    label={s.team.staffChoose}
+                    hint={staffMode === 'auto' ? s.team.staffAutoHint : s.team.staffManualHint}
+                >
+                    <div className="segmented">
+                        {(['auto', 'manual'] as const).map((value) => (
+                            <button
+                                key={value}
+                                type="button"
+                                className={staffMode === value ? 'is-active' : ''}
+                                onClick={() => setStaffMode(value)}
+                            >
+                                {value === 'auto' ? s.team.staffAuto : s.team.staffManual}
+                            </button>
+                        ))}
+                    </div>
+                </Field>
+                {staffMode === 'manual' && (
+                    <div className="team-staff">
+                        {members.map((member) => {
+                            const preset = staff[member.id];
+                            return (
+                                <div key={member.id} className={`team-staff__row${preset ? ' is-on' : ''}`}>
+                                    <label className="team-staff__who">
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(preset)}
+                                            onChange={() => toggle(member.id)}
+                                        />
+                                        <span>{member.name}</span>
+                                        <span className="muted">{member.description ?? member.role}</span>
+                                    </label>
+                                    {preset && (
+                                        <div className="team-staff__settings">
+                                            <Select
+                                                label={s.members.model}
+                                                value={preset.model}
+                                                options={[
+                                                    { value: '', label: member.model ?? s.team.byTier },
+                                                    ...[...new Set(connected.map((option) => option.model.id))].map(
+                                                        (id) => ({ value: id, label: id }),
+                                                    ),
+                                                ]}
+                                                onChange={(value) => setField(member.id, 'model', value)}
+                                            />
+                                            <Select
+                                                label={s.team.staffEffort}
+                                                value={preset.effort}
+                                                options={[
+                                                    { value: '', label: `${s.team.staffEffort}：${s.team.byMember}` },
+                                                    ...EFFORTS.map((value) => ({ value, label: s.efforts[value] })),
+                                                ]}
+                                                onChange={(value) => setField(member.id, 'effort', value)}
+                                            />
+                                            <Select
+                                                label={s.members.mode}
+                                                value={preset.mode}
+                                                options={[
+                                                    { value: '', label: s.team.byRun },
+                                                    ...PERMISSIONS.map((value) => ({
+                                                        value,
+                                                        label: s.members.modes[value],
+                                                    })),
+                                                ]}
+                                                onChange={(value) => setField(member.id, 'mode', value)}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                        {chosen.length === 0 && <p className="muted">{s.team.staffNone}</p>}
+                    </div>
+                )}
                 <Field label={s.team.parallel} hint={s.team.parallelHint}>
                     <Select
                         label={s.team.parallel}
@@ -656,7 +920,12 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
                     <button
                         type="button"
                         className="button button--primary"
-                        disabled={busy || !goal.trim() || (autonomy === 'L3' && !(Number(budget) > 0))}
+                        disabled={
+                            busy ||
+                            !goal.trim() ||
+                            (autonomy === 'L3' && !(Number(budget) > 0)) ||
+                            (staffMode === 'manual' && chosen.length === 0)
+                        }
                         onClick={() => void start()}
                     >
                         {busy ? <Spinner /> : null} {s.team.go}
@@ -763,12 +1032,14 @@ function TaskOverview({ run, onReport }: { run: TeamRun; onReport: () => void })
     const [showEarlier, setShowEarlier] = useState(false);
     const progress = [...run.progress].reverse() as Array<{ ts?: number; reason?: string; complete?: boolean }>;
     const [showAll, setShowAll] = useState(false);
+    const [staffing, setStaffing] = useState<TeamTask | undefined>();
     const counts = COLUMNS.map((column) => ({
         key: column.key,
         count: run.tasks.filter((task) => column.statuses.includes(task.status)).length,
     }));
     return (
         <div className="task-overview">
+            <TeamBrief run={run} />
             <section className="overview-card overview-progress" aria-label={s.team.progressTitle}>
                 <ol className="stepper">
                     {PHASES.map((phase, index) => (
@@ -876,6 +1147,21 @@ function TaskOverview({ run, onReport }: { run: TeamRun; onReport: () => void })
                                             </p>
                                         )}
                                     </div>
+                                    {task.memberId && (
+                                        <div className="conclusion-card__staff">
+                                            <span>{staffLine(task, run, s)}</span>
+                                            {live &&
+                                                ['pending', 'ready', 'blocked', 'failed'].includes(task.status) && (
+                                                    <button
+                                                        type="button"
+                                                        className="link"
+                                                        onClick={() => setStaffing(task)}
+                                                    >
+                                                        {s.team.staffEdit}
+                                                    </button>
+                                                )}
+                                        </div>
+                                    )}
                                     {files.length > 0 && (
                                         <div className="conclusion-card__files">
                                             {format(s.team.changedFiles, { files: files.slice(0, 6).join('、') })}
@@ -969,6 +1255,7 @@ function TaskOverview({ run, onReport }: { run: TeamRun; onReport: () => void })
             </section>
 
             <OverviewComposer run={run} />
+            {staffing && <StaffEditor run={run} task={staffing} onClose={() => setStaffing(undefined)} />}
         </div>
     );
 }

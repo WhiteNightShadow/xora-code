@@ -443,12 +443,17 @@ describe('members', () => {
             mode: 'auto_edit',
         });
 
-        // The member brings its skill to a conversation: the index names it and where its SKILL.md is.
+        // The member brings its skill to a conversation: the index names it and where its SKILL.md is. The job's
+        // model, thinking and permissions are the ones set when it was handed over (06 §22).
         const chat = await ui.request('member.chat', {
             projectId: project.id,
             memberId: member?.id as string,
             text: '你有什么skill？',
+            model: 'kimi-k3',
+            effort: 'max',
+            mode: 'plan',
         });
+        expect(chat).toMatchObject({ model: { model: 'kimi-k3' }, effort: 'max', mode: 'plan' });
         expect(await settled(ui, chat.id)).toBe('turn.completed');
         const first = bodies()
             .filter((body) => !assistant(body))

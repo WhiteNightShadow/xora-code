@@ -92,14 +92,20 @@ describe('run brief', () => {
         ].join('\n');
         expect(briefSections(text)).toEqual({
             conclusion: '调研写进了`analysis/menu-research.md`：菜单走长连接，方案A最可行。',
+            done: [],
             problems: ['外部来源没有联网核实', 'commit_report失败：项目不是git仓库 需要先git init'],
             next: ['用全权重跑一次', '先在项目里git init'],
         });
+        // 06 §22: the report states the outcome, what was done and how the rest moves on.
+        expect(
+            briefSections('## 目标达成\n主目标达成。\n## 已完成\n- 写好闭环脚本（`a.py`）\n## 下一步\n- 补环境：先拉chunk'),
+        ).toEqual({ conclusion: '主目标达成。', done: ['写好闭环脚本（`a.py`）'], problems: [], next: ['补环境：先拉chunk'] });
     });
 
     it('reads English headings, "none", and leaves a brief without headings alone', () => {
         expect(briefSections('## Conclusion\nDone.\n## Problems\n- None\n## Next steps:\n- Ship it')).toEqual({
             conclusion: 'Done.',
+            done: [],
             problems: [],
             next: ['Ship it'],
         });
