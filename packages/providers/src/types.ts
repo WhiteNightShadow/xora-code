@@ -59,6 +59,11 @@ export type ThinkingStyle =
     /** openai-style: `reasoning_effort` only. */
     | { readonly kind: 'openai' }
     /**
+     * minimax: thinking is on (adaptive) unless `thinking: {type: 'disabled'}` turns it off (M3); `effort`: the model
+     * takes `reasoning_effort` (M3.1-Flash).
+     */
+    | { readonly kind: 'minimax'; readonly effort: boolean }
+    /**
      * anthropic current models: `thinking: {type: 'adaptive', display: 'summarized'}` plus
      * `output_config: {effort}`. `offMode` says how "off" is expressed: `between_tools` (sonnet 5.5),
      * `disabled`, or `unsupported` (opus 5.5: lowest effort instead).

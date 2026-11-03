@@ -219,6 +219,22 @@ describe('reasoning echo', () => {
         });
     });
 
+    it('minimax gets its thinking back across tool calls (interleaved thinking)', () => {
+        const sent = body(offline('minimax-cn'), 'MiniMax-M3.1-Flash', {
+            messages: history('minimax-cn', 'MiniMax-M3.1-Flash', true),
+            tools: [READ_TOOL],
+        });
+        expect((sent.messages as Array<Record<string, unknown>>)[2]).toMatchObject({
+            role: 'assistant',
+            reasoning_content: 'I should look.',
+        });
+        const plain = body(offline('minimax-cn'), 'MiniMax-M3.1-Flash', {
+            messages: history('minimax-cn', 'MiniMax-M3.1-Flash', false),
+        });
+        expect((plain.messages as Array<Record<string, unknown>>)[2]).toMatchObject({ role: 'assistant' });
+        expect((plain.messages as Array<Record<string, unknown>>)[2]).not.toHaveProperty('reasoning_content');
+    });
+
     it('never echoes reasoning to another provider or another model', () => {
         for (const [provider, model] of [
             ['kimi-cn', 'deepseek-flash'],
@@ -310,6 +326,30 @@ describe('thinking and effort', () => {
         const off = body(connection, 'reasoner', { effort: 'off' });
         expect(off).not.toHaveProperty('reasoning_effort');
         expect(off).not.toHaveProperty('thinking');
+    });
+
+    it('minimax splits the thinking off the answer and controls it per model', () => {
+        // M3.1-Flash always thinks: effort low..max, "off" is its weakest level, never `thinking: disabled`.
+        const flash = (effort?: Effort) =>
+            body(offline('minimax-cn'), 'MiniMax-M3.1-Flash', effort === undefined ? {} : { effort });
+        expect(flash()).toMatchObject({ reasoning_split: true, reasoning_effort: 'max' });
+        expect(flash('high')).toMatchObject({ reasoning_effort: 'high' });
+        expect(flash('medium')).toMatchObject({ reasoning_effort: 'medium' });
+        expect(flash('off')).toMatchObject({ reasoning_effort: 'low' });
+        expect(flash('off')).not.toHaveProperty('thinking');
+        expect(flash('high')).not.toHaveProperty('temperature');
+        // M3 thinks or not; `enabled` is a 400 there, so on is simply the default.
+        const m3 = body(offline('minimax-global'), 'MiniMax-M3', { effort: 'high' });
+        expect(m3).toMatchObject({ reasoning_split: true });
+        expect(m3).not.toHaveProperty('thinking');
+        expect(body(offline('minimax-cn'), 'MiniMax-M3', { effort: 'off' })).toMatchObject({
+            thinking: { type: 'disabled' },
+        });
+        // M2.x always thinks and has no knob.
+        const m2 = body(offline('minimax-cn'), 'MiniMax-M2.7', { effort: 'off' });
+        expect(m2).toMatchObject({ reasoning_split: true });
+        expect(m2).not.toHaveProperty('thinking');
+        expect(m2).not.toHaveProperty('reasoning_effort');
     });
 
     it('sends no thinking fields for models that do not reason', () => {

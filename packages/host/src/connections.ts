@@ -151,8 +151,13 @@ export class ConnectionService {
         return preset;
     }
 
+    /**
+     * Models `/models` listed that the preset does not describe. One the preset describes since (a catalog update,
+     * e.g. MiniMax's thinking) comes from the preset, not from the conservative defaults stored when it was found.
+     */
     #extraModels(row: ConnectionRow): ModelInfo[] {
-        return fromJson<ModelInfo[]>(row.models_json, []);
+        const known = new Set((getPreset(row.preset_id)?.models ?? []).map((model) => model.id));
+        return fromJson<ModelInfo[]>(row.models_json, []).filter((model) => !known.has(model.id));
     }
 
     /**

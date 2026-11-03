@@ -26,6 +26,10 @@ function thinkingFields(style: ThinkingStyle | undefined, plan: ThinkingPlan): J
             return { thinking: { type: plan.on ? 'enabled' : 'disabled' }, ...effort };
         case 'glm':
             return { thinking: { type: plan.on ? 'enabled' : 'disabled', clear_thinking: !style.preserve }, ...effort };
+        case 'minimax':
+            // On is the default (`adaptive`; `enabled` is a 400 there).
+            if (!plan.on) return { thinking: { type: 'disabled' } };
+            return style.effort ? effort : {};
         case 'kimi':
         case 'openai':
         case 'anthropic_adaptive':

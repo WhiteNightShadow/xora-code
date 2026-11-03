@@ -450,22 +450,6 @@ const UNVERIFIED: readonly ProviderPreset[] = [
         quirks: { reasoningField: 'reasoning_content' },
     }),
     openAiCompatible({
-        id: 'minimax-cn',
-        name: 'MiniMax',
-        vendor: 'minimax',
-        region: 'cn',
-        url: 'https://api.minimaxi.com/v1',
-        quirks: { omitParams: ['temperature', 'top_p'] },
-    }),
-    openAiCompatible({
-        id: 'minimax-global',
-        name: 'MiniMax (global)',
-        vendor: 'minimax',
-        region: 'global',
-        url: 'https://api.minimax.io/v1',
-        quirks: { omitParams: ['temperature', 'top_p'] },
-    }),
-    openAiCompatible({
         id: 'doubao',
         name: 'Doubao (Volcengine Ark)',
         vendor: 'doubao',
@@ -530,6 +514,94 @@ const UNVERIFIED: readonly ProviderPreset[] = [
     },
 ];
 
+// ---------------------------------------------------------------------------------------------------------------
+// minimax
+
+/** Checked against the API and its documentation (platform.minimax.io, "Compatible OpenAI API"). */
+const MINIMAX_CHECKED = '2026-11-03';
+
+/** Models without `reasoning_effort`: their one level stands for "thinking on". */
+const MINIMAX_NO_KNOB: Quirks = { thinking: { kind: 'minimax', effort: false } };
+
+/** M2.x: thinking cannot be turned off and has no effort knob; `max_tokens` up to 196,608. */
+function minimaxM2(id: string, name: string): ModelInfo {
+    return {
+        id,
+        name,
+        family: 'minimax',
+        contextWindow: 204_800,
+        maxOutput: 196_608,
+        input: ['text'],
+        reasoning: { mode: 'always', efforts: ['high'], defaultEffort: 'high' },
+        tools: true,
+        quirks: MINIMAX_NO_KNOB,
+        verified: MINIMAX_CHECKED,
+    };
+}
+
+const MINIMAX_MODELS: readonly ModelInfo[] = [
+    {
+        // Always thinks (adaptive): `thinking: disabled` and `reasoning_effort: none` are a 400. Its effort goes
+        // low, medium, high, xhigh, max; the default is max.
+        id: 'MiniMax-M3.1-Flash',
+        name: 'MiniMax M3.1 Flash',
+        family: 'minimax',
+        contextWindow: 1_000_000,
+        maxOutput: 524_288,
+        input: ['text'],
+        reasoning: { mode: 'always', efforts: ['low', 'medium', 'high', 'max'], defaultEffort: 'max' },
+        tools: true,
+        verified: MINIMAX_CHECKED,
+    },
+    {
+        // Thinks adaptively, or not at all with `thinking: disabled`; it has no effort knob, so on is one level.
+        id: 'MiniMax-M3',
+        name: 'MiniMax M3',
+        family: 'minimax',
+        contextWindow: 1_000_000,
+        maxOutput: 524_288,
+        input: ['text'],
+        reasoning: { mode: 'toggle', efforts: ['high'], defaultEffort: 'high' },
+        tools: true,
+        quirks: MINIMAX_NO_KNOB,
+        verified: MINIMAX_CHECKED,
+    },
+    minimaxM2('MiniMax-M2.7', 'MiniMax M2.7'),
+    minimaxM2('MiniMax-M2.7-highspeed', 'MiniMax M2.7 Highspeed'),
+    minimaxM2('MiniMax-M2.5', 'MiniMax M2.5'),
+    minimaxM2('MiniMax-M2.5-highspeed', 'MiniMax M2.5 Highspeed'),
+    minimaxM2('MiniMax-M2.1', 'MiniMax M2.1'),
+    minimaxM2('MiniMax-M2.1-highspeed', 'MiniMax M2.1 Highspeed'),
+];
+
+const MINIMAX_QUIRKS: Quirks = {
+    reasoningField: 'reasoning_content',
+    // The thinking in `reasoning_content` instead of `<think>` tags in the answer (M3, M2.x; M3.1-Flash always).
+    extraBody: { reasoning_split: true },
+    // Interleaved thinking: across tool calls the whole assistant message goes back, its thinking included.
+    reasoningEcho: 'with_tools',
+    thinking: { kind: 'minimax', effort: true },
+    omitParams: ['temperature', 'top_p'],
+};
+
+function minimax(region: Region): ProviderPreset {
+    const host = region === 'cn' ? 'https://api.minimaxi.com' : 'https://api.minimax.io';
+    return {
+        id: `minimax-${region}`,
+        name: region === 'cn' ? 'MiniMax' : 'MiniMax (global)',
+        vendor: 'minimax',
+        channel: 'api',
+        region,
+        endpoints: { openai_chat: `${host}/v1` },
+        defaultWire: 'openai_chat',
+        auth: 'bearer',
+        models: MINIMAX_MODELS,
+        quirks: MINIMAX_QUIRKS,
+        links: { docs: region === 'cn' ? 'https://platform.minimaxi.com/docs' : 'https://platform.minimax.io/docs' },
+        verified: MINIMAX_CHECKED,
+    };
+}
+
 /** All built-in presets, verified ones first. */
 export const PRESETS: readonly ProviderPreset[] = [
     deepseek,
@@ -541,6 +613,8 @@ export const PRESETS: readonly ProviderPreset[] = [
     glm('global'),
     glmCoding('cn'),
     glmCoding('global'),
+    minimax('cn'),
+    minimax('global'),
     anthropic,
     ...UNVERIFIED,
 ];

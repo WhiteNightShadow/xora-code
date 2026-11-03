@@ -49,6 +49,22 @@
 
 另外：deepseek官方文档"接入agent工具"一栏里有自家的deepseek harness。经这些工具触发的服务端search/fetch，从2026-11-01起按每千次5元收费。
 
+### MiniMax（2026-11-03用真实接口和官方文档核对）
+
+起因：用户切到MiniMax后，思考强度选项消失了。原因是MiniMax的预设里没有登记模型，从`/models`发现的模型一律按“不会思考”记录，所以界面不显示思考强度，引擎也不发思考参数；输出上限还被记成了通用默认的8192。改法：
+
+- 目录里登记七个可用的模型。`MiniMax-M2`还在`/models`里，但已经下线（调用返回404），不登记。
+
+| 模型 | 上下文 | 输出上限 | 思考 | 思考强度 |
+| --- | --- | --- | --- | --- |
+| MiniMax-M3.1-Flash | 100万 | 524288 | 总在思考，`thinking: disabled`、`reasoning_effort: none`都会返回400 | `reasoning_effort`：low、medium、high、xhigh、max，默认max |
+| MiniMax-M3 | 100万 | 524288 | 可以关：`thinking: {type: 'disabled'}`；`enabled`返回400，不传就是开（adaptive） | 没有强度可调，界面上只有“关”和“高” |
+| MiniMax-M2.7、M2.5、M2.1（含各自的highspeed） | 204800 | 196608 | 关不掉，传`disabled`也照样思考 | 没有强度可调 |
+
+- 每次请求都带`reasoning_split: true`，思考内容走单独的`reasoning_content`字段。不带的话，M3和M2.x会把思考用`<think>`标签夹在正文里。
+- 跨工具调用时，把助手消息连同`reasoning_content`原样回传（interleaved thinking）。实测M3.1-Flash、M3、M2.7都接受；同时再带`reasoning_details`时，M3.1-Flash会返回500。
+- 连接里早先存下的发现模型，如果目录里已经有同名模型，以目录为准，不用重新刷新列表。
+
 ## 5. 引擎侧通用规则
 
 1. assistant消息原样回传，包括`reasoning_content`、thinking块和signature，不剥离、不调换顺序。

@@ -459,6 +459,44 @@ describe('fallback models', () => {
 });
 
 describe('model lists', () => {
+    it('takes a model the catalog describes from the catalog, not from what /models once said of it', async () => {
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-e2e-data-'));
+        const harness = await startHost(dataDir);
+        harnesses.push(harness);
+        const connection = await harness.ui.request('provider.save', {
+            presetId: 'minimax-cn',
+            name: 'MiniMax',
+            apiKey: 'test-key',
+        });
+        // What an older version stored for a model it found through /models: no thinking, 8k output.
+        const found = (id: string) => ({
+            id,
+            name: id,
+            family: 'minimax',
+            contextWindow: 128_000,
+            maxOutput: 8192,
+            input: ['text'],
+            reasoning: { mode: 'none', efforts: [], defaultEffort: 'off' },
+            tools: true,
+        });
+        harness.core.db.run('update connections set models_json = ?, selected_json = ? where id = ?', [
+            JSON.stringify([found('MiniMax-M3.1-Flash'), found('MiniMax-M9-preview')]),
+            JSON.stringify(['MiniMax-M3.1-Flash', 'MiniMax-M9-preview']),
+            connection.id,
+        ]);
+        const options = await harness.ui.request('model.list', {});
+        const flash = options.find((option) => option.model.id === 'MiniMax-M3.1-Flash');
+        expect(flash?.model.reasoning).toEqual({
+            mode: 'always',
+            efforts: ['low', 'medium', 'high', 'max'],
+            defaultEffort: 'max',
+        });
+        expect(flash?.model.maxOutput).toBe(524_288);
+        expect(options.filter((option) => option.model.id === 'MiniMax-M3.1-Flash')).toHaveLength(1);
+        // A model the catalog does not know keeps what was found.
+        expect(options.find((option) => option.model.id === 'MiniMax-M9-preview')?.model.reasoning.mode).toBe('none');
+    }, 60_000);
+
     it('offers the models the user picked from a refreshed list, and keeps the pick', async () => {
         server.reset();
         server.setModels([{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }]);
