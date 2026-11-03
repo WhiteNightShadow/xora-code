@@ -129,6 +129,7 @@ import {
 import { SqliteTeamStore } from './team-store.ts';
 import { hostLanguage, textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
+import type { TitleService } from './titles.ts';
 import type { HostToolProvider, TurnEnded, TurnService } from './turns.ts';
 import type { UsageService } from './usage.ts';
 import type { WorktreeService } from './worktrees.ts';
@@ -313,6 +314,8 @@ interface RunHost {
     supervisorId?: string;
     /** The group the run was handed to (06 §24). */
     group?: { id: string; name: string };
+    /** The gist of the goal, for lists (06 §28). */
+    title?: string;
     /** The report for the user once the run is over (06 §22). */
     brief?: RunBrief;
     /** Every message of the run, for the team conversation view (06 §7). */
@@ -417,6 +420,8 @@ export interface TeamDeps {
     /** Gives the supervisor and the members working cards their memory and the `remember` tool (06 §19). */
     readonly members?: Pick<MemberService, 'withMemory' | 'group'>;
     readonly userAgent?: string;
+    /** The gist of a goal as the run's title (06 §28). */
+    readonly titles?: TitleService;
 }
 
 /** How the supervisor reports a run that is over to whoever ordered it (06 §22): results only, three parts. */
@@ -972,6 +977,7 @@ export class TeamService {
             throw error;
         }
         this.#deps.log.info(`team ${runId} started in ${project.id}: ${shorten(goal, 60)}`);
+        this.#titleRun(state, goal);
         return this.#view(state);
     }
 
@@ -1774,6 +1780,7 @@ export class TeamService {
                   }
                 : {}),
             ...(host.group ? { group: { ...host.group } } : {}),
+            ...(host.title ? { title: host.title } : {}),
             feedback: [...(host.feedback ?? [])],
             conversation: [...(host.conversation ?? [])],
             supervisorThreadId: host.supervisorThreadId,
@@ -3949,6 +3956,30 @@ export class TeamService {
         return this.#deps.settings.get().approvals.reviewer === 'supervisor'
             ? '\n\n<user_attention>\nThe user only reads results. Approvals are decided by a supervisor on their behalf; only mass deletion and dropping a database reach them. Do not plan manual checks or reviews by a human unless the user asked for one: make every acceptance check a command or a review by a member.\n</user_attention>'
             : '';
+    }
+
+    /** 06 §28: the run and its supervisor's thread are titled by the gist of the goal, in the background. */
+    #titleRun(state: RunState, goal: string): void {
+        const titles = this.#deps.titles;
+        if (!titles) return;
+        const threadId = state.host.supervisorThreadId;
+        const before = this.#deps.threads.find(threadId)?.title;
+        void titles
+            .summarize(goal, { projectId: state.host.projectId, threadId })
+            .then((gist) => {
+                if (!gist || this.#disposed) return;
+                state.host.title = gist;
+                const thread = this.#deps.threads.find(threadId);
+                if (thread && thread.title === before) {
+                    this.#deps.threads.update(
+                        threadId,
+                        { title: textOf(TEXT).supervisorTitle(gist) },
+                        { touch: false },
+                    );
+                }
+                this.#save(state);
+            })
+            .catch((error: unknown) => this.#deps.log.info(`team ${state.run.id}: title kept: ${errorText(error)}`));
     }
 
     /** With approvals left to the supervisor (06 §24), an L2 run delivers without asking the user. */

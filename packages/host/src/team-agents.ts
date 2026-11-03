@@ -379,7 +379,8 @@ export function builtinsOutside(tools: readonly string[]): string[] {
  * to executors and specialists; read-only roles get none unless their list names some.
  */
 export function mcpToolsOf(agent: AgentSpec): string[] {
-    return mcpPatternsOf(toolsOf(agent));
+    // Its own MCP servers (06 §27) come on top of what its tools grant.
+    return [...new Set([...mcpPatternsOf(toolsOf(agent)), ...(agent.mcp ?? []).map((server) => `${server}__*`)])];
 }
 
 /** The MCP tool patterns a tool whitelist grants; see {@link mcpToolsOf}. */

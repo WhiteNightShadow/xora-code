@@ -11,7 +11,7 @@ import { parseArgs } from 'node:util';
 import { FuseV1Options, FuseVersion, flipFuses, getCurrentFuseWire } from '@electron/fuses';
 import { type ElectronApplication, _electron as electron, type Page } from 'playwright-core';
 import { openaiText, openaiToolCalls, startMockModelServer } from '../packages/test-kit/src/index.ts';
-import { secretStoreSwitches } from './app-switches.ts';
+import { forgetAppCopy, secretStoreSwitches } from './app-switches.ts';
 
 /**
  * UI smoke test in the real app (M1 acceptance): connect a model, open a project, ask for a change, approve it,
@@ -46,6 +46,9 @@ const work = await mkdtemp(path.join(tmpdir(), 'xora-smoke-'));
  * Playwright drives Electron through the Node inspector, which a packaged build switches off with the
  * EnableNodeCliInspectArguments fuse. Such a build runs from a copy with only that fuse switched back on.
  */
+/** The copy of the app a packaged build runs from, which LaunchServices must forget afterwards. */
+let appCopy: string | undefined;
+
 async function inspectable(executable: string): Promise<string> {
     const wire = await getCurrentFuseWire(executable);
     // @electron/fuses reports each fuse as the ASCII digit stored in the binary.
@@ -57,6 +60,7 @@ async function inspectable(executable: string): Promise<string> {
             ? executable.slice(0, executable.lastIndexOf('.app') + '.app'.length)
             : path.dirname(executable);
     const copyDir = path.join(work, 'app', path.basename(appDir));
+    appCopy = copyDir;
     await cp(appDir, copyDir, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
     const copy = path.join(copyDir, path.relative(appDir, executable));
     await flipFuses(copy, {
@@ -353,10 +357,12 @@ try {
 
     // New things start from the project's "+": a thread, a team or a workflow.
     await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
-    await page.getByRole('menuitemradio', { name: /新建线程/ }).click();
-    // Typed key by key: a dialog that takes the focus back on every render loses all but the first character.
-    await page.locator('.dialog textarea').pressSequentially('把hello.txt里的hello改成hello world');
-    await page.getByRole('button', { name: '创建' }).click();
+    await page.getByRole('menuitemradio', { name: /新建对话/ }).click();
+    // 03: a new conversation opens in the main area; its composer starts it. Typed key by key: a box that takes the
+    // focus back on every render loses all but the first character.
+    await page.locator('.new-thread textarea').pressSequentially('把hello.txt里的hello改成hello world');
+    await step(page, '新建对话直接在主区域里写，不弹框');
+    await page.locator('.new-thread').getByRole('button', { name: '发送', exact: true }).click();
     await page.getByRole('button', { name: '允许一次' }).waitFor();
     await step(page, '出现审批卡片');
     if ((await readFile(path.join(repo, 'hello.txt'), 'utf8')) !== 'hello\n') {
@@ -685,9 +691,9 @@ try {
     // The supervisor answers approvals for the user: an edit the task asks for goes ahead without a question.
     await hostCall(page, 'settings.update', { patch: { approvals: { reviewer: 'supervisor' } } });
     await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
-    await page.getByRole('menuitemradio', { name: /新建线程/ }).click();
-    await page.locator('.dialog textarea').pressSequentially('把hello.txt里的hello改一下');
-    await page.getByRole('button', { name: '创建' }).click();
+    await page.getByRole('menuitemradio', { name: /新建对话/ }).click();
+    await page.locator('.new-thread textarea').pressSequentially('把hello.txt里的hello改一下');
+    await page.keyboard.press('Enter');
     await page.locator('.approval .badge', { hasText: '主管已批准' }).waitFor();
     await page.locator('.approval__message', { hasText: '冒烟：改文件是任务要的' }).waitFor();
     await step(page, '审批交给主管：改文件由主管批了，不打扰你');
@@ -734,6 +740,7 @@ if (!failed) {
 }
 
 console.log(`\n${steps.length}步通过${failed ? '，有失败' : ''}`);
+forgetAppCopy(appCopy);
 if (values.keep || failed) {
     console.log(`临时目录：${work}`);
 } else {

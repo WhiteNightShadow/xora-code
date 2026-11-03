@@ -57,6 +57,7 @@ afterAll(async () => {
 async function host(): Promise<Ui> {
     const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-history-data-'));
     const core = await HostCore.create({
+        modelTitles: false,
         dataDir,
         shell: new MemoryShell({ dataDir }),
         bundleVersion: '1.0.0-test',

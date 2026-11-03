@@ -7,6 +7,7 @@ import {
     isChief,
     openChief,
     openMembers,
+    openNewThread,
     openProject,
     openRun,
     openSettings,
@@ -209,13 +210,13 @@ function ProjectGroup({
                             ]}
                             onPick={(kind) => {
                                 close();
-                                useApp.setState(
-                                    kind === 'thread'
-                                        ? { newThreadFor: project.id }
-                                        : kind === 'team'
-                                          ? { teamStartFor: project.id }
-                                          : { workflowDraftFor: project.id },
-                                );
+                                if (kind === 'thread') openNewThread(project.id);
+                                else
+                                    useApp.setState(
+                                        kind === 'team'
+                                            ? { teamStartFor: project.id }
+                                            : { workflowDraftFor: project.id },
+                                    );
                             }}
                         />
                     )}
@@ -299,7 +300,7 @@ function RunsNav({ kind }: { kind: 'team' | 'workflow' }) {
                   .filter((run) => !TEAM_ENDED.includes(run.status))
                   .map((run) => ({
                       id: run.id,
-                      title: run.goal,
+                      title: run.title ?? run.goal,
                       projectId: run.projectId,
                       status: s.team.statuses[run.status],
                       updatedAt: run.updatedAt,

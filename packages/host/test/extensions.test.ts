@@ -419,6 +419,7 @@ async function host(): Promise<{ ui: Ui; core: HostCore; home: string }> {
     const dataDir = temp('xora-ext-e2e-data-');
     const home = temp('xora-ext-e2e-home-');
     const core = await HostCore.create({
+        modelTitles: false,
         dataDir,
         shell: new MemoryShell({ dataDir }),
         bundleVersion: '1.0.0-test',

@@ -365,3 +365,112 @@
         animation: none;
     }
 }
+
+/* A new conversation in the main area (03): an empty conversation whose composer starts it ----------------- */
+
+.new-thread {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1;
+}
+
+.new-thread__body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--xk-space-3);
+    padding: var(--xk-space-6);
+    color: var(--xk-text-muted);
+    text-align: center;
+}
+
+.new-thread__art {
+    width: 180px;
+    max-width: 50%;
+    opacity: 0.9;
+}
+
+.new-thread__body p {
+    margin: 0;
+    max-width: 460px;
+    font-size: var(--xk-text-sm);
+    line-height: var(--xk-leading-relaxed);
+}
+
+.new-thread__composer {
+    margin: 0 auto var(--xk-space-5);
+    width: calc(100% - 48px);
+    max-width: var(--xk-content-width);
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-xl);
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-sm);
+}
+
+.new-thread__composer:focus-within {
+    border-color: var(--xk-accent);
+    box-shadow: var(--xk-shadow-sm), var(--xk-focus-ring);
+}
+
+.new-thread__input {
+    display: block;
+    width: 100%;
+    min-height: 76px;
+    resize: vertical;
+    border: 0;
+    outline: none;
+    background: none;
+    padding: var(--xk-space-3) var(--xk-space-4) var(--xk-space-2);
+    color: var(--xk-text);
+    font: inherit;
+    font-size: var(--xk-text-md);
+    line-height: var(--xk-leading-normal);
+}
+
+.new-thread__input::placeholder {
+    color: var(--xk-placeholder);
+}
+
+.new-thread__bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--xk-space-2);
+    padding: var(--xk-space-2) var(--xk-space-3) var(--xk-space-3);
+}
+
+.new-thread__send {
+    margin-left: auto;
+}
+
+.new-thread__more {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-3);
+    min-width: 280px;
+    max-width: 360px;
+    padding: var(--xk-space-2);
+}
+
+.new-thread__field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: var(--xk-text-sm);
+}
+
+.new-thread__field > span:first-child {
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.new-thread__hint {
+    margin: 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+}

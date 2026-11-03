@@ -2,7 +2,10 @@ import type { ModelRef, PermissionMode } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { host } from '../host.ts';
 import { attempt, selectThread, useApp, useStrings } from '../store.ts';
-import { Field, Modal, Select } from './primitives.tsx';
+import { ConversationArt } from './Art.tsx';
+import { Popover } from './Controls.tsx';
+import { Icon } from './Icon.tsx';
+import { AutoFocusTextarea, IconButton, Select, Spinner } from './primitives.tsx';
 
 const MODES: PermissionMode[] = ['ask', 'auto_edit', 'plan', 'full'];
 
@@ -15,17 +18,21 @@ function parse(value: string): ModelRef | undefined {
     return connectionId && model ? { connectionId, model } : undefined;
 }
 
-/** New thread: local or worktree, or the same task on several models at once (best-of-n, 04 §1). */
-export function NewThreadDialog({ projectId }: { projectId: string }) {
+/**
+ * A new conversation, right in the main area (03): an empty conversation whose composer starts it. Its permissions,
+ * model and place (the project folder or a worktree) sit under the composer; the engine and "the same task on
+ * several models" (best-of-n, 04 §1) are under "More". Nothing is created until the first message.
+ */
+export function NewThreadPage({ projectId }: { projectId: string }) {
     const s = useStrings();
     const project = useApp((state) => state.projects.find((item) => item.id === projectId));
     const models = useApp((state) => state.models);
     const settings = useApp((state) => state.settings);
-    const [tab, setTab] = useState<'single' | 'best'>('single');
     const [location, setLocation] = useState<'local' | 'worktree'>('local');
     const [model, setModel] = useState(settings?.defaultModel ? key(settings.defaultModel) : '');
     const [mode, setMode] = useState<PermissionMode>(settings?.defaultMode ?? 'ask');
     const [text, setText] = useState('');
+    // Best-of-n: the same task on several models, each in a worktree.
     const [picked, setPicked] = useState<string[]>([]);
     const [busy, setBusy] = useState(false);
     const [engines, setEngines] = useState<
@@ -44,9 +51,30 @@ export function NewThreadDialog({ projectId }: { projectId: string }) {
         label: `${option.model.name} · ${option.connectionName}`,
     }));
     const isRepo = project?.git.isRepo ?? false;
+    const best = picked.length >= 2;
 
-    const create = async () => {
+    const start = async () => {
+        if (busy || !text.trim()) return;
         setBusy(true);
+        if (best) {
+            const refs = picked.map(parse).filter((ref): ref is ModelRef => ref !== undefined);
+            const result = await attempt(() =>
+                host.call('thread.bestOfN', { projectId, text, models: refs, mode }, { timeoutMs: 300_000 }),
+            );
+            setBusy(false);
+            if (!result) return;
+            useApp.setState((state) => ({
+                threads: {
+                    ...state.threads,
+                    ...Object.fromEntries(result.threads.map((thread) => [thread.id, thread])),
+                },
+                split: result.threads.map((thread) => thread.id).slice(0, 3),
+                newThreadFor: undefined,
+            }));
+            const first = result.threads[0];
+            if (first) await selectThread(first.id);
+            return;
+        }
         const ref = parse(model);
         const thread = await attempt(() =>
             host.call(
@@ -55,177 +83,140 @@ export function NewThreadDialog({ projectId }: { projectId: string }) {
                 { timeoutMs: 120_000 },
             ),
         );
-        if (thread) {
-            useApp.setState((state) => ({ threads: { ...state.threads, [thread.id]: thread } }));
-            await selectThread(thread.id);
-            if (text.trim()) {
-                await attempt(() => host.call('turn.start', { threadId: thread.id, text }));
-            }
-            close();
+        if (!thread) {
+            setBusy(false);
+            return;
         }
+        useApp.setState((state) => ({ threads: { ...state.threads, [thread.id]: thread }, newThreadFor: undefined }));
+        await selectThread(thread.id);
+        await attempt(() => host.call('turn.start', { threadId: thread.id, text }));
         setBusy(false);
     };
 
-    const best = async () => {
-        setBusy(true);
-        const refs = picked.map(parse).filter((ref): ref is ModelRef => ref !== undefined);
-        const result = await attempt(() =>
-            host.call('thread.bestOfN', { projectId, text, models: refs, mode }, { timeoutMs: 300_000 }),
-        );
-        if (result) {
-            useApp.setState((state) => ({
-                threads: {
-                    ...state.threads,
-                    ...Object.fromEntries(result.threads.map((thread) => [thread.id, thread])),
-                },
-                split: result.threads.map((thread) => thread.id).slice(0, 3),
-            }));
-            const first = result.threads[0];
-            if (first) await selectThread(first.id);
-            close();
-        }
-        setBusy(false);
-    };
-
-    const modeField = (
-        <Field label={s.thread.mode} hint={s.modeHints[mode]}>
-            <div className="segmented">
-                {MODES.map((value) => (
-                    <button
-                        key={value}
-                        type="button"
-                        className={mode === value ? 'is-active' : ''}
-                        onClick={() => setMode(value)}
-                    >
-                        {s.modes[value]}
-                    </button>
-                ))}
-            </div>
-        </Field>
-    );
     return (
-        <Modal title={`${s.sidebar.newThread} · ${project?.name ?? ''}`} onClose={close}>
-            <div className="dialog">
-                <div className="segmented">
-                    <button
-                        type="button"
-                        className={tab === 'single' ? 'is-active' : ''}
-                        onClick={() => setTab('single')}
-                    >
-                        {s.newThread.single}
-                    </button>
-                    <button
-                        type="button"
-                        className={tab === 'best' ? 'is-active' : ''}
-                        disabled={!isRepo}
-                        onClick={() => setTab('best')}
-                        title={isRepo ? '' : s.newThread.needsRepo}
-                    >
-                        {s.newThread.bestOfN}
-                    </button>
+        <div className="thread new-thread">
+            <header className="thread-header">
+                <div className="thread-header__title">
+                    <h1>{s.newThread.title}</h1>
+                    <span className="thread-header__project">
+                        {project?.name}
+                        {project?.git.branch ? ` · ${project.git.branch}` : ''}
+                    </span>
                 </div>
-                {/* The task first: the dialog opens with the cursor in it. */}
-                <Field label={s.newThread.task}>
-                    <textarea
-                        className="textarea"
-                        rows={4}
-                        value={text}
-                        placeholder={s.thread.placeholder}
-                        onChange={(event) => setText(event.target.value)}
-                        onKeyDown={(event) => {
-                            if (
-                                event.key === 'Enter' &&
-                                (event.metaKey || event.ctrlKey) &&
-                                tab === 'single' &&
-                                !busy
-                            ) {
-                                event.preventDefault();
-                                void create();
-                            }
-                        }}
+                <div className="thread-header__controls">
+                    <IconButton icon="x" label={s.common.cancel} onClick={close} />
+                </div>
+            </header>
+            <div className="new-thread__body">
+                <ConversationArt className="new-thread__art" />
+                <p>{s.newThread.hint}</p>
+            </div>
+            <div className="new-thread__composer">
+                <AutoFocusTextarea
+                    className="new-thread__input"
+                    rows={3}
+                    value={text}
+                    placeholder={s.thread.placeholder}
+                    aria-label={s.newThread.title}
+                    onChange={(event) => setText(event.target.value)}
+                    onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                            event.preventDefault();
+                            void start();
+                        }
+                    }}
+                />
+                <div className="new-thread__bar">
+                    <Select
+                        compact
+                        label={s.thread.mode}
+                        value={mode}
+                        options={MODES.map((value) => ({ value, label: s.modes[value], hint: s.modeHints[value] }))}
+                        onChange={setMode}
                     />
-                </Field>
-                {modeField}
-                {tab === 'single' ? (
-                    <details className="dialog__more">
-                        <summary>{s.newThread.moreOptions}</summary>
-                        <Field label={s.newThread.location}>
-                            <Select
-                                label={s.newThread.location}
-                                value={location}
-                                options={[
-                                    { value: 'local', label: s.newThread.local },
-                                    ...(isRepo ? [{ value: 'worktree' as const, label: s.newThread.worktree }] : []),
-                                ]}
-                                onChange={setLocation}
-                            />
-                        </Field>
-                        <Field label={s.newThread.engine} hint={engines.find((item) => item.id === engine)?.note}>
-                            <Select
-                                label={s.newThread.engine}
-                                value={engine}
-                                options={engines.map((item) => ({
-                                    value: item.id,
-                                    label: item.available ? item.name : `${item.name}（${s.newThread.notInstalled}）`,
-                                    ...(item.command ? { hint: item.command } : {}),
-                                }))}
-                                onChange={setEngine}
-                            />
-                        </Field>
-                        {engine === 'xora' && (
-                            <Field label={s.thread.model}>
-                                <Select label={s.thread.model} value={model} options={options} onChange={setModel} />
-                            </Field>
-                        )}
-                    </details>
-                ) : (
-                    <Field label={s.newThread.models} hint={s.newThread.bestHint}>
-                        <div className="checklist">
-                            {options.map((option) => (
-                                <label key={option.value} className="toggle">
-                                    <input
-                                        type="checkbox"
-                                        checked={picked.includes(option.value)}
-                                        disabled={!picked.includes(option.value) && picked.length >= 4}
-                                        onChange={(event) =>
-                                            setPicked(
-                                                event.target.checked
-                                                    ? [...picked, option.value]
-                                                    : picked.filter((value) => value !== option.value),
-                                            )
-                                        }
-                                    />
-                                    <span>{option.label}</span>
-                                </label>
-                            ))}
-                        </div>
-                    </Field>
-                )}
-                <div className="row">
-                    {tab === 'single' ? (
-                        <button
-                            type="button"
-                            className="button button--primary"
-                            disabled={busy}
-                            onClick={() => void create()}
-                        >
-                            {s.newThread.create}
-                        </button>
-                    ) : (
-                        <button
-                            type="button"
-                            className="button button--primary"
-                            disabled={busy || picked.length < 2 || !text.trim()}
-                            onClick={() => void best()}
-                        >
-                            {s.newThread.startBest}
-                        </button>
+                    {engine === 'xora' && !best && options.length > 0 && (
+                        <Select compact label={s.thread.model} value={model} options={options} onChange={setModel} />
                     )}
-                    <button type="button" className="button" onClick={close}>
-                        {s.common.cancel}
+                    {isRepo && !best && (
+                        <Select
+                            compact
+                            label={s.newThread.location}
+                            value={location}
+                            options={[
+                                { value: 'local', label: s.newThread.local },
+                                { value: 'worktree' as const, label: s.newThread.worktree },
+                            ]}
+                            onChange={setLocation}
+                        />
+                    )}
+                    <Popover
+                        label={s.newThread.more}
+                        placement="up"
+                        triggerClassName="button button--small"
+                        trigger={
+                            <>
+                                {s.newThread.more}
+                                {best ? ` · ${s.newThread.bestOn}` : ''}
+                            </>
+                        }
+                    >
+                        {() => (
+                            <div className="new-thread__more">
+                                <div className="new-thread__field">
+                                    <span>{s.newThread.engine}</span>
+                                    <Select
+                                        compact
+                                        label={s.newThread.engine}
+                                        value={engine}
+                                        options={engines.map((item) => ({
+                                            value: item.id,
+                                            label: item.available
+                                                ? item.name
+                                                : `${item.name}（${s.newThread.notInstalled}）`,
+                                            ...(item.command ? { hint: item.command } : {}),
+                                        }))}
+                                        onChange={setEngine}
+                                    />
+                                </div>
+                                {isRepo && engine === 'xora' && (
+                                    <div className="new-thread__field">
+                                        <span>{s.newThread.models}</span>
+                                        <p className="new-thread__hint">{s.newThread.bestHint}</p>
+                                        <div className="checklist">
+                                            {options.map((option) => (
+                                                <label key={option.value} className="toggle">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={picked.includes(option.value)}
+                                                        disabled={!picked.includes(option.value) && picked.length >= 4}
+                                                        onChange={(event) =>
+                                                            setPicked(
+                                                                event.target.checked
+                                                                    ? [...picked, option.value]
+                                                                    : picked.filter((value) => value !== option.value),
+                                                            )
+                                                        }
+                                                    />
+                                                    <span>{option.label}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </Popover>
+                    <button
+                        type="button"
+                        className="button button--primary new-thread__send"
+                        disabled={busy || !text.trim()}
+                        onClick={() => void start()}
+                    >
+                        {busy ? <Spinner /> : <Icon name="send" size={14} />}{' '}
+                        {best ? s.newThread.startBest : s.newThread.send}
                     </button>
                 </div>
             </div>
-        </Modal>
+        </div>
     );
 }

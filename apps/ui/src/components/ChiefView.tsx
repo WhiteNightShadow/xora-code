@@ -42,7 +42,7 @@ export function ChiefHome() {
             .map((run) => ({
                 kind: 'team' as const,
                 id: run.id,
-                title: run.goal,
+                title: run.title ?? run.goal,
                 projectId: run.projectId,
                 status: s.team.statuses[run.status],
                 updatedAt: run.updatedAt,

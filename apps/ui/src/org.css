@@ -389,3 +389,9 @@
     color: var(--xk-text-muted);
     font-size: var(--xk-text-sm);
 }
+
+.member-editor__mcp {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+}

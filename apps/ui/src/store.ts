@@ -371,6 +371,7 @@ export function openMembers(memberId?: string): void {
         workflowsFor: undefined,
         teamsFor: undefined,
         chiefOpen: false,
+        newThreadFor: undefined,
     });
     void loadMembers(get().selectedProjectId);
 }
@@ -417,6 +418,7 @@ export function openWorkflowBoard(projectId?: string): void {
         selectedProjectId: target,
         membersOpen: false,
         chiefOpen: false,
+        newThreadFor: undefined,
     });
 }
 
@@ -429,6 +431,7 @@ export function openTeamBoard(projectId: string = ALL_PROJECTS): void {
         workflowRunId: undefined,
         membersOpen: false,
         chiefOpen: false,
+        newThreadFor: undefined,
         ...(projectId !== ALL_PROJECTS ? { selectedProjectId: projectId } : {}),
     });
 }
@@ -440,6 +443,21 @@ export function openRun(kind: 'team' | 'workflow', runId: string): void {
         workflowRunId: kind === 'workflow' ? runId : undefined,
         teamsFor: undefined,
         workflowsFor: undefined,
+        membersOpen: false,
+        chiefOpen: false,
+        newThreadFor: undefined,
+    });
+}
+
+/** A new conversation in a project, in the main area (03): it starts with its first message. */
+export function openNewThread(projectId: string): void {
+    set({
+        newThreadFor: projectId,
+        selectedProjectId: projectId,
+        teamRunId: undefined,
+        workflowRunId: undefined,
+        workflowsFor: undefined,
+        teamsFor: undefined,
         membersOpen: false,
         chiefOpen: false,
     });
@@ -472,6 +490,7 @@ export function openChief(fresh = false): void {
         teamsFor: undefined,
         membersOpen: false,
         rightPanel: undefined,
+        newThreadFor: undefined,
     });
 }
 
@@ -484,7 +503,8 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         !current.workflowsFor &&
         !current.teamsFor &&
         !current.membersOpen &&
-        !current.chiefOpen
+        !current.chiefOpen &&
+        !current.newThreadFor
     ) {
         return;
     }
@@ -497,6 +517,7 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         teamsFor: undefined,
         membersOpen: false,
         chiefOpen: false,
+        newThreadFor: undefined,
         reviewTurnId: undefined,
         ...(thread ? { selectedProjectId: thread.projectId } : {}),
     });

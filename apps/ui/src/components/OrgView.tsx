@@ -303,7 +303,7 @@ function GroupCard({
                             onClick={() => openRun('team', run.id)}
                         >
                             <Icon name="users" size={13} />
-                            <span className="chief-home__row-title">{run.goal}</span>
+                            <span className="chief-home__row-title">{run.title ?? run.goal}</span>
                             <span className="chief-home__row-meta">{s.team.statuses[run.status]}</span>
                         </button>
                     ))}

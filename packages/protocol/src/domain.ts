@@ -792,6 +792,8 @@ export const TeamRunSchema = z.object({
     members: z.array(StaffPresetSchema.extend({ memberId: z.string(), name: z.string() })).optional(),
     /** The group the run was handed to (06 §24): its leader supervises, its members work. */
     group: z.object({ id: z.string(), name: z.string() }).optional(),
+    /** The gist of the goal, for lists (06 §28); absent until written, and on older runs. */
+    title: z.string().optional(),
     /** The supervisor's report to the user once the run is over (06 §22); `report` keeps the details. */
     brief: RunBriefSchema.optional(),
     /** The supervisor's last message of each turn, newest last: what it reports to the user. */
@@ -943,6 +945,8 @@ export const MemberSchema = z.object({
     tools: z.array(z.string()).optional(),
     /** Skills of the skill library it brings to its work (06 §21). */
     skills: z.array(z.string()).optional(),
+    /** MCP servers it works with, by configured name (06 §27). */
+    mcp: z.array(z.string()).optional(),
     /** Built in, the user's (every project, `<data>/orgs/default/agents/`) or the project's (`.xora/agents/`). */
     source: z.enum(['builtin', 'user', 'project']),
     /** A built-in member the user changed: a file of the user's overrides it. */

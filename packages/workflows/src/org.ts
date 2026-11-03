@@ -77,6 +77,8 @@ export interface AgentSpec {
     readonly tools?: readonly string[];
     /** Skills of the skill library it brings to its work (06 §21), by name. */
     readonly skills?: readonly string[];
+    /** MCP servers it works with (06 §27), by the name they are configured under; any role may have them. */
+    readonly mcp?: readonly string[];
     readonly mode: PermissionMode;
     /** Only the supervisor delegates (06 §9: no recursive delegation). */
     readonly canDelegate: boolean;

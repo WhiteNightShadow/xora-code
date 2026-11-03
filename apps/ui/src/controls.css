@@ -23,6 +23,7 @@
 .thread-header,
 .team__header,
 .wf-board__header,
+.team-page__header,
 .right-panel__header {
     -webkit-app-region: drag;
 }
@@ -30,19 +31,23 @@
 .sidebar__top :is(button, input, a),
 .thread-header :is(h1, button, input, select, a, .popover),
 .team__header :is(h1, button, input, select, a, .popover),
-.wf-board__header :is(button, input, a),
+.wf-board__header :is(button, input, select, a, .popover),
+.team-page__header :is(button, input, select, a, .popover),
 .right-panel__header :is(button, input, select, a),
+.members :is(button, input, select, textarea, a, .popover),
+.chief-home :is(button, input, select, textarea, a),
 .popover__panel,
 .modal-backdrop {
     -webkit-app-region: no-drag;
 }
 
-/* The welcome page has no top bar: its empty top drags the window. */
-.main:has(> .welcome) {
+/* Pages without a top bar of their own (the welcome page, the chief's home, the team's pages): their empty top
+   drags the window, right across to the window buttons. */
+.main:has(> :is(.welcome, .chief-home, .members)) {
     position: relative;
 }
 
-.main:has(> .welcome)::before {
+.main:has(> :is(.welcome, .chief-home, .members))::before {
     content: "";
     position: absolute;
     inset: 0 0 auto;
@@ -869,6 +874,7 @@
 .app:not(.has-panel) .main:not(.main--split) > .thread > .thread-header,
 .app:not(.has-panel) .main--split > .split-pane:last-child .thread-header,
 .app:not(.has-panel) .wf-board__header,
+.app:not(.has-panel) .team-page__header,
 .app.has-panel .right-panel__header {
     padding-right: calc(12px + var(--titlebar-end));
 }

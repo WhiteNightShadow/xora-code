@@ -2,7 +2,9 @@ import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { type MockModelServer, startMockModelServer } from '@xora/test-kit';
+import { DEFAULT_ORG } from '@xora/workflows';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { mcpToolsOf } from '../src/team-agents.ts';
 import {
     buildEngine,
     type ChatBody,
@@ -213,6 +215,67 @@ describe('the organization chart', () => {
         expect(run).toMatchObject({ autonomy: 'L3', permission: 'auto_edit' });
         await ui.request('team.stop', { runId: run.id });
     });
+
+    it('lets the chief register an MCP server and give it to a member', async () => {
+        const chief = (body: ChatBody) =>
+            textOf(body.messages.find((message) => message.role === 'system')?.content).includes(
+                'You are the chief assistant of Xora Code',
+            );
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            if (!chief(body)) return say('好的。');
+            if (body.messages.at(-1)?.role !== 'tool') {
+                // Nothing listens there: the server is added all the same and its test says so.
+                return call({ name: 'mcp_add', arguments: { name: 'ios', url: 'http://127.0.0.1:9/mcp' } });
+            }
+            return lastCall(body) === 'mcp_add'
+                ? call({
+                      name: 'member_save',
+                      arguments: {
+                          id: 'scout',
+                          name: '侦察',
+                          role: 'scout',
+                          job: '看手机',
+                          tier: 'fast',
+                          mode: 'plan',
+                          mcp: ['ios'],
+                      },
+                  })
+                : say('加好了。');
+        });
+        const { ui, project } = await setUp();
+        const seen: string[] = [];
+        ui.onNotification('approval.requested', ({ approval }) => {
+            seen.push(approval.toolName ?? '');
+            void ui
+                .request('approval.respond', { approvalId: approval.id, decision: 'allow_once' })
+                .catch(() => undefined);
+        });
+        const thread = await ui.request('chief.start', { projectId: project.id, text: '把手机的mcp接上，给侦察用' });
+        await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: thread.id });
+            return read.events.some((event) => event.kind === 'turn.completed');
+        }, 'the chief to finish');
+        expect(seen).toEqual(['mcp_add']);
+        const added = server.requests
+            .map((entry) => entry.body as ChatBody)
+            .find((body) => body?.messages && chief(body) && lastCall(body) === 'mcp_add');
+        expect(textOf(added?.messages.at(-1)?.content)).toContain('Added ios');
+        const servers = (await ui.request('extension.list', { projectId: project.id })).mcpServers;
+        expect(servers.find((item) => item.name === 'ios')).toMatchObject({
+            transport: 'http',
+            target: 'http://127.0.0.1:9/mcp',
+        });
+        const scout = (await ui.request('member.list', { projectId: project.id })).find(
+            (member) => member.id === 'scout',
+        );
+        expect(scout?.mcp).toEqual(['ios']);
+        // Its server's tools open to it wherever it works, though a scout's role grants none (06 §27).
+        const spec = DEFAULT_ORG.roster.find((agent) => agent.id === 'scout');
+        expect(spec && mcpToolsOf(spec)).toEqual([]);
+        expect(spec && mcpToolsOf({ ...spec, mcp: ['ios'] })).toEqual(['ios__*']);
+    }, 60_000);
 
     it('lets the chief build the team when asked', async () => {
         const chief = (body: ChatBody) =>

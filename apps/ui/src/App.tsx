@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { ChiefHome } from './components/ChiefView.tsx';
 import { DispatchDialog, MembersPage } from './components/MembersView.tsx';
-import { NewThreadDialog } from './components/NewThreadDialog.tsx';
+import { NewThreadPage } from './components/NewThreadDialog.tsx';
 import { TeamOrgPage } from './components/OrgView.tsx';
 import { Spinner } from './components/primitives.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
@@ -79,7 +79,10 @@ export function App() {
         <div className={`app${rightPanel && thread && !runShown ? ' has-panel' : ''}`}>
             <Sidebar />
             <main className={`main${split.length > 1 ? ' main--split' : ''}`}>
-                {teamRunId ? (
+                {newThreadFor ? (
+                    // 03: a new conversation starts right here, from its composer.
+                    <NewThreadPage key={newThreadFor} projectId={newThreadFor} />
+                ) : teamRunId ? (
                     <TeamView runId={teamRunId} />
                 ) : workflowRunId ? (
                     <WorkflowRunView key={workflowRunId} runId={workflowRunId} />
@@ -113,7 +116,6 @@ export function App() {
             {rightPanel && thread && !runShown && <RightPanel thread={thread} panel={rightPanel} />}
             {settingsOpen && <SettingsModal section={settingsOpen} />}
             {usageOpen && <UsageModal />}
-            {newThreadFor && <NewThreadDialog projectId={newThreadFor} />}
             {teamStartFor && <TeamStartDialog projectId={teamStartFor} />}
             {workflowDraftFor && <WorkflowDraftDialog projectId={workflowDraftFor} />}
             {dispatchTo && <DispatchDialog key={dispatchTo} memberId={dispatchTo} />}

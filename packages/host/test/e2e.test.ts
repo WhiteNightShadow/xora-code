@@ -48,6 +48,7 @@ async function startHost(dataDir: string): Promise<Harness> {
     const shell = shells.get(dataDir) ?? new MemoryShell({ dataDir });
     shells.set(dataDir, shell);
     const core = await HostCore.create({
+        modelTitles: false,
         dataDir,
         shell,
         bundleVersion: '1.0.0-test',

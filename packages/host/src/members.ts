@@ -56,6 +56,7 @@ import {
 import { disabledBuiltins, loadTeamOrganization, mcpToolsOf, shorten, systemLayers } from './team-agents.ts';
 import { hostLanguage, textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
+import type { TitleService } from './titles.ts';
 import type { TriggerTarget } from './triggers.ts';
 import type { HostToolProvider, TurnService } from './turns.ts';
 
@@ -114,6 +115,9 @@ const TEXT = bilingual(
             `${name}不在项目${project}的成员里：只在别的项目里用的成员，不能在这里干活`,
         builtinStays: (name: string) => `${name}是内置成员，没法删除；改过的话可以恢复默认`,
         lastSupervisor: (name: string) => `${name}是最后一个主管：团队要有人带，先建一个新组长再删它`,
+        mcpTitle: '你的MCP服务',
+        mcpLayer: (servers: readonly string[]) =>
+            `你带着这些MCP服务：${servers.join('、')}。它们的工具名是mcp__<服务名>__<工具>；遇到它们擅长的事先用它们，用不了再换别的办法，并在结果里说明。`,
         leadsGroup: (name: string, group: string) => `${name}带着“${group}”：先给这个组换个组长再删它`,
         notBuiltin: (id: string) => `${id}不是内置成员，没有默认可恢复`,
         defaultGroup: '研发团队',
@@ -218,6 +222,9 @@ const TEXT = bilingual(
         builtinStays: (name) => `${name} is built in and cannot be deleted; if you changed it, reset it instead`,
         lastSupervisor: (name) =>
             `${name} is the last supervisor: a team needs a lead; make a new one before deleting it`,
+        mcpTitle: 'Your MCP servers',
+        mcpLayer: (servers) =>
+            `You bring these MCP servers: ${servers.join(', ')}. Their tools are named mcp__<server>__<tool>; use them first for what they are made for, and if they cannot help, take another way and say so in your result.`,
         leadsGroup: (name, group) => `${name} leads “${group}”: give the group another lead first`,
         notBuiltin: (id) => `${id} is not built in: there is no default to bring back`,
         defaultGroup: 'Dev team',
@@ -361,6 +368,8 @@ export interface MemberInput {
     readonly tools?: readonly string[] | undefined;
     /** Skills of the skill library, by name (06 §21). */
     readonly skills?: readonly string[] | undefined;
+    /** MCP servers it works with, by configured name (06 §27). */
+    readonly mcp?: readonly string[] | undefined;
 }
 
 export interface RoutineInput {
@@ -393,6 +402,8 @@ export interface MemberDeps {
     readonly hub?: HubOptions;
     /** Routines changed: their schedules go to the trigger service again. */
     readonly onRoutinesChanged?: () => void;
+    /** The gist of a conversation's opening request as its title (06 §28). */
+    readonly titles?: TitleService;
     readonly now?: () => number;
 }
 
@@ -482,6 +493,9 @@ export function agentFileText(
     if (fields.tools) lines.push(`tools: [${fields.tools.map((tool) => quoted(tool.trim())).join(', ')}]`);
     if (fields.skills && fields.skills.length > 0) {
         lines.push(`skills: [${fields.skills.map((skill) => quoted(skill.trim())).join(', ')}]`);
+    }
+    if (fields.mcp && fields.mcp.length > 0) {
+        lines.push(`mcp: [${fields.mcp.map((server) => quoted(server.trim())).join(', ')}]`);
     }
     lines.push('---');
     return `${lines.join('\n')}\n${body ? `\n${body}\n` : ''}`;
@@ -829,6 +843,7 @@ export class MemberService {
                     ...(given.description ? { description: given.description } : {}),
                     ...(given.tools ? { tools: given.tools } : {}),
                     ...(given.skills && given.skills.length > 0 ? { skills: given.skills } : {}),
+                    ...(given.mcp && given.mcp.length > 0 ? { mcp: given.mcp } : {}),
                 },
                 body,
             ),
@@ -1157,6 +1172,7 @@ export class MemberService {
             prompt: agent.prompt,
             ...(agent.tools ? { tools: [...agent.tools] } : {}),
             ...(agent.skills ? { skills: [...agent.skills] } : {}),
+            ...(agent.mcp ? { mcp: [...agent.mcp] } : {}),
             source: builtin ? 'builtin' : file?.scope === 'project' ? 'project' : 'user',
             customized: builtin && file !== undefined,
             ...(file ? { file: file.file } : {}),
@@ -1431,10 +1447,25 @@ export class MemberService {
      */
     withMemory(
         provider: HostToolProvider,
-        agent: Pick<AgentSpec, 'id' | 'name'> & { readonly skills?: readonly string[] | undefined },
+        agent: Pick<AgentSpec, 'id' | 'name'> & {
+            readonly skills?: readonly string[] | undefined;
+            readonly mcp?: readonly string[] | undefined;
+        },
         projectId: string,
     ): HostToolProvider {
         const own = provider.layers ?? [];
+        // 06 §27: the MCP servers it brings, and that their tools come first for what they are made for.
+        const servers = agent.mcp ?? [];
+        const mcpLayer =
+            servers.length > 0
+                ? [
+                      {
+                          id: 'member_mcp',
+                          title: textOf(TEXT).mcpTitle,
+                          text: textOf(TEXT).mcpLayer(servers),
+                      },
+                  ]
+                : [];
         const name = memberName(agent);
         void this.#migrate(agent.id);
         void this.#loadSkills(agent.id, agent.skills ?? []);
@@ -1448,7 +1479,7 @@ export class MemberService {
                 recallTool(),
             ],
             get layers() {
-                return [...own, layer(), ...skills()];
+                return [...own, layer(), ...skills(), ...mcpLayer];
             },
             handle: (tool, input, signal) =>
                 tool === REMEMBER_TOOL
@@ -1719,6 +1750,7 @@ export class MemberService {
         });
         turns.setHostTools(thread.id, this.provider(agent, org, project.id));
         await this.#open(thread, input.text);
+        this.#deps.titles?.retitle(thread.id, input.text, (gist) => text.chatTitle(memberName(agent), gist));
         log.info(`member ${agent.id} talks in ${thread.id}`);
         // Its page lists its work.
         this.#changed(agent.id);

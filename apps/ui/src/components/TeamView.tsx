@@ -386,7 +386,9 @@ export function TeamBoard({ projectId }: { projectId: string }) {
                     <Badge tone={run.status === 'done' ? 'ok' : run.status === 'failed' ? 'error' : 'accent'}>
                         {s.team.statuses[run.status]}
                     </Badge>
-                    <span className="team-board__goal">{run.goal}</span>
+                    <span className="team-board__goal" title={run.goal}>
+                        {run.title ?? run.goal}
+                    </span>
                     <span className="team-board__meta">
                         {all && projects.length > 1 ? `${projectName(run.projectId)} · ` : ''}
                         {run.tasks.length > 0 && format(s.team.progressCount, { done, total: run.tasks.length })}

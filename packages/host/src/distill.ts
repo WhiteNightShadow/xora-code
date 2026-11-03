@@ -15,6 +15,7 @@ import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import { textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
+import type { TitleService } from './titles.ts';
 import type { HostToolProvider, TurnService } from './turns.ts';
 
 /**
@@ -161,6 +162,8 @@ export interface DistillDeps {
     /** `<data>/workflows` and `<data>/extensions`, for user-level results. */
     readonly workflowsDir: string;
     readonly extensionsDir: string;
+    /** The gist of the request as the draft's title (06 §28). */
+    readonly titles?: TitleService;
 }
 
 function clip(text: string, limit: number): string {
@@ -280,6 +283,7 @@ export class DistillService {
         turns.setHostTools(thread.id, this.#checkTool(project.path));
         const prompt = words.draftPrompt(this.#target('workflow', input.scope));
         const started = await this.#open(thread, `${prompt}\n\n<request>\n${description}\n</request>`);
+        this.#deps.titles?.retitle(thread.id, description, (gist) => words.draftTitle(gist));
         log.info(`draft workflow in ${thread.id}`);
         return started;
     }

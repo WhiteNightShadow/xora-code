@@ -134,6 +134,7 @@ const AGENT_KEYS = new Set([
     'tier',
     'model',
     'skills',
+    'mcp',
     'description',
     'tools',
     'mode',
@@ -264,6 +265,13 @@ function applyAgentFile(
                 : {}
             : kept?.skills
               ? { skills: kept.skills }
+              : {}),
+        ...(data.mcp !== undefined
+            ? asTextList(data.mcp).length > 0
+                ? { mcp: asTextList(data.mcp) }
+                : {}
+            : kept?.mcp
+              ? { mcp: kept.mcp }
               : {}),
         mode:
             (asEnum(PERMISSION_MODES, data.mode, 'mode', warn) as PermissionMode | undefined) ??

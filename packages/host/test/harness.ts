@@ -66,6 +66,8 @@ export function hosts(engineEntry: () => string) {
                 readonly reviewer?: 'supervisor' | 'user';
                 /** The model agents run on (06 §25): the tests pick by tier unless they test the default model. */
                 readonly models?: 'default' | 'tiers';
+                /** Titles by a model (06 §28): off unless a test is about them. */
+                readonly modelTitles?: boolean;
             } = {},
         ): Promise<Harness> {
             const shell = shells.get(dataDir) ?? new MemoryShell({ dataDir });
@@ -79,6 +81,7 @@ export function hosts(engineEntry: () => string) {
                 skipShellEnv: true,
                 log: quiet,
                 ...(extra.fetch ? { fetch: extra.fetch } : {}),
+                modelTitles: extra.modelTitles ?? false,
             });
             core.settings.update({
                 approvals: { reviewer: extra.reviewer ?? 'user' },

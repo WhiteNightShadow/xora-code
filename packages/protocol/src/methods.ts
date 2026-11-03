@@ -523,6 +523,8 @@ export const methods = {
                         tools: z.array(z.string()).optional(),
                         /** Skills of the skill library, by name (06 §21). */
                         skills: z.array(z.string().max(64)).max(20).optional(),
+                        /** MCP servers it works with, by configured name (06 §27). */
+                        mcp: z.array(z.string().max(64)).max(20).optional(),
                     })
                     .strict(),
                 /** The group it works in (06 §24); a new member goes to the first group when absent. */

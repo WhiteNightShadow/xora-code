@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { FuseV1Options, FuseVersion, flipFuses, getCurrentFuseWire } from '@electron/fuses';
 import { type ElectronApplication, _electron as electron, type Page } from 'playwright-core';
 import { openaiText, openaiToolCalls, startMockModelServer } from '../packages/test-kit/src/index.ts';
-import { secretStoreSwitches } from './app-switches.ts';
+import { forgetAppCopy, secretStoreSwitches } from './app-switches.ts';
 
 /**
  * The README's screenshots (docs/images/), taken in the real app against a scripted model server and a demo
@@ -39,6 +39,9 @@ const WIDTH = 1280;
 const HEIGHT = 800;
 
 /** A packaged build runs from a copy with the inspector fuse on, as in ui-smoke.ts. */
+/** The copy of the app a packaged build runs from, which LaunchServices must forget afterwards. */
+let appCopy: string | undefined;
+
 async function inspectable(executable: string): Promise<string> {
     const wire = await getCurrentFuseWire(executable);
     if (wire[FuseV1Options.EnableNodeCliInspectArguments] !== '0'.charCodeAt(0)) {
@@ -49,6 +52,7 @@ async function inspectable(executable: string): Promise<string> {
             ? executable.slice(0, executable.lastIndexOf('.app') + '.app'.length)
             : path.dirname(executable);
     const copyDir = path.join(work, 'app', path.basename(appDir));
+    appCopy = copyDir;
     await cp(appDir, copyDir, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
     const copy = path.join(copyDir, path.relative(appDir, executable));
     await flipFuses(copy, {
@@ -810,6 +814,7 @@ try {
 if (values.keep || failed) {
     console.log(`临时目录：${work}`);
 } else {
+    forgetAppCopy(appCopy);
     await rm(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 }).catch(() => undefined);
 }
 process.exitCode = failed ? 1 : 0;

@@ -1,4 +1,4 @@
-import { openProject, openSettings, useApp, useStrings } from '../store.ts';
+import { openNewThread, openProject, openSettings, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { WelcomeArt } from './Art.tsx';
 import { Icon } from './Icon.tsx';
@@ -38,7 +38,7 @@ export function Welcome() {
                     type="button"
                     className="step"
                     disabled={!project}
-                    onClick={() => project && useApp.setState({ newThreadFor: project.id })}
+                    onClick={() => project && openNewThread(project.id)}
                 >
                     <span className="step__icon">3</span>
                     <span className="step__title">{s.welcome.startThread}</span>

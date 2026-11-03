@@ -54,6 +54,7 @@ import { registerTeamHandlers, TeamService } from './team.ts';
 import { TerminalService } from './terminals.ts';
 import { setLanguageSource, textOf } from './text.ts';
 import { ThreadStore } from './threads.ts';
+import { TitleService } from './titles.ts';
 import { type TriggerFire, TriggerService } from './triggers.ts';
 import { defaultThreadTitle, TurnService } from './turns.ts';
 import { UpdateService } from './updates.ts';
@@ -128,6 +129,8 @@ export interface HostOptions {
     /** Skip resolving the login shell PATH (tests). */
     readonly skipShellEnv?: boolean;
     readonly fetch?: typeof fetch;
+    /** Titles written by a model (06 §28); `false` keeps the start of the request (scripted tests). */
+    readonly modelTitles?: boolean;
     /** Home directory for user skills and MCP config imports; tests point it at a temporary folder. */
     readonly home?: string;
 }
@@ -167,6 +170,8 @@ export class HostCore {
     readonly chief: ChiefService;
     /** The supervisor that answers approval cards on the user's behalf (06 §24). */
     readonly reviewer: ApprovalReviewer;
+    /** Titles from the gist of a conversation's opening request (06 §28). */
+    readonly titles: TitleService | undefined;
     readonly triggers: TriggerService;
     #triggerSync: ReturnType<typeof setInterval> | undefined;
     readonly #options: HostOptions;
@@ -230,8 +235,21 @@ export class HostCore {
                 };
             },
         });
+        this.titles =
+            options.modelTitles === false
+                ? undefined
+                : new TitleService({
+                      threads: this.threads,
+                      connections: this.connections,
+                      settings: this.settings,
+                      usage: this.usage,
+                      bus: this.bus,
+                      log: this.log,
+                      userAgent,
+                  });
         this.turns = new TurnService({
             threads: this.threads,
+            ...(this.titles ? { titles: this.titles } : {}),
             projects: this.projects,
             connections: this.connections,
             settings: this.settings,
@@ -257,6 +275,7 @@ export class HostCore {
         });
         this.members = new MemberService({
             threads: this.threads,
+            ...(this.titles ? { titles: this.titles } : {}),
             turns: this.turns,
             projects: this.projects,
             connections: this.connections,
@@ -288,6 +307,7 @@ export class HostCore {
             log: this.log,
         });
         this.team = new TeamService({
+            ...(this.titles ? { titles: this.titles } : {}),
             db: this.db,
             bus: this.bus,
             log: this.log,
@@ -340,6 +360,7 @@ export class HostCore {
         });
         this.triggers.onFire((fire) => this.#onTrigger(fire));
         this.chief = new ChiefService({
+            ...(this.titles ? { titles: this.titles } : {}),
             threads: this.threads,
             turns: this.turns,
             projects: this.projects,
@@ -352,6 +373,7 @@ export class HostCore {
             team: this.team,
             workflows: this.workflows,
             members: this.members,
+            extensions: this.extensions,
         });
         this.reviewer = new ApprovalReviewer({
             approvals: this.approvals,
@@ -367,6 +389,7 @@ export class HostCore {
             userAgent,
         });
         this.distill = new DistillService({
+            ...(this.titles ? { titles: this.titles } : {}),
             threads: this.threads,
             turns: this.turns,
             projects: this.projects,

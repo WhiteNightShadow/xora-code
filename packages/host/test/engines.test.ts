@@ -281,6 +281,7 @@ describe('the host with a shell that starts engines', () => {
         }
         const dataDir = mkdtempSync(path.join(work, 'host-'));
         const core = await HostCore.create({
+            modelTitles: false,
             dataDir,
             shell: new PortShell({ dataDir }),
             bundleVersion: '1.0.0-test',

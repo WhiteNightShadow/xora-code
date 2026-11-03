@@ -625,11 +625,16 @@ function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Mem
                             )
                         )}
                     </div>
-                    {member.skills && member.skills.length > 0 && (
+                    {((member.skills?.length ?? 0) > 0 || (member.mcp?.length ?? 0) > 0) && (
                         <div className="member-detail__skills">
-                            {member.skills.map((skill) => (
+                            {member.skills?.map((skill) => (
                                 <Badge key={skill} tone="accent">
                                     {skill}
+                                </Badge>
+                            ))}
+                            {member.mcp?.map((server) => (
+                                <Badge key={`mcp:${server}`} tone="ok">
+                                    MCP · {server}
                                 </Badge>
                             ))}
                         </div>
@@ -702,6 +707,19 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
           ? ''
           : (editing.groupId ?? groups[0]?.id ?? '');
     const [groupId, setGroupId] = useState(currentGroup);
+    // 06 §27: the MCP servers it works with, from the ones configured in settings.
+    const [mcp, setMcp] = useState<string[]>([...(editing.member?.mcp ?? [])]);
+    const [servers, setServers] = useState<string[]>([]);
+    useEffect(() => {
+        void host
+            .call('extension.list', selectedProjectId ? { projectId: selectedProjectId } : {})
+            .then((snapshot) => setServers(snapshot.mcpServers.map((server) => server.name)))
+            .catch(() => undefined);
+    }, [selectedProjectId]);
+    const toggleMcp = (server: string) =>
+        setMcp((current) =>
+            current.includes(server) ? current.filter((item) => item !== server) : [...current, server],
+        );
     const existing = editing.member;
     const start = existing ?? templates.find((member) => member.id === 'scout') ?? templates[0];
     const [template, setTemplate] = useState(start?.id ?? '');
@@ -752,6 +770,7 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                     ...(base.tools ? { tools: [...base.tools] } : {}),
                     // The form does not edit skills: a member keeps the ones it has (06 §21).
                     ...(existing?.skills ? { skills: [...existing.skills] } : {}),
+                    ...(mcp.length > 0 ? { mcp } : {}),
                 },
                 // A lead leads groups rather than working in one.
                 ...(base.role !== 'supervisor' && (!existing || groupId !== currentGroup)
@@ -840,6 +859,25 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                         />
                     </Field>
                 </div>
+                {[...new Set([...servers, ...mcp])].length > 0 && (
+                    <Field label={s.members.mcp} hint={s.members.mcpHint}>
+                        <div className="member-editor__mcp">
+                            {[...new Set([...servers, ...mcp])].map((server) => (
+                                <label key={server} className="group-editor__member">
+                                    <input
+                                        type="checkbox"
+                                        checked={mcp.includes(server)}
+                                        onChange={() => toggleMcp(server)}
+                                    />
+                                    <span className="group-editor__name">
+                                        {server}
+                                        {!servers.includes(server) ? `（${s.members.mcpMissing}）` : ''}
+                                    </span>
+                                </label>
+                            ))}
+                        </div>
+                    </Field>
+                )}
                 {base?.role !== 'supervisor' && groups.length > 0 && (
                     <Field label={s.org.group} hint={s.org.groupHint}>
                         <Select

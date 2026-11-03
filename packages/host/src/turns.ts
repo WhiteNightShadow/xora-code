@@ -41,6 +41,7 @@ import type { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
 import { hostLanguage, textOf } from './text.ts';
 import type { ThreadStore } from './threads.ts';
+import { openingLine, type TitleService } from './titles.ts';
 import type { UsageService } from './usage.ts';
 
 const TEXT = bilingual(
@@ -139,6 +140,8 @@ function agentTypeOf(thread: ThreadMeta): string {
 
 export interface TurnDeps {
     readonly threads: ThreadStore;
+    /** The gist of a new conversation's opening request as its title (06 §28). */
+    readonly titles?: TitleService;
     readonly projects: ProjectService;
     readonly connections: ConnectionService;
     readonly settings: SettingsService;
@@ -580,6 +583,12 @@ export class TurnService {
             turns: thread.turns + 1,
             ...(thread.model || !modelRef ? {} : { model: modelRef }),
         });
+        // 06 §28: a new conversation is titled by its request at once, then by its gist.
+        if (thread.turns === 0 && hasDefaultTitle(thread.title) && text.trim() && !text.trim().startsWith('/')) {
+            const opening = openingLine(text);
+            if (opening) threads.update(threadId, { title: opening }, { touch: false });
+            this.#deps.titles?.retitle(threadId, text);
+        }
         projects.touch(thread.projectId);
         this.#updateSleep();
         const run = this.#run(running, thread, project, async (extras) => {
