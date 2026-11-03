@@ -125,6 +125,29 @@ describe.skipIf(!hasGit)('worktrees', { timeout: GIT_TIMEOUT }, () => {
         expect(git(source.path, ['status', '--porcelain'])).toBe('');
     });
 
+    it("puts the work onto the destination's own uncommitted and untracked files", async () => {
+        const { repo, manager } = await project();
+        const source = await manager.create({ id: 'thread-carry' });
+        // The project's own work, not committed: a change to a tracked file and a file git does not track.
+        const own = { 'f.txt': lines(10).replace('line 9', 'line 9 by the user'), 'notes.md': 'draft\n' };
+        await writeFiles(repo, own);
+        // The worktree starts from it (a team's carried changes, 06 §29), then works on top.
+        await writeFiles(source.path, own);
+        commitAll(source.path, 'start from the uncommitted changes');
+        await writeFiles(source.path, {
+            'f.txt': own['f.txt'].replace('line 1\n', 'line 1 by the task\n'),
+            'notes.md': 'draft\nmore\n',
+        });
+
+        const result = await manager.handoff(source.path, repo);
+        expect(result.status).toBe('moved');
+        expect(read(repo, 'f.txt')).toContain('line 1 by the task\n');
+        expect(read(repo, 'f.txt')).toContain('line 9 by the user\n');
+        expect(read(repo, 'notes.md')).toBe('draft\nmore\n');
+        expect(git(repo, ['diff', '--cached', '--name-only'])).toBe('');
+        expect(git(source.path, ['status', '--porcelain'])).toBe('');
+    });
+
     it('reports conflicts and leaves the source untouched', async () => {
         const { repo, manager } = await project();
         const source = await manager.create({ id: 'thread-4' });

@@ -1,8 +1,10 @@
-import { existsSync, mkdtempSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { type MockModelServer, type MockTurn, openaiToolCalls, startMockModelServer } from '@xora/test-kit';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { PLAN_REQUESTS } from '../src/team-agents.ts';
 import {
     agentOf,
     approveAll,
@@ -67,13 +69,19 @@ afterAll(async () => {
 
 async function startRun(
     goal: string,
-    options: { permission?: 'default' | 'auto_edit' | 'full'; hold?: ReadonlySet<string> } = {},
+    options: {
+        permission?: 'default' | 'auto_edit' | 'full';
+        hold?: ReadonlySet<string>;
+        /** Runs on the project before the run starts, e.g. to leave uncommitted changes. */
+        prepare?: (repo: string) => void;
+    } = {},
 ) {
     const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-supervision-data-'));
     const { ui } = await host.start(dataDir);
     const seen = approveAll(ui, [], options.hold);
     await connectMock(ui, server);
     const repo = gitRepo();
+    options.prepare?.(repo);
     const project = await ui.request('project.add', { path: repo });
     const started = await ui.request('team.start', {
         projectId: project.id,
@@ -117,7 +125,7 @@ function shellCoder(body: ChatBody): MockTurn {
 }
 
 describe('supervision loop', () => {
-    it('reviews a partial stage and lets the same member finish it with the guidance', async () => {
+    it('lets a member that moved forward go on at once while the supervisor reads the stage on the side', async () => {
         server.reset();
         server.respondWith((request) => {
             const body = request.body as ChatBody | undefined;
@@ -131,21 +139,15 @@ describe('supervision loop', () => {
             switch (agentOf(body)) {
                 case 'Supervisor': {
                     if (last?.role === 'tool') {
-                        return say(lastCall(body) === 'task_guide' ? 'Guided T1.' : 'Planned.');
+                        return say('Planned.');
                     }
                     if (textOf(last?.content).includes('<team_goal>')) {
                         return call({ name: 'task_create', arguments: { tasks: [card(BOTH, ['a.txt', 'b.txt'])] } });
                     }
-                    if (textOf(last?.content).includes('Stage review of T1')) {
-                        return call({
-                            name: 'task_guide',
-                            arguments: { taskId: 'T1', decision: 'continue', guidance: 'Now write b.txt with "two".' },
-                        });
-                    }
-                    return say('Noted.');
+                    return say(textOf(last?.content).includes('Stage report of T1') ? 'Saw the stage.' : 'Noted.');
                 }
                 case 'Coder': {
-                    const second = userText(body).includes('Stage 1 of T1 is reviewed.');
+                    const second = userText(body).includes('Stage 1 of T1 is recorded');
                     if (last?.role === 'tool') {
                         if (lastCall(body) === 'write') {
                             return call({
@@ -168,8 +170,9 @@ describe('supervision loop', () => {
                         }
                         return say('Handed in.');
                     }
+                    // The second stage takes a while, so the stage reaches the supervisor on its own.
                     return second
-                        ? call({ name: 'write', arguments: { path: 'b.txt', content: 'two\n' } })
+                        ? { ...call({ name: 'write', arguments: { path: 'b.txt', content: 'two\n' } }), delayMs: 1500 }
                         : call({ name: 'write', arguments: { path: 'a.txt', content: 'one\n' } });
                 }
                 default:
@@ -181,30 +184,35 @@ describe('supervision loop', () => {
         expect(done.status).toBe('done');
         const task = done.tasks[0];
         expect(task).toMatchObject({ id: 'T1', status: 'done', stage: 2, attempts: 1 });
-        expect(task?.guidance).toBe('Now write b.txt with "two".');
+        expect(task?.guidance).toBeUndefined();
         expect(existsSync(path.join(repo, 'a.txt')) && existsSync(path.join(repo, 'b.txt'))).toBe(true);
 
         const requests = server.requests.map((request) => request.body as ChatBody);
-        const review = requests.find(
-            (body) => agentOf(body) === 'Supervisor' && lastText(body).includes('Stage review of T1'),
-        );
-        expect(lastText(review as ChatBody)).toContain('Stage review of T1 (stage 1');
-        expect(lastText(review as ChatBody)).toContain('Acceptance commands: 0 of 1 pass.');
-        expect(lastText(review as ChatBody)).toContain('- write b.txt');
+        // 06 §29: the stage goes to the supervisor on the side; the member does not wait for a decision.
+        const report = requests.find(
+            (body) => agentOf(body) === 'Supervisor' && lastText(body).includes('Stage report of T1'),
+        ) as ChatBody;
+        expect(lastText(report)).toContain('Stage report of T1 (stage 1');
+        expect(lastText(report)).toContain('Acceptance commands: 0 of 1 pass.');
+        expect(lastText(report)).toContain('- write b.txt');
+        expect(lastText(report)).toContain('goes on now, without waiting for you');
+        // Woken after the plan stands, it starts from the state of the run instead of its earlier turns.
+        expect(JSON.stringify(report.messages)).toContain('<run_state>');
+        expect(JSON.stringify(report.messages)).toContain('- T1 [');
+        expect(JSON.stringify(report.messages)).not.toContain('<team_goal>');
         // The second stage runs in the same thread: its request still holds the card and the first write.
         const next = requests.find(
-            (body) => agentOf(body) === 'Coder' && lastText(body).includes('Stage 1 of T1 is reviewed.'),
-        );
-        expect(lastText(next as ChatBody)).toContain('From the supervisor: Now write b.txt with "two".');
-        expect(userText(next as ChatBody)).toContain('<task_card id="T1"');
-        expect(JSON.stringify(next?.messages)).toContain('a.txt');
+            (body) => agentOf(body) === 'Coder' && lastText(body).includes('Stage 1 of T1 is recorded'),
+        ) as ChatBody;
+        expect(lastText(next)).toContain('Still to do: write b.txt.');
+        expect(userText(next)).toContain('<task_card id="T1"');
+        expect(JSON.stringify(next.messages)).toContain('a.txt');
 
         expect(done.conversation?.map((entry) => [entry.from, entry.to, entry.kind, entry.text])).toEqual([
             ['T1', 'supervisor', 'stage', '第1阶段：wrote a.txt（还剩1项）'],
-            ['supervisor', 'T1', 'guide', 'continue: Now write b.txt with "two".'],
         ]);
-        // The turn that only reviewed the stage is not feedback to the user.
-        expect(done.feedback?.map((entry) => entry.text)).not.toContain('Guided T1.');
+        // The turn that only read the stage is not feedback to the user.
+        expect(done.feedback?.map((entry) => entry.text)).not.toContain('Saw the stage.');
         // 06 §22: once over, the supervisor's model writes the report: outcome, done, next steps, from the record.
         const reported = await waitFor(async () => {
             const run = await ui.request('team.get', { runId: done.id });
@@ -217,6 +225,119 @@ describe('supervision loop', () => {
         expect(userText(material as ChatBody)).toContain('- T1 Write the files: done');
         expect(userText(material as ChatBody)).toContain('result: wrote b.txt');
         expect(reported.report).toContain('# 交付报告');
+    }, 120_000);
+
+    it('waits for the supervisor on a stage without progress, and a stuck hands-off run ends with what is done', async () => {
+        server.reset();
+        const only = (file: string) => `node -e "process.exit(require('fs').existsSync('${file}')?0:1)"`;
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            if (textOf(body.messages[0]?.content).includes('现在向下达任务的人交付结果')) {
+                return say(
+                    '## 目标达成\n达成一部分：a.txt写好了。\n## 已完成\n- a.txt（`a.txt`）\n## 下一步\n- 换个办法写b.txt',
+                );
+            }
+            const last = body.messages.at(-1);
+            switch (agentOf(body)) {
+                case 'Supervisor': {
+                    if (last?.role === 'tool') {
+                        return say(lastCall(body) === 'task_guide' ? 'Stopped T2.' : 'Planned.');
+                    }
+                    const said = textOf(last?.content);
+                    if (said.includes('<team_goal>')) {
+                        return call({
+                            name: 'task_create',
+                            arguments: {
+                                tasks: [
+                                    { ...card(only('a.txt'), ['a.txt']), id: 'T1', title: 'Write a.txt' },
+                                    { ...card(only('b.txt'), ['b.txt']), id: 'T2', title: 'Write b.txt' },
+                                ],
+                            },
+                        });
+                    }
+                    if (said.includes('Stage review of T2')) {
+                        return call({
+                            name: 'task_guide',
+                            arguments: { taskId: 'T2', decision: 'stop', guidance: 'b.txt cannot be written here.' },
+                        });
+                    }
+                    if (said.includes('No card can go on')) {
+                        return say('a.txt写好了；b.txt在这里写不了，要换个目录。');
+                    }
+                    return say('Noted.');
+                }
+                case 'Coder': {
+                    const second = userText(body).includes('<task_card id="T2"');
+                    if (second) {
+                        return last?.role === 'tool'
+                            ? say('Handed in.')
+                            : call({
+                                  name: 'deliver',
+                                  arguments: {
+                                      status: 'partial',
+                                      summary: 'could not write b.txt',
+                                      remaining: ['write b.txt'],
+                                  },
+                              });
+                    }
+                    if (last?.role === 'tool') {
+                        return lastCall(body) === 'write'
+                            ? call({
+                                  name: 'deliver',
+                                  arguments: {
+                                      status: 'done',
+                                      summary: 'wrote a.txt',
+                                      changes: [{ file: 'a.txt', kind: 'added' }],
+                                      evidence: [{ type: 'diff' }],
+                                  },
+                              })
+                            : say('Handed in.');
+                    }
+                    return call({ name: 'write', arguments: { path: 'a.txt', content: 'one\n' } });
+                }
+                default:
+                    return say('ok');
+            }
+        });
+
+        const { ui, repo, done } = await startRun('写a.txt和b.txt');
+        // 06 §29: nobody watches an L2 run, so it ends with what it finished instead of waiting.
+        expect(done.status).toBe('done');
+        expect(done.note).toContain('部分完成');
+        expect(done.note).toContain('T2');
+        expect(done.tasks.map((task) => [task.id, task.status])).toEqual([
+            ['T1', 'done'],
+            ['T2', 'blocked'],
+        ]);
+        expect(existsSync(path.join(repo, 'a.txt'))).toBe(true);
+        expect(existsSync(path.join(repo, 'b.txt'))).toBe(false);
+
+        const requests = server.requests.map((request) => request.body as ChatBody);
+        // A stage without progress still waits for the supervisor's decision.
+        expect(
+            requests.some((body) => agentOf(body) === 'Supervisor' && lastText(body).includes('Stage review of T2')),
+        ).toBe(true);
+        const asked = requests.find(
+            (body) => agentOf(body) === 'Supervisor' && lastText(body).includes('No card can go on'),
+        ) as ChatBody;
+        expect(lastText(asked)).toContain('T2 (blocked)');
+        expect(lastText(asked)).toContain('Nobody watches this run (autonomy L2)');
+        // Its answer is what it tells the user, and goes into the report.
+        expect(done.feedback?.map((entry) => entry.text)).toContain('a.txt写好了；b.txt在这里写不了，要换个目录。');
+        const reported = await waitFor(async () => {
+            const run = await ui.request('team.get', { runId: done.id });
+            return run.brief?.status === 'ready' ? run : undefined;
+        }, 'the report');
+        expect(reported.brief?.text).toContain('换个办法写b.txt');
+        const material = requests.find((body) =>
+            textOf(body?.messages?.[0]?.content).includes('现在向下达任务的人交付结果'),
+        );
+        const lastMaterial = server.requests
+            .map((request) => request.body as ChatBody)
+            .filter((body) => textOf(body?.messages?.[0]?.content).includes('现在向下达任务的人交付结果'))
+            .at(-1);
+        expect(userText((lastMaterial ?? material) as ChatBody)).toContain('- T2 Write b.txt: blocked');
     }, 120_000);
 
     it('reports a member that repeats itself and steers it at its next step', async () => {
@@ -480,5 +601,166 @@ describe('supervision loop', () => {
         await expect(ui.request('team.presetTask', { runId: started.id, taskId: 'T1', effort: 'low' })).rejects.toThrow(
             'T1已经开始了',
         );
+    }, 120_000);
+});
+
+/** A command that passes when `file` exists in the folder it runs in. */
+const exists = (file: string) => `node -e "process.exit(require('fs').existsSync('${file}')?0:1)"`;
+
+const isReport = (body: ChatBody) => textOf(body.messages[0]?.content).includes('现在向下达任务的人交付结果');
+const REPORT = '## 目标达成\n已达成。\n## 已完成\n- 文件写好了\n## 下一步\n- 无';
+
+/** A coder that writes `file` with `content`, then hands it in as done. */
+function writer(body: ChatBody, file: string, content: string): MockTurn {
+    const last = body.messages.at(-1);
+    if (last?.role === 'tool') {
+        return lastCall(body) === 'write'
+            ? call({
+                  name: 'deliver',
+                  arguments: {
+                      status: 'done',
+                      summary: `wrote ${file}`,
+                      changes: [{ file, kind: 'added' }],
+                      evidence: [{ type: 'diff' }],
+                  },
+              })
+            : say('Handed in.');
+    }
+    return call({ name: 'write', arguments: { path: file, content } });
+}
+
+describe('a faster team (06 §29)', () => {
+    it('asks a supervisor for its cards once a planning turn used its requests', async () => {
+        server.reset();
+        let reads = 0;
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            if (isReport(body)) return say(REPORT);
+            const last = body.messages.at(-1);
+            switch (agentOf(body)) {
+                case 'Supervisor': {
+                    if (last?.role === 'tool') {
+                        if (lastCall(body) === 'read' && !userText(body).includes('Planning time is up')) {
+                            reads++;
+                            return call({ name: 'read', arguments: { path: 'README.md' } });
+                        }
+                        return say('Planned.');
+                    }
+                    const said = textOf(last?.content);
+                    if (said.includes('<team_goal>')) {
+                        reads++;
+                        return call({ name: 'read', arguments: { path: 'README.md' } });
+                    }
+                    if (said.includes('Planning time is up')) {
+                        return call({ name: 'task_create', arguments: { tasks: [card(ONLY_A, ['a.txt'])] } });
+                    }
+                    return say('Noted.');
+                }
+                case 'Coder':
+                    return writer(body, 'a.txt', 'one\n');
+                default:
+                    return say('ok');
+            }
+        });
+
+        const { done } = await startRun('写a.txt');
+        expect(done.status).toBe('done');
+        // The planning turn ended at its limit, and the host asked for the cards.
+        expect(reads).toBe(PLAN_REQUESTS);
+        const asked = server.requests
+            .map((request) => request.body as ChatBody)
+            .filter((body) => agentOf(body) === 'Supervisor' && lastText(body).includes('Planning time is up'));
+        expect(asked).toHaveLength(1);
+    }, 120_000);
+
+    it("starts every worktree from the project's uncommitted changes and integrates only a card's own", async () => {
+        server.reset();
+        const sees = `node -e "const f=require('fs');process.exit(f.readFileSync('README.md','utf8').includes('by the user')&&f.existsSync('notes.md')&&f.existsSync('c.txt')?0:1)"`;
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            if (isReport(body)) return say(REPORT);
+            const last = body.messages.at(-1);
+            switch (agentOf(body)) {
+                case 'Supervisor':
+                    if (last?.role === 'tool') return say('Planned.');
+                    return textOf(last?.content).includes('<team_goal>')
+                        ? call({ name: 'task_create', arguments: { tasks: [card(sees, ['c.txt'])] } })
+                        : say('Noted.');
+                case 'Coder':
+                    return writer(body, 'c.txt', 'three\n');
+                default:
+                    return say('ok');
+            }
+        });
+
+        const { repo, done } = await startRun('写c.txt', {
+            prepare: (dir) => {
+                writeFileSync(path.join(dir, 'README.md'), '# demo by the user\n');
+                writeFileSync(path.join(dir, 'notes.md'), 'draft\n');
+            },
+        });
+        expect(done.status).toBe('done');
+        expect(done.warnings).toContain('项目里有没提交的改动：已带进各任务的worktree，整合时只合入任务自己的改动');
+        // The card's acceptance passed in its worktree, which held the user's changes; the project got only c.txt.
+        expect(done.tasks[0]).toMatchObject({ id: 'T1', status: 'done', attempts: 1 });
+        expect(readFileSync(path.join(repo, 'c.txt'), 'utf8')).toBe('three\n');
+        expect(readFileSync(path.join(repo, 'README.md'), 'utf8')).toBe('# demo by the user\n');
+        expect(readFileSync(path.join(repo, 'notes.md'), 'utf8')).toBe('draft\n');
+        expect(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('1');
+    }, 120_000);
+
+    it('keeps each local card to its own changes while they share the project folder', async () => {
+        server.reset();
+        let repo = '';
+        const appears = async (file: string) => {
+            for (let tries = 0; tries < 400 && !existsSync(path.join(repo, file)); tries++) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+        };
+        server.respondWith(async (request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            if (isReport(body)) return say(REPORT);
+            const last = body.messages.at(-1);
+            switch (agentOf(body)) {
+                case 'Supervisor':
+                    if (last?.role === 'tool') return say('Planned.');
+                    return textOf(last?.content).includes('<team_goal>')
+                        ? call({
+                              name: 'task_create',
+                              arguments: {
+                                  tasks: [
+                                      { ...card(exists('a.txt'), ['a.txt']), id: 'T1', workspace: 'local' },
+                                      { ...card(exists('b.txt'), ['b.txt']), id: 'T2', workspace: 'local' },
+                                  ],
+                              },
+                          })
+                        : say('Noted.');
+                case 'Coder': {
+                    const mine = userText(body).includes('<task_card id="T2"') ? 'b.txt' : 'a.txt';
+                    // Each hands in only once the other one's file is there: both turns see both files change.
+                    if (last?.role === 'tool' && lastCall(body) === 'write') {
+                        await appears(mine === 'a.txt' ? 'b.txt' : 'a.txt');
+                    }
+                    return writer(body, mine, `${mine}\n`);
+                }
+                default:
+                    return say('ok');
+            }
+        });
+
+        const { done } = await startRun('写a.txt和b.txt', {
+            prepare: (dir) => {
+                repo = dir;
+            },
+        });
+        expect(done.status).toBe('done');
+        // Neither card is blamed for the other's file: both pass at their first attempt.
+        expect(done.tasks.map((task) => [task.id, task.status, task.attempts])).toEqual([
+            ['T1', 'done', 1],
+            ['T2', 'done', 1],
+        ]);
     }, 120_000);
 });

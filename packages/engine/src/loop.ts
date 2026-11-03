@@ -8,6 +8,8 @@ import {
     contextMessages,
     currentContextTokens,
     estimatedContextTokens,
+    estimateMessageTokens,
+    estimateTokens,
     pruneToolResults,
     summarise,
     summaryCut,
@@ -326,8 +328,15 @@ export class TurnRunner {
         this.#tools = new Map(all.map((tool) => [tool.name, tool]));
     }
 
-    async run(prompt: readonly acp.ContentBlock[]): Promise<StopReason> {
+    /**
+     * `fresh`: the context starts over from this summary, which the host wrote, before the prompt (a team's supervisor
+     * woken with the state of its run, 06 §29). The earlier messages stay in the session file, out of the context.
+     */
+    async run(prompt: readonly acp.ContentBlock[], options: { readonly fresh?: string } = {}): Promise<StopReason> {
         const session = this.#session;
+        if (options.fresh) {
+            this.#restart(options.fresh);
+        }
         // Steering the previous turn accepted but ended before taking (cancelled, out of requests) comes first.
         this.#steer();
         session.append(toUserMessage(prompt, session));
@@ -387,6 +396,27 @@ export class TurnRunner {
         }
         this.#session.append({ role: 'user', content: notes.map((note) => ({ type: 'text' as const, text: note })) });
         return true;
+    }
+
+    /** The context starts from `summary`: everything before this point is represented by it, as after a compaction. */
+    #restart(summary: string): void {
+        const session = this.#session;
+        const keepFrom = session.history.length;
+        const before = contextMessages(session).reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+        session.contextStart = keepFrom;
+        session.summary = summary;
+        session.prunedUpTo = Math.max(session.prunedUpTo, keepFrom);
+        session.lastPromptTokens = 0;
+        session.lastPromptEstimate = 0;
+        session.file.append({
+            t: 'compaction',
+            ts: Date.now(),
+            level: 3,
+            summary,
+            keepFrom,
+            tokensBefore: before,
+            tokensAfter: estimateTokens(summary),
+        });
     }
 
     /** Compaction levels 2 and 3 when the context crosses 60% and 80% of the budget. */

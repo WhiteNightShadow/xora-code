@@ -52,6 +52,7 @@ import {
     needsHuman,
     nextTier,
     type Organization,
+    ownershipMatcher,
     ProgressLedger,
     parseDeliverable,
     parseReview,
@@ -109,6 +110,7 @@ import {
     loadTeamOrganization,
     MEMBER_TOOLS,
     mcpToolsOf,
+    PLAN_REQUESTS,
     planReviewFeedback,
     planReviewPrompt,
     RESUME_PROMPT,
@@ -194,6 +196,36 @@ const PLAN_NUDGE =
     "run's autonomy level no person is involved before the report. Create the task cards now with task_create; they " +
     'are dispatched from there. If the goal cannot be done at all, say why in your final message.';
 
+/** 06 §29: a planning turn used its PLAN_REQUESTS; the cards come now, whoever is in the loop. */
+const PLAN_TIME_UP =
+    `Planning time is up (${PLAN_REQUESTS} requests). Create the task cards now with task_create from what you know; ` +
+    'do not read more first. What is still unknown goes into a readonly scout card that runs alongside the others, ' +
+    'or that the cards needing its facts depend on.';
+
+/** What the commit of the project's uncommitted changes in a worktree is labelled (06 §29). */
+const CARRIED = 'the uncommitted changes of the project';
+
+/** 06 §29: a stage that moved forward goes to the supervisor on the side; the member does not wait for it. */
+const STAGE_REPORT = 'Stage report of';
+
+/** Context window of the run's threads (06 §29): pruned from about 77k tokens on, compacted from about 100k. */
+const TEAM_CONTEXT_WINDOW = 160_000;
+
+/** Times a hands-off run that is stuck gives its supervisor a turn to change the plan before it ends (06 §29). */
+const MAX_WRAP_ASKS = 2;
+
+/** The team's latest messages a woken supervisor sees with the state of the run (06 §29). */
+const RECENT_MESSAGES = 12;
+
+/** 06 §29: nobody watches a stuck hands-off run, so its supervisor decides at once: another approach, or the end. */
+function wrapUpPrompt(blockers: readonly string[], autonomy: string): string {
+    return [
+        `No card can go on: ${blockers.join(', ')}. Nobody watches this run (autonomy ${autonomy}), so it does not wait for the user. Decide now, in this turn:`,
+        '- If another approach can still reach the goal within the budget, change the plan: task_update (status "ready" with the new approach in the card), task_create or task_assign. Do not repeat what already failed.',
+        '- Otherwise change nothing and end your turn: the host ends the run with what is done, integrates the finished cards and writes the report. Your final message goes into it: what was achieved, where and why the rest is stuck, and what the user can do next.',
+    ].join('\n');
+}
+
 type RunStatus = TeamRunView['status'];
 const TERMINAL: ReadonlySet<RunStatus> = new Set(['done', 'failed', 'cancelled']);
 const WORKFLOW_STATE: Readonly<Record<RunStatus, { status: TeamRunStatus; phase?: TeamRunPhase }>> = {
@@ -274,6 +306,14 @@ interface RunHost {
     note?: string;
     /** Set while the run waits on nothing it can do itself. */
     stuck?: boolean;
+    /** The project had uncommitted changes when the run started: every worktree starts from them (06 §29). */
+    carry?: boolean;
+    /** A hands-off run is stuck and its supervisor has a turn to change the plan before the run ends (06 §29). */
+    wrapAsked?: boolean;
+    /** How often that happened in the run (see MAX_WRAP_ASKS). */
+    wrapAsks?: number;
+    /** The run ended with what it had; these cards were not finished (06 §29). */
+    wrappedUp?: string[];
     /** Planning turns that ended without a task card (see MAX_PLAN_NUDGES). */
     planNudges?: number;
     /** A planning turn ended without a task card while a person is in the loop: the note says so until there is one. */
@@ -469,7 +509,7 @@ const TEXT = bilingual(
         l3Budget: 'L3没人看着，要给这次运行设一个花费上限',
         noSupervisor: '组织里没有主管',
         noGroup: (id: string) => `没有小组${id}`,
-        uncommitted: '项目里有没提交的改动：各任务的worktree从最近一次提交开始，看不到这些改动',
+        carried: '项目里有没提交的改动：已带进各任务的worktree，整合时只合入任务自己的改动',
         supervisorTitle: (goal: string) => `团队：${goal}`,
         supervisorNotStarted: (error: string) => `主管线程没能启动：${error}`,
         stoppedByYou: '你停止了这次运行',
@@ -512,6 +552,11 @@ const TEXT = bilingual(
         stuck: (blockers: readonly string[]) =>
             `没有能继续的任务（${blockers.join('，')}）；在主管线程里说明怎么处理，或者停止这次运行`,
         stuckTitle: '团队卡住了',
+        wrapping: '没有能继续的任务，主管在决定换个办法还是收尾',
+        partialDone: (blockers: readonly string[]) =>
+            `部分完成：${blockers.join('，')}没有做完；做完的部分已经合入项目，下一步见汇报`,
+        notDone: (blockers: readonly string[]) => `目标没有完成：${blockers.join('，')}；下一步见汇报`,
+        wrappedTitle: '团队已收尾',
         noPreviousRun: (id: string) => `这个项目里没有运行${id}`,
         previousRunActive: '上一次运行还没结束：等它结束，或者先停止它',
         awaitingUser: '主管这一轮没有拆出任务，可能在主管线程里等你回复：回复它，或者停止这次运行',
@@ -521,6 +566,8 @@ const TEXT = bilingual(
         notGitRepo: (taskId: string) => `项目不是git仓库，${taskId}改在项目目录里执行`,
         notSeeded: (from: string, taskId: string, reason: string) =>
             `${from}的结果没能带进${taskId}的worktree：${reason}`,
+        notCarried: (taskId: string, reason: string) =>
+            `项目里没提交的改动没能带进${taskId}的worktree，它从最近一次提交开始：${reason}`,
         dispatchTitle: (taskId: string, title: string) => `派工：${taskId} ${title}`,
         dispatchSummary: (agent: string, tier: Tier, workspace: string, goal: string) =>
             `交给${agent}（${tierLabel(tier, 'zh-CN')}档，${workspace}）\n目标：${goal}`,
@@ -584,8 +631,8 @@ const TEXT = bilingual(
         l3Budget: 'Nobody watches an L3 run: give it a spending cap',
         noSupervisor: 'The organization has no supervisor',
         noGroup: (id: string) => `No group ${id}`,
-        uncommitted:
-            "The project has uncommitted changes: each task's worktree starts from the latest commit and does not see them",
+        carried:
+            "The project has uncommitted changes: each task's worktree starts from them, and only the task's own changes are integrated",
         supervisorTitle: (goal) => `Team: ${goal}`,
         supervisorNotStarted: (error) => `The supervisor thread could not start: ${error}`,
         stoppedByYou: 'You stopped this run',
@@ -630,6 +677,11 @@ const TEXT = bilingual(
         stuck: (blockers) =>
             `No task can go on (${blockers.join(', ')}); tell the supervisor in its thread what to do, or stop the run`,
         stuckTitle: 'The team is stuck',
+        wrapping: 'No task can go on; the supervisor decides whether to change the approach or wrap up',
+        partialDone: (blockers) =>
+            `Partly done: ${blockers.join(', ')} not finished; the finished work is in the project, next steps are in the report`,
+        notDone: (blockers) => `The goal was not reached: ${blockers.join(', ')}; next steps are in the report`,
+        wrappedTitle: 'The team wrapped up',
         noPreviousRun: (id) => `This project has no run ${id}`,
         previousRunActive: 'The earlier run has not ended: wait for it, or stop it first',
         awaitingUser:
@@ -640,6 +692,8 @@ const TEXT = bilingual(
         notGitRepo: (taskId) => `The project is not a git repository; ${taskId} runs in the project folder instead`,
         notSeeded: (from, taskId, reason) =>
             `The results of ${from} could not be brought into the worktree of ${taskId}: ${reason}`,
+        notCarried: (taskId, reason) =>
+            `The project's uncommitted changes could not be brought into the worktree of ${taskId}, which starts from the latest commit: ${reason}`,
         dispatchTitle: (taskId, title) => `Dispatch: ${taskId} ${title}`,
         dispatchSummary: (agent, tier, workspace, goal) =>
             `To ${agent} (${tierLabel(tier, 'en')} tier, ${workspace})\nGoal: ${goal}`,
@@ -911,8 +965,10 @@ export class TeamService {
         const tier = resolveTier('supervisor', undefined, org).tier;
         const pick = this.#pickModel(org, autonomy, project, tier, warnings, undefined, supervisor);
         const base = project.git.isRepo ? await headCommit(project.path).catch(() => undefined) : undefined;
-        if (base && (await this.#deps.worktrees.changedFiles(project.path)).length > 0) {
-            warnings.push(text.uncommitted);
+        // 06 §29: uncommitted changes travel into every worktree of the run; only a task's own changes come back.
+        const carry = base !== undefined && (await this.#deps.worktrees.changedFiles(project.path)).length > 0;
+        if (carry) {
+            warnings.push(text.carried);
         }
         const thread = threads.create({
             projectId: project.id,
@@ -941,6 +997,7 @@ export class TeamService {
             planApproved: false,
             deliveryApproved: false,
             ...(base ? { base } : {}),
+            ...(carry ? { carry: true } : {}),
             org,
             orgSources: [...loaded.sources],
             warnings,
@@ -1837,6 +1894,9 @@ export class TeamService {
             mcpTools: mcpToolsOf(agent),
             layers: systemLayers(state.host.org, agent),
             highRiskApproval: true,
+            // 06 §29: planning is the critical path, and the run's threads keep a smaller context.
+            maxTurnRequests: () => (state.host.status === 'planning' ? PLAN_REQUESTS : undefined),
+            softContextWindow: TEAM_CONTEXT_WINDOW,
             handle: (name, input) => this.#supervisorTool(runId, name, input),
         });
     }
@@ -1859,6 +1919,7 @@ export class TeamService {
             highRiskApproval: true,
             // The engine stops the turn where the card's turn budget runs out.
             maxTurnRequests: () => this.#turnsLeft(state, taskId),
+            softContextWindow: TEAM_CONTEXT_WINDOW,
             handle: (name, input, signal) => this.#memberTool(runId, taskId, name, input, signal),
         });
     }
@@ -1934,14 +1995,15 @@ export class TeamService {
 
     // Supervisor -----------------------------------------------------------------------------------------
 
-    async #startSupervisor(state: RunState, text: string): Promise<boolean> {
+    /** `fresh`: the turn's context starts from this state of the run instead of the earlier turns (06 §29). */
+    async #startSupervisor(state: RunState, text: string, fresh?: string): Promise<boolean> {
         const threadId = state.host.supervisorThreadId;
         if (state.supervisorStarting || this.#deps.turns.isRunning(threadId)) {
             return false;
         }
         state.supervisorStarting = true;
         try {
-            state.host.supervisorTurnId = await this.#deps.turns.start(threadId, text);
+            state.host.supervisorTurnId = await this.#deps.turns.start(threadId, text, [], fresh ? { fresh } : {});
             this.#save(state);
             return true;
         } finally {
@@ -1980,9 +2042,17 @@ export class TeamService {
         try {
             state.internalTurn = lines.every(
                 (line) =>
-                    line.startsWith(STAGE_REVIEW) || line.startsWith(WATCH_REPORT) || line.startsWith(APPROVAL_REQUEST),
+                    line.startsWith(STAGE_REVIEW) ||
+                    line.startsWith(STAGE_REPORT) ||
+                    line.startsWith(WATCH_REPORT) ||
+                    line.startsWith(APPROVAL_REQUEST),
             );
-            if (await this.#startSupervisor(state, wakeText(lines, state.board))) {
+            // 06 §29: once the plan stands, a woken supervisor starts from the state of the run, not every turn before.
+            const fresh =
+                host.planApproved && (host.status === 'running' || host.status === 'integrating')
+                    ? this.#runState(state)
+                    : undefined;
+            if (await this.#startSupervisor(state, wakeText(lines, state.board), fresh)) {
                 for (const question of asked) {
                     question.delivered = true;
                 }
@@ -2000,6 +2070,69 @@ export class TeamService {
             }
         }
         this.#save(state);
+    }
+
+    /**
+     * What a woken supervisor knows of its run (06 §29): the goal, the task ledger, every card with its latest result,
+     * the team's latest messages and its own latest conclusions, instead of every earlier turn.
+     */
+    #runState(state: RunState): string {
+        const { run, board, host } = state;
+        const clip = (value: string, limit: number) => {
+            const flat = value.replace(/\s+/g, ' ').trim();
+            return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
+        };
+        const costs = this.#costs(state);
+        const lines = [
+            '<run_state>',
+            "The host keeps the record of this run. Your earlier turns are replaced by this state of it: act on the update that follows, and use task_list or the members' threads when you need more.",
+            `Goal: ${clip(run.goal, 3_000)}`,
+            `Autonomy: ${run.autonomy}. Spent ${round(costs.total)} ${costs.currency}${run.budget ? ` of ${run.budget.limit} ${run.budget.currency}` : ''}.`,
+        ];
+        const ledger = state.ledger?.current;
+        if (ledger) {
+            if (ledger.plan) lines.push(`Approach: ${clip(ledger.plan, 1_500)}`);
+            const list = (title: string, items: readonly string[]) => {
+                if (items.length > 0) lines.push(`${title}: ${items.map((item) => clip(item, 300)).join(' | ')}`);
+            };
+            list('Facts', ledger.facts.slice(-12));
+            list('Decisions', ledger.decisions.slice(-12));
+            list('Assumptions', ledger.assumptions.slice(-8));
+            list('Risks', ledger.risks.slice(-8));
+        }
+        lines.push('Cards:');
+        for (const taskId of board.topologicalOrder()) {
+            const task = board.get(taskId);
+            if (!task) continue;
+            const info = host.tasks[taskId];
+            const who = info?.agentId ?? task.owner;
+            lines.push(
+                `- ${taskId} [${task.status}] ${clip(task.card.title, 100)}` +
+                    (who ? ` (${who} at ${task.tier})` : ` (${task.tier})`) +
+                    (task.attempts.length > 0 ? `, ${task.attempts.length} attempt(s)` : '') +
+                    (task.card.dependsOn.length > 0 ? `, after ${task.card.dependsOn.join(', ')}` : ''),
+            );
+            if (task.deliverable?.summary) lines.push(`  latest: ${clip(task.deliverable.summary, 400)}`);
+            if (task.status !== 'done' && info?.remaining?.length) {
+                lines.push(`  left: ${clip(info.remaining.join('; '), 300)}`);
+            }
+            if (task.status !== 'done' && task.note) lines.push(`  note: ${clip(task.note, 300)}`);
+            if (info?.guidance) lines.push(`  your guidance: ${clip(info.guidance, 300)}`);
+        }
+        const recent = (host.conversation ?? []).slice(-RECENT_MESSAGES);
+        if (recent.length > 0) {
+            lines.push('Latest messages:');
+            for (const entry of recent) {
+                lines.push(`- ${entry.from} → ${entry.to} (${entry.kind}): ${clip(entry.text, 300)}`);
+            }
+        }
+        const said = (host.feedback ?? []).slice(-2);
+        if (said.length > 0) {
+            lines.push('Your latest words to the user:');
+            for (const entry of said) lines.push(`- ${clip(entry.text, 800)}`);
+        }
+        lines.push('</run_state>');
+        return lines.join('\n');
     }
 
     async #afterSupervisorTurn(state: RunState, event: TurnEnded): Promise<void> {
@@ -2062,6 +2195,14 @@ export class TeamService {
                     delete host.note;
                 }
                 void this.#planReady(state);
+            } else if (event.stopReason === 'max_turn_requests') {
+                // 06 §29: planning time is up; the cards come now, whoever is in the loop.
+                host.planNudges = (host.planNudges ?? 0) + 1;
+                if (host.planNudges > MAX_PLAN_NUDGES) {
+                    this.#pause(state, textOf(TEXT).noPlan);
+                    return;
+                }
+                this.#wake(state, PLAN_TIME_UP);
             } else if (!this.#plannedNothing(state)) {
                 return;
             }
@@ -2933,6 +3074,11 @@ export class TeamService {
             void this.#integrate(state);
             return;
         }
+        if (board.active().length === 0 && tasks.length > 0 && !needsHuman(state.run.autonomy, 'plan_approval')) {
+            // 06 §29: nobody watches a hands-off run, so a stuck one does not wait for the user.
+            this.#settleStuck(state);
+            return;
+        }
         if (board.active().length === 0 && tasks.length > 0 && !host.stuck) {
             const text = textOf(TEXT);
             const blockers = tasks
@@ -2944,6 +3090,34 @@ export class TeamService {
             this.#save(state);
             this.#notice(state, 'warning', text.stuckTitle, host.note);
         }
+    }
+
+    /**
+     * A hands-off run with no card that can go on (06 §29): its supervisor gets one turn to change the plan; when it
+     * changes nothing, or after MAX_WRAP_ASKS such turns, the run ends with what is done: the finished cards are
+     * integrated and the report says what is left and how it can go on.
+     */
+    #settleStuck(state: RunState): void {
+        const { host, board } = state;
+        const unfinished = board.list().filter((task) => task.status !== 'done' && task.status !== 'cancelled');
+        const blockers = unfinished.map((task) => `${task.card.id} (${task.status})`);
+        if (!host.wrapAsked && (host.wrapAsks ?? 0) < MAX_WRAP_ASKS) {
+            host.wrapAsked = true;
+            host.wrapAsks = (host.wrapAsks ?? 0) + 1;
+            host.note = textOf(TEXT).wrapping;
+            this.#wake(state, wrapUpPrompt(blockers, state.run.autonomy));
+            this.#save(state);
+            return;
+        }
+        const text = textOf(TEXT);
+        host.wrapAsked = false;
+        host.stuck = false;
+        host.wrappedUp = unfinished.map((task) =>
+            text.blocker(task.card.id, task.handler === 'supervisor', task.status),
+        );
+        delete host.note;
+        this.#save(state);
+        void this.#integrate(state);
     }
 
     /** Claims ready tasks up to the parallel limit synchronously, then starts each one's executor. */
@@ -2984,6 +3158,11 @@ export class TeamService {
             // A running run that is stuck shows the stuck note (#advance); it goes with the flag.
             if (host.stuck) {
                 host.stuck = false;
+                host.note = undefined;
+            }
+            // The supervisor changed the plan of a stuck hands-off run (06 §29): the run goes on.
+            if (host.wrapAsked) {
+                host.wrapAsked = false;
                 host.note = undefined;
             }
             void this.#work(state, taskId, 'dispatch', agent);
@@ -3053,14 +3232,25 @@ export class TeamService {
                 this.#deps.threads.delete(thread.id);
                 throw error;
             }
-            const sources = this.#dependencyWorktrees(state, taskId);
+            // 06 §29: the project's uncommitted changes first, then the results of the cards it depends on.
+            const sources = [
+                ...(host.carry ? [{ dir: project.path, label: CARRIED }] : []),
+                ...this.#dependencyWorktrees(state, taskId),
+            ];
             if (sources.length > 0) {
                 const seeded = await worktrees.seed(cwd, sources);
                 for (const failure of seeded.failed) {
+                    const carried = failure.label === CARRIED;
                     handoff.push(
-                        `The results of ${failure.label} could not be copied into your worktree (${failure.reason}); ask the supervisor if you need them.`,
+                        carried
+                            ? `The project's uncommitted changes could not be copied into your worktree (${failure.reason}); it starts from the latest commit. Ask the supervisor if you need them.`
+                            : `The results of ${failure.label} could not be copied into your worktree (${failure.reason}); ask the supervisor if you need them.`,
                     );
-                    this.#warn(state, (text) => text.notSeeded(failure.label, taskId, shorten(failure.reason, 120)));
+                    this.#warn(state, (text) =>
+                        carried
+                            ? text.notCarried(taskId, shorten(failure.reason, 120))
+                            : text.notSeeded(failure.label, taskId, shorten(failure.reason, 120)),
+                    );
                 }
             }
         } else {
@@ -3080,6 +3270,7 @@ export class TeamService {
         info.verdict = undefined;
         info.released = false;
         info.turns = 0;
+        info.stopping = undefined;
         turns.setHostTools(thread.id, this.#memberProvider(state, taskId, agent));
         this.#save(state);
         const layers = buildAgentLayers({
@@ -3089,7 +3280,7 @@ export class TeamService {
             ...(handoff.length > 0 ? { handoff } : {}),
         });
         const taskLayer = layers.find((layer) => layer.placement === 'user')?.text ?? renderTaskCard(card);
-        return `${taskLayer}\n\n${executorNote(card, location, this.#turnLimit(state, taskId))}`;
+        return `${taskLayer}\n\n${executorNote(card, location, this.#turnLimit(state, taskId), project.path)}`;
     }
 
     /** L0 confirms every step (06 §8): each dispatch waits for the user; a refusal fails the task for the supervisor. */
@@ -3253,6 +3444,14 @@ export class TeamService {
         if (!threadId) {
             throw new Error(`task ${taskId} has no executor thread`);
         }
+        // 06 §29: the supervisor stopped or escalated it between two of its turns.
+        if (info.stopping) {
+            const stopping = info.stopping;
+            info.stopping = undefined;
+            this.#stopRunning(state, taskId, stopping, '');
+            this.#save(state);
+            return undefined;
+        }
         const queued = info.messages?.splice(0) ?? [];
         let text = queued.length > 0 ? `${prompt}\n\n<team_messages>\n${queued.join('\n')}\n</team_messages>` : prompt;
         info.delivered = undefined;
@@ -3273,7 +3472,10 @@ export class TeamService {
             }
             if (ended.outcome === 'completed') {
                 if (info.location !== 'worktree') {
-                    info.changed = [...new Set([...(info.changed ?? []), ...ended.changedFiles])];
+                    // 06 §29: in the shared project folder a turn sees the other local cards' changes too.
+                    const own = this.#ownChanges(state, taskId, ended.changedFiles);
+                    info.changed = [...new Set([...(info.changed ?? []), ...own])];
+                    return { ...ended, changedFiles: own };
                 }
                 return ended;
             }
@@ -3321,6 +3523,29 @@ export class TeamService {
             this.#save(state);
             text = `The previous model request failed (${errorClass}); you now run on ${next.ref.model}. Continue the task from where it stopped and deliver.`;
         }
+    }
+
+    /**
+     * The changes of a local card's turn that are its own (06 §29): what lies in the ownership of another writable card
+     * working in the project folder in this run is that card's, unless it is in this card's ownership too.
+     */
+    #ownChanges(state: RunState, taskId: string, files: readonly string[]): string[] {
+        const card = state.board.get(taskId)?.card;
+        const others = state.board
+            .list()
+            .filter(
+                (task) =>
+                    task.card.id !== taskId &&
+                    task.card.workspace !== 'readonly' &&
+                    state.host.tasks[task.card.id]?.location === 'local' &&
+                    (state.host.tasks[task.card.id]?.threads.length ?? 0) > 0,
+            )
+            .map((task) => ownershipMatcher(task.card.ownership));
+        if (!card || others.length === 0) {
+            return [...files];
+        }
+        const mine = ownershipMatcher(card.ownership);
+        return files.filter((file) => mine(file) || !others.some((owned) => owned(file)));
     }
 
     /** The card's turn budget (06 §6): `budget.maxTurns`, else {@link DEFAULT_MAX_TURNS}. */
@@ -3741,24 +3966,40 @@ export class TeamService {
             text: textOf(TEXT).stageEntry(stage, shorten(deliverable.summary, 300), left, progress),
             kind: 'stage',
         });
-        const review = [
-            `${STAGE_REVIEW} ${taskId} (stage ${stage}, ${owner} at ${task.tier}): ${shorten(deliverable.summary, 600)}`,
+        const facts = [
+            `${goesOn ? STAGE_REPORT : STAGE_REVIEW} ${taskId} (stage ${stage}, ${owner} at ${task.tier}): ${shorten(deliverable.summary, 600)}`,
             left > 0
                 ? `Still to do:\n${deliverable.remaining.map((item) => `- ${shorten(item, 200)}`).join('\n')}`
                 : 'It listed nothing as left.',
             total > 0 ? `Acceptance commands: ${passing} of ${total} pass.` : 'The card has no acceptance command.',
             changed > 0 ? `It changed ${changed} file(s) in this stage.` : 'It changed no file in this stage.',
-            goesOn
-                ? 'The host sees progress.'
-                : progress
-                  ? `That was stage ${stage}: past ${MAX_STAGES} stages, going on counts as a failed round.`
-                  : 'The host sees no progress since the last stage: going on counts as a failed round.',
-            `Decide with task_guide on ${taskId}: continue with concrete guidance for the next stage, escalate, or stop. ` +
-                `Without a decision the member ${goesOn ? 'goes on with what is left' : 'gets the failure feedback'}.`,
-        ].join('\n');
-        const decided = await this.#reviewStage(state, taskId, review);
-        if (!this.#live(state) || board.get(taskId)?.status !== 'in_review') {
-            return undefined;
+        ];
+        let decided: GuideDecision | undefined;
+        if (goesOn) {
+            // 06 §29: a stage that moved forward does not wait: the member goes on at once, and the supervisor reads it
+            // on the side and steps in with task_guide only where it must.
+            this.#wake(
+                state,
+                [
+                    ...facts,
+                    `The host sees progress: ${taskId} goes on now, without waiting for you. Step in with task_guide on ${taskId} only if it heads the wrong way: continue with guidance reaches it at its next step; escalate or stop end its work. Otherwise do nothing.`,
+                ].join('\n'),
+            );
+        } else {
+            decided = await this.#reviewStage(
+                state,
+                taskId,
+                [
+                    ...facts,
+                    progress
+                        ? `That was stage ${stage}: past ${MAX_STAGES} stages, going on counts as a failed round.`
+                        : 'The host sees no progress since the last stage: going on counts as a failed round.',
+                    `Decide with task_guide on ${taskId}: continue with concrete guidance for the next stage, escalate, or stop. Without a decision the member gets the failure feedback.`,
+                ].join('\n'),
+            );
+            if (!this.#live(state) || board.get(taskId)?.status !== 'in_review') {
+                return undefined;
+            }
         }
         const guidance = decided?.guidance?.trim() || undefined;
         if (decided?.decision === 'stop') {
@@ -3806,7 +4047,7 @@ export class TeamService {
             );
             this.#save(state);
             return [
-                `Stage ${stage} of ${taskId} is reviewed.`,
+                `Stage ${stage} of ${taskId} is recorded; the supervisor reads it on the side, and its guidance, if any, reaches you while you work.`,
                 ...(guidance ? [`From the supervisor: ${guidance}`] : []),
                 ...(left > 0 ? [`Still to do: ${deliverable.remaining.join('; ')}.`] : []),
                 `Go on from where you stopped${total > 0 ? ` (${passing} of ${total} acceptance commands pass now)` : ''}. ` +
@@ -3914,7 +4155,13 @@ export class TeamService {
             threadId !== undefined &&
             this.#deps.turns.isRunning(threadId) &&
             (task.status === 'assigned' || task.status === 'in_progress');
-        if (!running || threadId === undefined) {
+        // 06 §29: a member whose stage went to the supervisor on the side may be between two turns.
+        const between =
+            !running &&
+            threadId !== undefined &&
+            state.working.has(taskId) &&
+            (task.status === 'assigned' || task.status === 'in_progress' || task.status === 'in_review');
+        if ((!running && !between) || threadId === undefined) {
             return fail(
                 `${taskId} is ${task.status} and no stage of it waits for review; use task_update, task_assign or send_message.`,
             );
@@ -3938,7 +4185,10 @@ export class TeamService {
             reason: guidance ?? (decision === 'escalate' ? 'escalated by the supervisor' : 'stopped by the supervisor'),
         };
         this.#save(state);
-        this.#deps.turns.cancel(threadId);
+        // Between two turns the next one does not start (#executorTurn).
+        if (running) {
+            this.#deps.turns.cancel(threadId);
+        }
         return ok(
             decision === 'escalate'
                 ? `${taskId}: its member stops now and the card goes one tier up.`
@@ -4459,6 +4709,10 @@ export class TeamService {
                 this.#setStatus(state, 'integrating');
             }
             const done = board.list({ status: 'done' });
+            // A run that wrapped up with nothing finished has nothing to integrate (06 §29).
+            if (host.wrappedUp && done.length === 0) {
+                host.deliveryApproved = true;
+            }
             if (
                 needsHuman(state.run.autonomy, 'final_delivery') &&
                 !host.deliveryApproved &&
@@ -4550,17 +4804,24 @@ export class TeamService {
             const failed = checks.filter((check) => !check.ran || check.exit !== 0);
             host.report = this.#report(state);
             const words = textOf(TEXT);
-            this.#setStatus(
-                state,
-                failed.length > 0 ? 'failed' : 'done',
-                failed.length > 0 ? words.finalFailed(failed.map((check) => check.run)) : undefined,
-            );
+            // 06 §29: a run that wrapped up is done with what it finished, or failed when it finished nothing.
+            const unfinished = host.wrappedUp;
+            const note =
+                failed.length > 0
+                    ? words.finalFailed(failed.map((check) => check.run))
+                    : unfinished
+                      ? done.length > 0
+                          ? words.partialDone(unfinished)
+                          : words.notDone(unfinished)
+                      : undefined;
+            const ended = failed.length > 0 || (unfinished !== undefined && done.length === 0) ? 'failed' : 'done';
+            this.#setStatus(state, ended, note);
             this.#startBrief(state);
             this.#notice(
                 state,
-                failed.length > 0 ? 'warning' : 'info',
-                failed.length > 0 ? words.endedFailed : words.completed,
-                words.reportInView,
+                ended === 'failed' ? 'warning' : 'info',
+                unfinished ? words.wrappedTitle : failed.length > 0 ? words.endedFailed : words.completed,
+                unfinished && note ? note : words.reportInView,
             );
             for (const taskId of board.topologicalOrder()) {
                 const info = host.tasks[taskId];

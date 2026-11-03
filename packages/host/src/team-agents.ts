@@ -473,7 +473,12 @@ function boardSummary(board: TaskBoard): string {
     return [...counts].map(([status, count]) => `${count} ${status.replace('_', ' ')}`).join(', ') || 'no tasks';
 }
 
-/** The supervisor's first message: the goal (06 §4 layer 6) and how the host runs the team. */
+/**
+ * Model requests a planning turn of the supervisor may make (06 §29): no member starts before the cards exist, so
+ * planning is the critical path; then the host asks for the cards.
+ */
+export const PLAN_REQUESTS = 10;
+
 /** What the supervisor of a continued run learns about the run before it. */
 export interface PreviousRun {
     readonly goal: string;
@@ -481,6 +486,7 @@ export interface PreviousRun {
     readonly report?: string;
 }
 
+/** The supervisor's first message: the goal (06 §4 layer 6) and how the host runs the team. */
 export function supervisorBrief(
     goal: string,
     run: TeamRun,
@@ -498,7 +504,8 @@ export function supervisorBrief(
         '',
         '<team_host>',
         '- Create the task cards with task_create; one call may hold several cards that depend on each other. Invalid cards come back with the reason: fix them and call again.',
-        '- Writable cards (workspace worktree or local) need ownership globs. A worktree card runs in its own git worktree that starts from the results of the cards it depends on; a readonly card runs in the project folder without write access.',
+        `- Plan fast: no member starts before your cards exist. Read only what you need to cut the goal into cards (the project's instructions and the few files the goal names, about five reads), then create them in one task_create call. Research that takes longer is a card of its own: a readonly scout card that runs alongside the others, or that the cards needing its facts depend on. A planning turn has at most ${PLAN_REQUESTS} model requests; then the host asks you for the cards.`,
+        "- Writable cards (workspace worktree or local) need ownership globs. A worktree card runs in its own git worktree that starts from the project's uncommitted changes and the results of the cards it depends on; its own changes are integrated at the end. Prefer worktree for writable cards; choose local when the card's commands need what git ignores in the project folder (a virtual environment, node_modules, local data) or a service running there. Local cards share the project folder at the same time, each within its ownership. A readonly card runs in the project folder without write access.",
         `- When the plan is complete, end your turn. The host then has a plan reviewer of another model family audit it once and gives you the findings for one revision (do not create a card for that review); ${approval ? 'then the user approves the plan before anything is dispatched' : 'then dispatch starts'}.`,
         `- The host dispatches ready cards (at most ${maxParallel} at a time), runs their acceptance checks, sends failed deliveries back, escalates tiers, integrates the worktrees in dependency order and writes the delivery report. You get a <team_update> after task events.`,
         `- Up to ${maxParallel} members work at the same time: split the goal into independent cards with disjoint ownership wherever you can, and add a dependency only where a card needs another's result. A chain of cards runs one after the other.`,
@@ -589,14 +596,22 @@ export function wakeText(lines: readonly string[], board: TaskBoard): string {
     ].join('\n');
 }
 
-/** Follows the task card in an executor's first message; `turns` is the card's turn budget. */
-export function executorNote(card: TaskCard, location: 'worktree' | 'local', turns: number): string {
+/**
+ * Follows the task card in an executor's first message; `turns` is the card's turn budget, `projectDir` the project
+ * folder a worktree card finds what git ignores in.
+ */
+export function executorNote(
+    card: TaskCard,
+    location: 'worktree' | 'local',
+    turns: number,
+    projectDir?: string,
+): string {
     const where =
         card.workspace === 'readonly'
             ? 'This card is read-only: change no files.'
             : location === 'worktree'
-              ? 'You work in your own git worktree, which already holds the results of the cards this one depends on. Leave your changes uncommitted: the host integrates them.'
-              : 'You work directly in the project folder. Do not commit.';
+              ? `You work in your own git worktree, which already holds the project's uncommitted changes and the results of the cards this one depends on. Leave your changes uncommitted: the host integrates them.${projectDir ? ` What git ignores (virtual environments, node_modules, downloaded data) is not in it: use it from the project folder ${projectDir}.` : ''}`
+              : 'You work directly in the project folder, where other members may work at the same time: change only the files of your ownership. Do not commit.';
     return [
         '<team_host>',
         where,

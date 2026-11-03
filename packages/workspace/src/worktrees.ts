@@ -351,9 +351,10 @@ export class WorktreeManager {
 
     /**
      * Moves uncommitted work from one checkout of the repository to another: tracked changes travel as a binary
-     * patch applied with `git apply --3way`, untracked non-ignored files are copied. Only after a clean apply are
-     * the tracked paths reset and the copied files deleted in the source; on conflicts or failure the source is
-     * left exactly as it was. Applied changes end up staged in the destination, as `--3way` does.
+     * patch, untracked non-ignored files are copied. The patch goes onto the destination's files as they are, which
+     * may hold uncommitted or untracked work of their own; when it does not fit them it is merged with
+     * `git apply --3way`, whose results end up staged. Only after a clean apply are the tracked paths reset and the
+     * copied files deleted in the source; on conflicts or failure the source is left exactly as it was.
      */
     async handoff(fromDir: string, toDir: string): Promise<HandoffResult> {
         return serialize(this.#key(), async () => {
@@ -390,7 +391,13 @@ export class WorktreeManager {
                 return result('failed', { conflicts: collisions, message: 'untracked files would be overwritten' });
             }
             let conflicts: HandoffConflict[] = [];
-            if (patch.length > 0) {
+            // The destination's files as they are first: `--3way` works through the index, which refuses files
+            // changed or untracked there, such as a project's own uncommitted work under a team's (06 §29).
+            const direct =
+                patch.length > 0
+                    ? await runGit(['apply', '--whitespace=nowarn', '-'], { ...user(destination), input: patch })
+                    : undefined;
+            if (direct !== undefined && direct.code !== 0) {
                 const unresolved = new Set(await unmergedPaths(destination));
                 const applied = await runGit(['apply', '--3way', '--whitespace=nowarn', '-'], {
                     ...user(destination),

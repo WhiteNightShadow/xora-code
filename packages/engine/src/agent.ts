@@ -268,13 +268,18 @@ export function createXoraAgent(options: XoraAgentOptions): acp.AgentApp {
                 }
                 const onAbort = () => controller.abort();
                 signal.addEventListener('abort', onAbort, { once: true });
-                const turnId = (params._meta as { xora?: { turnId?: unknown } } | null | undefined)?.xora?.turnId;
+                const meta = (params._meta as { xora?: { turnId?: unknown; fresh?: unknown } } | null | undefined)
+                    ?.xora;
+                const turnId = meta?.turnId;
                 if (typeof turnId === 'string' && turnId.length > 0) {
                     session.beginTurn(turnId);
                 }
                 try {
                     const runner = new TurnRunner(session, io(client, session.id), controller.signal, tools, lsp);
-                    const stopReason = await runner.run(params.prompt);
+                    const stopReason = await runner.run(
+                        params.prompt,
+                        typeof meta?.fresh === 'string' && meta.fresh.trim() ? { fresh: meta.fresh } : {},
+                    );
                     return { stopReason };
                 } catch (error) {
                     if (error instanceof ModelError) {

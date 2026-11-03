@@ -215,6 +215,11 @@ export interface HostToolProvider {
     /** Model requests the next turn may make at most, e.g. what is left of a task card's `budget.maxTurns`. */
     maxTurnRequests?(): number | undefined;
     /**
+     * A smaller context window than the user's setting, so the engine prunes and compacts the thread earlier (team
+     * threads, 06 §29).
+     */
+    readonly softContextWindow?: number;
+    /**
      * MCP tools the thread may use, as `mcp__<server>__<tool>` names with `*` globs (a team role's allowlist);
      * absent means every tool of the project's servers. Servers none of them can match are not started.
      */
@@ -371,6 +376,8 @@ class RunningTurn {
     extras: SessionExtras | undefined;
     /** Shared host tools the session got for this turn, by name. */
     shared = new Set<string>();
+    /** The context starts over from this summary for the turn (xora engine, 06 §29). */
+    fresh: string | undefined;
     /**
      * Tool cards already matched to a call of a host tool, by item: some models reuse a call id from one request to
      * the next.
@@ -525,7 +532,16 @@ export class TurnService {
         return thread.location.kind === 'worktree' ? thread.location.path : project.path;
     }
 
-    async start(threadId: string, text: string, attachments: readonly Attachment[] = []): Promise<string> {
+    /**
+     * `options.fresh`: the engine starts this turn's context over from the given summary instead of the earlier turns,
+     * which stay in the thread (a team's supervisor woken with the state of its run, 06 §29).
+     */
+    async start(
+        threadId: string,
+        text: string,
+        attachments: readonly Attachment[] = [],
+        options: { readonly fresh?: string } = {},
+    ): Promise<string> {
         const { threads, projects, connections, settings } = this.#deps;
         const thread = threads.get(threadId);
         if (this.#running.has(threadId)) {
@@ -569,6 +585,7 @@ export class TurnService {
         };
         const cwd = this.cwdOf(thread, project);
         const running = new RunningTurn(thread, cwd, engine, turnId);
+        running.fresh = options.fresh?.trim() || undefined;
         this.#running.set(threadId, running);
         threads.append(
             threadId,
@@ -705,7 +722,10 @@ export class TurnService {
             effort: thread.effort,
             mode: thread.mode,
             layers,
-            softContextWindow: current.softContextWindow,
+            softContextWindow: Math.min(
+                current.softContextWindow,
+                provider?.softContextWindow ?? current.softContextWindow,
+            ),
             language: hostLanguage(),
             maxTurnRequests: Math.max(
                 1,
@@ -1141,7 +1161,13 @@ export class TurnService {
                 sessionId,
                 prompt,
                 // The xora engine marks where each host turn starts, for rewind and fork (M3-3).
-                ...(running.process.isXora ? { _meta: { xora: { turnId: running.turnId } } } : {}),
+                ...(running.process.isXora
+                    ? {
+                          _meta: {
+                              xora: { turnId: running.turnId, ...(running.fresh ? { fresh: running.fresh } : {}) },
+                          },
+                      }
+                    : {}),
             });
             await this.#finish(
                 running,
