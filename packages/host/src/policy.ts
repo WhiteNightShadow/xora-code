@@ -1,6 +1,15 @@
 import path from 'node:path';
 import { bilingual, type PermissionMode, type Risk, type Rule, type ToolKind, type UiLanguage } from '@xora/protocol';
-import { type HighRisk, type HighRiskAction, highRiskOfCommand, highRiskOfTool } from '@xora/tools';
+import {
+    type Grave,
+    type GraveAction,
+    graveOfCommand,
+    graveOfTool,
+    type HighRisk,
+    type HighRiskAction,
+    highRiskOfCommand,
+    highRiskOfTool,
+} from '@xora/tools';
 import { isHighRiskAction } from '@xora/workflows';
 import picomatch from 'picomatch';
 
@@ -26,6 +35,8 @@ export interface CallFacts {
     readonly external: boolean;
     /** A high-risk action (06 §8) in a thread whose high-risk actions a person approves; see {@link highRiskOf}. */
     readonly highRisk?: HighRisk;
+    /** Mass deletion or dropping a database (06 §24): the user decides it, in every mode; see {@link graveOf}. */
+    readonly grave?: Grave;
 }
 
 export interface PolicyContext {
@@ -75,6 +86,8 @@ const TEXT = bilingual(
         sensitive: '涉及敏感文件',
         outside: '超出工作区',
         highRiskAsk: (action: string) => `高风险动作（${action}）要你确认`,
+        grave: { mass_delete: '大批量删除', drop_database: '删库' } as Readonly<Record<GraveAction, string>>,
+        graveAsk: (action: string) => `${action}：要你本人确认`,
         ruleAsk: '规则要求确认',
         ruleAllow: '规则允许',
         sessionAllow: '本会话已允许',
@@ -103,6 +116,8 @@ const TEXT = bilingual(
         sensitive: 'Touches sensitive files',
         outside: 'Outside the workspace',
         highRiskAsk: (action) => `High-risk action (${action}): needs your approval`,
+        grave: { mass_delete: 'Mass deletion', drop_database: 'Dropping a database' },
+        graveAsk: (action) => `${action}: needs your own approval`,
         ruleAsk: 'A rule asks for approval',
         ruleAllow: 'Allowed by a rule',
         sessionAllow: 'Allowed for this session',
@@ -158,7 +173,38 @@ export function risksOf(facts: CallFacts): Risk[] {
     if (facts.highRisk) {
         risks.add(facts.highRisk.action === 'delete' ? 'delete' : 'network');
     }
+    if (facts.grave) {
+        risks.add('delete');
+    }
     return [...risks];
+}
+
+/** How approval cards name a grave action. */
+export function graveLabel(action: GraveAction, language: UiLanguage): string {
+    return TEXT[language].grave[action];
+}
+
+/**
+ * Mass deletion or dropping a database (06 §24): a shell command by what it runs, an MCP tool by its name, a delete
+ * tool by the database files it removes. Checked in every thread: the user decides these whoever else reviews.
+ */
+export function graveOf(
+    call: {
+        readonly toolName: string;
+        readonly command?: string | undefined;
+        readonly kind?: ToolKind;
+        readonly paths?: readonly string[];
+    },
+    where: { readonly cwd: string; readonly roots?: readonly string[] },
+): Grave | undefined {
+    if (call.command !== undefined) {
+        return graveOfCommand(call.command, { cwd: where.cwd, roots: where.roots ?? [where.cwd] });
+    }
+    if (call.kind === 'delete') {
+        const file = call.paths?.find((item) => /\.(?:db|sqlite3?|mdb|accdb|rdb)$/i.test(item));
+        if (file) return { action: 'drop_database', what: `delete ${file}` };
+    }
+    return graveOfTool(call.toolName);
 }
 
 /** The host name a URL goes to, lower-cased and without a final dot; the URL as given when it does not parse. */
@@ -297,6 +343,10 @@ export function decide(facts: CallFacts, context: PolicyContext): PolicyResult {
     // Leaving the workspace or touching secrets is never decided silently (10 §4), in any mode.
     const guarded = facts.outside.length > 0 || facts.sensitive.length > 0;
     const base = modeDefault(facts, context.mode, context.language);
+    // Mass deletion and dropping a database wait for the user in every mode that may run them (06 §24).
+    if (facts.grave && base.decision !== 'deny') {
+        return { decision: 'ask', risks, reason: text.graveAsk(text.grave[facts.grave.action]) };
+    }
     if (guarded) {
         if (context.mode === 'plan' && base.decision === 'deny') {
             return { decision: 'deny', risks, reason: base.reason };

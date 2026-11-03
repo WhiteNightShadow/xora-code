@@ -1,37 +1,38 @@
-import { useId } from 'react';
-
 /*
  * Xora's own artwork: the logo mark and the quiet illustrations of the welcome page and empty states. All of it is
  * decoration (aria-hidden) and takes its colours from the theme through the `xa-*` classes in app.css.
  */
 
-/** An id usable in `url(#…)`, unique per mounted copy. */
-function useSvgId(name: string): string {
-    return `${name}-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
-}
-
-/** Two angle brackets meeting in an X, with the agent's spark in the corner. */
+/** The app's mark, the app icon at small sizes (by 白夜): a new moon and its star on white paper. */
 export function LogoMark({ size = 24, className }: { size?: number; className?: string }) {
-    const fill = useSvgId('xora-logo');
+    // The app icon at 24 px (apps/desktop/build-resources/icon.svg, by 白夜): a new moon in one black line on white
+    // paper, and the agent, a star wired to a node and on to the moon's tip.
     return (
         <svg className={className} width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <defs>
-                <linearGradient id={fill} x1="2" y1="1" x2="22" y2="23" gradientUnits="userSpaceOnUse">
-                    <stop offset="0" className="xa-brand-from" />
-                    <stop offset="1" className="xa-brand-to" />
-                </linearGradient>
-            </defs>
-            <rect x="1" y="1" width="22" height="22" rx="7" fill={`url(#${fill})`} />
-            <path d="M1.5 8A6.5 6.5 0 0 1 8 1.5h8A6.5 6.5 0 0 1 22.5 8v1.2H1.5z" fill="#fff" opacity="0.1" />
+            <rect
+                x="0.75"
+                y="0.75"
+                width="22.5"
+                height="22.5"
+                rx="6.5"
+                fill="#fff"
+                stroke="rgba(0,0,0,0.14)"
+                strokeWidth="0.5"
+            />
             <path
-                d="M7 8.3 10.7 12 7 15.7M17 8.3 13.3 12 17 15.7"
+                d="M10.18 6.18A6.62 6.62 0 1 0 16.96 15.72A5.93 5.93 0 0 1 10.18 6.18Z"
                 fill="none"
-                stroke="#fff"
-                strokeWidth="2.1"
-                strokeLinecap="round"
+                stroke="#111"
+                strokeWidth="1.25"
                 strokeLinejoin="round"
             />
-            <circle cx="18.6" cy="5.4" r="1.3" fill="#ffd27a" />
+            <path d="M15.1 10.08L19.16 12.75L16.96 15.72" fill="none" stroke="#111" strokeWidth="0.45" />
+            <path
+                d="M15.1 7.41C15.55 9.62 15.55 9.62 17.77 10.08C15.55 10.53 15.55 10.53 15.1 12.75C14.64 10.53 14.64 10.53 12.43 10.08C14.64 9.62 14.64 9.62 15.1 7.41Z"
+                fill="#111"
+            />
+            <circle cx="19.16" cy="12.75" r="0.6" fill="#111" />
+            <circle cx="16.96" cy="15.72" r="0.6" fill="#111" />
         </svg>
     );
 }

@@ -9,6 +9,14 @@ export {
 } from './command.ts';
 export { isSecretEnvName, KEPT_ENV_NAMES, sanitizeEnv } from './env.ts';
 export {
+    type Grave,
+    type GraveAction,
+    type GraveOptions,
+    graveOfCommand,
+    graveOfTool,
+    MASS_DELETE_TARGETS,
+} from './grave.ts';
+export {
     type HighRisk,
     type HighRiskAction,
     type HighRiskOptions,

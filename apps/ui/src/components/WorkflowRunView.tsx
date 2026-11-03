@@ -83,7 +83,9 @@ function useAsking(run: WorkflowRun): Set<string> {
     const approvals = useApp((state) => state.approvals);
     return new Set(
         run.steps
-            .filter((step) => approvals.some((approval) => step.threadIds.includes(approval.threadId)))
+            .filter((step) =>
+                approvals.some((approval) => !approval.reviewer && step.threadIds.includes(approval.threadId)),
+            )
             .map((step) => step.id),
     );
 }
@@ -313,7 +315,8 @@ function RunApprovals({ run }: { run: WorkflowRun }) {
     const s = useStrings();
     const approvals = useApp((state) => state.approvals);
     const threads = runThreads(run);
-    const pending = approvals.filter((approval) => threads.has(approval.threadId));
+    // The supervisor answers some for the user (06 §24): those are not the user's to see here.
+    const pending = approvals.filter((approval) => threads.has(approval.threadId) && !approval.reviewer);
     if (pending.length === 0) return null;
     return (
         <section className="team__approvals" aria-label={format(s.team.pendingApprovals, { count: pending.length })}>

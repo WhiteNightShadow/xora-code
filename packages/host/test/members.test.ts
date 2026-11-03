@@ -232,9 +232,13 @@ describe('members', () => {
         expect(moved).toMatchObject({ source: 'user', file: path.join(userAgents, 'local-helper.md') });
         expect((await ui.request('member.list', {})).map((member) => member.id)).toContain('local-helper');
 
-        // A built-in member cannot be deleted, a changed one goes back to its default, the user's goes.
-        await expect(ui.request('member.delete', { memberId: 'coder' })).rejects.toThrow('内置成员');
-        await ui.request('member.delete', { memberId: 'scout' });
+        // 06 §24: a built-in member leaves the team when deleted and comes back with a reset; a changed one goes back
+        // to its default with a reset; the user's goes.
+        await ui.request('member.delete', { memberId: 'coder' });
+        expect((await ui.request('member.list', {})).map((member) => member.id)).not.toContain('coder');
+        await ui.request('member.reset', { memberId: 'coder' });
+        expect((await ui.request('member.list', {})).map((member) => member.id)).toContain('coder');
+        await ui.request('member.reset', { memberId: 'scout' });
         expect((await ui.request('member.list', {})).find((member) => member.id === 'scout')).toMatchObject({
             name: '侦察',
             tier: 'fast',

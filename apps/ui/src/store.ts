@@ -5,6 +5,7 @@ import {
     type LanguageSetting,
     type Member,
     type ModelOption,
+    type OrgChart,
     type PresetSummary,
     type Project,
     resolveLanguage,
@@ -96,6 +97,10 @@ interface AppState {
     dispatchTo: string | undefined;
     /** The chief assistant's home in the main area (06 §23); its conversations show as threads. */
     chiefOpen: boolean;
+    /** The organization chart (06 §24): groups, their leads and members, deleted built-in members. */
+    org: OrgChart | undefined;
+    /** The group the "hand to a team" dialog starts with. */
+    teamStartGroup: string | undefined;
     toasts: Toast[];
     /** Bumps when usage changes, so open usage views refetch. */
     usageVersion: number;
@@ -137,6 +142,8 @@ export const useApp = create<AppState>(() => ({
     memberId: undefined,
     dispatchTo: undefined,
     chiefOpen: false,
+    org: undefined,
+    teamStartGroup: undefined,
     toasts: [],
     usageVersion: 0,
 }));
@@ -344,8 +351,11 @@ function listen(): void {
 /** Loads the members of a project's organization (the built-in and the user's ones without a project). */
 export async function loadMembers(projectId: string | undefined): Promise<void> {
     try {
-        const members = await host.call('member.list', projectId ? { projectId } : {});
-        set({ members });
+        const [members, org] = await Promise.all([
+            host.call('member.list', projectId ? { projectId } : {}),
+            host.call('org.get', {}).catch(() => undefined),
+        ]);
+        set({ members, ...(org ? { org } : {}) });
     } catch {
         // An older host without members: the page stays empty.
     }

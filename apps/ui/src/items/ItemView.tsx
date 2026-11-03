@@ -221,20 +221,41 @@ function ApprovalView({ item }: { item: ItemOf<'approval'> }) {
     const s = useStrings();
     const approval = useApp((state) => state.approvals.find((pending) => pending.id === item.approvalId));
     const pending = item.status === 'pending' && approval;
+    // 06 §24: the supervisor answers it for the user, who may still take it over.
+    const reviewing = pending && approval.reviewer === 'supervisor';
+    const [takeOver, setTakeOver] = useState(false);
+    const bySupervisor = item.decidedBy === 'supervisor' && (item.status === 'allowed' || item.status === 'denied');
     return (
-        <section className={`approval approval--${item.status}`} aria-label={s.approval.title}>
+        <section
+            className={`approval approval--${item.status}${reviewing && !takeOver ? ' is-reviewing' : ''}${pending && approval.grave ? ' is-grave' : ''}`}
+            aria-label={s.approval.title}
+        >
             <div className="approval__header">
                 <span className="approval__icon">
                     <Icon name="shield" size={14} />
                 </span>
-                <strong>{pending ? s.approval.title : item.title}</strong>
+                <strong>{pending && !reviewing ? s.approval.title : item.title}</strong>
+                {reviewing && !takeOver && (
+                    <>
+                        <Spinner size={10} />
+                        <span className="approval__reviewing">{s.approval.reviewing}</span>
+                        <button type="button" className="link" onClick={() => setTakeOver(true)}>
+                            {s.approval.takeOver}
+                        </button>
+                    </>
+                )}
+                {pending && approval.grave && <Badge tone="error">{s.approval.grave[approval.grave]}</Badge>}
                 {!pending && (
                     <Badge tone={item.status === 'allowed' ? 'ok' : 'muted'}>
-                        {s.approval[item.status === 'pending' ? 'cancelled' : item.status]}
+                        {bySupervisor
+                            ? s.approval.bySupervisor[item.status as 'allowed' | 'denied']
+                            : s.approval[item.status === 'pending' ? 'cancelled' : item.status]}
                     </Badge>
                 )}
             </div>
-            {pending && <PendingApproval approval={approval} />}
+            {pending && approval.grave && <div className="approval__grave">{s.approval.graveHint}</div>}
+            {pending && approval.note && <div className="approval__message">{approval.note}</div>}
+            {pending && (!reviewing || takeOver) && <PendingApproval approval={approval} />}
             {!pending && item.message && <div className="approval__message">{item.message}</div>}
         </section>
     );

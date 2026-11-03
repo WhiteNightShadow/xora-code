@@ -179,7 +179,11 @@ describe('the chief assistant', () => {
         expect(runs).toHaveLength(1);
         const run = runs[0];
         // L2 and full access unless the user asks otherwise; the named member is the one who works.
-        expect(run).toMatchObject({ autonomy: 'L2', permission: 'full', goal: '做一个待办应用：能加、能勾、能删，npm test通过' });
+        expect(run).toMatchObject({
+            autonomy: 'L2',
+            permission: 'full',
+            goal: '做一个待办应用：能加、能勾、能删，npm test通过',
+        });
         expect(run?.members?.map((member) => member.memberId)).toEqual(['coder']);
         const [card] = await cards(ui, thread.id);
         expect(card).toMatchObject({ kind: 'team', refId: run?.id, status: 'running' });
@@ -221,6 +225,8 @@ describe('the chief assistant', () => {
         const thread = await ui.request('chief.start', { projectId: project.id, text: '看看nowhere的工作流' });
         expect(await settled(ui, thread.id)).toBe('turn.completed');
         const answered = bodies().find((body) => isChief(body) && body.messages.at(-1)?.role === 'tool');
-        expect(textOf(answered?.messages.at(-1)?.content)).toContain(`No project "nowhere"; the projects are: ${project.name}`);
+        expect(textOf(answered?.messages.at(-1)?.content)).toContain(
+            `No project "nowhere"; the projects are: ${project.name}`,
+        );
     }, 60_000);
 });

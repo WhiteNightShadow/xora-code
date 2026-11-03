@@ -480,8 +480,9 @@ describe('team runs', () => {
     it('start from how the user started the last one', async () => {
         server.respondWith((request) => (body(request) ? say('ok') : undefined));
         const { ui, project, settings } = await setUp();
+        // L2 by default: the supervisor delivers, the user reads the report (06 §24).
         expect((await ui.request('settings.get', {})).lastChoices).toEqual({
-            teamAutonomy: 'L1',
+            teamAutonomy: 'L2',
             teamMode: 'standard',
             teamBudget: null,
             workflowMode: 'default',

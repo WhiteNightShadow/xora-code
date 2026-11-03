@@ -6,7 +6,6 @@ import {
     ALL_PROJECTS,
     attempt,
     loadMembers,
-    openMembers,
     openRun,
     openTeamBoard,
     selectThread,
@@ -20,6 +19,7 @@ import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import '../task.css';
 import { BriefBody } from './BriefBody.tsx';
+import { TeamTabs } from './OrgView.tsx';
 import { Badge, Empty, Field, formatMoney, IconButton, Modal, relativeTime, Select, Spinner } from './primitives.tsx';
 import { RunActions } from './RunActions.tsx';
 import { RUN_MODE_ICONS } from './WorkflowView.tsx';
@@ -405,32 +405,29 @@ export function TeamBoard({ projectId }: { projectId: string }) {
     };
     return (
         <div className="wf-board team-board">
-            <header className="wf-board__header">
-                <div className="wf-board__title">
-                    <h1>{s.sidebar.teams}</h1>
-                </div>
-                <div className="row">
-                    {projects.length > 1 && (
-                        <Select
-                            compact
-                            label={s.sidebar.project}
-                            value={projectId}
-                            options={[
-                                { value: ALL_PROJECTS, label: s.sidebar.allProjects },
-                                ...projects.map((project) => ({ value: project.id, label: project.name })),
-                            ]}
-                            onChange={(value) => openTeamBoard(value)}
-                        />
-                    )}
-                    <IconButton icon="refresh" label={s.common.refresh} onClick={load} />
-                    <button type="button" className="button" onClick={() => openMembers()}>
-                        <Icon name="users" size={14} /> {s.sidebar.members}
-                    </button>
-                    <button type="button" className="button button--primary" onClick={start}>
-                        <Icon name="plus" size={14} /> {s.team.newRun}
-                    </button>
-                </div>
-            </header>
+            <TeamTabs
+                active="runs"
+                actions={
+                    <>
+                        {projects.length > 1 && (
+                            <Select
+                                compact
+                                label={s.sidebar.project}
+                                value={projectId}
+                                options={[
+                                    { value: ALL_PROJECTS, label: s.sidebar.allProjects },
+                                    ...projects.map((project) => ({ value: project.id, label: project.name })),
+                                ]}
+                                onChange={(value) => openTeamBoard(value)}
+                            />
+                        )}
+                        <IconButton icon="refresh" label={s.common.refresh} onClick={load} />
+                        <button type="button" className="button button--primary" onClick={start}>
+                            <Icon name="plus" size={14} /> {s.team.newRun}
+                        </button>
+                    </>
+                }
+            />
             <div className="wf-board__body">
                 <p className="wf-board__intro">{s.team.boardHint}</p>
                 {runs.length === 0 ? (
@@ -479,7 +476,8 @@ export function TeamView({ runId }: { runId: string }) {
     const approvals = useApp((state) => state.approvals);
     // What the run waits on from the user, wherever in its threads it was asked: the plan, risky commands, the delivery.
     const runThreads = new Set(run ? [run.supervisorThreadId, ...run.tasks.map((task) => task.threadId)] : []);
-    const pending = approvals.filter((approval) => runThreads.has(approval.threadId));
+    // The supervisor answers some for the user (06 §24): those are not the user's to see here.
+    const pending = approvals.filter((approval) => runThreads.has(approval.threadId) && !approval.reviewer);
     const [budget, setBudget] = useState('');
     useEffect(() => {
         void host
@@ -751,6 +749,16 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
     // Opened from the board of every project, it starts where the user picks.
     const projects = useApp((state) => state.projects);
     const [projectId, setProjectId] = useState(initial);
+    // 06 §24: the group it goes to: its lead supervises, its members work.
+    const groups = useApp((state) => state.org?.groups ?? []);
+    const startGroup = useApp((state) => state.teamStartGroup);
+    const [groupId, setGroupId] = useState(startGroup ?? groups[0]?.id ?? '');
+    const firstGroup = groups[0]?.id;
+    // The chart may arrive after the dialog opens: it then starts with the first group.
+    useEffect(() => {
+        if (!groupId && firstGroup) setGroupId(startGroup ?? firstGroup);
+    }, [groupId, firstGroup, startGroup]);
+    const group = groups.find((item) => item.id === groupId);
     // Starts from what the user chose last time (the host remembers it on each start).
     const last = useApp((state) => state.settings?.lastChoices);
     const [goal, setGoal] = useState('');
@@ -762,7 +770,9 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
     const defaultParallel = useApp((state) => state.settings?.team.maxParallel ?? 3);
     const [parallel, setParallel] = useState(String(defaultParallel));
     // 06 §22: the supervisor picks the members, or the user does, each with its model, thinking and permissions.
-    const members = useApp((state) => state.members).filter((member) => member.role !== 'supervisor');
+    const members = useApp((state) => state.members).filter(
+        (member) => member.role !== 'supervisor' && (!group || group.memberIds.includes(member.id)),
+    );
     const connected = useApp((state) => state.models);
     const [staffMode, setStaffMode] = useState<'auto' | 'manual'>('auto');
     const [staff, setStaff] = useState<Record<string, { model: string; effort: string; mode: string }>>({});
@@ -782,7 +792,7 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
             [memberId]: { ...(current[memberId] ?? { model: '', effort: '', mode: '' }), [field]: value },
         }));
     const [busy, setBusy] = useState(false);
-    const close = () => useApp.setState({ teamStartFor: undefined });
+    const close = () => useApp.setState({ teamStartFor: undefined, teamStartGroup: undefined });
     const start = async () => {
         setBusy(true);
         const run = await attempt(() =>
@@ -791,6 +801,7 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
                 {
                     projectId,
                     goal,
+                    ...(groupId ? { groupId } : {}),
                     autonomy,
                     mode,
                     permission,
@@ -816,6 +827,7 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
                 teamRuns: { ...state.teamRuns, [run.id]: run },
                 teamRunId: run.id,
                 teamStartFor: undefined,
+                teamStartGroup: undefined,
             }));
         }
     };
@@ -830,6 +842,19 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
                             options={projects.map((project) => ({ value: project.id, label: project.name }))}
                             onChange={(value) => {
                                 setProjectId(value);
+                                setStaff({});
+                            }}
+                        />
+                    </Field>
+                )}
+                {groups.length > 0 && (
+                    <Field label={s.org.handToGroup} hint={s.org.handToGroupHint}>
+                        <Select
+                            label={s.org.handToGroup}
+                            value={groupId}
+                            options={groups.map((item) => ({ value: item.id, label: item.name }))}
+                            onChange={(value) => {
+                                setGroupId(value);
                                 setStaff({});
                             }}
                         />

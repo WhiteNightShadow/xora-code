@@ -15,6 +15,8 @@ import {
     ModelOptionSchema,
     ModelRefSchema,
     MoneySchema,
+    OrgChartSchema,
+    OrgGroupSchema,
     PermissionModeSchema,
     PresetSummarySchema,
     ProjectSchema,
@@ -376,6 +378,8 @@ export const methods = {
                     .array(StaffPresetSchema.extend({ memberId: z.string() }).strict())
                     .max(20)
                     .optional(),
+                /** The group it is handed to (06 §24): its leader supervises and its members work. */
+                groupId: z.string().optional(),
             })
             .strict(),
         result: TeamRunSchema,
@@ -521,14 +525,57 @@ export const methods = {
                         skills: z.array(z.string().max(64)).max(20).optional(),
                     })
                     .strict(),
+                /** The group it works in (06 §24); a new member goes to the first group when absent. */
+                groupId: z.string().nullable().optional(),
             })
             .strict(),
         result: MemberSchema,
     },
-    /** Deletes a member's file: a member the user made goes, a changed built-in one goes back to its default. */
+    /**
+     * Deletes a member (06 §24): one the user made goes (its file to the trash), a built-in one leaves the
+     * organization until `member.reset` brings it back. Its memory stays. The last supervisor stays.
+     */
     'member.delete': {
         params: z.object({ projectId: IdSchema.optional(), memberId: z.string() }).strict(),
         result: ok,
+    },
+    /** Puts a built-in member back as it comes: a changed one loses the changes, a deleted one returns. */
+    'member.reset': { params: z.object({ memberId: z.string() }).strict(), result: ok },
+    /** The organization chart (06 §24): groups with their leaders and members, and deleted built-in members. */
+    'org.get': { params: z.object({ projectId: IdSchema.optional() }).strict(), result: OrgChartSchema },
+    /** Creates or changes a group; the members listed leave any other group. */
+    'org.saveGroup': {
+        params: z
+            .object({
+                projectId: IdSchema.optional(),
+                id: z.string().max(64).optional(),
+                name: z.string().min(1).max(60),
+                description: z.string().max(300).optional(),
+                leaderId: z.string(),
+                memberIds: z.array(z.string()).max(60),
+            })
+            .strict(),
+        result: OrgGroupSchema,
+    },
+    /** Deletes a group; its members are left without one. */
+    'org.deleteGroup': { params: z.object({ groupId: z.string() }).strict(), result: ok },
+    /** Moves a member to a group, or out of every group (`null`). */
+    'org.moveMember': {
+        params: z
+            .object({ projectId: IdSchema.optional(), memberId: z.string(), groupId: z.string().nullable() })
+            .strict(),
+        result: OrgChartSchema,
+    },
+    /**
+     * Builds a group from a template (06 §24), such as a regular software team: a tech lead, a product manager, an
+     * architect, front- and back-end engineers, QA, DevOps, a reviewer, a researcher and a principal engineer.
+     * `replace` deletes the members and groups that are not part of it.
+     */
+    'org.applyTemplate': {
+        params: z
+            .object({ projectId: IdSchema.optional(), template: z.enum(['dev-team']), replace: z.boolean() })
+            .strict(),
+        result: OrgChartSchema,
     },
     /**
      * One part of a member's memory (06 §21): `member` its general notes, `project` its notes in a project, `team`

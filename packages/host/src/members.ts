@@ -11,6 +11,8 @@ import {
     type ItemOf,
     type Member,
     type MemberRoutine,
+    type OrgChart,
+    type OrgGroup,
     type PermissionMode,
     type Project,
     RpcError,
@@ -40,6 +42,7 @@ import type { ConnectionService } from './connections.ts';
 import type { HostToolResult } from './engines/manager.ts';
 import { newId } from './ids.ts';
 import { type Logger, redact } from './log.ts';
+import { groupId, ORG_TEMPLATES, readGroups, writeGroups } from './org-groups.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import {
@@ -110,6 +113,15 @@ const TEXT = bilingual(
         notInProject: (name: string, project: string) =>
             `${name}不在项目${project}的成员里：只在别的项目里用的成员，不能在这里干活`,
         builtinStays: (name: string) => `${name}是内置成员，没法删除；改过的话可以恢复默认`,
+        lastSupervisor: (name: string) => `${name}是最后一个主管：团队要有人带，先建一个新组长再删它`,
+        leadsGroup: (name: string, group: string) => `${name}带着“${group}”：先给这个组换个组长再删它`,
+        notBuiltin: (id: string) => `${id}不是内置成员，没有默认可恢复`,
+        defaultGroup: '研发团队',
+        defaultGroupJob: '默认的团队：主管带着所有成员',
+        groupMissing: (id: string) => `没有小组${id}`,
+        noGroupName: '先给小组起个名字',
+        groupNameTaken: (name: string) => `已经有小组叫“${name}”了`,
+        badLeader: (id: string) => `${id}不能当组长：组长要是主管角色的成员`,
         routineMissing: '没有这个例行任务',
         badSchedule: (error: string) => `时间写得不对：${error}`,
         badTimezone: (zone: string) => `不认识时区${zone}`,
@@ -204,6 +216,16 @@ const TEXT = bilingual(
         notInProject: (name, project) =>
             `${name} is not a member in the project ${project}: a member of another project cannot work here`,
         builtinStays: (name) => `${name} is built in and cannot be deleted; if you changed it, reset it instead`,
+        lastSupervisor: (name) =>
+            `${name} is the last supervisor: a team needs a lead; make a new one before deleting it`,
+        leadsGroup: (name, group) => `${name} leads “${group}”: give the group another lead first`,
+        notBuiltin: (id) => `${id} is not built in: there is no default to bring back`,
+        defaultGroup: 'Dev team',
+        defaultGroupJob: 'The default team: the supervisor leads every member',
+        groupMissing: (id) => `No group ${id}`,
+        noGroupName: 'Give the group a name first',
+        groupNameTaken: (name) => `There is a group called “${name}” already`,
+        badLeader: (id) => `${id} cannot lead a group: a lead is a member with the supervisor role`,
         routineMissing: 'There is no such routine',
         badSchedule: (error) => `The schedule cannot be read: ${error}`,
         badTimezone: (zone) => `Unknown time zone ${zone}`,
@@ -725,7 +747,17 @@ export class MemberService {
     }
 
     /** Creates or changes a member's agent file (06 §19): the user's for every project, or the project's. */
-    async save(input: { projectId?: string; scope: 'user' | 'project'; member: MemberInput }): Promise<Member> {
+    async save(input: {
+        projectId?: string | undefined;
+        scope: 'user' | 'project';
+        member: MemberInput;
+        /** The group it works in (06 §24): `null` none; absent, a new member joins the first group. */
+        groupId?: string | null | undefined;
+        /** A template's member: `member.id` names a new member. */
+        allowNewId?: boolean;
+        /** A template places its members itself. */
+        keepGroups?: boolean;
+    }): Promise<Member> {
         const text = textOf(TEXT);
         const given = input.member;
         const role = ROLES.find((value) => value === given.role);
@@ -751,9 +783,11 @@ export class MemberService {
         }
         const roster = await this.#roster(project);
         let id: string;
+        const isNew = given.id === undefined || !roster.org.roster.some((agent) => agent.id === given.id);
         if (given.id !== undefined) {
             id = given.id;
-            if (!roster.org.roster.some((agent) => agent.id === id) && !BUILTIN_IDS.has(id)) {
+            const fresh = input.allowNewId && /^[a-z][a-z0-9-]{0,39}$/.test(id) && !roster.files.has(id);
+            if (!roster.org.roster.some((agent) => agent.id === id) && !BUILTIN_IDS.has(id) && !fresh) {
                 throw new RpcError(RpcErrorCode.NotFound, text.notFound(id));
             }
         } else {
@@ -805,25 +839,57 @@ export class MemberService {
             await unlink(before.file).catch(() => undefined);
         }
         this.#deps.log.info(`member ${id} saved in ${file}`);
+        // Its place in the organization (06 §24): where the user put it, or a new one in the first group.
+        if (!input.keepGroups && role !== 'supervisor') {
+            if (input.groupId !== undefined) {
+                await this.#place(id, input.groupId, true);
+            } else if (isNew) {
+                const first = (await this.#groups())[0];
+                if (first) await this.#place(id, first.id, false);
+            }
+        }
         this.#changed(id);
         return this.#member(id, project?.id);
     }
 
-    /** Deletes a member's file: a member the user made goes, with its routines; a changed built-in one is reset. */
+    /**
+     * Deletes a member (06 §24). One the user made leaves with its file (to the trash) and its routines; a built-in
+     * one leaves the organization through a file that disables it, until `reset` brings it back. Its memory stays.
+     * The last supervisor and the leader of a group stay until another takes their place.
+     */
     async remove(memberId: string, projectId?: string): Promise<void> {
         const text = textOf(TEXT);
         const project = projectId ? await this.#deps.projects.get(projectId) : undefined;
         const roster = await this.#roster(project);
         const agent = roster.org.roster.find((item) => item.id === memberId);
-        const file = roster.files.get(memberId);
-        if (!file) {
-            if (agent && BUILTIN_IDS.has(memberId)) {
-                throw new RpcError(RpcErrorCode.Rejected, text.builtinStays(memberName(agent)));
-            }
+        if (!agent) {
             throw new RpcError(RpcErrorCode.NotFound, text.notFound(memberId));
         }
-        await unlink(file.file);
-        this.#deps.log.info(`member ${memberId}: removed ${file.file}`);
+        if (agent.role === 'supervisor' && roster.org.roster.filter((item) => item.role === 'supervisor').length <= 1) {
+            throw new RpcError(RpcErrorCode.Rejected, text.lastSupervisor(memberName(agent)));
+        }
+        const led = (await this.#groups()).find((group) => group.leaderId === memberId);
+        if (led) {
+            throw new RpcError(RpcErrorCode.Rejected, text.leadsGroup(memberName(agent), led.name));
+        }
+        const file = roster.files.get(memberId);
+        if (BUILTIN_IDS.has(memberId)) {
+            const userDir = path.join(this.#deps.orgsDir, 'default', 'agents');
+            // A project's file that changed it would define it there all the same.
+            if (file?.scope === 'project') await this.#trash(file.file);
+            const own = (await agentFiles(userDir, 'user')).filter((item) => item.id === memberId);
+            const target = own.at(-1)?.file ?? path.join(userDir, `${folderName(memberId)}.md`);
+            for (const extra of own.slice(0, -1)) await this.#trash(extra.file);
+            await writeAtomic(target, `---\nid: ${quoted(memberId)}\ndisabled: true\n---\n`);
+            this.#deps.log.info(`member ${memberId}: built-in member removed from the organization`);
+        } else {
+            if (!file) {
+                throw new RpcError(RpcErrorCode.NotFound, text.notFound(memberId));
+            }
+            await this.#trash(file.file);
+            this.#deps.log.info(`member ${memberId}: removed ${file.file}`);
+        }
+        await this.#place(memberId, null, false);
         // Gone from the user's members and the project's: its routines stop. Its memory stays.
         const after = await this.#roster(project);
         if (!after.org.roster.some((item) => item.id === memberId)) {
@@ -831,6 +897,233 @@ export class MemberService {
             await this.#routinesChanged();
         }
         this.#changed(memberId);
+    }
+
+    /** Puts a built-in member back as it comes (06 §24): a changed one loses the changes, a deleted one returns. */
+    async reset(memberId: string): Promise<void> {
+        if (!BUILTIN_IDS.has(memberId)) {
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).notBuiltin(memberId));
+        }
+        const userDir = path.join(this.#deps.orgsDir, 'default', 'agents');
+        for (const file of (await agentFiles(userDir, 'user')).filter((item) => item.id === memberId)) {
+            await unlink(file.file).catch(() => undefined);
+        }
+        this.#deps.log.info(`member ${memberId}: reset to the built-in one`);
+        this.#changed(memberId);
+    }
+
+    /** A file the user may want back: into `<data>/orgs/default/.trash/`, never deleted. */
+    async #trash(file: string): Promise<void> {
+        const dir = path.join(this.#deps.orgsDir, 'default', '.trash');
+        await mkdir(dir, { recursive: true });
+        const name = `${path.basename(file, '.md')}-${new Date().toISOString().replace(/[:.]/g, '-')}.md`;
+        await rename(file, path.join(dir, name)).catch(async () => {
+            await writeFile(path.join(dir, name), await readFile(file, 'utf8').catch(() => ''));
+            await unlink(file).catch(() => undefined);
+        });
+    }
+
+    // The organization chart (06 §24) ------------------------------------------------------------------------
+
+    /** The groups as they stand: the stored ones, or the default team of the user's members. */
+    async #groups(): Promise<OrgGroup[]> {
+        const stored = await readGroups(this.#deps.orgsDir);
+        if (stored) return stored;
+        const { org } = await this.#roster();
+        const leader = org.roster.find((agent) => agent.role === 'supervisor');
+        if (!leader) return [];
+        const text = textOf(TEXT);
+        return [
+            {
+                id: 'default',
+                name: text.defaultGroup,
+                description: text.defaultGroupJob,
+                leaderId: leader.id,
+                memberIds: org.roster.filter((agent) => agent.role !== 'supervisor').map((agent) => agent.id),
+            },
+        ];
+    }
+
+    /** The organization chart: its groups, and the built-in members the user deleted. */
+    async org(): Promise<OrgChart> {
+        const groups = await this.#groups();
+        const { org } = await this.#roster();
+        const present = new Set(org.roster.map((agent) => agent.id));
+        return {
+            groups,
+            removed: DEFAULT_ORG.roster
+                .filter((agent) => !present.has(agent.id))
+                .map((agent) => ({ id: agent.id, name: memberName(agent) })),
+        };
+    }
+
+    /** One group, for a team run handed to it. */
+    async group(groupId: string): Promise<OrgGroup | undefined> {
+        return (await this.#groups()).find((group) => group.id === groupId);
+    }
+
+    /** Creates or changes a group: a lead with the supervisor role and members, who leave any other group. */
+    async saveGroup(input: {
+        projectId?: string | undefined;
+        id?: string | undefined;
+        name: string;
+        description?: string | undefined;
+        leaderId: string;
+        memberIds: readonly string[];
+    }): Promise<OrgGroup> {
+        return this.#serial('groups', async () => {
+            const text = textOf(TEXT);
+            const name = oneLine(input.name);
+            if (!name) throw new RpcError(RpcErrorCode.InvalidParams, text.noGroupName);
+            const project = input.projectId ? await this.#deps.projects.get(input.projectId) : undefined;
+            const roster = await this.#roster(project);
+            const leader = roster.org.roster.find((agent) => agent.id === input.leaderId);
+            if (leader?.role !== 'supervisor')
+                throw new RpcError(RpcErrorCode.InvalidParams, text.badLeader(input.leaderId));
+            const groups = await this.#groups();
+            if (input.id !== undefined && !groups.some((group) => group.id === input.id)) {
+                throw new RpcError(RpcErrorCode.NotFound, text.groupMissing(input.id));
+            }
+            if (groups.some((group) => group.id !== input.id && group.name.toLowerCase() === name.toLowerCase())) {
+                throw new RpcError(RpcErrorCode.Rejected, text.groupNameTaken(name));
+            }
+            const known = new Set(roster.org.roster.map((agent) => agent.id));
+            const members = [...new Set(input.memberIds)].filter((id) => known.has(id) && id !== leader.id);
+            const id = input.id ?? groupId(name, new Set(groups.map((group) => group.id)));
+            const description = input.description ? oneLine(input.description) : '';
+            const group: OrgGroup = {
+                id,
+                name,
+                ...(description ? { description } : {}),
+                leaderId: leader.id,
+                memberIds: members,
+            };
+            const moved = new Set(members);
+            const next = groups.map((entry) =>
+                entry.id === id
+                    ? group
+                    : { ...entry, memberIds: entry.memberIds.filter((member) => !moved.has(member)) },
+            );
+            if (!groups.some((entry) => entry.id === id)) next.push(group);
+            await writeGroups(this.#deps.orgsDir, next);
+            this.#deps.log.info(`group ${id} saved: lead ${leader.id}, ${members.length} members`);
+            this.#changed('*');
+            return group;
+        });
+    }
+
+    /** Deletes a group; its members are left without one. */
+    async deleteGroup(groupId: string): Promise<void> {
+        await this.#serial('groups', async () => {
+            const groups = await this.#groups();
+            if (!groups.some((group) => group.id === groupId)) {
+                throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).groupMissing(groupId));
+            }
+            await writeGroups(
+                this.#deps.orgsDir,
+                groups.filter((group) => group.id !== groupId),
+            );
+            this.#changed('*');
+        });
+    }
+
+    /** Moves a member into a group, or out of every group (`null`). */
+    async moveMember(memberId: string, target: string | null, projectId?: string): Promise<OrgChart> {
+        const project = projectId ? await this.#deps.projects.get(projectId) : undefined;
+        const roster = await this.#roster(project);
+        if (!roster.org.roster.some((agent) => agent.id === memberId)) {
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).notFound(memberId));
+        }
+        if (target !== null && !(await this.#groups()).some((group) => group.id === target)) {
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).groupMissing(target));
+        }
+        await this.#place(memberId, target, true);
+        return this.org();
+    }
+
+    /**
+     * Puts a member in one group, or in none: the groups are written out (the default team becomes the stored one
+     * the first time). `always`: also when nothing was stored and the member would be in the default team anyway.
+     */
+    async #place(memberId: string, target: string | null, always: boolean): Promise<void> {
+        await this.#serial('groups', async () => {
+            const stored = await readGroups(this.#deps.orgsDir);
+            if (!stored && !always) return;
+            const groups = stored ?? (await this.#groups());
+            const next = groups.map((group) => ({
+                ...group,
+                memberIds: group.memberIds.filter((id) => id !== memberId),
+            }));
+            const into = next.find((group) => group.id === target);
+            if (into && into.leaderId !== memberId) into.memberIds.push(memberId);
+            await writeGroups(this.#deps.orgsDir, next);
+            this.#changed('*');
+        });
+    }
+
+    /**
+     * Builds a group from a template (06 §24): built-in members renamed for their jobs, new ones added, the group
+     * written. `replace` deletes the user's members and the groups that are not part of it (a project's stay).
+     */
+    async applyTemplate(input: { template: 'dev-team'; replace: boolean }): Promise<OrgChart> {
+        const template = ORG_TEMPLATES[input.template];
+        const language = hostLanguage();
+        const wanted = new Set(template.members.map((member) => member.id));
+        // The built-in members it uses come back first.
+        const before = await this.#roster();
+        for (const spec of template.members) {
+            if (BUILTIN_IDS.has(spec.id) && !before.org.roster.some((agent) => agent.id === spec.id)) {
+                await this.reset(spec.id);
+            }
+        }
+        if (input.replace) {
+            await this.#serial('groups', () => writeGroups(this.#deps.orgsDir, []));
+            for (const agent of (await this.#roster()).org.roster) {
+                if (!wanted.has(agent.id)) await this.remove(agent.id);
+            }
+        }
+        for (const spec of template.members) {
+            const current = (await this.#roster()).org.roster.find((agent) => agent.id === spec.id);
+            const builtin = DEFAULT_ORG.roster.find((agent) => agent.id === spec.id);
+            const category = spec.category ?? builtin?.category;
+            await this.save({
+                scope: 'user',
+                member: {
+                    id: spec.id,
+                    name: spec.name[language],
+                    role: spec.role,
+                    ...(category ? { category } : {}),
+                    tier: spec.tier ?? builtin?.tier ?? current?.tier ?? 'standard',
+                    ...(current?.models?.[0] ? { model: current.models[0].model } : {}),
+                    mode: spec.mode ?? builtin?.mode ?? current?.mode ?? 'auto_edit',
+                    description: spec.description[language],
+                    prompt: spec.prompt ?? builtin?.prompt ?? current?.prompt ?? '',
+                    ...(current?.skills ? { skills: [...current.skills] } : {}),
+                },
+                allowNewId: true,
+                keepGroups: true,
+            });
+        }
+        const [leader, ...rest] = template.members;
+        await this.#serial('groups', async () => {
+            const group: OrgGroup = {
+                id: template.group.id,
+                name: template.group.name[language],
+                description: template.group.description[language],
+                leaderId: leader?.id ?? 'supervisor',
+                memberIds: rest.map((member) => member.id),
+            };
+            const moved = new Set(group.memberIds);
+            const others = input.replace
+                ? []
+                : (await this.#groups())
+                      .filter((entry) => entry.id !== group.id)
+                      .map((entry) => ({ ...entry, memberIds: entry.memberIds.filter((id) => !moved.has(id)) }));
+            await writeGroups(this.#deps.orgsDir, [group, ...others]);
+        });
+        this.#deps.log.info(`organization: template ${input.template} applied${input.replace ? ', replacing' : ''}`);
+        this.#changed('*');
+        return this.org();
     }
 
     /** The threads a member works or worked in, in every project, newest first. */
@@ -1608,7 +1901,7 @@ export class MemberService {
                         ...item,
                         status: outcome.status,
                         ...(outcome.decision ? { decision: outcome.decision } : {}),
-                        decidedBy: 'user',
+                        decidedBy: outcome.decidedBy ?? 'user',
                         ...(outcome.message ? { message: outcome.message } : {}),
                     },
                 },
@@ -1976,6 +2269,20 @@ export function registerMemberHandlers(peer: UiPeer, members: MemberService): vo
         await members.remove(memberId, projectId);
         return { ok: true } as const;
     });
+    peer.handle('member.reset', async ({ memberId }) => {
+        await members.reset(memberId);
+        return { ok: true } as const;
+    });
+    peer.handle('org.get', () => members.org());
+    peer.handle('org.saveGroup', (params) => members.saveGroup(params));
+    peer.handle('org.deleteGroup', async ({ groupId }) => {
+        await members.deleteGroup(groupId);
+        return { ok: true } as const;
+    });
+    peer.handle('org.moveMember', ({ memberId, groupId, projectId }) =>
+        members.moveMember(memberId, groupId, projectId),
+    );
+    peer.handle('org.applyTemplate', ({ template, replace }) => members.applyTemplate({ template, replace }));
     peer.handle('member.memory', ({ memberId, scope, projectId }) => members.memory(memberId, scope, projectId));
     peer.handle('member.assistant', ({ projectId, text }) => members.assistant({ projectId, text }));
     peer.handle('member.setMemory', async ({ memberId, text, scope, projectId }) => {

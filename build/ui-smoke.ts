@@ -125,6 +125,14 @@ server.respondWith((request) => {
         | { messages?: Array<{ role: string }>; tools?: Array<{ function?: { name?: string } }> }
         | undefined;
     const messages = body?.messages ?? [];
+    // The supervisor answers an approval for the user (06 §24): it allows the edit the task asked for.
+    if (
+        JSON.stringify(messages[0] ?? '').includes(
+            "You are the supervisor who answers an AI agent's permission requests",
+        )
+    ) {
+        return openaiText('{"decision":"allow","reason":"冒烟：改文件是任务要的"}');
+    }
     // The chief assistant (06 §23) hands the job to the scout, then says so.
     if (body?.tools?.some((tool) => tool.function?.name === 'member_dispatch')) {
         return messages.at(-1)?.role === 'tool'
@@ -337,6 +345,8 @@ try {
     await hostCall(page, 'project.add', { path: repo });
     await page.locator('.project__name', { hasText: 'repo' }).waitFor();
     await step(page, '打开项目');
+    // The first steps answer approval cards by hand; the supervisor's review comes at the end (06 §24).
+    await hostCall(page, 'settings.update', { patch: { approvals: { reviewer: 'user' } } });
     // With a model and a project, the home is the chief assistant (06 §23).
     await page.locator('.chief-home textarea').waitFor();
     await step(page, '首页是总助手');
@@ -504,6 +514,7 @@ try {
     // A run that is over can be archived; the team board lists it apart and can delete it (03).
     await page.locator('.team').getByRole('button', { name: '归档', exact: true }).click();
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
+    await page.getByRole('tab', { name: '团队任务' }).click();
     await page
         .locator('.team-board')
         .getByRole('button', { name: /已归档/ })
@@ -593,9 +604,14 @@ try {
     await step(page, '追问会开一个带着运行记录的线程');
     // Members (06 §19): the built-in ones are there; a new one made from a template is handed work, writes down
     // what it learned, and gets a routine that can also run right away.
-    await page.locator('.sidebar__nav', { hasText: '成员' }).click();
-    await page.locator('.member-card', { hasText: '侦察' }).first().waitFor();
-    await step(page, '侧栏进成员页，内置成员都在');
+    // 06 §24: members are on the team's page, in their groups.
+    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
+    await page
+        .locator('.org-group', { hasText: '研发团队' })
+        .locator('.org-member', { hasText: '侦察' })
+        .first()
+        .waitFor();
+    await step(page, '团队页的组织架构里，成员都在小组里');
     await page.getByRole('button', { name: '新建成员', exact: true }).click();
     const memberEditor = page.locator('.member-editor');
     await memberEditor.getByPlaceholder('比如：抓包侦察、日报员').pressSequentially('冒烟侦察');
@@ -629,7 +645,7 @@ try {
     await page.locator('.routine.is-off', { hasText: '冒烟早检' }).waitFor();
     await step(page, '停用例行任务');
     // Designing a member in a conversation starts from what the user needs (06 §21; not sent here).
-    await page.locator('.sidebar__nav', { hasText: '成员' }).click();
+    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
     await page.getByRole('button', { name: '对话建人', exact: true }).click();
     await page.locator('.modal textarea').waitFor();
     await page.locator('.modal').getByRole('button', { name: '取消', exact: true }).click();
@@ -649,6 +665,32 @@ try {
     await delegation.locator('.delegation__open').click();
     await page.locator('.thread-header .member-chip', { hasText: '侦察' }).waitFor();
     await step(page, '卡片能打开成员的对话');
+    // 06 §24: a regular software team from the template; any member can be deleted, a built-in one comes back.
+    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
+    await page.getByRole('button', { name: '用模板建团队', exact: true }).click();
+    await page.locator('.modal').getByRole('button', { name: '建团队', exact: true }).click();
+    const devGroup = page.locator('.org-group', { hasText: '开发组' });
+    await devGroup.locator('.org-member', { hasText: '前端工程师' }).waitFor();
+    await devGroup.locator('.org-member.is-lead', { hasText: '技术负责人' }).waitFor();
+    await step(page, '用模板建出常规开发团队');
+    const expert = devGroup.locator('.org-member', { hasText: '资深专家' });
+    await expert.hover();
+    await expert.getByRole('button', { name: '更多' }).click();
+    await page.locator('.menu-list').getByRole('button', { name: '删除' }).click();
+    await expert.waitFor({ state: 'detached' });
+    await page.getByRole('button', { name: /已删除的成员/ }).click();
+    await page.locator('.org__removed li', { hasText: '专家' }).getByRole('button', { name: '恢复' }).click();
+    await page.locator('.org-member', { hasText: '专家' }).first().waitFor();
+    await step(page, '内置成员也能删，删了还能恢复');
+    // The supervisor answers approvals for the user: an edit the task asks for goes ahead without a question.
+    await hostCall(page, 'settings.update', { patch: { approvals: { reviewer: 'supervisor' } } });
+    await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
+    await page.getByRole('menuitemradio', { name: /新建线程/ }).click();
+    await page.locator('.dialog textarea').pressSequentially('把hello.txt里的hello改一下');
+    await page.getByRole('button', { name: '创建' }).click();
+    await page.locator('.approval .badge', { hasText: '主管已批准' }).waitFor();
+    await page.locator('.approval__message', { hasText: '冒烟：改文件是任务要的' }).waitFor();
+    await step(page, '审批交给主管：改文件由主管批了，不打扰你');
 } catch (error) {
     reportFailure(error);
     console.error(

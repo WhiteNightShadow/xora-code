@@ -1,5 +1,6 @@
 import type { Connection, PresetSummary, Rule, Settings } from '@xora/protocol';
 import { useEffect, useState } from 'react';
+import { LogoMark } from '../components/Art.tsx';
 import { Badge, Field, Modal, type Option, Select, Spinner, Toggle } from '../components/primitives.tsx';
 import { errorMessage, host } from '../host.ts';
 import { attempt, refreshConnections, type SettingsSection, toast, uiLanguage, useApp, useStrings } from '../store.ts';
@@ -589,11 +590,26 @@ function Prompts() {
 
 function Permissions() {
     const s = useStrings();
+    const [settings, update] = useSettings();
     const [rules, setRules] = useState<Rule[] | undefined>();
     const load = () => void host.call('rules.list', {}).then(setRules);
     useEffect(load, []);
     return (
         <div className="settings-section">
+            {/* 06 §24: who answers approval cards. */}
+            {settings && (
+                <Field label={s.settings.reviewer} hint={s.settings.reviewerHints[settings.approvals.reviewer]}>
+                    <Select
+                        label={s.settings.reviewer}
+                        value={settings.approvals.reviewer}
+                        options={[
+                            { value: 'supervisor', label: s.settings.reviewers.supervisor },
+                            { value: 'user', label: s.settings.reviewers.user },
+                        ]}
+                        onChange={(reviewer) => update({ approvals: { reviewer } })}
+                    />
+                </Field>
+            )}
             <h3>{s.settings.rules}</h3>
             {!rules ? (
                 <Spinner />
@@ -777,6 +793,13 @@ function About() {
     const info = useApp((state) => state.info);
     return (
         <div className="settings-section">
+            <div className="about__brand">
+                <LogoMark size={48} />
+                <div>
+                    <strong>Xora Code</strong>
+                    <span>{s.settings.creator}</span>
+                </div>
+            </div>
             <Field label={s.settings.bundleVersion}>
                 <code>{info?.bundleVersion}</code>
             </Field>

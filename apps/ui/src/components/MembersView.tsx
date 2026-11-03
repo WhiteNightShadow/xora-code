@@ -39,7 +39,7 @@ export function MemberAvatar({ member, size = 36 }: { member: Pick<Member, 'id' 
 }
 
 /** What a member is: its role (an executor by its kind of work), model tier and permissions. */
-function roleLine(member: Member, s: Strings): string {
+export function roleLine(member: Member, s: Strings): string {
     const role =
         member.role === 'executor' && member.category
             ? ((s.members.categories as Record<string, string>)[member.category] ?? member.category)
@@ -558,9 +558,12 @@ function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Mem
     const selectedProjectId = useApp((state) => state.selectedProjectId);
     const [showPrompt, setShowPrompt] = useState(false);
     const description = descriptionOf(member, s);
-    const removable = member.source !== 'builtin' || member.customized;
+    const groups = useApp((state) => state.org?.groups ?? []);
+    const group = groups.find((item) => item.memberIds.includes(member.id));
+    const leads = groups.filter((item) => item.leaderId === member.id);
+    // 06 §24: every member can go; a built-in one can come back, and a changed one can go back to how it came.
     const remove = () => {
-        const question = member.source === 'builtin' ? s.members.confirmReset : s.members.confirmDelete;
+        const question = member.source === 'builtin' ? s.org.confirmDeleteBuiltin : s.members.confirmDelete;
         if (!window.confirm(format(question, { name: member.name }))) return;
         void attempt(() =>
             host.call('member.delete', {
@@ -570,9 +573,23 @@ function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Mem
         ).then(async (done) => {
             if (!done) return;
             await loadMembers(selectedProjectId);
-            if (member.source !== 'builtin') openMembers();
+            openMembers();
         });
     };
+    const reset = () => {
+        if (!window.confirm(format(s.members.confirmReset, { name: member.name }))) return;
+        void attempt(() => host.call('member.reset', { memberId: member.id })).then(async (done) => {
+            if (done) await loadMembers(selectedProjectId);
+        });
+    };
+    const move = (target: string) =>
+        void attempt(() =>
+            host.call('org.moveMember', {
+                ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
+                memberId: member.id,
+                groupId: target || null,
+            }),
+        ).then((org) => org && useApp.setState({ org }));
     return (
         <div className="member-detail">
             <button type="button" className="link member-detail__back" onClick={() => openMembers()}>
@@ -587,6 +604,27 @@ function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Mem
                     </h1>
                     <div className="member-detail__meta">{roleLine(member, s)}</div>
                     {description && <p className="member-detail__desc">{description}</p>}
+                    <div className="member-detail__group">
+                        {leads.length > 0 ? (
+                            <span>{format(s.org.leads, { groups: leads.map((item) => item.name).join('、') })}</span>
+                        ) : (
+                            groups.length > 0 && (
+                                <span className="member-detail__move">
+                                    <span>{s.org.group}</span>
+                                    <Select
+                                        compact
+                                        label={s.org.group}
+                                        value={group?.id ?? ''}
+                                        options={[
+                                            ...groups.map((item) => ({ value: item.id, label: item.name })),
+                                            { value: '', label: s.org.noGroup },
+                                        ]}
+                                        onChange={move}
+                                    />
+                                </span>
+                            )
+                        )}
+                    </div>
                     {member.skills && member.skills.length > 0 && (
                         <div className="member-detail__skills">
                             {member.skills.map((skill) => (
@@ -608,11 +646,14 @@ function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Mem
                     <button type="button" className="button" onClick={() => onEdit(member)}>
                         {s.members.edit}
                     </button>
-                    {removable && (
-                        <button type="button" className="button button--danger" onClick={remove}>
-                            {member.source === 'builtin' ? s.members.reset : s.members.delete}
+                    {member.customized && (
+                        <button type="button" className="button" onClick={reset}>
+                            {s.members.reset}
                         </button>
                     )}
+                    <button type="button" className="button button--danger" onClick={remove}>
+                        {s.members.delete}
+                    </button>
                 </div>
             </header>
             <p className="member-detail__mention">{format(s.members.mentionHint, { name: member.name })}</p>
@@ -640,18 +681,28 @@ function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Mem
     );
 }
 
-interface Editing {
+export interface Editing {
     /** The member being changed; a new one when absent. */
     readonly member?: Member;
+    /** The group a new member joins (06 §24); the first one when absent. */
+    readonly groupId?: string | null;
 }
 
 /** Creates a member from a built-in one, or changes a member: name, job, instructions, tier, permissions. */
-function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => void }) {
+export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => void }) {
     const s = useStrings();
     const members = useApp((state) => state.members);
     const selectedProjectId = useApp((state) => state.selectedProjectId);
     const project = useApp((state) => state.projects.find((item) => item.id === state.selectedProjectId));
-    const templates = members.filter((member) => member.source === 'builtin' && member.role !== 'supervisor');
+    // A lead of a group is made from the supervisor (06 §24).
+    const templates = members.filter((member) => member.source === 'builtin');
+    const groups = useApp((state) => state.org?.groups ?? []);
+    const currentGroup = editing.member
+        ? (groups.find((group) => group.memberIds.includes(editing.member?.id ?? ''))?.id ?? '')
+        : editing.groupId === null
+          ? ''
+          : (editing.groupId ?? groups[0]?.id ?? '');
+    const [groupId, setGroupId] = useState(currentGroup);
     const existing = editing.member;
     const start = existing ?? templates.find((member) => member.id === 'scout') ?? templates[0];
     const [template, setTemplate] = useState(start?.id ?? '');
@@ -702,6 +753,10 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
                     // The form does not edit skills: a member keeps the ones it has (06 §21).
                     ...(existing?.skills ? { skills: [...existing.skills] } : {}),
                 },
+                // A lead leads groups rather than working in one.
+                ...(base.role !== 'supervisor' && (!existing || groupId !== currentGroup)
+                    ? { groupId: groupId || null }
+                    : {}),
             }),
         );
         setBusy(false);
@@ -785,6 +840,19 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
                         />
                     </Field>
                 </div>
+                {base?.role !== 'supervisor' && groups.length > 0 && (
+                    <Field label={s.org.group} hint={s.org.groupHint}>
+                        <Select
+                            label={s.org.group}
+                            value={groupId}
+                            options={[
+                                ...groups.map((group) => ({ value: group.id, label: group.name })),
+                                { value: '', label: s.org.noGroup },
+                            ]}
+                            onChange={setGroupId}
+                        />
+                    </Field>
+                )}
                 {!existing && project && (
                     <Field label={s.members.scope}>
                         <Select
@@ -821,7 +889,7 @@ function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => v
  * 06 §21: "design a member in a conversation": the user says what they need, and the organization assistant asks,
  * finds skills on GitHub, installs the ones the user approves and saves the member, in a thread of its own.
  */
-function AssistantDialog({ onClose }: { onClose: () => void }) {
+export function AssistantDialog({ onClose }: { onClose: () => void }) {
     const s = useStrings();
     const projects = useApp((state) => state.projects);
     const selected = useApp((state) => state.selectedProjectId);

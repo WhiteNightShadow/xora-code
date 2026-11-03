@@ -1,4 +1,5 @@
 import {
+    type Approval,
     bilingual,
     type Effort,
     type HostMethods,
@@ -6,6 +7,7 @@ import {
     type ItemOf,
     type Member,
     type Money,
+    type OrgGroup,
     type PermissionMode,
     type Project,
     RpcError,
@@ -93,10 +95,14 @@ const CHIEF_PROMPT = `You are the chief assistant of Xora Code: the one place th
 How to route a request
 1. Answer yourself when no work in a project is needed: a question, an explanation, advice, or how things stand (the status below; work_status for details).
 2. One person's job (a fix, a script, a review, a research question, a document) goes to one member with member_dispatch. Pick the member whose job fits (member_list) and write a complete brief: the goal, the context you know, what done looks like.
-3. Work with several parts or people, or that takes hours, goes to a team with team_start. Write the goal as an outcome with how to check it. The supervisor plans it and picks the members unless the user named people (members). Autonomy: L2 by default (the user sees only risky actions and the delivery); L1 when the user wants to see the plan first; L3 only when the user asks for unattended work.
+3. Work with several parts or people, or that takes hours, goes to a team with team_start. Write the goal as an outcome with how to check it. The group's lead plans it and picks among its members unless the user named people (members). Autonomy: L2 by default (the user sees only risky actions and the delivery); L1 when the user wants to see the plan first; L3 only when the user asks for unattended work.
 4. When the project already has a workflow for it (workflow_list), start it with workflow_start and its inputs.
 5. More instructions for team work under way go to its supervisor with team_message; more work after a team run is over is a new team_start with continues.
 Start as soon as the request is clear: do not ask the user to confirm what they just asked for. Ask first only when the project is unclear among several, the goal is ambiguous, or the work would be large or costly (L3, many members, a big budget). Never start the same work twice: look at the status first.
+
+The organization
+- The user may ask you to build or change the team: create, change or delete members (member_save, member_delete, member_restore) and groups (group_save, group_delete). A group is a lead with the supervisor role and its members, the way a company has teams; a member is in one group. For a regular software team use org_template with dev-team, and replace: true when the user wants to start over or clear the members there are. Look at member_list first, do it, then say in two or three lines what the organization looks like now.
+- Hand team work to the group that fits it (team_start with group).
 
 After handing work on
 - Say in one or two sentences who does what. The card in this conversation follows the work and opens it; do not poll it.
@@ -127,9 +133,99 @@ const CHIEF_TOOLS: HostToolProvider['tools'] = [
     {
         name: 'member_list',
         description:
-            'The members who can take work in a project: id, name, role, model tier or model, permissions, job, skills.',
+            'The organization as it stands for a project: its groups with their leads and members (id, name, role, model tier or model, permissions, job, skills), members in no group, and deleted built-in members.',
         parameters: { type: 'object', properties: { project: PROJECT }, additionalProperties: false },
         kind: 'read',
+    },
+    {
+        name: 'member_save',
+        description:
+            "Creates a member, or changes the member with this id (give every field you want it to keep). Roles: supervisor (leads a group: plans, hands out and accepts its work), planner, plan_reviewer, scout (read-only research), executor (hands-on work; category such as frontend, backend, testing, devops, docs), reviewer, specialist (hard problems). The user's members work in every project.",
+        parameters: {
+            type: 'object',
+            properties: {
+                id: { type: 'string', description: 'The member to change; leave out to create one' },
+                name: { type: 'string', description: 'A job title people know, e.g. 前端工程师' },
+                role: {
+                    type: 'string',
+                    enum: ['supervisor', 'planner', 'plan_reviewer', 'scout', 'executor', 'reviewer', 'specialist'],
+                },
+                category: { type: 'string', description: "An executor's kind of work" },
+                job: { type: 'string', description: 'One line: what it does' },
+                prompt: { type: 'string', description: "Its instructions; leave out to keep its own or its role's" },
+                tier: { type: 'string', enum: ['flagship', 'standard', 'economy', 'fast'] },
+                model: { type: 'string', description: 'A connected model id it runs on first; optional' },
+                mode: { type: 'string', enum: ['plan', 'ask', 'auto_edit', 'full'] },
+                group: { type: 'string', description: 'The group it works in, by name or id' },
+            },
+            required: ['name', 'role', 'job', 'tier', 'mode'],
+            additionalProperties: false,
+        },
+        kind: 'other',
+    },
+    {
+        name: 'member_delete',
+        description:
+            "Deletes a member: one the user made goes to the trash, a built-in one leaves the organization until member_restore. Its memory stays. A group's lead and the last supervisor cannot go until another takes their place.",
+        parameters: {
+            type: 'object',
+            properties: { member: { type: 'string', description: 'Member id or name' } },
+            required: ['member'],
+            additionalProperties: false,
+        },
+        kind: 'other',
+    },
+    {
+        name: 'member_restore',
+        description: 'Brings a deleted built-in member back as it comes, or undoes the changes made to one.',
+        parameters: {
+            type: 'object',
+            properties: { member: { type: 'string', description: 'Built-in member id' } },
+            required: ['member'],
+            additionalProperties: false,
+        },
+        kind: 'other',
+    },
+    {
+        name: 'group_save',
+        description:
+            'Creates or changes a group of the organization, the way a company has teams: a lead (a member with the supervisor role) and its members, who leave any other group.',
+        parameters: {
+            type: 'object',
+            properties: {
+                id: { type: 'string', description: 'The group to change; leave out to create one' },
+                name: { type: 'string' },
+                job: { type: 'string', description: 'One line: what the group does' },
+                lead: { type: 'string', description: 'Member id or name of its lead' },
+                members: { type: 'array', items: { type: 'string' }, description: 'Member ids or names' },
+            },
+            required: ['name', 'lead', 'members'],
+            additionalProperties: false,
+        },
+        kind: 'other',
+    },
+    {
+        name: 'group_delete',
+        description: 'Deletes a group; its members are left in no group.',
+        parameters: {
+            type: 'object',
+            properties: { group: { type: 'string', description: 'Group id or name' } },
+            required: ['group'],
+            additionalProperties: false,
+        },
+        kind: 'other',
+    },
+    {
+        name: 'org_template',
+        description:
+            'Builds a regular software team in one step, as the group 开发组: tech lead, product manager, architect, frontend and backend engineers, QA, DevOps, code reviewer, researcher and principal engineer. replace: true first deletes the other members and groups (the user wants to start over); their memories stay.',
+        parameters: {
+            type: 'object',
+            properties: { template: { type: 'string', enum: ['dev-team'] }, replace: { type: 'boolean' } },
+            required: ['template', 'replace'],
+            additionalProperties: false,
+        },
+        kind: 'other',
     },
     {
         name: 'member_dispatch',
@@ -181,6 +277,10 @@ const CHIEF_TOOLS: HostToolProvider['tools'] = [
                     description: 'Member ids or names to work in it; the supervisor picks when left out',
                 },
                 continues: { type: 'string', description: 'A finished team run of the project this one continues' },
+                group: {
+                    type: 'string',
+                    description: 'The group to hand it to, by name or id: its lead supervises and its members work',
+                },
             },
             required: ['goal'],
             additionalProperties: false,
@@ -479,10 +579,15 @@ export class ChiefService {
         if (card) this.#refresh(card);
     }
 
+    /** The approvals that wait for the user: the supervisor answers the rest (06 §24). */
+    #userApprovals(): Approval[] {
+        return this.#deps.approvals.list().filter((approval) => !approval.reviewer);
+    }
+
     /** Pending approvals in these threads. */
     #pending(threadIds: ReadonlyArray<string | undefined>): number {
         const wanted = new Set(threadIds.filter((id): id is string => Boolean(id)));
-        return this.#deps.approvals.list().filter((approval) => wanted.has(approval.threadId)).length;
+        return this.#userApprovals().filter((approval) => wanted.has(approval.threadId)).length;
     }
 
     /** Where a card's work stands now, and whether its end can be reported yet (a report still being written). */
@@ -704,6 +809,35 @@ export class ChiefService {
                     return { content: await this.#status(threadId, stringArg(args, 'run')) };
                 case 'member_list':
                     return { content: await this.#memberList(this.#projectOf(threadId, args.project)) };
+                case 'member_save':
+                    return { content: await this.#memberSave(threadId, args) };
+                case 'member_delete': {
+                    const project = this.#projectOf(threadId, undefined);
+                    const member = this.#memberOf(await this.#deps.members.list(project.id), stringArg(args, 'member'));
+                    await this.#deps.members.remove(member.id, project.id);
+                    return { content: `Deleted ${member.id} (${member.name}).` };
+                }
+                case 'member_restore': {
+                    const id = stringArg(args, 'member');
+                    await this.#deps.members.reset(id);
+                    return { content: `${id} is back as it comes.` };
+                }
+                case 'group_save':
+                    return { content: await this.#groupSave(threadId, args) };
+                case 'group_delete': {
+                    const group = await this.#groupOf(stringArg(args, 'group'));
+                    await this.#deps.members.deleteGroup(group.id);
+                    return { content: `Deleted the group ${group.name}; its members are in no group now.` };
+                }
+                case 'org_template': {
+                    const chart = await this.#deps.members.applyTemplate({
+                        template: 'dev-team',
+                        replace: args.replace === true,
+                    });
+                    return {
+                        content: `Built the team. ${chart.groups.map((group) => `${group.name}: lead ${group.leaderId}, members ${group.memberIds.join(', ')}`).join('; ')}`,
+                    };
+                }
                 case 'member_dispatch':
                     return await this.#dispatch(threadId, args, call);
                 case 'team_start':
@@ -778,16 +912,103 @@ export class ChiefService {
     }
 
     async #memberList(project: Project): Promise<string> {
-        const members = await this.#membersOf(project);
-        return [
-            `Members who can work in ${project.name}:`,
-            ...members.map(
-                (member) =>
-                    `- ${member.id} (${member.name}): ${member.role}${member.category ? `/${member.category}` : ''}, ` +
-                    `${member.model ?? member.tier}, ${member.mode}${member.description ? ` — ${member.description}` : ''}` +
-                    `${member.skills?.length ? `; skills: ${member.skills.join(', ')}` : ''}`,
-            ),
-        ].join('\n');
+        const [members, chart] = await Promise.all([this.#deps.members.list(project.id), this.#deps.members.org()]);
+        const line = (member: Member) =>
+            `- ${member.id} (${member.name}): ${member.role}${member.category ? `/${member.category}` : ''}, ` +
+            `${member.model ?? member.tier}, ${member.mode}${member.description ? ` — ${member.description}` : ''}` +
+            `${member.skills?.length ? `; skills: ${member.skills.join(', ')}` : ''}`;
+        const byId = new Map(members.map((member) => [member.id, member]));
+        const placed = new Set<string>();
+        const lines = [`The organization, as it works in ${project.name}:`];
+        for (const group of chart.groups) {
+            const lead = byId.get(group.leaderId);
+            placed.add(group.leaderId);
+            lines.push(
+                `Group "${group.name}" (id ${group.id})${group.description ? ` — ${group.description}` : ''}`,
+                `  lead: ${lead ? line(lead).slice(2) : `${group.leaderId} (missing)`}`,
+            );
+            for (const id of group.memberIds) {
+                const member = byId.get(id);
+                if (!member) continue;
+                placed.add(id);
+                lines.push(`  ${line(member)}`);
+            }
+        }
+        const loose = members.filter((member) => !placed.has(member.id));
+        if (loose.length > 0) lines.push('In no group:', ...loose.map((member) => `  ${line(member)}`));
+        if (chart.removed.length > 0) {
+            lines.push(
+                `Deleted built-in members (member_restore brings one back): ${chart.removed.map((item) => `${item.id} (${item.name})`).join(', ')}`,
+            );
+        }
+        return lines.join('\n');
+    }
+
+    async #groupOf(value: string): Promise<OrgGroup> {
+        const chart = await this.#deps.members.org();
+        const lower = value.toLowerCase();
+        const group =
+            chart.groups.find((item) => item.id === value) ??
+            chart.groups.find((item) => item.name.toLowerCase() === lower);
+        if (!group) {
+            throw new ToolError(
+                `No group "${value}"; the groups are: ${chart.groups.map((item) => `${item.id} (${item.name})`).join(', ') || 'none'}`,
+            );
+        }
+        return group;
+    }
+
+    async #memberSave(threadId: string, args: Record<string, unknown>): Promise<string> {
+        const project = this.#projectOf(threadId, undefined);
+        const members = await this.#deps.members.list(project.id);
+        const id = stringArg(args, 'id');
+        const current = id ? this.#memberOf(members, id) : undefined;
+        const groupName = stringArg(args, 'group');
+        const group = groupName ? await this.#groupOf(groupName) : undefined;
+        const prompt = typeof args.prompt === 'string' && args.prompt.trim() ? args.prompt : (current?.prompt ?? '');
+        const model = stringArg(args, 'model');
+        const category = stringArg(args, 'category');
+        const job = stringArg(args, 'job');
+        const saved = await this.#deps.members.save({
+            projectId: project.id,
+            scope: current?.source === 'project' ? 'project' : 'user',
+            member: {
+                ...(current ? { id: current.id } : {}),
+                name: stringArg(args, 'name'),
+                role: stringArg(args, 'role'),
+                ...(category ? { category } : {}),
+                tier: stringArg(args, 'tier'),
+                ...(model ? { model } : {}),
+                mode: (stringArg(args, 'mode') || 'auto_edit') as PermissionMode,
+                ...(job ? { description: job } : {}),
+                prompt,
+                ...(current?.skills ? { skills: current.skills } : {}),
+            },
+            ...(group ? { groupId: group.id } : {}),
+        });
+        return `Saved ${saved.id} (${saved.name})${group ? ` in ${group.name}` : ''}.`;
+    }
+
+    async #groupSave(threadId: string, args: Record<string, unknown>): Promise<string> {
+        const project = this.#projectOf(threadId, undefined);
+        const members = await this.#deps.members.list(project.id);
+        const id = stringArg(args, 'id');
+        const existing = id ? await this.#groupOf(id) : undefined;
+        const lead = this.#memberOf(members, stringArg(args, 'lead'));
+        const listed = Array.isArray(args.members)
+            ? args.members.filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+            : [];
+        const memberIds = listed.map((value) => this.#memberOf(members, value.trim()).id);
+        const job = stringArg(args, 'job');
+        const group = await this.#deps.members.saveGroup({
+            projectId: project.id,
+            ...(existing ? { id: existing.id } : {}),
+            name: stringArg(args, 'name'),
+            ...(job ? { description: job } : {}),
+            leaderId: lead.id,
+            memberIds,
+        });
+        return `Saved the group ${group.name} (id ${group.id}): lead ${lead.name}, ${group.memberIds.length} members.`;
     }
 
     /** Shows the card of work just handed on in the chief's turn, and follows it. */
@@ -861,7 +1082,10 @@ export class ChiefService {
             : [];
         const roster = named.length > 0 ? await this.#membersOf(project) : [];
         const members = named.map((value) => ({ memberId: this.#memberOf(roster, value.trim()).id }));
+        const groupName = stringArg(args, 'group');
+        const group = groupName ? await this.#groupOf(groupName) : undefined;
         const run = await this.#deps.team.start({
+            ...(group ? { groupId: group.id } : {}),
             projectId: project.id,
             goal,
             autonomy: (['L0', 'L1', 'L2', 'L3'].includes(autonomy) ? autonomy : 'L2') as 'L0' | 'L1' | 'L2' | 'L3',
@@ -1023,7 +1247,7 @@ export class ChiefService {
         ];
         lines.push('', 'Other work under way:');
         lines.push(...(others.length > 0 ? others.slice(0, STATUS_RUNS) : ['- none']));
-        const approvals = this.#deps.approvals.list();
+        const approvals = this.#userApprovals();
         if (approvals.length > 0) {
             lines.push('', `Waiting for the user: ${approvals.length} approval${approvals.length === 1 ? '' : 's'}.`);
         }
@@ -1068,7 +1292,7 @@ export class ChiefService {
                             `- workflow run ${run.id} "${run.title}" in ${this.#projectName(run.projectId)} — ${run.status}`,
                     ),
             ];
-            const approvals = this.#deps.approvals.list().map((approval) => {
+            const approvals = this.#userApprovals().map((approval) => {
                 const thread = this.#deps.threads.find(approval.threadId);
                 return `- ${approval.title}${thread ? ` (in "${thread.title}")` : ''}`;
             });

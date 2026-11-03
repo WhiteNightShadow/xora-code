@@ -761,11 +761,11 @@ try {
     );
 
     phase('members');
-    // The members, and one member in full.
-    await page.locator('.sidebar__nav', { hasText: '成员' }).click();
-    await page.locator('.member-card', { hasText: '抓包侦察' }).waitFor();
+    // The organization chart (06 §24), and one member in full.
+    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
+    await page.locator('.org-member', { hasText: '抓包侦察' }).waitFor();
     await shot(page, 'xora-members');
-    await page.locator('.member-card', { hasText: '抓包侦察' }).getByRole('button', { name: '详情' }).click();
+    await page.locator('.org-member', { hasText: '抓包侦察' }).locator('.org-member__main').click();
     await page.locator('.member-memory', { hasText: '127.0.0.1:9090' }).waitFor();
     await page.locator('.member-work__row').first().waitFor();
     await shot(page, 'xora-member');

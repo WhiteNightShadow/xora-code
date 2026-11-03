@@ -55,7 +55,14 @@ export function hosts(engineEntry: () => string) {
     const shells = new Map<string, MemoryShell>();
     const open: Harness[] = [];
     return {
-        async start(dataDir: string, extra: { readonly fetch?: typeof fetch } = {}): Promise<Harness> {
+        /**
+         * `reviewer`: who answers approval cards (06 §24). The tests answer them as the user unless they test the
+         * supervisor's review.
+         */
+        async start(
+            dataDir: string,
+            extra: { readonly fetch?: typeof fetch; readonly reviewer?: 'supervisor' | 'user' } = {},
+        ): Promise<Harness> {
             const shell = shells.get(dataDir) ?? new MemoryShell({ dataDir });
             shells.set(dataDir, shell);
             const core = await HostCore.create({
@@ -66,8 +73,9 @@ export function hosts(engineEntry: () => string) {
                 engineEntry: engineEntry(),
                 skipShellEnv: true,
                 log: quiet,
-                ...extra,
+                ...(extra.fetch ? { fetch: extra.fetch } : {}),
             });
+            core.settings.update({ approvals: { reviewer: extra.reviewer ?? 'user' } });
             const channel = new MessageChannel();
             const hostSide = core.connectUi(domPortTransport(channel.port1));
             const ui: Ui = new RpcPeer(domPortTransport(channel.port2), { methods, notifications, timeoutMs: 60_000 });

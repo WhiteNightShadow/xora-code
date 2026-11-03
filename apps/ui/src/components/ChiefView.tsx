@@ -30,7 +30,8 @@ export function ChiefHome() {
     const threads = useApp((state) => state.threads);
     const teamRuns = useApp((state) => state.teamRuns);
     const workflowRuns = useApp((state) => state.workflowRuns);
-    const approvals = useApp((state) => state.approvals);
+    // Only the user's: the supervisor answers the rest (06 §24).
+    const approvals = useApp((state) => state.approvals).filter((approval) => !approval.reviewer);
     const history = Object.values(threads)
         .filter((thread) => isChief(thread) && !thread.archived)
         .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -86,7 +87,7 @@ export function ChiefHome() {
                     <h1>{s.chief.title}</h1>
                     <p>{s.chief.noProject}</p>
                     <button type="button" className="button button--primary" onClick={() => void openProject()}>
-                        <Icon name="folder" size={14} /> {s.sidebar.openProject}
+                        <Icon name="folderPlus" size={14} /> {s.sidebar.openProject}
                     </button>
                 </div>
             </div>

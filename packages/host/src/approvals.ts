@@ -36,6 +36,15 @@ export interface ApprovalOutcome {
 export type ApprovalListener = (approval: Approval, facts: CallFacts) => void;
 
 /**
+ * Says, before anyone sees a new card, whether a supervisor answers it on the user's behalf (06 §24). Never asked
+ * for mass deletion or dropping a database.
+ */
+export type ApprovalTriage = (
+    input: Omit<Approval, 'id' | 'createdAt' | 'expiresAt' | 'alwaysScopes'>,
+    facts: CallFacts,
+) => 'supervisor' | undefined;
+
+/**
  * A tool call that follows its thread's mode: what deciding it again takes when the mode changes while it waits
  * (see {@link ApprovalService.reconsider}).
  */
@@ -47,9 +56,10 @@ export interface FollowsMode {
 }
 
 interface Pending {
-    readonly approval: Approval;
+    approval: Approval;
     readonly facts: CallFacts;
     readonly follows?: FollowsMode;
+    readonly onHandedBack?: (approval: Approval) => void;
     readonly resolve: (outcome: ApprovalOutcome) => void;
     readonly timer: ReturnType<typeof setTimeout>;
 }
@@ -87,6 +97,7 @@ export class ApprovalService {
     readonly #bus: Bus;
     readonly #pending = new Map<string, Pending>();
     readonly #listeners = new Set<ApprovalListener>();
+    #triage: ApprovalTriage | undefined;
     /** Per-thread "本会话允许" keys. */
     readonly #sessionAllows = new Map<string, Set<string>>();
 
@@ -156,6 +167,30 @@ export class ApprovalService {
         return () => this.#listeners.delete(listener);
     }
 
+    /** Who answers new cards: a supervisor on the user's behalf, or the user (06 §24). */
+    setTriage(triage: ApprovalTriage | undefined): void {
+        this.#triage = triage;
+    }
+
+    /**
+     * Hands a card the supervisor was to answer back to the user, with why (it could not decide, or wants the user
+     * to): the UIs are told of it again, now as the user's, and so is whoever asked.
+     */
+    handBack(approvalId: string, note?: string): void {
+        const pending = this.#pending.get(approvalId);
+        if (!pending?.approval.reviewer) {
+            return;
+        }
+        const { reviewer: _reviewer, ...rest } = pending.approval;
+        pending.approval = { ...rest, ...(note ? { note } : {}) };
+        this.#bus.broadcast('approval.requested', { approval: pending.approval });
+        try {
+            pending.onHandedBack?.(pending.approval);
+        } catch {
+            // The card stays the user's all the same.
+        }
+    }
+
     pendingFor(threadId: string): number {
         return [...this.#pending.values()].filter((pending) => pending.approval.threadId === threadId).length;
     }
@@ -169,20 +204,38 @@ export class ApprovalService {
         facts: CallFacts,
         onCreated: (approval: Approval) => void,
         follows?: FollowsMode,
+        onHandedBack?: (approval: Approval) => void,
     ): Promise<ApprovalOutcome> {
         const now = Date.now();
+        let reviewer: 'supervisor' | undefined;
+        try {
+            reviewer = facts.grave ? undefined : this.#triage?.(input, facts);
+        } catch {
+            reviewer = undefined;
+        }
         const approval: Approval = {
             ...input,
             id: newId('a'),
             createdAt: now,
             expiresAt: now + APPROVAL_TTL_MS,
-            // Never offer "always" for calls that leave the workspace, touch secrets or are high-risk actions.
+            // Never offer "always" for calls that leave the workspace, touch secrets, are high-risk or grave.
             alwaysScopes:
-                facts.outside.length > 0 || facts.sensitive.length > 0 || facts.highRisk ? [] : ['project', 'global'],
+                facts.outside.length > 0 || facts.sensitive.length > 0 || facts.highRisk || facts.grave
+                    ? []
+                    : ['project', 'global'],
+            ...(reviewer ? { reviewer } : {}),
+            ...(facts.grave ? { grave: facts.grave.action } : {}),
         };
         return new Promise((resolve) => {
             const timer = setTimeout(() => this.#settle(approval.id, { status: 'expired' }), APPROVAL_TTL_MS);
-            this.#pending.set(approval.id, { approval, facts, ...(follows ? { follows } : {}), resolve, timer });
+            this.#pending.set(approval.id, {
+                approval,
+                facts,
+                ...(follows ? { follows } : {}),
+                ...(onHandedBack ? { onHandedBack } : {}),
+                resolve,
+                timer,
+            });
             onCreated(approval);
             this.#bus.broadcast('approval.requested', { approval });
             for (const listener of this.#listeners) {
@@ -207,8 +260,8 @@ export class ApprovalService {
             throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).gone);
         }
         const { approval, facts } = pending;
-        // A high-risk action is approved one call at a time (06 §8): "for this session" counts as once.
-        if (decision === 'allow_session' && !facts.highRisk) {
+        // A high-risk or grave action is approved one call at a time (06 §8, §24): "for this session" counts as once.
+        if (decision === 'allow_session' && !facts.highRisk && !facts.grave) {
             const keys = this.#sessionAllows.get(approval.threadId) ?? new Set<string>();
             keys.add(sessionKey(facts));
             this.#sessionAllows.set(approval.threadId, keys);

@@ -1,0 +1,391 @@
+/* The team's page (06 §24): the organization chart and the team's work, two tabs of one entry ------------------- */
+
+.team-page__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--xk-space-4);
+    flex-wrap: wrap;
+}
+
+.team-board > .team-page__header {
+    padding: 20px 24px 0;
+}
+
+.team-page__title {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-4);
+}
+
+.team-page__title h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: var(--xk-weight-semibold);
+    letter-spacing: -0.01em;
+}
+
+.team-page__tabs {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-subtle);
+}
+
+.team-page__tabs button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: var(--xk-radius-sm);
+    background: none;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+    cursor: pointer;
+}
+
+.team-page__tabs button:hover {
+    color: var(--xk-text);
+}
+
+.team-page__tabs button.is-active {
+    background: var(--xk-bg-elevated);
+    color: var(--xk-text);
+    font-weight: var(--xk-weight-medium);
+    box-shadow: var(--xk-shadow-xs);
+}
+
+/* Chart ---------------------------------------------------------------------------------------------------- */
+
+.org {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-4);
+    max-width: 1100px;
+}
+
+.org__boss {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-3);
+    padding: 12px 16px;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-xs);
+}
+
+.org__boss-mark {
+    flex: none;
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--xk-text);
+    color: var(--xk-bg-elevated);
+}
+
+.org__boss-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.org__boss-text span {
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.org__groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+    gap: var(--xk-space-4);
+    position: relative;
+}
+
+.org-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-3);
+    padding: 14px 16px 16px;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-xs);
+    animation: xk-fade-up var(--xk-duration-base) var(--xk-ease-out) backwards;
+}
+
+.org-group--loose {
+    background: var(--xk-bg-subtle);
+    box-shadow: none;
+}
+
+.org-group__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--xk-space-3);
+}
+
+.org-group__title {
+    min-width: 0;
+}
+
+.org-group__title h2 {
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: var(--xk-text-lg);
+    font-weight: var(--xk-weight-semibold);
+}
+
+.org-group__title p {
+    margin: 4px 0 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.org-group__count {
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-regular);
+}
+
+.org-group__lead {
+    padding-bottom: var(--xk-space-3);
+    border-bottom: 1px dashed var(--xk-border);
+}
+
+.org__members {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 6px;
+}
+
+.org__empty {
+    margin: 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.org-group__runs {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-top: var(--xk-space-2);
+    border-top: 1px solid var(--xk-border-subtle);
+}
+
+.org-member {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    border-radius: var(--xk-radius-md);
+    transition: background var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.org-member:hover {
+    background: var(--xk-bg-hover);
+}
+
+.org-member__main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border: 0;
+    background: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.org-member__text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.org-member__name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--xk-text-sm);
+    font-weight: var(--xk-weight-medium);
+    color: var(--xk-text);
+}
+
+.org-member__role {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+}
+
+.org-member__actions {
+    flex: none;
+    display: flex;
+    gap: 2px;
+    padding-right: 4px;
+    opacity: 0;
+    transition: opacity var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.org-member:hover .org-member__actions,
+.org-member:focus-within .org-member__actions {
+    opacity: 1;
+}
+
+.org-member.is-lead .org-member__name {
+    font-size: var(--xk-text-md);
+}
+
+.org__removed ul {
+    margin: 6px 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+}
+
+.org__removed li {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+/* Dialogs -------------------------------------------------------------------------------------------------- */
+
+.group-editor__members {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 4px 12px;
+    max-height: 260px;
+    overflow: auto;
+}
+
+.group-editor__member {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: var(--xk-text-sm);
+    cursor: pointer;
+}
+
+.group-editor__name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.group-editor__elsewhere {
+    margin-left: auto;
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+}
+
+.org-template__intro {
+    margin: 0;
+    color: var(--xk-text-muted);
+}
+
+.org-template__list {
+    margin: 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: var(--xk-text-sm);
+}
+
+.org-template__replace p {
+    margin: 4px 0 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+}
+
+.member-detail__group {
+    margin-top: 6px;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.member-detail__move {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Approval cards the supervisor answers (06 §24) -------------------------------------------------------------- */
+
+.approval.is-reviewing {
+    border-color: var(--xk-border);
+    background: var(--xk-bg-subtle);
+    animation: none;
+    box-shadow: none;
+}
+
+.approval__reviewing {
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.approval.is-grave {
+    border-color: var(--xk-error-border);
+    background: var(--xk-error-subtle);
+}
+
+.approval__grave {
+    color: var(--xk-error);
+    font-size: var(--xk-text-sm);
+    font-weight: var(--xk-weight-medium);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .org-group {
+        animation: none;
+    }
+}
+
+/* About: the app's mark and who made it ---------------------------------------------------------------------- */
+
+.about__brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: var(--xk-space-2);
+}
+
+.about__brand > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.about__brand strong {
+    font-size: var(--xk-text-lg);
+}
+
+.about__brand span {
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}

@@ -401,6 +401,12 @@ export const ApprovalSchema = z.object({
     /** Which "always" scopes make sense for this call. */
     alwaysScopes: z.array(z.enum(['project', 'global'])),
     engine: z.string(),
+    /** A supervisor decides it on the user's behalf (06 §24): it is not the user's to answer unless handed back. */
+    reviewer: z.literal('supervisor').optional(),
+    /** Mass deletion or dropping a database: the user decides it themselves (06 §24). */
+    grave: z.enum(['mass_delete', 'drop_database']).optional(),
+    /** Why the supervisor handed it back to the user. */
+    note: z.string().optional(),
 });
 export type Approval = z.infer<typeof ApprovalSchema>;
 
@@ -545,6 +551,11 @@ export const SettingsSchema = z.object({
     }),
     /** Agent teams (06): members of one run that work at the same time. */
     team: z.object({ maxParallel: z.number().int().min(1).max(8) }),
+    /**
+     * Who answers approval cards (06 §24): `supervisor` has a supervisor agent decide them on the user's behalf, and
+     * only mass deletion and dropping a database reach the user; `user` asks the user.
+     */
+    approvals: z.object({ reviewer: z.enum(['supervisor', 'user']) }),
     /** What the user chose when they last started a team run or a workflow: the next one starts from it. */
     lastChoices: z.object({
         teamAutonomy: z.enum(['L0', 'L1', 'L2', 'L3']),
@@ -773,6 +784,8 @@ export const TeamRunSchema = z.object({
     parallel: z.number().optional(),
     /** The members the user chose for the run, with their settings (06 §22); absent: the supervisor picks. */
     members: z.array(StaffPresetSchema.extend({ memberId: z.string(), name: z.string() })).optional(),
+    /** The group the run was handed to (06 §24): its leader supervises, its members work. */
+    group: z.object({ id: z.string(), name: z.string() }).optional(),
     /** The supervisor's report to the user once the run is over (06 §22); `report` keeps the details. */
     brief: RunBriefSchema.optional(),
     /** The supervisor's last message of each turn, newest last: what it reports to the user. */
@@ -935,6 +948,27 @@ export const MemberSchema = z.object({
     routines: z.array(MemberRoutineSchema),
 });
 export type Member = z.infer<typeof MemberSchema>;
+
+/**
+ * A group of the organization (06 §24), the way a company has teams: a leader (a supervisor, who plans and hands
+ * out the group's work) and its members. A member is in one group at most; one not in any reports to the user.
+ */
+export const OrgGroupSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    /** One line: what the group does. */
+    description: z.string().optional(),
+    leaderId: z.string(),
+    memberIds: z.array(z.string()),
+});
+export type OrgGroup = z.infer<typeof OrgGroupSchema>;
+
+/** The organization chart (06 §24): its groups, and the built-in members the user deleted, who can come back. */
+export const OrgChartSchema = z.object({
+    groups: z.array(OrgGroupSchema),
+    removed: z.array(z.object({ id: z.string(), name: z.string() })),
+});
+export type OrgChart = z.infer<typeof OrgChartSchema>;
 
 /**
  * The report for whoever ordered a run (06 §11): what came of it, what is wrong, what to do next, without the

@@ -45,6 +45,7 @@ import { type HostPaths, hostPaths } from './paths.ts';
 import { ProjectService } from './projects.ts';
 import { PromptService } from './prompts.ts';
 import { ReviewService } from './review.ts';
+import { ApprovalReviewer } from './reviewer.ts';
 import { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
 import { mergePath, resolveLoginPath } from './shell-env.ts';
@@ -164,6 +165,8 @@ export class HostCore {
     readonly members: MemberService;
     /** The chief assistant (06 §23): the one place the user talks to. */
     readonly chief: ChiefService;
+    /** The supervisor that answers approval cards on the user's behalf (06 §24). */
+    readonly reviewer: ApprovalReviewer;
     readonly triggers: TriggerService;
     #triggerSync: ReturnType<typeof setInterval> | undefined;
     readonly #options: HostOptions;
@@ -349,6 +352,19 @@ export class HostCore {
             team: this.team,
             workflows: this.workflows,
             members: this.members,
+        });
+        this.reviewer = new ApprovalReviewer({
+            approvals: this.approvals,
+            threads: this.threads,
+            projects: this.projects,
+            connections: this.connections,
+            settings: this.settings,
+            usage: this.usage,
+            bus: this.bus,
+            log: this.log,
+            orgsDir: this.paths.orgsDir,
+            team: this.team,
+            userAgent,
         });
         this.distill = new DistillService({
             threads: this.threads,
@@ -1247,6 +1263,7 @@ export class HostCore {
         await this.turns.endSessions('app_exit');
         this.terminals.dispose();
         this.updates.dispose();
+        this.reviewer.dispose();
         this.chief.dispose();
         this.workflows.dispose();
         this.team.dispose();

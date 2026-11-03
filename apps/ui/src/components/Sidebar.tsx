@@ -10,7 +10,6 @@ import {
     openProject,
     openRun,
     openSettings,
-    openTeamBoard,
     openWorkflowBoard,
     selectThread,
     useApp,
@@ -287,7 +286,10 @@ function ChiefNav() {
 function RunsNav({ kind }: { kind: 'team' | 'workflow' }) {
     const s = useStrings();
     const projects = useApp((state) => state.projects);
-    const boardOpen = useApp((state) => (kind === 'team' ? Boolean(state.teamsFor) : Boolean(state.workflowsFor)));
+    // 06 §24: the team's entry holds the organization chart and the team's work.
+    const boardOpen = useApp((state) =>
+        kind === 'team' ? Boolean(state.teamsFor) || state.membersOpen : Boolean(state.workflowsFor),
+    );
     const openRunId = useApp((state) => (kind === 'team' ? state.teamRunId : state.workflowRunId));
     const teamRuns = useApp((state) => state.teamRuns);
     const workflowRuns = useApp((state) => state.workflowRuns);
@@ -319,7 +321,7 @@ function RunsNav({ kind }: { kind: 'team' | 'workflow' }) {
             <button
                 type="button"
                 className={`sidebar__nav${boardOpen ? ' is-selected' : ''}`}
-                onClick={() => (kind === 'team' ? openTeamBoard() : openWorkflowBoard())}
+                onClick={() => (kind === 'team' ? openMembers() : openWorkflowBoard())}
             >
                 <Icon name={kind === 'team' ? 'users' : 'bolt'} size={14} />{' '}
                 {kind === 'team' ? s.sidebar.teams : s.sidebar.workflows}
@@ -348,7 +350,6 @@ export function Sidebar() {
     const projects = useApp((state) => state.projects);
     const threadMap = useApp((state) => state.threads);
     const update = useApp((state) => state.update);
-    const membersOpen = useApp((state) => state.membersOpen);
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<Array<{ threadId: string; title: string; snippet: string }> | undefined>();
@@ -387,7 +388,7 @@ export function Sidebar() {
         <nav className="sidebar" aria-label={s.sidebar.projects}>
             {/* No title bar: this strip drags the window, and on macOS holds its buttons. */}
             <div className="sidebar__top">
-                <IconButton icon="folder" label={s.sidebar.openProject} onClick={() => void openProject()} />
+                <IconButton icon="folderPlus" label={s.sidebar.openProject} onClick={() => void openProject()} />
             </div>
             <div className="sidebar__search">
                 <Icon name="search" size={13} />
@@ -417,13 +418,6 @@ export function Sidebar() {
                 <ChiefNav />
                 <RunsNav kind="team" />
                 <RunsNav kind="workflow" />
-                <button
-                    type="button"
-                    className={`sidebar__nav${membersOpen ? ' is-selected' : ''}`}
-                    onClick={() => openMembers()}
-                >
-                    <Icon name="user" size={14} /> {s.sidebar.members}
-                </button>
             </div>
             {inbox.length > 0 && (
                 <div className="inbox">

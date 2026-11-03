@@ -6,6 +6,7 @@ import type { SessionConfig } from '@xora/engine';
 import type { HooksOutcome } from '@xora/extensions';
 import { matchesToolPattern } from '@xora/mcp';
 import {
+    type Approval,
     type Attachment,
     bilingual,
     type ErrorClass,
@@ -32,7 +33,7 @@ import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
-import { type CallFacts, highRiskLabel, highRiskOf, type PolicyResult } from './policy.ts';
+import { type CallFacts, graveOf, highRiskLabel, highRiskOf, type PolicyResult } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { PromptService } from './prompts.ts';
 import type { ReviewService } from './review.ts';
@@ -1651,6 +1652,8 @@ export class TurnService {
         const highRisk = this.#guardsHighRisk(running.threadId)
             ? highRiskOf({ toolName, command }, { cwd: running.cwd })
             : undefined;
+        // In every thread: the user decides mass deletion and dropping a database (06 §24).
+        const grave = graveOf({ toolName, command, kind, paths }, { cwd: running.cwd });
         return {
             toolName,
             kind,
@@ -1670,6 +1673,7 @@ export class TurnService {
             sensitive,
             external: running.engine.kind === 'external',
             ...(highRisk ? { highRisk } : {}),
+            ...(grave ? { grave } : {}),
         };
     }
 
@@ -1750,6 +1754,21 @@ export class TurnService {
             (shown.length > 0 ? shown.join('\n') : (request.toolCall.title ?? facts.toolName));
         const title = request.toolCall.title ?? facts.toolName;
         let approvalItem: ItemOf<'approval'> | undefined;
+        // The card is the user's: the thread waits on them, hooks hear of it, and a window in the back notifies.
+        const toUser = (approval: Approval) => {
+            threads.update(running.threadId, { status: 'awaiting_approval' });
+            this.#sideHook(running, 'Notification', ['permission_prompt'], {
+                message: `Xora Code needs your permission to use ${approval.title}`,
+                notification_type: 'permission_prompt',
+            });
+            const prefs = settings.get().notifications;
+            if (prefs.onApproval && !bus.focused) {
+                const text = textOf(TEXT);
+                shell
+                    .notify(text.needsApproval, text.inThread(thread.title, approval.title), running.threadId)
+                    .catch(() => undefined);
+            }
+        };
         const outcome = await new Promise<Awaited<ReturnType<ApprovalService['request']>>>((resolve) => {
             const onAbort = () => approvals.cancelThread(running.threadId);
             signal.addEventListener('abort', onAbort, { once: true });
@@ -1786,22 +1805,8 @@ export class TurnService {
                             status: 'pending',
                         };
                         this.#persist(running, approvalItem, 'item.started');
-                        threads.update(running.threadId, { status: 'awaiting_approval' });
-                        this.#sideHook(running, 'Notification', ['permission_prompt'], {
-                            message: `Xora Code needs your permission to use ${approval.title}`,
-                            notification_type: 'permission_prompt',
-                        });
-                        const prefs = settings.get().notifications;
-                        if (prefs.onApproval && !bus.focused) {
-                            const text = textOf(TEXT);
-                            shell
-                                .notify(
-                                    text.needsApproval,
-                                    text.inThread(thread.title, approval.title),
-                                    running.threadId,
-                                )
-                                .catch(() => undefined);
-                        }
+                        // A supervisor answers it on the user's behalf (06 §24): nothing to tell the user yet.
+                        if (!approval.reviewer) toUser(approval);
                     },
                     // A mode change while it waits decides the call again; a hook's question stays a question.
                     {
@@ -1809,6 +1814,8 @@ export class TurnService {
                         projectRoot: running.cwd,
                         ...(hookDecision === 'ask' ? { hookAsked: true } : {}),
                     },
+                    // The supervisor handed it back: now it is the user's.
+                    toUser,
                 )
                 .then(resolve);
         });

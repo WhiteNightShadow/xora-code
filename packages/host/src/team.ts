@@ -23,7 +23,7 @@ import {
 } from '@xora/protocol';
 import { completeModel, findModel } from '@xora/providers';
 import type { XoraDatabase } from '@xora/storage';
-import { type HighRisk, type HighRiskAction, isReadOnlyCommand } from '@xora/tools';
+import { type Grave, type HighRisk, type HighRiskAction, isReadOnlyCommand } from '@xora/tools';
 import {
     type AgentSpec,
     type AutonomyLevel,
@@ -92,7 +92,7 @@ import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
 import { type MemberService, memberName } from './members.ts';
-import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
+import { type CallFacts, graveOf, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import {
@@ -309,6 +309,10 @@ interface RunHost {
     parallel?: number;
     /** The members the user chose, with their settings (06 §22); absent: the supervisor picks from all. */
     staff?: Record<string, StaffPreset>;
+    /** The supervisor's member id: a group's lead (06 §24); absent on older runs, which had the first supervisor. */
+    supervisorId?: string;
+    /** The group the run was handed to (06 §24). */
+    group?: { id: string; name: string };
     /** The report for the user once the run is over (06 §22). */
     brief?: RunBrief;
     /** Every message of the run, for the team conversation view (06 §7). */
@@ -391,6 +395,8 @@ interface ConfirmRequest {
     readonly command?: string;
     /** The command is a high-risk action (06 §8): approved once, never "always". */
     readonly highRisk?: HighRisk;
+    /** Mass deletion or dropping a database (06 §24): the user's to decide. */
+    readonly grave?: Grave;
 }
 
 export interface TeamDeps {
@@ -409,7 +415,7 @@ export interface TeamDeps {
     readonly orgsDir: string;
     readonly commandTimeoutMs?: number;
     /** Gives the supervisor and the members working cards their memory and the `remember` tool (06 §19). */
-    readonly members?: Pick<MemberService, 'withMemory'>;
+    readonly members?: Pick<MemberService, 'withMemory' | 'group'>;
     readonly userAgent?: string;
 }
 
@@ -455,6 +461,7 @@ const TEXT = bilingual(
         emptyGoal: '目标不能为空',
         autonomyProblems: (problems: readonly string[]) => problems.join('；'),
         noSupervisor: '组织里没有主管',
+        noGroup: (id: string) => `没有小组${id}`,
         uncommitted: '项目里有没提交的改动：各任务的worktree从最近一次提交开始，看不到这些改动',
         supervisorTitle: (goal: string) => `团队：${goal}`,
         supervisorNotStarted: (error: string) => `主管线程没能启动：${error}`,
@@ -566,6 +573,7 @@ const TEXT = bilingual(
         emptyGoal: 'The goal cannot be empty',
         autonomyProblems: (problems) => problems.join('; '),
         noSupervisor: 'The organization has no supervisor',
+        noGroup: (id: string) => `No group ${id}`,
         uncommitted:
             "The project has uncommitted changes: each task's worktree starts from the latest commit and does not see them",
         supervisorTitle: (goal) => `Team: ${goal}`,
@@ -797,6 +805,8 @@ export class TeamService {
         parallel?: number;
         /** The members who work in the run, with their settings (06 §22); the supervisor picks when absent. */
         members?: ReadonlyArray<StaffPreset & { memberId: string }>;
+        /** The group it is handed to (06 §24): its lead supervises, its members are the staff. */
+        groupId?: string;
     }): Promise<TeamRunView> {
         await this.#ready;
         const { projects, settings, threads } = this.#deps;
@@ -837,11 +847,25 @@ export class TeamService {
                 text.autonomyProblems(checked.problems.map((problem) => problem.message)),
             );
         }
-        const supervisor = org.roster.find((agent) => agent.role === 'supervisor');
+        // A group's lead supervises the run and its members are the staff (06 §24).
+        const group = input.groupId ? await this.#deps.members?.group(input.groupId) : undefined;
+        if (input.groupId && !group) {
+            throw new RpcError(RpcErrorCode.NotFound, text.noGroup(input.groupId));
+        }
+        const lead = group ? findAgent(org, group.leaderId) : undefined;
+        const supervisor =
+            (lead?.role === 'supervisor' ? lead : undefined) ?? org.roster.find((agent) => agent.role === 'supervisor');
         if (!supervisor) {
             throw new RpcError(RpcErrorCode.Rejected, text.noSupervisor);
         }
         let staff: Record<string, StaffPreset> | undefined;
+        if (group && (!input.members || input.members.length === 0)) {
+            const working = group.memberIds.filter((id) => {
+                const agent = findAgent(org, id);
+                return agent !== undefined && agent.role !== 'supervisor';
+            });
+            if (working.length > 0) staff = Object.fromEntries(working.map((id) => [id, {}]));
+        }
         if (input.members && input.members.length > 0) {
             staff = {};
             for (const entry of input.members) {
@@ -900,6 +924,8 @@ export class TeamService {
             permission: runPermission(input.permission ?? 'full', autonomy),
             ...(input.parallel !== undefined ? { parallel: clampParallel(input.parallel) } : {}),
             ...(staff ? { staff } : {}),
+            supervisorId: supervisor.id,
+            ...(group ? { group: { id: group.id, name: group.name } } : {}),
             tasks: {},
             reviewThreads: [],
             actions: [],
@@ -918,7 +944,7 @@ export class TeamService {
                 : undefined;
             await this.#startSupervisor(
                 state,
-                `${supervisorBrief(goal, run, this.#maxParallel(state), host.mode, previous)}\n\n${this.#staffBrief(state)}`,
+                `${supervisorBrief(goal, run, this.#maxParallel(state), host.mode, previous)}\n\n${this.#staffBrief(state)}${this.#quietBrief()}`,
             );
         } catch (error) {
             this.#setStatus(state, 'failed', textOf(TEXT).supervisorNotStarted(errorText(error)));
@@ -1717,6 +1743,7 @@ export class TeamService {
                       }),
                   }
                 : {}),
+            ...(host.group ? { group: { ...host.group } } : {}),
             feedback: [...(host.feedback ?? [])],
             conversation: [...(host.conversation ?? [])],
             supervisorThreadId: host.supervisorThreadId,
@@ -1750,7 +1777,9 @@ export class TeamService {
     #attachTools(state: RunState): void {
         const { turns } = this.#deps;
         const org = state.host.org;
-        const supervisor = org.roster.find((agent) => agent.role === 'supervisor');
+        const supervisor =
+            (state.host.supervisorId ? findAgent(org, state.host.supervisorId) : undefined) ??
+            org.roster.find((agent) => agent.role === 'supervisor');
         if (supervisor) {
             turns.setHostTools(state.host.supervisorThreadId, this.#supervisorProvider(state, supervisor));
         }
@@ -2223,8 +2252,15 @@ export class TeamService {
                 sensitive: [],
                 external: false,
                 ...(request.highRisk ? { highRisk: request.highRisk } : {}),
+                ...(request.grave ? { grave: request.grave } : {}),
             };
             let item: ItemOf<'approval'> | undefined;
+            // The user's card: the supervisor's thread waits on them while it is not working.
+            const toUser = () => {
+                if (!turns.isRunning(threadId)) {
+                    threads.update(threadId, { status: 'awaiting_approval' });
+                }
+            };
             const outcome = await approvals.request(
                 {
                     threadId,
@@ -2254,10 +2290,11 @@ export class TeamService {
                         status: 'pending',
                     };
                     threads.append(threadId, 'item.started', { item }, { turnId, itemId: item.id });
-                    if (!turns.isRunning(threadId)) {
-                        threads.update(threadId, { status: 'awaiting_approval' });
-                    }
+                    // A supervisor answers it on the user's behalf (06 §24): nothing waits on the user yet.
+                    if (!approval.reviewer) toUser();
                 },
+                undefined,
+                toUser,
             );
             if (item && !this.#disposed) {
                 threads.append(
@@ -2268,7 +2305,7 @@ export class TeamService {
                             ...item,
                             status: outcome.status,
                             ...(outcome.decision ? { decision: outcome.decision } : {}),
-                            decidedBy: 'user',
+                            decidedBy: outcome.decidedBy ?? 'user',
                             ...(outcome.message ? { message: outcome.message } : {}),
                         },
                     },
@@ -3409,8 +3446,10 @@ export class TeamService {
     ): Promise<CommandResult | undefined> {
         const { approvals, log } = this.#deps;
         const { host } = state;
-        // A card's command may push or publish too: that still needs the user, whatever the mode (06 §8).
+        // A card's command may push or publish too: that still needs a person, whatever the mode (06 §8); mass
+        // deletion and dropping a database need the user themselves (06 §24).
         const highRisk = highRiskOf({ toolName: 'acceptance', command: run }, { cwd });
+        const grave = graveOf({ toolName: 'acceptance', command: run }, { cwd });
         const facts: CallFacts = {
             toolName: 'acceptance',
             kind: 'execute',
@@ -3422,6 +3461,7 @@ export class TeamService {
             sensitive: [],
             external: false,
             ...(highRisk ? { highRisk } : {}),
+            ...(grave ? { grave } : {}),
         };
         const policy = approvals.evaluate(host.supervisorThreadId, facts, {
             mode,
@@ -3442,6 +3482,7 @@ export class TeamService {
                 command: run,
                 risks: policy.risks,
                 ...(highRisk ? { highRisk } : {}),
+                ...(grave ? { grave } : {}),
             });
             if (outcome.status !== 'allowed') {
                 return undefined;
@@ -3871,6 +3912,26 @@ export class TeamService {
      * goes to the supervisor as well. The card stays the user's too; the first answer counts. Network, paths outside
      * the workspace, sensitive files, external agents and high-risk actions are the user's alone.
      */
+    /** 06 §24: when the user only reads results, the supervisor plans no checks that would ask them. */
+    #quietBrief(): string {
+        return this.#deps.settings.get().approvals.reviewer === 'supervisor'
+            ? '\n\n<user_attention>\nThe user only reads results. Approvals are decided by a supervisor on their behalf; only mass deletion and dropping a database reach them. Do not plan manual checks or reviews by a human unless the user asked for one: make every acceptance check a command or a review by a member.\n</user_attention>'
+            : '';
+    }
+
+    /** With approvals left to the supervisor (06 §24), an L2 run delivers without asking the user. */
+    #supervisorDelivers(state: RunState): boolean {
+        return state.run.autonomy === 'L2' && this.#deps.settings.get().approvals.reviewer === 'supervisor';
+    }
+
+    /** Whether a run's supervisor decides this card itself (06 §21): the host's reviewer leaves it alone. */
+    isDelegated(approvalId: string): boolean {
+        for (const state of this.#runs.values()) {
+            if (state.delegated.has(approvalId)) return true;
+        }
+        return false;
+    }
+
     #delegate(approval: Approval, facts: CallFacts): void {
         if (this.#disposed) {
             return;
@@ -4335,6 +4396,15 @@ export class TeamService {
                 this.#setStatus(state, 'integrating');
             }
             const done = board.list({ status: 'done' });
+            if (
+                needsHuman(state.run.autonomy, 'final_delivery') &&
+                !host.deliveryApproved &&
+                this.#supervisorDelivers(state)
+            ) {
+                // 06 §24: the supervisor checked every card; at L2 the delivery is its call, the user reads the report.
+                host.deliveryApproved = true;
+                this.#save(state);
+            }
             if (needsHuman(state.run.autonomy, 'final_delivery') && !host.deliveryApproved) {
                 const outcome = await this.#confirm(state, {
                     toolName: 'team_delivery',

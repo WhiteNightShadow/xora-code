@@ -24,7 +24,7 @@ import {
 } from '@xora/protocol';
 import { completeModel, findModel } from '@xora/providers';
 import { fromJson, type XoraDatabase } from '@xora/storage';
-import { type HighRisk, type HighRiskAction, isReadOnlyCommand } from '@xora/tools';
+import { type Grave, type HighRisk, type HighRiskAction, isReadOnlyCommand } from '@xora/tools';
 import {
     type AgentSpec,
     type AgentStep,
@@ -69,7 +69,7 @@ import { runCheck } from './goals.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
 import type { MemberService } from './members.ts';
-import { type CallFacts, highRiskLabel, highRiskOf } from './policy.ts';
+import { type CallFacts, graveOf, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import type { TeamService } from './team.ts';
@@ -578,6 +578,8 @@ interface ApproveRequest {
     readonly risks: readonly Risk[];
     readonly command?: string;
     readonly highRisk?: HighRisk;
+    /** Mass deletion or dropping a database (06 §24): the user's to decide. */
+    readonly grave?: Grave;
     /** A command the policy asked about: decided again when the run's permissions change while it waits. */
     readonly follows?: FollowsMode;
 }
@@ -2480,8 +2482,10 @@ export class WorkflowService {
         const { record } = state;
         const { approvals, projects, log } = this.#deps;
         const project = await projects.get(record.projectId);
-        // A step's command may push or publish: that needs a person whatever the mode or rules say (06 §8).
+        // A step's command may push or publish: that needs a person whatever the mode or rules say (06 §8); mass
+        // deletion and dropping a database need the user themselves (06 §24).
         const highRisk = highRiskOf({ toolName: 'workflow_command', command }, { cwd: project.path });
+        const grave = graveOf({ toolName: 'workflow_command', command }, { cwd: project.path });
         const facts: CallFacts = {
             toolName: 'workflow_command',
             kind: 'execute',
@@ -2493,6 +2497,7 @@ export class WorkflowService {
             sensitive: [],
             external: false,
             ...(highRisk ? { highRisk } : {}),
+            ...(grave ? { grave } : {}),
         };
         const policy = approvals.evaluate(record.threadId, facts, {
             mode,
@@ -2512,6 +2517,7 @@ export class WorkflowService {
                 command,
                 risks: policy.risks,
                 ...(highRisk ? { highRisk } : {}),
+                ...(grave ? { grave } : {}),
                 follows: { projectId: record.projectId, projectRoot: project.path },
             });
             if (outcome.status !== 'allowed') return undefined;
@@ -2544,8 +2550,17 @@ export class WorkflowService {
             sensitive: [],
             external: false,
             ...(request.highRisk ? { highRisk: request.highRisk } : {}),
+            ...(request.grave ? { grave: request.grave } : {}),
         };
         let item: ItemOf<'approval'> | undefined;
+        // The user's card: the run waits on them.
+        const toUser = () => {
+            threads.update(threadId, { status: 'awaiting_approval' });
+            if (record.status === 'running') {
+                record.status = 'waiting';
+                this.#save(state);
+            }
+        };
         const outcome = await approvals.request(
             {
                 threadId,
@@ -2575,13 +2590,11 @@ export class WorkflowService {
                     status: 'pending',
                 };
                 threads.append(threadId, 'item.started', { item }, { turnId, itemId: item.id });
-                threads.update(threadId, { status: 'awaiting_approval' });
-                if (record.status === 'running') {
-                    record.status = 'waiting';
-                    this.#save(state);
-                }
+                // A supervisor answers it on the user's behalf (06 §24): the run goes on meanwhile.
+                if (!approval.reviewer) toUser();
             },
             request.follows,
+            toUser,
         );
         if (item && !this.#disposed) {
             threads.append(
