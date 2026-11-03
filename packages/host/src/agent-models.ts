@@ -7,6 +7,7 @@ import {
     type Organization,
     pickReviewerModel,
     type ResolvedModel,
+    SUBSCRIPTION_CHANNEL,
     type Tier,
     type TierEffort,
     tierLabel,
@@ -16,8 +17,10 @@ import type { SettingsService } from './settings.ts';
 import { textOf } from './text.ts';
 
 /**
- * Model choice for agents started by the host (team members, workflow steps): a tier's model chain over the
- * connected models (06 §3), falling back to the default model.
+ * Model choice for agents started by the host (team members, workflow steps, the chief, member conversations): the
+ * agent's own model, else the user's default model (06 §25), the tier's model chain behind it for errors. With the
+ * team setting `models: 'tiers'` a tier's chain over the connected models picks instead (06 §3), falling back to the
+ * default model.
  */
 
 const TEXT = bilingual(
@@ -76,6 +79,31 @@ export function defaultModel(sources: ModelSources, project: Project): ModelRef 
     return project.defaults?.model ?? sources.settings.get().defaultModel ?? undefined;
 }
 
+/** Whether agents run on the default model (06 §25) rather than their tier's chain. */
+export function followsDefaultModel(sources: ModelSources): boolean {
+    return sources.settings.get().team.models !== 'tiers';
+}
+
+/**
+ * The default model, when agents follow it and it can run here: connected, and for unattended work not a
+ * subscription key (06 §12).
+ */
+function usableDefault(
+    sources: ModelSources,
+    project: Project,
+    available: readonly ConnectedModel[],
+    unattended: boolean,
+): ConnectedModel | undefined {
+    if (!followsDefaultModel(sources)) return undefined;
+    const chosen = defaultModel(sources, project);
+    if (!chosen) return undefined;
+    const connected = available.find(
+        (model) => model.connectionId === chosen.connectionId && model.model === chosen.model,
+    );
+    if (!connected || (unattended && connected.channel === SUBSCRIPTION_CHANNEL)) return undefined;
+    return connected;
+}
+
 /**
  * The tier's first connected model, or for a reviewer the first of another family; the default model with a
  * warning when the chain has nothing connected. `unattended` keeps the chain to API channels (06 §12).
@@ -94,10 +122,49 @@ export function pickTierModel(
     },
 ): ModelPick {
     const { org, project, tier, warnings } = input;
-    const chain = modelChain(tier, org, connectedModels(sources.connections), {
+    const available = connectedModels(sources.connections);
+    const own = input.prefer && input.prefer.length > 0;
+    const chain = modelChain(tier, org, available, {
         unattended: input.unattended,
-        ...(input.prefer && input.prefer.length > 0 ? { prefer: input.prefer } : {}),
+        ...(own ? { prefer: input.prefer } : {}),
     });
+    // 06 §25: the user's default model for everyone without a model of their own; the tier's chain behind it.
+    const usual = own ? undefined : usableDefault(sources, project, available, input.unattended);
+    if (usual) {
+        const family = usual.family ?? inferFamily(usual.model);
+        const reviewerOf = input.reviewerOf?.toLowerCase();
+        const fallbacks = [
+            ...sources.settings
+                .get()
+                .fallbackModels.flatMap((ref) =>
+                    available.filter(
+                        (model) =>
+                            model.connectionId === ref.connectionId &&
+                            model.model === ref.model &&
+                            !(input.unattended && model.channel === SUBSCRIPTION_CHANNEL),
+                    ),
+                ),
+            ...chain,
+        ]
+            .filter(
+                (model, index, list) =>
+                    !(model.connectionId === usual.connectionId && model.model === usual.model) &&
+                    list.findIndex(
+                        (other) => other.connectionId === model.connectionId && other.model === model.model,
+                    ) === index,
+            )
+            .map((model) => ({
+                ref: { connectionId: model.connectionId, model: model.model },
+                ...(model.family ? { family: model.family } : {}),
+            }));
+        return {
+            ref: { connectionId: usual.connectionId, model: usual.model },
+            ...(family ? { family } : {}),
+            effort: effortOf(org.tiers[tier].effort),
+            fallbacks,
+            ...(reviewerOf !== undefined ? { crossFamily: family !== undefined && family !== reviewerOf } : {}),
+        };
+    }
     const reviewer = input.reviewerOf !== undefined ? pickReviewerModel(input.reviewerOf, chain) : undefined;
     const picked = input.reviewerOf !== undefined ? reviewer?.model : chain[0];
     const toRef = (model: ResolvedModel) => ({
@@ -142,6 +209,9 @@ export function runChannels(
 ): string[] {
     const available = connectedModels(sources.connections);
     const channels = new Set<string>();
+    // 06 §25: agents run on the default model when it can run here.
+    const usual = usableDefault(sources, project, available, unattended);
+    if (usual) return [usual.channel ?? 'custom'];
     for (const tier of tiers) {
         const head = modelChain(tier, org, available, { unattended })[0];
         if (head) {

@@ -638,7 +638,7 @@ const ASSISTANT_TOOLS: HostToolProvider['tools'] = [
     },
 ];
 
-function candidateLines(candidates: readonly SkillCandidate[]): string {
+export function candidateLines(candidates: readonly SkillCandidate[]): string {
     return candidates
         .map(
             (item, index) =>
@@ -1748,13 +1748,36 @@ export class MemberService {
         return threads.get(thread.id);
     }
 
-    #assistantProvider(threadId: string, projectId: string): HostToolProvider {
-        const hub: HubOptions = {
+    /** GitHub access for skill searches: the host's fetch, and a token from the environment when there is one. */
+    #hub(): HubOptions {
+        return {
             ...(this.#deps.hub ?? {}),
             ...(this.#deps.hub?.token === undefined && (process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN)
                 ? { token: process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN }
                 : {}),
         };
+    }
+
+    /** Skills on GitHub about a capability (06 §21), for whoever designs members: the chief assistant (06 §26). */
+    findSkills(query: string): Promise<SkillCandidate[]> {
+        return searchSkills(query, this.#hub());
+    }
+
+    /**
+     * Installs a skill a search of that conversation returned (`found`), once its card is approved, into the skill
+     * library; for the chief assistant designing a member (06 §26).
+     */
+    installFound(
+        threadId: string,
+        projectId: string,
+        args: Record<string, unknown>,
+        found: ReadonlyMap<string, SkillCandidate>,
+    ): Promise<HostToolResult> {
+        return this.#installForAssistant(threadId, projectId, args, found, this.#hub());
+    }
+
+    #assistantProvider(threadId: string, projectId: string): HostToolProvider {
+        const hub = this.#hub();
         const found = new Map<string, SkillCandidate>();
         return {
             tools: ASSISTANT_TOOLS,

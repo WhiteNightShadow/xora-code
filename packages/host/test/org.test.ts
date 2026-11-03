@@ -180,6 +180,40 @@ describe('the organization chart', () => {
         await ui.request('team.stop', { runId: run.id });
     });
 
+    it('starts a hands-off L3 run although a member has full access: it works there with editing only', async () => {
+        server.respondWith((request) =>
+            (request.body as ChatBody | undefined)?.messages ? say('先看看。') : undefined,
+        );
+        const { ui, project } = await setUp();
+        const coder = (await ui.request('member.list', { projectId: project.id })).find(
+            (member) => member.id === 'coder',
+        );
+        await ui.request('member.save', {
+            projectId: project.id,
+            scope: 'user',
+            member: {
+                id: 'coder',
+                name: coder?.name ?? '编码',
+                role: 'executor',
+                category: 'coding',
+                tier: 'economy',
+                mode: 'full',
+                prompt: coder?.prompt ?? '',
+            },
+        });
+        await expect(
+            ui.request('team.start', { projectId: project.id, goal: '整理一下', autonomy: 'L3' }),
+        ).rejects.toThrow('花费上限');
+        const run = await ui.request('team.start', {
+            projectId: project.id,
+            goal: '整理一下',
+            autonomy: 'L3',
+            budget: 5,
+        });
+        expect(run).toMatchObject({ autonomy: 'L3', permission: 'auto_edit' });
+        await ui.request('team.stop', { runId: run.id });
+    });
+
     it('lets the chief build the team when asked', async () => {
         const chief = (body: ChatBody) =>
             textOf(body.messages.find((message) => message.role === 'system')?.content).includes(

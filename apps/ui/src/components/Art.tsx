@@ -19,20 +19,23 @@ export function LogoMark({ size = 24, className }: { size?: number; className?: 
                 stroke="rgba(0,0,0,0.14)"
                 strokeWidth="0.5"
             />
-            <path
-                d="M10.18 6.18A6.62 6.62 0 1 0 16.96 15.72A5.93 5.93 0 0 1 10.18 6.18Z"
-                fill="none"
-                stroke="#111"
-                strokeWidth="1.25"
-                strokeLinejoin="round"
-            />
-            <path d="M15.1 10.08L19.16 12.75L16.96 15.72" fill="none" stroke="#111" strokeWidth="0.45" />
-            <path
-                d="M15.1 7.41C15.55 9.62 15.55 9.62 17.77 10.08C15.55 10.53 15.55 10.53 15.1 12.75C14.64 10.53 14.64 10.53 12.43 10.08C14.64 9.62 14.64 9.62 15.1 7.41Z"
-                fill="#111"
-            />
-            <circle cx="19.16" cy="12.75" r="0.6" fill="#111" />
-            <circle cx="16.96" cy="15.72" r="0.6" fill="#111" />
+            {/* Centred like the icon's drawing (icon.svg): a little smaller, by its weight. */}
+            <g transform="translate(12.27 11.87) scale(0.92) translate(-11.87 -12.77)">
+                <path
+                    d="M10.18 6.18A6.62 6.62 0 1 0 16.96 15.72A5.93 5.93 0 0 1 10.18 6.18Z"
+                    fill="none"
+                    stroke="#111"
+                    strokeWidth="1.25"
+                    strokeLinejoin="round"
+                />
+                <path d="M15.1 10.08L19.16 12.75L16.96 15.72" fill="none" stroke="#111" strokeWidth="0.45" />
+                <path
+                    d="M15.1 7.41C15.55 9.62 15.55 9.62 17.77 10.08C15.55 10.53 15.55 10.53 15.1 12.75C14.64 10.53 14.64 10.53 12.43 10.08C14.64 9.62 14.64 9.62 15.1 7.41Z"
+                    fill="#111"
+                />
+                <circle cx="19.16" cy="12.75" r="0.6" fill="#111" />
+                <circle cx="16.96" cy="15.72" r="0.6" fill="#111" />
+            </g>
         </svg>
     );
 }

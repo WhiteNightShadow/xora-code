@@ -82,7 +82,7 @@ import {
     validateAutonomy,
 } from '@xora/workflows';
 import { headCommit, releasePort } from '@xora/workspace';
-import { type ModelPick, pickTierModel, runChannels } from './agent-models.ts';
+import { followsDefaultModel, type ModelPick, pickTierModel, runChannels } from './agent-models.ts';
 import type { ApprovalOutcome, ApprovalService } from './approvals.ts';
 import type { Bus } from './bus.ts';
 import type { ConnectionService } from './connections.ts';
@@ -460,6 +460,8 @@ const TEXT = bilingual(
         projectMissing: (folder: string) => `项目文件夹不存在：${folder}`,
         emptyGoal: '目标不能为空',
         autonomyProblems: (problems: readonly string[]) => problems.join('；'),
+        l3Subscription: 'L3没人看着，不用订阅额度：给团队连一个按量计费的模型（api、本地或自定义）',
+        l3Budget: 'L3没人看着，要给这次运行设一个花费上限',
         noSupervisor: '组织里没有主管',
         noGroup: (id: string) => `没有小组${id}`,
         uncommitted: '项目里有没提交的改动：各任务的worktree从最近一次提交开始，看不到这些改动',
@@ -572,6 +574,9 @@ const TEXT = bilingual(
         projectMissing: (folder) => `The project folder does not exist: ${folder}`,
         emptyGoal: 'The goal cannot be empty',
         autonomyProblems: (problems) => problems.join('; '),
+        l3Subscription:
+            'Nobody watches an L3 run, so it does not use subscription quotas: connect a pay-as-you-go model (api, local or custom)',
+        l3Budget: 'Nobody watches an L3 run: give it a spending cap',
         noSupervisor: 'The organization has no supervisor',
         noGroup: (id: string) => `No group ${id}`,
         uncommitted:
@@ -729,6 +734,14 @@ function memberMode(own: PermissionMode, writable: boolean, run: WorkflowRunMode
     return MODE_ORDER.indexOf(base) >= MODE_ORDER.indexOf(run) ? base : run;
 }
 
+/**
+ * Nobody watches an L3 run until its report: a member with full access works there with editing only, the way the
+ * run's own full access is capped (06 §26). High-risk and grave actions still ask.
+ */
+function unwatched(mode: PermissionMode, autonomy: AutonomyLevel): PermissionMode {
+    return autonomy === 'L3' && mode === 'full' ? 'auto_edit' : mode;
+}
+
 function clampParallel(value: number): number {
     return Math.min(MAX_PARALLEL, Math.max(MIN_PARALLEL, Math.round(value)));
 }
@@ -836,15 +849,23 @@ export class TeamService {
         const currency = settings.get().currency;
         const limit =
             input.budget ?? (org.budgets.currency === currency && org.budgets.perRun ? org.budgets.perRun : undefined);
+        // Members with full access do not stop an L3 run: they work there with editing only (`unwatched`).
         const checked = validateAutonomy(autonomy, {
             channels: this.#channels(org, autonomy, project),
             ...(limit !== undefined ? { budget: limit } : {}),
-            modes: org.roster.map((agent) => agent.mode),
         });
         if (!checked.ok) {
             throw new RpcError(
                 RpcErrorCode.Rejected,
-                text.autonomyProblems(checked.problems.map((problem) => problem.message)),
+                text.autonomyProblems(
+                    checked.problems.map((problem) =>
+                        problem.code === 'subscription_channel'
+                            ? text.l3Subscription
+                            : problem.code === 'missing_budget'
+                              ? text.l3Budget
+                              : problem.message,
+                    ),
+                ),
             );
         }
         // A group's lead supervises the run and its members are the staff (06 §24).
@@ -1073,7 +1094,11 @@ export class TeamService {
     #pinned(state: RunState, taskId: string): boolean {
         const info = state.host.tasks[taskId];
         const memberId = info?.specId ?? info?.preset?.memberId;
-        return Boolean(info?.preset?.model || (memberId && state.host.staff?.[memberId]?.model));
+        // 06 §25: with everyone on the default model a stronger tier is the same model: the supervisor decides.
+        return (
+            Boolean(info?.preset?.model || (memberId && state.host.staff?.[memberId]?.model)) ||
+            followsDefaultModel(this.#deps)
+        );
     }
 
     /** Who works a card and with what, for the views: what it will get before it starts, what it runs with after. */
@@ -1100,7 +1125,9 @@ export class TeamService {
             memberId: agent.id,
             ...(model ? { model } : {}),
             ...(preset.effort ? { effort: preset.effort } : {}),
-            mode: !writable ? 'plan' : (preset.mode ?? memberMode(agent.mode, writable, state.host.permission)),
+            mode: !writable
+                ? 'plan'
+                : unwatched(preset.mode ?? memberMode(agent.mode, writable, state.host.permission), state.run.autonomy),
             ...(info?.preset || state.host.staff?.[agent.id] ? { preset: true } : {}),
         };
     }
@@ -1150,7 +1177,10 @@ export class TeamService {
             if (!agent || !thread) {
                 continue;
             }
-            const mode = memberMode(agent.mode, task.card.workspace !== 'readonly', state.host.permission);
+            const mode = unwatched(
+                memberMode(agent.mode, task.card.workspace !== 'readonly', state.host.permission),
+                state.run.autonomy,
+            );
             if (thread.mode !== mode) {
                 this.#deps.threads.update(thread.id, { mode });
                 this.#deps.threads.append(thread.id, 'thread.config', { mode });
@@ -2988,7 +3018,9 @@ export class TeamService {
         }
         const owner = task.owner ?? `${agent.id}-${taskId}`;
         // A read-only card plans whatever was set; otherwise what the user set, else the member's and the run's.
-        const mode = !writable ? 'plan' : (preset.mode ?? memberMode(agent.mode, writable, state.host.permission));
+        const mode = !writable
+            ? 'plan'
+            : unwatched(preset.mode ?? memberMode(agent.mode, writable, state.host.permission), state.run.autonomy);
         const thread = this.#createThread(state, {
             title: `${taskId}·${shorten(card.title, 30)}`,
             role: agent.role,

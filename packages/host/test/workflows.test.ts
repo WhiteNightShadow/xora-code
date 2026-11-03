@@ -64,7 +64,10 @@ async function startHost(dataDir: string): Promise<Harness> {
         log: quiet,
     });
     // These runs test the user's own answers to approval cards (06 §24 has the supervisor's).
-    core.settings.update({ approvals: { reviewer: 'user' } });
+    core.settings.update({
+        approvals: { reviewer: 'user' },
+        team: { ...core.settings.get().team, models: 'tiers' },
+    });
     const channel = new MessageChannel();
     const hostSide = core.connectUi(domPortTransport(channel.port1));
     const ui: Ui = new RpcPeer(domPortTransport(channel.port2), { methods, notifications, timeoutMs: 60_000 });

@@ -61,7 +61,12 @@ export function hosts(engineEntry: () => string) {
          */
         async start(
             dataDir: string,
-            extra: { readonly fetch?: typeof fetch; readonly reviewer?: 'supervisor' | 'user' } = {},
+            extra: {
+                readonly fetch?: typeof fetch;
+                readonly reviewer?: 'supervisor' | 'user';
+                /** The model agents run on (06 §25): the tests pick by tier unless they test the default model. */
+                readonly models?: 'default' | 'tiers';
+            } = {},
         ): Promise<Harness> {
             const shell = shells.get(dataDir) ?? new MemoryShell({ dataDir });
             shells.set(dataDir, shell);
@@ -75,7 +80,10 @@ export function hosts(engineEntry: () => string) {
                 log: quiet,
                 ...(extra.fetch ? { fetch: extra.fetch } : {}),
             });
-            core.settings.update({ approvals: { reviewer: extra.reviewer ?? 'user' } });
+            core.settings.update({
+                approvals: { reviewer: extra.reviewer ?? 'user' },
+                team: { ...core.settings.get().team, models: extra.models ?? 'tiers' },
+            });
             const channel = new MessageChannel();
             const hostSide = core.connectUi(domPortTransport(channel.port1));
             const ui: Ui = new RpcPeer(domPortTransport(channel.port2), { methods, notifications, timeoutMs: 60_000 });

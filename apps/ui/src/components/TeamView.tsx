@@ -765,6 +765,8 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
     const [autonomy, setAutonomy] = useState<'L0' | 'L1' | 'L2' | 'L3'>(last?.teamAutonomy ?? 'L1');
     const [mode, setMode] = useState<'standard' | 'hypotheses'>(last?.teamMode ?? 'standard');
     const [budget, setBudget] = useState(last?.teamBudget ? String(last.teamBudget) : '');
+    const quiet = useApp((state) => (state.settings?.approvals.reviewer ?? 'supervisor') === 'supervisor');
+    const currency = useApp((state) => state.settings?.currency ?? 'CNY');
     // 06 §21: members act without asking unless the user picks otherwise; high-risk actions always ask.
     const [permission, setPermission] = useState<'default' | 'auto_edit' | 'full'>(last?.teamPermission ?? 'full');
     const defaultParallel = useApp((state) => state.settings?.team.maxParallel ?? 3);
@@ -885,9 +887,14 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
                         value={autonomy}
                         options={(['L0', 'L1', 'L2', 'L3'] as const).map((level) => ({
                             value: level,
-                            label: `${level}：${s.team.levels[level]}`,
+                            // 06 §24: with the supervisor answering approvals, L2 is hands-off.
+                            label: `${level}：${(quiet ? s.team.levelsQuiet : s.team.levels)[level]}`,
                         }))}
-                        onChange={setAutonomy}
+                        onChange={(level) => {
+                            setAutonomy(level);
+                            // Nobody watches L3: it needs a spending cap, suggested here.
+                            if (level === 'L3' && !(Number(budget) > 0)) setBudget(currency === 'USD' ? '3' : '20');
+                        }}
                     />
                 </Field>
                 <Field

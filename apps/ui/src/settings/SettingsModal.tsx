@@ -101,6 +101,18 @@ function General() {
                     onChange={(count) => update({ team: { ...settings.team, maxParallel: Number(count) } })}
                 />
             </Field>
+            {/* 06 §25: the model members run on. */}
+            <Field label={s.settings.teamModels} hint={s.settings.teamModelsHints[settings.team.models ?? 'default']}>
+                <Select
+                    label={s.settings.teamModels}
+                    value={settings.team.models ?? 'default'}
+                    options={[
+                        { value: 'default', label: s.settings.teamModelChoices.default },
+                        { value: 'tiers', label: s.settings.teamModelChoices.tiers },
+                    ]}
+                    onChange={(models) => update({ team: { ...settings.team, models } })}
+                />
+            </Field>
         </div>
     );
 }

@@ -693,7 +693,6 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
     const s = useStrings();
     const members = useApp((state) => state.members);
     const selectedProjectId = useApp((state) => state.selectedProjectId);
-    const project = useApp((state) => state.projects.find((item) => item.id === state.selectedProjectId));
     // A lead of a group is made from the supervisor (06 §24).
     const templates = members.filter((member) => member.source === 'builtin');
     const groups = useApp((state) => state.org?.groups ?? []);
@@ -721,7 +720,8 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
             : []),
     ];
     const [mode, setMode] = useState<PermissionMode>(start?.mode ?? 'ask');
-    const [scope, setScope] = useState<'user' | 'project'>(existing?.source === 'project' ? 'project' : 'user');
+    // 06 §26: a member belongs to the organization and works in every project; one a project defined stays there.
+    const scope: 'user' | 'project' = existing?.source === 'project' ? 'project' : 'user';
     const [busy, setBusy] = useState(false);
     const pick = (id: string) => {
         const next = templates.find((member) => member.id === id);
@@ -853,19 +853,6 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                         />
                     </Field>
                 )}
-                {!existing && project && (
-                    <Field label={s.members.scope}>
-                        <Select
-                            label={s.members.scope}
-                            value={scope}
-                            options={[
-                                { value: 'user', label: s.members.scopeUser },
-                                { value: 'project', label: format(s.members.scopeProject, { project: project.name }) },
-                            ]}
-                            onChange={setScope}
-                        />
-                    </Field>
-                )}
                 <div className="row">
                     <button
                         type="button"
@@ -886,20 +873,28 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
 
 /** The members page in the main area (06 §19): every member as a card, or one member in full. */
 /**
- * 06 §21: "design a member in a conversation": the user says what they need, and the organization assistant asks,
- * finds skills on GitHub, installs the ones the user approves and saves the member, in a thread of its own.
+ * 06 §26: "design a member in a conversation" is the chief assistant's work. The user says what they need and which
+ * group it joins; the chief asks what it must, finds skills on GitHub when they help, installs them (a card each)
+ * and saves the member in that group. A member belongs to the organization, not to a project.
  */
-export function AssistantDialog({ onClose }: { onClose: () => void }) {
+export function AssistantDialog({ onClose, groupId: initial }: { onClose: () => void; groupId?: string }) {
     const s = useStrings();
     const projects = useApp((state) => state.projects);
     const selected = useApp((state) => state.selectedProjectId);
-    const [projectId, setProjectId] = useState(selected ?? projects[0]?.id ?? '');
+    const groups = useApp((state) => state.org?.groups ?? []);
+    const [groupId, setGroupId] = useState(initial ?? groups[0]?.id ?? '');
     const [text, setText] = useState('');
     const [busy, setBusy] = useState(false);
+    // The chief's conversation starts somewhere; the member it makes works in every project.
+    const projectId = projects.some((project) => project.id === selected) ? (selected ?? '') : (projects[0]?.id ?? '');
     const start = async () => {
+        const group = groups.find((item) => item.id === groupId);
+        const request = group
+            ? format(s.members.assistantRequest, { group: group.name, text: text.trim() })
+            : format(s.members.assistantRequestLoose, { text: text.trim() });
         setBusy(true);
         const thread = await attempt(() =>
-            host.call('member.assistant', { projectId, text: text.trim() }, { timeoutMs: 120_000 }),
+            host.call('chief.start', { projectId, text: request }, { timeoutMs: 120_000 }),
         );
         setBusy(false);
         if (thread) {
@@ -920,13 +915,16 @@ export function AssistantDialog({ onClose }: { onClose: () => void }) {
                         onChange={(event) => setText(event.target.value)}
                     />
                 </Field>
-                {projects.length > 1 && (
-                    <Field label={s.members.assistantProject}>
+                {groups.length > 0 && (
+                    <Field label={s.org.group} hint={s.org.groupHint}>
                         <Select
-                            label={s.members.assistantProject}
-                            value={projectId}
-                            options={projects.map((project) => ({ value: project.id, label: project.name }))}
-                            onChange={setProjectId}
+                            label={s.org.group}
+                            value={groupId}
+                            options={[
+                                ...groups.map((group) => ({ value: group.id, label: group.name })),
+                                { value: '', label: s.org.noGroup },
+                            ]}
+                            onChange={setGroupId}
                         />
                     </Field>
                 )}

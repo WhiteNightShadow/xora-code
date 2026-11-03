@@ -68,7 +68,10 @@ async function startHost(dataDir: string): Promise<Harness> {
         log: quiet,
     });
     // These runs test the user's own answers to approval cards (06 §24 has the supervisor's).
-    core.settings.update({ approvals: { reviewer: 'user' } });
+    core.settings.update({
+        approvals: { reviewer: 'user' },
+        team: { ...core.settings.get().team, models: 'tiers' },
+    });
     const channel = new MessageChannel();
     const hostSide = core.connectUi(domPortTransport(channel.port1));
     const ui: Ui = new RpcPeer(domPortTransport(channel.port2), { methods, notifications, timeoutMs: 60_000 });
@@ -422,7 +425,12 @@ describe('agent team run', () => {
         }, 'run done');
         expect(done.status).toBe('done');
         expect(again.map((approval) => approval.toolName)).toEqual(['team_delivery', 'acceptance']);
-        // Nothing more for the team after the restart: the one request is the report for the user (06 §22).
+        // Nothing more for the team after the restart: the one request is the report for the user (06 §22), written
+        // once the run is over.
+        await waitFor(async () => {
+            const run = await second.ui.request('team.get', { runId: started.id });
+            return run.brief?.status === 'ready' || run.brief?.status === 'failed' ? run : undefined;
+        }, 'the report');
         expect(server.requests.slice(before).map((request) => agentOf(request.body as ChatBody | undefined))).toEqual([
             'none',
         ]);

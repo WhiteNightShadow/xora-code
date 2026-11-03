@@ -66,7 +66,8 @@ export function TeamOrgPage() {
     const selectedProjectId = useApp((state) => state.selectedProjectId);
     const reviewer = useApp((state) => state.settings?.approvals.reviewer ?? 'supervisor');
     const [editing, setEditing] = useState<Editing | undefined>();
-    const [assisting, setAssisting] = useState(false);
+    // The group a member made in a conversation joins (06 §26); absent: the dialog is closed.
+    const [assisting, setAssisting] = useState<{ groupId?: string } | undefined>();
     const [group, setGroup] = useState<OrgGroup | 'new' | undefined>();
     const [templating, setTemplating] = useState(false);
     const [showRemoved, setShowRemoved] = useState(false);
@@ -99,7 +100,7 @@ export function TeamOrgPage() {
                         <button type="button" className="button" onClick={() => setEditing({})}>
                             <Icon name="plus" size={14} /> {s.members.create}
                         </button>
-                        <button type="button" className="button button--primary" onClick={() => setAssisting(true)}>
+                        <button type="button" className="button button--primary" onClick={() => setAssisting({})}>
                             <Icon name="message" size={14} /> {s.members.assistant}
                         </button>
                     </>
@@ -125,7 +126,17 @@ export function TeamOrgPage() {
                     </div>
                     <div className="org__groups">
                         {org.groups.map((item) => (
-                            <GroupCard key={item.id} group={item} byId={byId} onEdit={() => setGroup(item)} />
+                            <GroupCard
+                                key={item.id}
+                                group={item}
+                                byId={byId}
+                                onEdit={() => setGroup(item)}
+                                onAdd={(how) =>
+                                    how === 'form'
+                                        ? setEditing({ groupId: item.id })
+                                        : setAssisting({ groupId: item.id })
+                                }
+                            />
                         ))}
                         {org.groups.length === 0 && <p className="org__empty">{s.org.noGroups}</p>}
                     </div>
@@ -170,14 +181,30 @@ export function TeamOrgPage() {
                 </div>
             )}
             {editing && <MemberEditor editing={editing} onClose={() => setEditing(undefined)} />}
-            {assisting && <AssistantDialog onClose={() => setAssisting(false)} />}
+            {assisting && (
+                <AssistantDialog
+                    onClose={() => setAssisting(undefined)}
+                    {...(assisting.groupId ? { groupId: assisting.groupId } : {})}
+                />
+            )}
             {group && <GroupEditor group={group === 'new' ? undefined : group} onClose={() => setGroup(undefined)} />}
             {templating && <TemplateDialog onClose={() => setTemplating(false)} />}
         </div>
     );
 }
 
-function GroupCard({ group, byId, onEdit }: { group: OrgGroup; byId: Map<string, Member>; onEdit: () => void }) {
+function GroupCard({
+    group,
+    byId,
+    onEdit,
+    onAdd,
+}: {
+    group: OrgGroup;
+    byId: Map<string, Member>;
+    onEdit: () => void;
+    /** A new member for this group: from the form, or in a conversation with the chief. */
+    onAdd: (how: 'form' | 'chat') => void;
+}) {
     const s = useStrings();
     const projects = useApp((state) => state.projects);
     const selectedProjectId = useApp((state) => state.selectedProjectId);
@@ -217,6 +244,40 @@ function GroupCard({ group, byId, onEdit }: { group: OrgGroup; byId: Map<string,
                     >
                         <Icon name="send" size={12} /> {s.org.handTo}
                     </button>
+                    <Popover
+                        label={s.org.addMember}
+                        placement="down"
+                        align="end"
+                        triggerClassName="button button--small"
+                        trigger={
+                            <>
+                                <Icon name="plus" size={12} /> {s.org.addMember}
+                            </>
+                        }
+                    >
+                        {(close) => (
+                            <div className="menu-list">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        close();
+                                        onAdd('chat');
+                                    }}
+                                >
+                                    <Icon name="message" size={13} /> {s.members.assistant}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        close();
+                                        onAdd('form');
+                                    }}
+                                >
+                                    <Icon name="pencil" size={13} /> {s.members.create}
+                                </button>
+                            </div>
+                        )}
+                    </Popover>
                     <button type="button" className="button button--small" onClick={onEdit}>
                         {s.org.editGroup}
                     </button>

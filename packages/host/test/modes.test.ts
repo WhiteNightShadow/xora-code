@@ -490,7 +490,7 @@ describe('team runs', () => {
         // A run that does not start remembers nothing.
         await expect(
             ui.request('team.start', { projectId: project.id, goal: '没有预算', autonomy: 'L3' }),
-        ).rejects.toThrow('L3 needs a budget');
+        ).rejects.toThrow('要给这次运行设一个花费上限');
         expect(settings).toEqual([]);
 
         const first = await ui.request('team.start', {
