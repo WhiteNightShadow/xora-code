@@ -2,7 +2,18 @@ import type { TeamRun, TeamTask } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
-import { attempt, loadMembers, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
+import {
+    ALL_PROJECTS,
+    attempt,
+    loadMembers,
+    openMembers,
+    openRun,
+    openTeamBoard,
+    selectThread,
+    toast,
+    useApp,
+    useStrings,
+} from '../store.ts';
 import { format } from '../strings.ts';
 import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
@@ -333,14 +344,17 @@ function StaffEditor({ run, task, onClose }: { run: TeamRun; task: TeamTask; onC
 }
 
 /** The project's team board (03): its team runs, running ones first, archived ones apart, and a new run. */
+/** The team runs of one project or of all (`ALL_PROJECTS`), the ones under way first, and a new run. */
 export function TeamBoard({ projectId }: { projectId: string }) {
     const s = useStrings();
-    const project = useApp((state) => state.projects.find((item) => item.id === projectId));
+    const projects = useApp((state) => state.projects);
+    const all = projectId === ALL_PROJECTS;
     const allRuns = useApp((state) => state.teamRuns);
+    const selectedProjectId = useApp((state) => state.selectedProjectId);
     const [showArchived, setShowArchived] = useState(false);
     const load = () => {
         void host
-            .call('team.list', { projectId })
+            .call('team.list', all ? {} : { projectId })
             .then((runs) =>
                 useApp.setState((state) => ({
                     teamRuns: { ...state.teamRuns, ...Object.fromEntries(runs.map((run) => [run.id, run])) },
@@ -348,14 +362,19 @@ export function TeamBoard({ projectId }: { projectId: string }) {
             )
             .catch((error) => toast(errorMessage(error), 'error'));
     };
+    // biome-ignore lint/correctness/useExhaustiveDependencies: `all` follows `projectId`
     useEffect(load, [projectId]);
     const runs = Object.values(allRuns)
-        .filter((run) => run.projectId === projectId)
+        .filter((run) => all || run.projectId === projectId)
         .sort((a, b) => b.updatedAt - a.updatedAt);
+    const projectName = (id: string) => projects.find((project) => project.id === id)?.name ?? '';
     const running = runs.filter((run) => !TEAM_TERMINAL.includes(run.status));
     const finished = runs.filter((run) => TEAM_TERMINAL.includes(run.status) && !run.archived);
     const archived = runs.filter((run) => TEAM_TERMINAL.includes(run.status) && run.archived);
-    const start = () => useApp.setState({ teamStartFor: projectId });
+    const start = () =>
+        useApp.setState({
+            teamStartFor: all ? (selectedProjectId ?? projects[0]?.id) : projectId,
+        });
     const row = (run: TeamRun) => {
         const done = run.tasks.filter((task) => task.status === 'done').length;
         const working = run.tasks.filter((task) =>
@@ -363,16 +382,13 @@ export function TeamBoard({ projectId }: { projectId: string }) {
         ).length;
         return (
             <div key={run.id} className="team-board__run">
-                <button
-                    type="button"
-                    className="team-board__open"
-                    onClick={() => useApp.setState({ teamRunId: run.id, teamsFor: undefined })}
-                >
+                <button type="button" className="team-board__open" onClick={() => openRun('team', run.id)}>
                     <Badge tone={run.status === 'done' ? 'ok' : run.status === 'failed' ? 'error' : 'accent'}>
                         {s.team.statuses[run.status]}
                     </Badge>
                     <span className="team-board__goal">{run.goal}</span>
                     <span className="team-board__meta">
+                        {all && projects.length > 1 ? `${projectName(run.projectId)} · ` : ''}
                         {run.tasks.length > 0 && format(s.team.progressCount, { done, total: run.tasks.length })}
                         {working > 0 && ` · ${format(s.team.membersWorking, { count: working })}`}
                         {` · ${relativeTime(run.updatedAt)}`}
@@ -392,9 +408,20 @@ export function TeamBoard({ projectId }: { projectId: string }) {
             <header className="wf-board__header">
                 <div className="wf-board__title">
                     <h1>{s.sidebar.teams}</h1>
-                    <span className="wf-board__project">{project?.name}</span>
                 </div>
                 <div className="row">
+                    {projects.length > 1 && (
+                        <Select
+                            compact
+                            label={s.sidebar.project}
+                            value={projectId}
+                            options={[
+                                { value: ALL_PROJECTS, label: s.sidebar.allProjects },
+                                ...projects.map((project) => ({ value: project.id, label: project.name })),
+                            ]}
+                            onChange={(value) => openTeamBoard(value)}
+                        />
+                    )}
                     <IconButton icon="refresh" label={s.common.refresh} onClick={load} />
                     <button type="button" className="button" onClick={() => openMembers()}>
                         <Icon name="users" size={14} /> {s.sidebar.members}
@@ -719,8 +746,11 @@ export function TeamView({ runId }: { runId: string }) {
     );
 }
 
-export function TeamStartDialog({ projectId }: { projectId: string }) {
+export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
     const s = useStrings();
+    // Opened from the board of every project, it starts where the user picks.
+    const projects = useApp((state) => state.projects);
+    const [projectId, setProjectId] = useState(initial);
     // Starts from what the user chose last time (the host remembers it on each start).
     const last = useApp((state) => state.settings?.lastChoices);
     const [goal, setGoal] = useState('');
@@ -736,9 +766,10 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
     const connected = useApp((state) => state.models);
     const [staffMode, setStaffMode] = useState<'auto' | 'manual'>('auto');
     const [staff, setStaff] = useState<Record<string, { model: string; effort: string; mode: string }>>({});
+    // The members of the project the run starts in: project members differ between projects.
     useEffect(() => {
-        if (members.length === 0) void loadMembers(projectId);
-    }, [members.length, projectId]);
+        void loadMembers(projectId);
+    }, [projectId]);
     const chosen = Object.entries(staff);
     const toggle = (memberId: string) =>
         setStaff((current) => {
@@ -791,6 +822,19 @@ export function TeamStartDialog({ projectId }: { projectId: string }) {
     return (
         <Modal title={s.team.start} onClose={close}>
             <div className="dialog">
+                {projects.length > 1 && (
+                    <Field label={s.sidebar.project}>
+                        <Select
+                            label={s.sidebar.project}
+                            value={projectId}
+                            options={projects.map((project) => ({ value: project.id, label: project.name }))}
+                            onChange={(value) => {
+                                setProjectId(value);
+                                setStaff({});
+                            }}
+                        />
+                    </Field>
+                )}
                 <Field label={s.team.goal} hint={s.team.goalHint}>
                     <textarea
                         className="textarea"

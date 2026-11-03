@@ -1,10 +1,21 @@
 import type { WorkflowInfo, WorkflowRun, WorkflowRunMode } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
-import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
+import { attempt, openRun, openWorkflowBoard, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { Icon, type IconName } from './Icon.tsx';
-import { Badge, Empty, Field, formatMoney, IconButton, Modal, relativeTime, Spinner, Toggle } from './primitives.tsx';
+import {
+    Badge,
+    Empty,
+    Field,
+    formatMoney,
+    IconButton,
+    Modal,
+    relativeTime,
+    Select,
+    Spinner,
+    Toggle,
+} from './primitives.tsx';
 
 const RUN_MODES: WorkflowRunMode[] = ['default', 'auto_edit', 'full'];
 export const RUN_MODE_ICONS: Record<WorkflowRunMode, IconName> = {
@@ -264,7 +275,8 @@ function WorkflowCard({
 /** A project's workflows in the main area: what they are, how to make one, each with its run form, and the runs. */
 export function WorkflowBoard({ projectId }: { projectId: string }) {
     const s = useStrings();
-    const project = useApp((state) => state.projects.find((item) => item.id === projectId));
+    const projects = useApp((state) => state.projects);
+    const project = projects.find((item) => item.id === projectId);
     const allRuns = useApp((state) => state.workflowRuns);
     const [list, setList] = useState<WorkflowInfo[] | undefined>();
     const [trusting, setTrusting] = useState(false);
@@ -303,9 +315,19 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
             <header className="wf-board__header">
                 <div className="wf-board__title">
                     <h1>{s.workflow.title}</h1>
-                    <span className="wf-board__project">{project?.name}</span>
+                    {projects.length <= 1 && <span className="wf-board__project">{project?.name}</span>}
                 </div>
                 <div className="row">
+                    {/* Workflows belong to a project: one entry for all, the project picked here. */}
+                    {projects.length > 1 && (
+                        <Select
+                            compact
+                            label={s.sidebar.project}
+                            value={projectId}
+                            options={projects.map((item) => ({ value: item.id, label: item.name }))}
+                            onChange={(value) => openWorkflowBoard(value)}
+                        />
+                    )}
                     <IconButton icon="refresh" label={s.common.refresh} onClick={load} />
                     <button type="button" className="button button--primary" onClick={create}>
                         <Icon name="plus" size={14} /> {s.workflow.create}
@@ -366,7 +388,7 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
                                 key={run.id}
                                 type="button"
                                 className="wf-board__run"
-                                onClick={() => useApp.setState({ workflowRunId: run.id, workflowsFor: undefined })}
+                                onClick={() => openRun('workflow', run.id)}
                             >
                                 <Badge tone={runTone(run.status)}>{s.workflow.statuses[run.status]}</Badge>
                                 <span className="wf-board__run-title">{run.title}</span>
@@ -390,7 +412,7 @@ export function WorkflowBoard({ projectId }: { projectId: string }) {
                                 key={run.id}
                                 type="button"
                                 className="wf-board__run"
-                                onClick={() => useApp.setState({ workflowRunId: run.id, workflowsFor: undefined })}
+                                onClick={() => openRun('workflow', run.id)}
                             >
                                 <Badge tone={runTone(run.status)}>{s.workflow.statuses[run.status]}</Badge>
                                 <span className="wf-board__run-title">{run.title}</span>

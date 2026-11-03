@@ -125,6 +125,21 @@ server.respondWith((request) => {
         | { messages?: Array<{ role: string }>; tools?: Array<{ function?: { name?: string } }> }
         | undefined;
     const messages = body?.messages ?? [];
+    // The chief assistant (06 §23) hands the job to the scout, then says so.
+    if (body?.tools?.some((tool) => tool.function?.name === 'member_dispatch')) {
+        return messages.at(-1)?.role === 'tool'
+            ? openaiText('交给侦察了，它看完我告诉你。')
+            : openaiToolCalls([
+                  {
+                      name: 'member_dispatch',
+                      arguments: JSON.stringify({ member: 'scout', brief: '看看hello.txt里写了什么' }),
+                  },
+              ]);
+    }
+    // The scout the chief handed the job to answers it.
+    if (messages.at(-1)?.role === 'user' && JSON.stringify(messages.at(-1)).includes('看看hello.txt里写了什么')) {
+        return openaiText('hello.txt里只有一行：hello world。');
+    }
     // The brief of a finished run: a request without tools that asks for the three headings.
     if (!body?.tools?.length && JSON.stringify(messages).includes('## 目标达成')) {
         return openaiText(
@@ -322,6 +337,9 @@ try {
     await hostCall(page, 'project.add', { path: repo });
     await page.locator('.project__name', { hasText: 'repo' }).waitFor();
     await step(page, '打开项目');
+    // With a model and a project, the home is the chief assistant (06 §23).
+    await page.locator('.chief-home textarea').waitFor();
+    await step(page, '首页是总助手');
 
     // New things start from the project's "+": a thread, a team or a workflow.
     await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
@@ -483,9 +501,9 @@ try {
         await stop.click();
         await page.locator('.team .badge', { hasText: /已停止|已暂停|失败/ }).waitFor();
     }
-    // A run that is over can be archived; the project's team board lists it apart and can delete it (03).
+    // A run that is over can be archived; the team board lists it apart and can delete it (03).
     await page.locator('.team').getByRole('button', { name: '归档', exact: true }).click();
-    await page.locator('.project__board', { hasText: '团队' }).first().click();
+    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
     await page
         .locator('.team-board')
         .getByRole('button', { name: /已归档/ })
@@ -504,7 +522,7 @@ try {
         path.join(repo, '.xora', 'workflows', 'tidy.yaml'),
         'name: tidy\ntitle: 整理文件\nsteps:\n  - id: done\n    gate: human\n    message: 整理好了吗\n',
     );
-    await page.locator('.project__board', { hasText: '工作流' }).first().click();
+    await page.locator('.sidebar__nav', { hasText: '工作流' }).click();
     await page.locator('.wf-board').getByRole('button', { name: '新建工作流', exact: true }).click();
     await page.locator('.modal textarea').pressSequentially('每天跑一遍测试');
     if ((await page.locator('.modal textarea').inputValue()) !== '每天跑一遍测试') {
@@ -616,6 +634,21 @@ try {
     await page.locator('.modal textarea').waitFor();
     await page.locator('.modal').getByRole('button', { name: '取消', exact: true }).click();
     await step(page, '成员页能对话建人');
+    // The chief assistant (06 §23): one place to say what is needed. It hands the job to a member, and a card in its
+    // conversation follows the work to its answer and opens it.
+    await page.locator('.sidebar__nav', { hasText: '总助手' }).click();
+    await page.locator('.chief-home textarea').pressSequentially('让侦察看看hello.txt');
+    await page.locator('.chief-home').getByRole('button', { name: '发送', exact: true }).click();
+    await page.locator('.thread-header h1', { hasText: '总助手：' }).waitFor();
+    const delegation = page.locator('.delegation', { hasText: '侦察' }).first();
+    await delegation.waitFor();
+    await step(page, '总助手把活派给成员，对话里有跟进卡片');
+    await delegation.locator('.badge', { hasText: '已完成' }).waitFor();
+    await delegation.locator('.delegation__summary', { hasText: 'hello world' }).waitFor();
+    await step(page, '派出的活做完，卡片上就是结果');
+    await delegation.locator('.delegation__open').click();
+    await page.locator('.thread-header .member-chip', { hasText: '侦察' }).waitFor();
+    await step(page, '卡片能打开成员的对话');
 } catch (error) {
     reportFailure(error);
     console.error(

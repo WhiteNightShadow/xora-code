@@ -539,6 +539,14 @@ export const methods = {
         params: z.object({ projectId: IdSchema, text: z.string().min(1).max(20_000) }).strict(),
         result: ThreadMetaSchema,
     },
+    /**
+     * A new conversation with the chief assistant (06 §23), the one place the user talks to: it answers, or hands
+     * the work to a member, a team or a workflow in any project. `projectId` is the project it starts in.
+     */
+    'chief.start': {
+        params: z.object({ projectId: IdSchema, text: z.string().min(1).max(50_000) }).strict(),
+        result: ThreadMetaSchema,
+    },
     'member.memory': {
         params: z
             .object({

@@ -5,6 +5,8 @@ import { ItemView } from '../items/ItemView.tsx';
 import { memberOf } from '../members.ts';
 import {
     attempt,
+    isChief,
+    openChief,
     openReview,
     openWorkflowBoard,
     selectThread,
@@ -130,6 +132,16 @@ function Header({ thread }: { thread: ThreadMeta }) {
                 {thread.parent && <ParentLink threadId={thread.parent.threadId} />}
             </div>
             <div className="thread-header__controls">
+                {isChief(thread) && (
+                    <button
+                        type="button"
+                        className="button button--small"
+                        title={s.chief.newChatHint}
+                        onClick={() => openChief(true)}
+                    >
+                        <Icon name="plus" size={13} /> {s.chief.newChat}
+                    </button>
+                )}
                 <Popover
                     label={s.common.more}
                     placement="down"

@@ -78,7 +78,7 @@ interface AppState {
     /** Team run shown in the main area instead of a thread. */
     teamRunId: string | undefined;
     teamStartFor: string | undefined;
-    /** Project whose team board is shown in the main area. */
+    /** The team board in the main area: the runs of one project, or of all (`ALL_PROJECTS`). */
     teamsFor: string | undefined;
     workflowRuns: Record<string, WorkflowRun>;
     /** Workflow run shown in the main area instead of a thread. */
@@ -94,6 +94,8 @@ interface AppState {
     memberId: string | undefined;
     /** The member the "hand it work" dialog is open for. */
     dispatchTo: string | undefined;
+    /** The chief assistant's home in the main area (06 §23); its conversations show as threads. */
+    chiefOpen: boolean;
     toasts: Toast[];
     /** Bumps when usage changes, so open usage views refetch. */
     usageVersion: number;
@@ -134,6 +136,7 @@ export const useApp = create<AppState>(() => ({
     membersOpen: false,
     memberId: undefined,
     dispatchTo: undefined,
+    chiefOpen: false,
     toasts: [],
     usageVersion: 0,
 }));
@@ -357,6 +360,7 @@ export function openMembers(memberId?: string): void {
         workflowRunId: undefined,
         workflowsFor: undefined,
         teamsFor: undefined,
+        chiefOpen: false,
     });
     void loadMembers(get().selectedProjectId);
 }
@@ -384,27 +388,80 @@ export async function startApp(): Promise<void> {
     await loaded;
 }
 
-/** The project's workflow board in the main area: its workflows, how to make one, and its runs. */
-export function openWorkflowBoard(projectId: string): void {
+/** `teamsFor` when the team board shows the runs of every project. */
+export const ALL_PROJECTS = '*';
+
+/**
+ * The workflow board in the main area: a project's workflows, how to make one, and its runs; without a project,
+ * the current one's.
+ */
+export function openWorkflowBoard(projectId?: string): void {
+    const state = get();
+    const target = projectId ?? state.selectedProjectId ?? state.projects[0]?.id;
+    if (!target) return;
     set({
-        workflowsFor: projectId,
+        workflowsFor: target,
         teamsFor: undefined,
         teamRunId: undefined,
         workflowRunId: undefined,
-        selectedProjectId: projectId,
+        selectedProjectId: target,
         membersOpen: false,
+        chiefOpen: false,
     });
 }
 
-/** The project's team board in the main area: its team runs, archived ones apart, and a new run. */
-export function openTeamBoard(projectId: string): void {
+/** The team board in the main area: the team runs of one project, or of every project, and a new run. */
+export function openTeamBoard(projectId: string = ALL_PROJECTS): void {
     set({
         teamsFor: projectId,
         workflowsFor: undefined,
         teamRunId: undefined,
         workflowRunId: undefined,
-        selectedProjectId: projectId,
         membersOpen: false,
+        chiefOpen: false,
+        ...(projectId !== ALL_PROJECTS ? { selectedProjectId: projectId } : {}),
+    });
+}
+
+/** A team or workflow run in the main area. */
+export function openRun(kind: 'team' | 'workflow', runId: string): void {
+    set({
+        teamRunId: kind === 'team' ? runId : undefined,
+        workflowRunId: kind === 'workflow' ? runId : undefined,
+        teamsFor: undefined,
+        workflowsFor: undefined,
+        membersOpen: false,
+        chiefOpen: false,
+    });
+}
+
+/** Whether a thread is a conversation with the chief assistant (06 §23). */
+export function isChief(thread: Pick<ThreadMeta, 'role'> | undefined): boolean {
+    return thread?.role === 'chief';
+}
+
+/**
+ * The chief assistant: its latest conversation, or its home (`fresh`, or when there is none) to start one.
+ */
+export function openChief(fresh = false): void {
+    const latest = fresh
+        ? undefined
+        : Object.values(get().threads)
+              .filter((thread) => isChief(thread) && !thread.archived)
+              .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (latest) {
+        void selectThread(latest.id);
+        return;
+    }
+    set({
+        chiefOpen: true,
+        selectedThreadId: undefined,
+        teamRunId: undefined,
+        workflowRunId: undefined,
+        workflowsFor: undefined,
+        teamsFor: undefined,
+        membersOpen: false,
+        rightPanel: undefined,
     });
 }
 
@@ -416,7 +473,8 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         !current.workflowRunId &&
         !current.workflowsFor &&
         !current.teamsFor &&
-        !current.membersOpen
+        !current.membersOpen &&
+        !current.chiefOpen
     ) {
         return;
     }
@@ -428,6 +486,7 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         workflowsFor: undefined,
         teamsFor: undefined,
         membersOpen: false,
+        chiefOpen: false,
         reviewTurnId: undefined,
         ...(thread ? { selectedProjectId: thread.projectId } : {}),
     });

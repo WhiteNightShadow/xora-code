@@ -772,7 +772,8 @@ try {
 
     phase('workflow view');
     // The workflow run: its conclusion first, the process unfolded under it.
-    await page.locator('.run-row', { hasText: '发布前检查' }).first().click();
+    await page.locator('.sidebar__nav', { hasText: '工作流' }).click();
+    await page.locator('.wf-board__run', { hasText: '发布前检查' }).first().click();
     await page.locator('.wf-brief__conclusion', { hasText: '可以发布' }).waitFor({ timeout: 90_000 });
     await page.locator('.wf-process__toggle').click();
     await page.locator('.flow-node.is-succeeded').nth(2).waitFor();
@@ -780,7 +781,8 @@ try {
 
     phase('team view');
     // The team run, delivered.
-    await page.locator('.run-row', { hasText: '优惠券也改成按分计算' }).first().click();
+    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
+    await page.locator('.team-board__open', { hasText: '优惠券也改成按分计算' }).first().click();
     await page.locator('.team__goal .badge', { hasText: /已交付|完成/ }).waitFor({ timeout: 30_000 });
     await shot(page, 'xora-team');
 } catch (error) {

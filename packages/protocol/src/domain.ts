@@ -337,6 +337,31 @@ export const SubagentItemSchema = z.object({
     toolCallId: z.string().optional(),
 });
 
+/**
+ * Work the chief assistant handed on (06 §23): a team run, a workflow run or a member's conversation. Its card in
+ * the assistant's turn follows the work: `waiting` while it waits for the user, the outcome's first lines once over.
+ * A card that reports news after the turn it started in (`report`) goes into the latest turn instead.
+ */
+export const DelegationItemSchema = z.object({
+    ...itemBase,
+    type: z.literal('delegation'),
+    kind: z.enum(['team', 'workflow', 'member']),
+    /** The team or workflow run, or the member's thread. */
+    refId: z.string(),
+    projectId: IdSchema,
+    title: z.string(),
+    /** The member's name, or the workflow's title. */
+    who: z.string().optional(),
+    status: z.enum(['running', 'waiting', 'done', 'failed', 'cancelled']),
+    /** What it waits for from the user, its progress, or the outcome once over. */
+    summary: z.string().optional(),
+    cost: MoneySchema.optional(),
+    /** The tool call that handed it on, whose own card the UI then leaves out. */
+    toolCallId: z.string().optional(),
+    /** A later report on work handed on in an earlier turn. */
+    report: z.boolean().optional(),
+});
+
 export const ItemSchema = z.discriminatedUnion('type', [
     UserMessageItemSchema,
     AgentMessageItemSchema,
@@ -349,6 +374,7 @@ export const ItemSchema = z.discriminatedUnion('type', [
     ErrorItemSchema,
     CompactionItemSchema,
     SubagentItemSchema,
+    DelegationItemSchema,
 ]);
 export type Item = z.infer<typeof ItemSchema>;
 export type ItemOf<T extends Item['type']> = Extract<Item, { type: T }>;

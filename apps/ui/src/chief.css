@@ -1,0 +1,367 @@
+/* The chief assistant (06 §23): its home, the cards of work it handed on, and the sidebar's entries ---------- */
+
+.sidebar__main {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: var(--xk-space-1);
+}
+
+.sidebar__main .sidebar__nav {
+    position: relative;
+    margin-top: 1px;
+    margin-bottom: 1px;
+}
+
+.sidebar__nav--chief {
+    color: var(--xk-text);
+    font-weight: var(--xk-weight-medium);
+}
+
+.sidebar__nav--chief svg {
+    color: var(--xk-accent-text);
+}
+
+.sidebar__nav .dot-badge {
+    top: 6px;
+    left: 19px;
+}
+
+.sidebar__count {
+    margin-left: auto;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+    font-size: var(--xk-text-2xs);
+    font-weight: var(--xk-weight-semibold);
+    line-height: 18px;
+    text-align: center;
+}
+
+.run-row.sidebar__run {
+    width: auto;
+    margin: 0 10px 0 22px;
+    padding-left: 12px;
+    border-radius: var(--xk-radius-md);
+    font-size: var(--xk-text-xs);
+}
+
+/* Home ------------------------------------------------------------------------------------------------- */
+
+.chief-home {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: var(--xk-space-10) var(--xk-space-6) var(--xk-space-10);
+}
+
+.chief-home__hero {
+    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--xk-space-2);
+    text-align: center;
+    animation: xk-fade-up var(--xk-duration-slow) var(--xk-ease-out) backwards;
+}
+
+.chief-home__mark {
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--xk-brand-from), var(--xk-brand-to));
+    color: var(--xk-on-accent);
+    box-shadow: var(--xk-shadow-md);
+}
+
+.chief-home__hero h1 {
+    margin: var(--xk-space-1) 0 0;
+    font-size: var(--xk-text-2xl);
+    font-weight: var(--xk-weight-bold);
+    letter-spacing: -0.02em;
+}
+
+.chief-home__hero p {
+    margin: 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-md);
+    line-height: var(--xk-leading-relaxed);
+}
+
+.chief-home__composer {
+    width: 100%;
+    max-width: 720px;
+    margin-top: var(--xk-space-6);
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-xl);
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-sm);
+    transition:
+        border-color var(--xk-duration-fast) var(--xk-ease-out),
+        box-shadow var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.chief-home__composer:focus-within {
+    border-color: var(--xk-accent);
+    box-shadow: var(--xk-shadow-sm), var(--xk-focus-ring);
+}
+
+.chief-home__input {
+    display: block;
+    width: 100%;
+    min-height: 96px;
+    resize: vertical;
+    border: 0;
+    outline: none;
+    background: none;
+    padding: var(--xk-space-4) var(--xk-space-4) var(--xk-space-2);
+    color: var(--xk-text);
+    font: inherit;
+    font-size: var(--xk-text-md);
+    line-height: var(--xk-leading-normal);
+}
+
+.chief-home__input::placeholder {
+    color: var(--xk-placeholder);
+}
+
+.chief-home__bar {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+    padding: var(--xk-space-2) var(--xk-space-3) var(--xk-space-3);
+}
+
+.chief-home__examples {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.chief-home__example {
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--xk-border-subtle);
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+    cursor: pointer;
+    transition:
+        background var(--xk-duration-fast) var(--xk-ease-out),
+        color var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.chief-home__example:hover {
+    background: var(--xk-bg-hover);
+    color: var(--xk-text);
+}
+
+.chief-home__grid {
+    width: 100%;
+    max-width: 720px;
+    margin-top: var(--xk-space-6);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--xk-space-4);
+}
+
+.chief-home__section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.chief-home__section h3 {
+    margin: 0 0 var(--xk-space-1);
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-semibold);
+    letter-spacing: 0.02em;
+}
+
+.chief-home__empty {
+    margin: 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.chief-home__row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+    min-height: 34px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--xk-radius-md);
+    background: none;
+    color: var(--xk-text);
+    font-size: var(--xk-text-sm);
+    text-align: left;
+    cursor: pointer;
+}
+
+.chief-home__row:hover {
+    background: var(--xk-bg-hover);
+}
+
+.chief-home__row svg {
+    flex: none;
+    color: var(--xk-accent-text);
+}
+
+.chief-home__row.is-needs svg {
+    color: var(--xk-warn);
+}
+
+.chief-home__row-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chief-home__row-meta {
+    flex: none;
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+}
+
+.chief-home__dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--xk-accent);
+}
+
+/* Cards of work handed on --------------------------------------------------------------------------------- */
+
+.delegation {
+    position: relative;
+    margin: var(--xk-space-2) 0;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg-elevated);
+    box-shadow: var(--xk-shadow-xs);
+    overflow: hidden;
+}
+
+.delegation--running::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 40%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--xk-accent), transparent);
+    animation: xk-indeterminate 1.6s var(--xk-ease-in-out) infinite;
+    pointer-events: none;
+}
+
+.delegation--waiting {
+    border-color: var(--xk-warn-border);
+}
+
+.delegation--done.is-report {
+    border-color: var(--xk-ok-border);
+}
+
+.delegation__head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 40px;
+    padding: 6px 12px 6px 8px;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-sm);
+}
+
+.delegation__icon {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+}
+
+.delegation--done .delegation__icon {
+    background: var(--xk-ok-subtle);
+    color: var(--xk-ok);
+}
+
+.delegation--waiting .delegation__icon {
+    background: var(--xk-warn-subtle);
+    color: var(--xk-warn);
+}
+
+.delegation__kind {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+    white-space: nowrap;
+}
+
+.delegation__title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--xk-text);
+}
+
+.delegation__cost {
+    flex: none;
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+    font-variant-numeric: tabular-nums;
+}
+
+.delegation__open {
+    flex: none;
+}
+
+.delegation__summary {
+    padding: 0 14px 10px 42px;
+    color: var(--xk-text);
+    font-size: var(--xk-text-sm);
+}
+
+.delegation__summary > :first-child {
+    margin-top: 0;
+}
+
+.delegation__summary > :last-child {
+    margin-bottom: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .chief-home__hero,
+    .delegation--running::after {
+        animation: none;
+    }
+}

@@ -4,8 +4,11 @@ import { host } from '../host.ts';
 import { memberOf } from '../members.ts';
 import {
     attempt,
+    isChief,
+    openChief,
     openMembers,
     openProject,
+    openRun,
     openSettings,
     openTeamBoard,
     openWorkflowBoard,
@@ -139,37 +142,32 @@ function ProjectGroup({
     onToggle: () => void;
 }) {
     const s = useStrings();
-    const selectedThreadId = useApp((state) => state.selectedThreadId);
+    // A thread is selected only while it is what the main area shows, not under a run, a board or a page.
+    const selectedThreadId = useApp((state) =>
+        state.teamRunId ||
+        state.workflowRunId ||
+        state.teamsFor ||
+        state.workflowsFor ||
+        state.membersOpen ||
+        state.chiefOpen
+            ? undefined
+            : state.selectedThreadId,
+    );
     const selectedProjectId = useApp((state) => state.selectedProjectId);
     const [showArchived, setShowArchived] = useState(false);
-    const teamRunId = useApp((state) => state.teamRunId);
-    const workflowRunId = useApp((state) => state.workflowRunId);
-    const workflowsFor = useApp((state) => state.workflowsFor);
-    const teamsFor = useApp((state) => state.teamsFor);
-    const allRuns = useApp((state) => state.teamRuns);
-    const allWorkflowRuns = useApp((state) => state.workflowRuns);
-    const projectRuns = Object.values(allRuns).filter((run) => run.projectId === project.id);
-    const runningTeams = projectRuns.filter((run) => !['done', 'failed', 'cancelled'].includes(run.status)).length;
-    const runs = projectRuns
-        .filter((run) => !run.archived)
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, 5);
-    // Sub-workflows are reached through their parent run.
-    const workflowRuns = Object.values(allWorkflowRuns)
-        .filter((run) => run.projectId === project.id && !run.parentRunId && !run.archived)
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, 5);
     // Team members' and workflow steps' threads are reached through their run, not listed one by one; subagents'
-    // through the card in their parent's turn, unless that thread is gone.
+    // through the card in their parent's turn, unless that thread is gone; the chief's conversations through its
+    // entry at the top (06 §23).
     const threadMap = useApp((state) => state.threads);
     const active = threads.filter(
         (thread) =>
             !thread.archived &&
             !thread.teamRunId &&
             !thread.workflowRunId &&
+            !isChief(thread) &&
             !(thread.parent && threadMap[thread.parent.threadId]),
     );
-    const archived = threads.filter((thread) => thread.archived);
+    const archived = threads.filter((thread) => thread.archived && !isChief(thread));
     return (
         <div className={`project${selectedProjectId === project.id ? ' is-current' : ''}`}>
             <div className="project__header">
@@ -225,73 +223,6 @@ function ProjectGroup({
                 </Popover>
             </div>
             {open && (
-                <button
-                    type="button"
-                    className={`run-row project__board${teamsFor === project.id && !teamRunId && !workflowRunId ? ' is-selected' : ''}`}
-                    onClick={() => openTeamBoard(project.id)}
-                >
-                    <Icon name="users" size={12} />
-                    <span className="thread-row__title">{s.sidebar.teams}</span>
-                    {runningTeams > 0 && <span className="thread-row__meta">{runningTeams}</span>}
-                </button>
-            )}
-            {open && (
-                <button
-                    type="button"
-                    className={`run-row project__board${workflowsFor === project.id && !teamRunId && !workflowRunId ? ' is-selected' : ''}`}
-                    onClick={() => openWorkflowBoard(project.id)}
-                >
-                    <Icon name="bolt" size={12} />
-                    <span className="thread-row__title">{s.sidebar.workflows}</span>
-                </button>
-            )}
-            {open && workflowRuns.length > 0 && (
-                <div className="project__runs">
-                    {workflowRuns.map((run) => (
-                        <button
-                            key={run.id}
-                            type="button"
-                            className={`run-row${workflowRunId === run.id ? ' is-selected' : ''}`}
-                            onClick={() =>
-                                useApp.setState({
-                                    workflowRunId: run.id,
-                                    teamRunId: undefined,
-                                    workflowsFor: undefined,
-                                    teamsFor: undefined,
-                                })
-                            }
-                        >
-                            <Icon name="bolt" size={11} />
-                            <span className="thread-row__title">{run.title}</span>
-                            <span className="thread-row__meta">{s.workflow.statuses[run.status]}</span>
-                        </button>
-                    ))}
-                </div>
-            )}
-            {open && runs.length > 0 && (
-                <div className="project__runs">
-                    {runs.map((run) => (
-                        <button
-                            key={run.id}
-                            type="button"
-                            className={`run-row${teamRunId === run.id ? ' is-selected' : ''}`}
-                            onClick={() =>
-                                useApp.setState({
-                                    teamRunId: run.id,
-                                    workflowRunId: undefined,
-                                    workflowsFor: undefined,
-                                    teamsFor: undefined,
-                                })
-                            }
-                        >
-                            <Icon name="users" size={11} />
-                            <span className="thread-row__title">{run.goal}</span>
-                            <span className="thread-row__meta">{s.team.statuses[run.status]}</span>
-                        </button>
-                    ))}
-                </div>
-            )}
-            {open && (
                 <div className="project__threads">
                     {active.length === 0 && <div className="project__empty">{s.sidebar.noThreads}</div>}
                     {active.map((thread) => (
@@ -313,6 +244,102 @@ function ProjectGroup({
                 </div>
             )}
         </div>
+    );
+}
+
+const TEAM_ENDED = ['done', 'failed', 'cancelled'];
+const WORKFLOW_ENDED = ['completed', 'failed', 'cancelled'];
+/** Runs under way listed under their entry; the board has the rest. */
+const NAV_RUNS = 5;
+
+/** The chief assistant (06 §23): the one place to say what you need. A dot: news from work it handed on. */
+function ChiefNav() {
+    const s = useStrings();
+    const selected = useApp(
+        (state) =>
+            state.chiefOpen ||
+            (!state.teamRunId &&
+                !state.workflowRunId &&
+                !state.teamsFor &&
+                !state.workflowsFor &&
+                !state.membersOpen &&
+                isChief(state.selectedThreadId ? state.threads[state.selectedThreadId] : undefined)),
+    );
+    const news = useApp((state) =>
+        Object.values(state.threads).some((thread) => isChief(thread) && !thread.archived && thread.unread),
+    );
+    return (
+        <button
+            type="button"
+            className={`sidebar__nav sidebar__nav--chief${selected ? ' is-selected' : ''}`}
+            onClick={() => openChief()}
+        >
+            <Icon name="sparkle" size={14} /> {s.sidebar.chief}
+            {news && <span className="dot-badge" />}
+        </button>
+    );
+}
+
+/**
+ * Teams and workflows of every project: one entry each (the board picks the project), with the runs under way
+ * listed beneath it.
+ */
+function RunsNav({ kind }: { kind: 'team' | 'workflow' }) {
+    const s = useStrings();
+    const projects = useApp((state) => state.projects);
+    const boardOpen = useApp((state) => (kind === 'team' ? Boolean(state.teamsFor) : Boolean(state.workflowsFor)));
+    const openRunId = useApp((state) => (kind === 'team' ? state.teamRunId : state.workflowRunId));
+    const teamRuns = useApp((state) => state.teamRuns);
+    const workflowRuns = useApp((state) => state.workflowRuns);
+    const runs =
+        kind === 'team'
+            ? Object.values(teamRuns)
+                  .filter((run) => !TEAM_ENDED.includes(run.status))
+                  .map((run) => ({
+                      id: run.id,
+                      title: run.goal,
+                      projectId: run.projectId,
+                      status: s.team.statuses[run.status],
+                      updatedAt: run.updatedAt,
+                  }))
+            : Object.values(workflowRuns)
+                  // Sub-workflows are reached through their parent run.
+                  .filter((run) => !WORKFLOW_ENDED.includes(run.status) && !run.parentRunId)
+                  .map((run) => ({
+                      id: run.id,
+                      title: run.title,
+                      projectId: run.projectId,
+                      status: s.workflow.statuses[run.status],
+                      updatedAt: run.updatedAt,
+                  }));
+    runs.sort((a, b) => b.updatedAt - a.updatedAt);
+    const several = projects.length > 1;
+    return (
+        <>
+            <button
+                type="button"
+                className={`sidebar__nav${boardOpen ? ' is-selected' : ''}`}
+                onClick={() => (kind === 'team' ? openTeamBoard() : openWorkflowBoard())}
+            >
+                <Icon name={kind === 'team' ? 'users' : 'bolt'} size={14} />{' '}
+                {kind === 'team' ? s.sidebar.teams : s.sidebar.workflows}
+                {runs.length > 0 && <span className="sidebar__count">{runs.length}</span>}
+            </button>
+            {runs.slice(0, NAV_RUNS).map((run) => (
+                <button
+                    key={run.id}
+                    type="button"
+                    className={`run-row sidebar__run${openRunId === run.id ? ' is-selected' : ''}`}
+                    onClick={() => openRun(kind, run.id)}
+                >
+                    <span className="thread-row__title">{run.title}</span>
+                    <span className="thread-row__meta">
+                        {several ? `${projects.find((project) => project.id === run.projectId)?.name ?? ''} · ` : ''}
+                        {run.status}
+                    </span>
+                </button>
+            ))}
+        </>
     );
 }
 
@@ -386,13 +413,18 @@ export function Sidebar() {
                     ))}
                 </div>
             )}
-            <button
-                type="button"
-                className={`sidebar__nav${membersOpen ? ' is-selected' : ''}`}
-                onClick={() => openMembers()}
-            >
-                <Icon name="users" size={14} /> {s.sidebar.members}
-            </button>
+            <div className="sidebar__main">
+                <ChiefNav />
+                <RunsNav kind="team" />
+                <RunsNav kind="workflow" />
+                <button
+                    type="button"
+                    className={`sidebar__nav${membersOpen ? ' is-selected' : ''}`}
+                    onClick={() => openMembers()}
+                >
+                    <Icon name="user" size={14} /> {s.sidebar.members}
+                </button>
+            </div>
             {inbox.length > 0 && (
                 <div className="inbox">
                     <div className="inbox__title">

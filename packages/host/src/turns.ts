@@ -221,7 +221,13 @@ export interface HostToolProvider {
      * outside the workspace, a secret or a high-risk action still decides as usual.
      */
     allowFetch?(): boolean;
-    handle(name: string, input: unknown, signal: AbortSignal): Promise<HostToolResult>;
+    /** `call`: the turn it runs in and the call's tool card, when the host could pair them. */
+    handle(name: string, input: unknown, signal: AbortSignal, call?: HostToolCall): Promise<HostToolResult>;
+}
+
+export interface HostToolCall {
+    readonly turnId: string;
+    readonly toolCallId?: string;
 }
 
 export interface TurnEnded {
@@ -361,7 +367,10 @@ class RunningTurn {
     extras: SessionExtras | undefined;
     /** Shared host tools the session got for this turn, by name. */
     shared = new Set<string>();
-    /** Tool cards already matched to a call of a shared tool. */
+    /**
+     * Tool cards already matched to a call of a host tool, by item: some models reuse a call id from one request to
+     * the next.
+     */
     readonly matched = new Set<string>();
 
     constructor(thread: ThreadMeta, cwd: string, engine: EngineDefinition, turnId: string) {
@@ -1221,8 +1230,12 @@ export class TurnService {
                 if (!provider) {
                     return { content: `Tool ${name} is not available in this thread.`, isError: true };
                 }
+                const toolCallId = this.#toolCallOf(running, name, input);
                 try {
-                    return await provider.handle(name, input, signal);
+                    return await provider.handle(name, input, signal, {
+                        turnId: running.turnId,
+                        ...(toolCallId ? { toolCallId } : {}),
+                    });
                 } catch (error) {
                     return {
                         content: `Tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1244,10 +1257,10 @@ export class TurnService {
             if (
                 item?.type === 'tool_call' &&
                 item.name === name &&
-                !running.matched.has(toolCallId) &&
+                !running.matched.has(itemId) &&
                 JSON.stringify(item.input ?? null) === wanted
             ) {
-                running.matched.add(toolCallId);
+                running.matched.add(itemId);
                 return toolCallId;
             }
         }

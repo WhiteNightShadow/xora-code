@@ -159,10 +159,15 @@ export function applyDelta(
     upsert(turn, { id: delta.itemId, turnId: delta.turnId, ts: Date.now(), type: delta.stream, text: delta.text });
 }
 
-/** The items a turn shows: a tool call that started a subagent is shown by the subagent's card instead. */
+/**
+ * The items a turn shows: a tool call that started a subagent, or that the chief handed work on with, is shown by
+ * that card instead.
+ */
 export function visibleItems(items: readonly Item[]): readonly Item[] {
     const paired = new Set(
-        items.flatMap((item) => (item.type === 'subagent' && item.toolCallId ? [item.toolCallId] : [])),
+        items.flatMap((item) =>
+            (item.type === 'subagent' || item.type === 'delegation') && item.toolCallId ? [item.toolCallId] : [],
+        ),
     );
     return paired.size === 0
         ? items

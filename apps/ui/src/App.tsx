@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { ChiefHome } from './components/ChiefView.tsx';
 import { DispatchDialog, MembersPage } from './components/MembersView.tsx';
 import { NewThreadDialog } from './components/NewThreadDialog.tsx';
 import { Spinner } from './components/primitives.tsx';
@@ -44,7 +45,14 @@ export function App() {
     const workflowDraftFor = useApp((state) => state.workflowDraftFor);
     const membersOpen = useApp((state) => state.membersOpen);
     const dispatchTo = useApp((state) => state.dispatchTo);
-    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor || teamsFor || membersOpen);
+    const chiefOpen = useApp((state) => state.chiefOpen);
+    // With a project and a model the home is the chief assistant (06 §23); before that, the first steps.
+    const chiefHome = useApp(
+        (state) =>
+            state.projects.length > 0 &&
+            state.connections.some((connection) => connection.hasKey || connection.presetId.startsWith('local')),
+    );
+    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor || teamsFor || membersOpen || chiefOpen);
     const splitIds = useApp((state) => state.split);
     const threads = useApp((state) => state.threads);
     const split = splitIds.map((id) => threads[id]).filter((item) => item !== undefined);
@@ -79,6 +87,8 @@ export function App() {
                     <TeamBoard key={teamsFor} projectId={teamsFor} />
                 ) : membersOpen ? (
                     <MembersPage />
+                ) : chiefOpen ? (
+                    <ChiefHome />
                 ) : split.length > 1 ? (
                     split.map((item) => (
                         <div key={item.id} className="split-pane">
@@ -87,6 +97,8 @@ export function App() {
                     ))
                 ) : thread ? (
                     <ThreadView key={thread.id} thread={thread} />
+                ) : chiefHome ? (
+                    <ChiefHome />
                 ) : (
                     <Welcome />
                 )}

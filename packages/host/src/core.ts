@@ -20,6 +20,7 @@ import { completeModel } from '@xora/providers';
 import { XoraDatabase } from '@xora/storage';
 import { ApprovalService } from './approvals.ts';
 import { Bus } from './bus.ts';
+import { ChiefService, registerChiefHandlers } from './chief.ts';
 import { ConnectionService } from './connections.ts';
 import { DistillService } from './distill.ts';
 import { EngineManager } from './engines/manager.ts';
@@ -161,6 +162,8 @@ export class HostCore {
     readonly workflows: WorkflowService;
     readonly distill: DistillService;
     readonly members: MemberService;
+    /** The chief assistant (06 §23): the one place the user talks to. */
+    readonly chief: ChiefService;
     readonly triggers: TriggerService;
     #triggerSync: ReturnType<typeof setInterval> | undefined;
     readonly #options: HostOptions;
@@ -246,6 +249,7 @@ export class HostCore {
                 void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`));
                 this.team.onTurnEnded(event);
                 this.workflows.onTurnEnded(event);
+                this.chief.onTurnEnded(event);
             },
         });
         this.members = new MemberService({
@@ -332,6 +336,20 @@ export class HostCore {
             members: this.members,
         });
         this.triggers.onFire((fire) => this.#onTrigger(fire));
+        this.chief = new ChiefService({
+            threads: this.threads,
+            turns: this.turns,
+            projects: this.projects,
+            connections: this.connections,
+            settings: this.settings,
+            approvals: this.approvals,
+            bus: this.bus,
+            log: this.log,
+            orgsDir: this.paths.orgsDir,
+            team: this.team,
+            workflows: this.workflows,
+            members: this.members,
+        });
         this.distill = new DistillService({
             threads: this.threads,
             turns: this.turns,
@@ -374,6 +392,7 @@ export class HostCore {
         core.#tellShellLanguage();
         await core.distill.restore().catch((error) => core.log.warn(`distill: ${String(error)}`));
         await core.members.restore().catch((error) => core.log.warn(`members: ${String(error)}`));
+        await core.chief.restore().catch((error) => core.log.warn(`chief: ${String(error)}`));
         core.#syncTriggers();
         // Also catches what no event reports: a project that lost its trust, a workflow file edited by hand.
         core.#triggerSync = setInterval(() => core.#syncTriggers(), 60_000);
@@ -952,6 +971,7 @@ export class HostCore {
             this.#remember({ lastChoices: { ...settings.get().lastChoices, workflowMode: mode } }),
         );
         registerMemberHandlers(peer, this.members);
+        registerChiefHandlers(peer, this.chief);
 
         // Extensions (09) ---------------------------------------------------------------------------------------
         const extensions = this.extensions;
@@ -1227,6 +1247,7 @@ export class HostCore {
         await this.turns.endSessions('app_exit');
         this.terminals.dispose();
         this.updates.dispose();
+        this.chief.dispose();
         this.workflows.dispose();
         this.team.dispose();
         this.subagents.dispose();

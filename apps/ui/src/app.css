@@ -3494,13 +3494,6 @@ button.tool__header:hover {
     line-height: var(--xk-leading-relaxed);
 }
 
-.project__runs {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    margin-bottom: 1px;
-}
-
 .run-row {
     width: 100%;
     display: flex;

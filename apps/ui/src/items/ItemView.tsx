@@ -1,5 +1,6 @@
 import type { Approval, ApprovalDecision, Item, ItemOf, ToolDisplay } from '@xora/protocol';
 import { useState } from 'react';
+import { DelegationCard } from '../components/ChiefView.tsx';
 import { DiffView } from '../components/DiffView.tsx';
 import { Icon, type IconName } from '../components/Icon.tsx';
 import { Markdown } from '../components/Markdown.tsx';
@@ -389,5 +390,7 @@ export function ItemView({ item, live, turnRunning = true }: { item: Item; live:
             return <CompactionView item={item} />;
         case 'subagent':
             return <SubagentView item={item} turnRunning={turnRunning} />;
+        case 'delegation':
+            return <DelegationCard item={item} />;
     }
 }

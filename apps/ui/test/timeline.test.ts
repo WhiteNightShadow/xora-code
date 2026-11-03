@@ -195,4 +195,23 @@ describe('subagent cards', () => {
         const plain = items.slice(0, 2);
         expect(visibleItems(plain)).toBe(plain);
     });
+
+    it("show the chief's card of work handed on in place of the tool call (06 §23)", () => {
+        const items = [
+            { ...tool('a', 'c1'), name: 'team_start', title: 'team_start' },
+            {
+                id: 'd1',
+                turnId: 'u1',
+                ts: 2,
+                type: 'delegation',
+                kind: 'team',
+                refId: 'team_1',
+                projectId: 'p1',
+                title: '做个待办应用',
+                status: 'running',
+                toolCallId: 'c1',
+            } as const,
+        ];
+        expect(visibleItems(items).map((item) => item.id)).toEqual(['d1']);
+    });
 });
