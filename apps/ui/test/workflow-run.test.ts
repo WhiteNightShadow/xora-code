@@ -98,8 +98,15 @@ describe('run brief', () => {
         });
         // 06 §22: the report states the outcome, what was done and how the rest moves on.
         expect(
-            briefSections('## 目标达成\n主目标达成。\n## 已完成\n- 写好闭环脚本（`a.py`）\n## 下一步\n- 补环境：先拉chunk'),
-        ).toEqual({ conclusion: '主目标达成。', done: ['写好闭环脚本（`a.py`）'], problems: [], next: ['补环境：先拉chunk'] });
+            briefSections(
+                '## 目标达成\n主目标达成。\n## 已完成\n- 写好闭环脚本（`a.py`）\n## 下一步\n- 补环境：先拉chunk',
+            ),
+        ).toEqual({
+            conclusion: '主目标达成。',
+            done: ['写好闭环脚本（`a.py`）'],
+            problems: [],
+            next: ['补环境：先拉chunk'],
+        });
     });
 
     it('reads English headings, "none", and leaves a brief without headings alone', () => {
