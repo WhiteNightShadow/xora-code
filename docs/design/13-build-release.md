@@ -93,6 +93,12 @@
   - `libasound2`在ubuntu 24.04上是虚拟包，apt挑了`liboss4-salsa-asound2`来满足它，里面缺electron要的符号。所以依赖写成`libasound2t64 | libasound2`。
   - 终端面板缺`min-width: 0`，终端的宽度把自己的容器撑开了，每次自适应都缩几像素。linux的滚动条要占宽度，暴露了这个问题；三个平台都受影响。
   - 冒烟脚本本身：`mkdir -p`换成node的mkdir，终端命令分powershell和posix两种写法，windows上删临时目录要重试（应用刚退出时子进程还占着exe）。
+- **1.1.0（2026-11-04）**：结果见`docs/releases/v1.1.0.md`。
+  - mac arm64在本机验；windows两个包都在arm64测试机上验（x64包经prism转译）：x64测试机没开，它的2223端口被手机调试用的iproxy占着。
+  - linux x64经rosetta跑时，界面加载超过30秒，应用的就绪超时（30秒）先到了，演练判成启动失败。`linux.sh`给x64加了3倍超时（`--timeout-scale 3`，应用自己的就绪超时也跟着放大），真x64机器是原生运行，不受影响。
+  - 放大超时后，linux x64冒烟49步全过，演练7/8：修复模式页的探针（`safe-mode.ts`的`probeAfterLoad`）在页面加载完后固定等1.5秒就读状态，不跟着倍数放大，转译下页面还在读取。待改：改成等页面状态不再是loading（有上限）再读。
+  - windows和linux的验证不要同时跑：同时跑时，rosetta下的x64演练明显更慢。
+  - `release/`里留着上一版的产物时，`package.ts`写的`SHA256SUMS`会把两版都算进去，`linux.sh`和`windows.sh`默认用`ls`找到的第一个包，也会拿到旧版。这次把1.0.0的产物挪进了`release/old-1.0.0/`；上传用的`SHA256SUMS`另外生成，只含这一版，文件名和github上一样带点（`Xora.Code-…`）。
 - **界面语言**：10-31改成默认跟随系统，见03第5节。
   - 冒烟按中文按钮名找控件，所以用`--lang=zh-CN`把应用语言固定成中文。最后两步另起一个`--lang=en-US`的干净实例，查界面和菜单是英文，在设置里改成简体中文后两者都跟着变。
   - 更新演练不加`--lang`。windows测试机的系统语言是en-US，修复模式页面在那里显示英文，演练照样通过。

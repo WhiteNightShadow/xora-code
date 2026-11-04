@@ -15,9 +15,11 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CACHE=$HOME/Library/Caches/xora-vm
 VM=xorabuild
 NODE=node-v24.22.2-linux-arm64
+# SCALE stretches the drill's and the smoke's timeouts, the app's own boot timeouts included: the x64 package runs
+# through Rosetta here, where loading the UI took over 30 seconds (11-04); a real x64 machine runs it natively.
 case $ARCH in
-  arm64) DEB_ARCH=arm64; IMAGE_ARCH=arm64 ;;
-  x64) DEB_ARCH=amd64; IMAGE_ARCH=x86_64 ;;
+  arm64) DEB_ARCH=arm64; IMAGE_ARCH=arm64; SCALE=1 ;;
+  x64) DEB_ARCH=amd64; IMAGE_ARCH=x86_64; SCALE=3 ;;
   *) echo "arch must be arm64 or x64" >&2; exit 2 ;;
 esac
 DEB=${2:-$(ls "$ROOT"/apps/desktop/release/*-linux-"$DEB_ARCH".deb | head -1)}
@@ -81,9 +83,9 @@ echo "== drill and smoke under Xvfb"
 lima bash -s <<EOF
 export PATH=/opt/node/bin:\$PATH
 rm -rf /tmp/xora-out && mkdir -p /tmp/xora-out/shots && cd /tmp
-xvfb-run -a -s '-screen 0 1440x900x24' node '$ROOT/dist/vm-harness/drill.mjs' --app '$APP' --bundles '$ROOT/dist/vm-harness/bundles' > /tmp/xora-out/drill.log 2>&1
+xvfb-run -a -s '-screen 0 1440x900x24' node '$ROOT/dist/vm-harness/drill.mjs' --app '$APP' --bundles '$ROOT/dist/vm-harness/bundles' --timeout-scale $SCALE > /tmp/xora-out/drill.log 2>&1
 echo exit=\$? >> /tmp/xora-out/drill.log
-xvfb-run -a -s '-screen 0 1440x900x24' node '$ROOT/dist/vm-harness/ui-smoke.mjs' --app '$APP' --shots /tmp/xora-out/shots > /tmp/xora-out/smoke.log 2>&1
+xvfb-run -a -s '-screen 0 1440x900x24' node '$ROOT/dist/vm-harness/ui-smoke.mjs' --app '$APP' --shots /tmp/xora-out/shots --timeout-scale $SCALE > /tmp/xora-out/smoke.log 2>&1
 echo exit=\$? >> /tmp/xora-out/smoke.log
 EOF
 

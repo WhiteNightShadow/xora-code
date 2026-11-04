@@ -734,6 +734,8 @@ try {
     await page.keyboard.press('Enter');
     await page.locator('.approval .badge', { hasText: '主管已批准' }).waitFor();
     await page.locator('.approval__message', { hasText: '冒烟：改文件是任务要的' }).waitFor();
+    // The turn goes on after the approval; it ends before the window closes, or the app stays in the tray for it.
+    await page.locator('.composer').getByRole('button', { name: '停止' }).waitFor({ state: 'detached' });
     await step(page, '审批交给主管：改文件由主管批了，不打扰你');
 } catch (error) {
     reportFailure(error);
