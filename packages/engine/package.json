@@ -1,6 +1,6 @@
 {
   "name": "@xora/engine",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Xora engine: an ACP agent with Xora's agent loop, tools, permissions and context management",

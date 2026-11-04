@@ -1,6 +1,6 @@
 {
   "name": "@xora/storage",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "SQLite database, migrations and append-only thread event logs for the Xora Code host",

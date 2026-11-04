@@ -1,7 +1,7 @@
 import type { Member, OrgGroup, TeamRun } from '@xora/protocol';
 import { type ReactNode, useEffect, useState } from 'react';
 import { host } from '../host.ts';
-import { sortMembers } from '../members.ts';
+import { memberJob, sortMembers } from '../members.ts';
 import {
     attempt,
     loadMembers,
@@ -349,7 +349,7 @@ function OrgMember({ member, lead }: { member: Member; lead?: boolean }) {
                         {member.name}
                         {lead && <Badge tone="accent">{s.org.lead}</Badge>}
                     </span>
-                    <span className="org-member__role">{member.description ?? roleLine(member, s)}</span>
+                    <span className="org-member__role">{memberJob(member, s) ?? roleLine(member, s)}</span>
                 </span>
             </button>
             <div className="org-member__actions">

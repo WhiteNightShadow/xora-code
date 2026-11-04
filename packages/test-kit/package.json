@@ -1,6 +1,6 @@
 {
   "name": "@xora/test-kit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Mock model server and fake ACP agent for tests",

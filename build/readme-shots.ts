@@ -14,7 +14,8 @@ import { forgetAppCopy, secretStoreSwitches } from './app-switches.ts';
 /**
  * The README's screenshots (docs/images/), taken in the real app against a scripted model server and a demo
  * project, so they show the product without anyone's paths, accounts or keys: a fix in a thread with its diff
- * (light and dark), the members, one member's memory and routines, a workflow run's conclusion and a team run.
+ * (light and dark), the members, one member's memory and routines, a workflow run's conclusion, a team run and the
+ * chief assistant's home.
  *
  *   node build/readme-shots.ts                 unpackaged shell with dist/app-bundle (run `pnpm build && pnpm bundle`)
  *   node build/readme-shots.ts --app <exe>     a packaged build
@@ -335,6 +336,29 @@ server.respondWith((request) => {
     const last = messages.at(-1);
     const user = userText(body);
 
+    // 06 §28: the gist of a request as a conversation's title.
+    if (systemOf(body).includes('给一段对话起标题')) {
+        const titles: Array<[string, string]> = [
+            ['精度', '修复订单金额的精度问题'],
+            ['登录接口', '整理登录接口的请求链路'],
+            ['优惠券', '优惠券改成按分计算'],
+            ['做到哪', 'shop-api本周进展'],
+        ];
+        return openaiText(titles.find(([word]) => user.includes(word))?.[1] ?? 'shop-api的改动');
+    }
+    // The chief assistant (06 §23) answers from what the team did this week.
+    if (systemOf(body).includes('You are the chief assistant of Xora Code')) {
+        return openaiText(
+            [
+                '这周shop-api两件事都做完了：',
+                '',
+                '1. **订单金额按分计算**：修掉了0.1元买3件算成0.30000000000000004的问题，补了三条测试，发布前检查结论是可以发布。',
+                '2. **优惠券也改成按分计算**：团队做完并验收，叠加优惠的测试已经补上，CHANGELOG写好了。',
+                '',
+                '需要你决定的只有一件：要不要现在打`v0.4.1`标签发布。说一声我就让成员去做。',
+            ].join('\n'),
+        );
+    }
     // The brief of the finished workflow run.
     if (!body.tools?.length && JSON.stringify(messages).includes('## 目标达成')) {
         return openaiText(
@@ -638,8 +662,11 @@ try {
             prompt: '你负责抓包分析：先确认代理和证书正常，再抓目标接口，交回接口清单（方法、路径、关键参数）和签名方式，每条附上抓到的请求。',
         },
     });
+    // Its notes in this project (06 §21: general notes, a project's and the team's are kept apart).
     await hostCall(page, 'member.setMemory', {
         memberId: packet.id,
+        scope: 'project',
+        projectId: project.id,
         text: [
             '- [shop-api 2026-10-30] 登录接口是POST /api/v2/session，签名在请求头x-sign',
             '- [shop-api 2026-10-31] 抓包走本机代理127.0.0.1:9090，模拟器里已经装了证书',
@@ -702,11 +729,11 @@ try {
     phase('fix in a thread');
     // The fix in a thread, opened from the project's "+".
     await page.locator('.project__header').getByRole('button', { name: '新建', exact: true }).first().click();
-    await page.getByRole('menuitemradio', { name: /新建线程/ }).click();
+    await page.getByRole('menuitemradio', { name: /新建对话/ }).click();
     await page
-        .locator('.dialog textarea')
+        .locator('.new-thread textarea')
         .fill('订单总价有精度问题：0.1元的商品买3件，算出来是0.30000000000000004。帮我修一下，补上测试');
-    await page.getByRole('button', { name: '创建' }).click();
+    await page.locator('.new-thread').getByRole('button', { name: '发送', exact: true }).click();
     await page.getByText('要不要一起改成按分算').waitFor({ timeout: 90_000 });
     // The title a user would give it.
     const threads = await hostCall<
@@ -784,11 +811,28 @@ try {
     await shot(page, 'xora-workflow');
 
     phase('team view');
-    // The team run, delivered.
+    // The team run, delivered: the team page opens on its organization; the runs are the other tab.
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
-    await page.locator('.team-board__open', { hasText: '优惠券也改成按分计算' }).first().click();
+    await page.getByRole('tab', { name: '团队任务' }).click();
+    // Listed by the gist of its goal (06 §28).
+    await page.locator('.team-board__open', { hasText: '优惠券' }).first().click();
     await page.locator('.team__goal .badge', { hasText: /已交付|完成/ }).waitFor({ timeout: 30_000 });
     await shot(page, 'xora-team');
+
+    phase('chief');
+    // The chief assistant (06 §23), the one place to ask: it answers from what the team, the workflows and the
+    // threads did, and hands work on.
+    const chief = await hostCall<{ id: string }>(page, 'chief.start', {
+        projectId: project.id,
+        text: '这周shop-api做到哪了？有什么要我决定的？',
+    });
+    await settled(page, chief.id);
+    await page.locator('.sidebar__nav', { hasText: '总助手' }).click();
+    await page.getByText('需要你决定的只有一件').waitFor({ timeout: 30_000 });
+    // The changes panel the fix opened has nothing to show here.
+    const panel = page.locator('.right-panel');
+    if (await panel.isVisible()) await panel.getByRole('button', { name: '关闭' }).first().click();
+    await shot(page, 'xora-chief');
 } catch (error) {
     failed = true;
     console.error(`✗ ${error instanceof Error ? error.stack : String(error)}`);
