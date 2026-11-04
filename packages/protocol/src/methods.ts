@@ -236,6 +236,33 @@ export const methods = {
         result: z.object({ turnId: z.string() }),
     },
     'turn.cancel': { params: threadRef, result: ok },
+    /**
+     * A message for a thread that may be busy (03): a turn starts at once when the thread is free and nothing waits;
+     * otherwise the message waits its turn and starts one when the running turn has ended by itself.
+     */
+    'turn.queue': {
+        params: z
+            .object({
+                threadId: IdSchema,
+                text: z.string().max(1_000_000),
+                attachments: z.array(AttachmentSchema).max(20).optional(),
+            })
+            .strict(),
+        result: z.object({ turnId: z.string().optional(), queuedId: z.string().optional() }),
+    },
+    'turn.unqueue': { params: z.object({ threadId: IdSchema, id: z.string() }).strict(), result: ok },
+    'turn.editQueued': {
+        params: z.object({ threadId: IdSchema, id: z.string(), text: z.string().max(1_000_000) }).strict(),
+        result: ok,
+    },
+    /**
+     * A waiting message now: into the running turn, which takes it before its next model request (06 §20), or as a
+     * turn of its own when nothing runs. `steered: false`: the running turn did not take it, and it still waits.
+     */
+    'turn.sendQueued': {
+        params: z.object({ threadId: IdSchema, id: z.string() }).strict(),
+        result: z.object({ turnId: z.string().optional(), steered: z.boolean().optional() }),
+    },
     /** Everything that extends agents in a project: skills, commands, agents, hooks, MCP servers, plugins (09). */
     'extension.list': {
         params: z.object({ projectId: IdSchema.optional() }).strict(),

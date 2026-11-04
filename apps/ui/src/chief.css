@@ -70,16 +70,10 @@
     animation: xk-fade-up var(--xk-duration-slow) var(--xk-ease-out) backwards;
 }
 
+/* The app's own icon (icon.svg), as in the Dock. */
 .chief-home__mark {
-    width: 44px;
-    height: 44px;
-    border-radius: 14px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(135deg, var(--xk-brand-from), var(--xk-brand-to));
-    color: var(--xk-on-accent);
-    box-shadow: var(--xk-shadow-md);
+    flex: none;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.12));
 }
 
 .chief-home__hero h1 {
@@ -97,6 +91,7 @@
 }
 
 .chief-home__composer {
+    position: relative;
     width: 100%;
     max-width: 720px;
     margin-top: var(--xk-space-6);
@@ -402,6 +397,7 @@
 }
 
 .new-thread__composer {
+    position: relative;
     margin: 0 auto var(--xk-space-5);
     width: calc(100% - 48px);
     max-width: var(--xk-content-width);
@@ -473,4 +469,10 @@
     margin: 0;
     color: var(--xk-text-muted);
     font-size: var(--xk-text-xs);
+}
+
+/* `@member` suggestions over a plain message box (06 §19). */
+.mention.mention--members {
+    left: 12px;
+    bottom: calc(100% + 6px);
 }

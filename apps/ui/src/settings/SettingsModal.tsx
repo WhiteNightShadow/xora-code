@@ -544,14 +544,27 @@ function Models() {
 
 function Prompts() {
     const s = useStrings();
-    const projectId = useApp((state) => state.selectedProjectId);
-    const project = useApp((state) => state.projects.find((item) => item.id === state.selectedProjectId));
+    const projects = useApp((state) => state.projects);
+    const selectedProjectId = useApp((state) => state.selectedProjectId);
+    // Any project's own prompt, the selected one first (it was the only one before).
+    const [projectId, setProjectId] = useState<string | undefined>(
+        projects.some((project) => project.id === selectedProjectId) ? selectedProjectId : projects[0]?.id,
+    );
     const [global, setGlobal] = useState<string | undefined>();
     const [projectText, setProjectText] = useState<string | undefined>();
     useEffect(() => {
         void host.call('prompt.get', { scope: 'global' }).then((result) => setGlobal(result.text));
-        if (projectId)
-            void host.call('prompt.get', { scope: 'project', projectId }).then((result) => setProjectText(result.text));
+    }, []);
+    useEffect(() => {
+        setProjectText(undefined);
+        if (!projectId) return;
+        let current = true;
+        void host.call('prompt.get', { scope: 'project', projectId }).then((result) => {
+            if (current) setProjectText(result.text);
+        });
+        return () => {
+            current = false;
+        };
     }, [projectId]);
     const save = async (scope: 'global' | 'project', text: string) => {
         const done = await attempt(() =>
@@ -577,19 +590,24 @@ function Prompts() {
                 </button>
             </Field>
             {projectId && (
-                <Field
-                    label={`${s.settings.projectPrompt}：${project?.name ?? ''}`}
-                    hint={s.settings.projectPromptHint}
-                >
+                <Field label={s.settings.projectPrompt} hint={s.settings.projectPromptHint}>
+                    <Select
+                        label={s.settings.projectPromptPick}
+                        value={projectId}
+                        options={projects.map((project) => ({ value: project.id, label: project.name }))}
+                        onChange={setProjectId}
+                    />
                     <textarea
                         className="textarea"
                         rows={6}
                         value={projectText ?? ''}
+                        disabled={projectText === undefined}
                         onChange={(event) => setProjectText(event.target.value)}
                     />
                     <button
                         type="button"
                         className="button button--small"
+                        disabled={projectText === undefined}
                         onClick={() => void save('project', projectText ?? '')}
                     >
                         {s.settings.save}

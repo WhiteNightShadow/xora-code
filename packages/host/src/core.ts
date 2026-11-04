@@ -911,6 +911,16 @@ export class HostCore {
         peer.handle('turn.start', async ({ threadId, text, attachments }) => ({
             turnId: await turns.start(threadId, text, attachments ?? []),
         }));
+        peer.handle('turn.queue', ({ threadId, text, attachments }) => turns.queue(threadId, text, attachments ?? []));
+        peer.handle('turn.unqueue', ({ threadId, id }) => {
+            turns.unqueue(threadId, id);
+            return { ok: true as const };
+        });
+        peer.handle('turn.editQueued', ({ threadId, id, text }) => {
+            turns.editQueued(threadId, id, text);
+            return { ok: true as const };
+        });
+        peer.handle('turn.sendQueued', ({ threadId, id }) => turns.sendQueued(threadId, id));
         peer.handle('fs.read', async ({ threadId, path: file }) => readForPreview(await dirOf(threadId), file));
         peer.handle('fs.find', async ({ threadId, query }) => findFiles(await dirOf(threadId), query));
         peer.handle('fs.list', async ({ threadId, path: dir }) => listForPreview(await dirOf(threadId), dir ?? '.'));

@@ -1,6 +1,7 @@
 import { rmSync } from 'node:fs';
 import path from 'node:path';
 import {
+    type Attachment,
     type Effort,
     type EventEnvelope,
     type Goal,
@@ -57,6 +58,15 @@ export interface ThreadExtra {
     group?: string;
     goal?: Goal;
     tokens?: { input: number; output: number };
+    /** Messages waiting for the running turn to end, oldest first (03). */
+    queue?: QueuedMessage[];
+}
+
+/** A message that waits for the running turn of its thread to end (03). */
+export interface QueuedMessage {
+    readonly id: string;
+    readonly text: string;
+    readonly attachments: readonly Attachment[];
 }
 
 function toMeta(row: ThreadRow): ThreadMeta {
@@ -91,6 +101,15 @@ function toMeta(row: ThreadRow): ThreadMeta {
         ...(extra.group ? { group: extra.group } : {}),
         ...(extra.goal ? { goal: extra.goal } : {}),
         ...(extra.tokens ? { tokens: extra.tokens } : {}),
+        ...(extra.queue && extra.queue.length > 0
+            ? {
+                  queued: extra.queue.map((item) => ({
+                      id: item.id,
+                      text: item.text,
+                      attachments: item.attachments.map((attachment) => attachment.name),
+                  })),
+              }
+            : {}),
     };
 }
 
@@ -212,6 +231,7 @@ export class ThreadStore {
             location: ThreadLocation;
             goal: Goal | null;
             tokens: { input: number; output: number };
+            queue: readonly QueuedMessage[];
         }>,
         options: { touch?: boolean } = {},
     ): ThreadMeta {
@@ -239,11 +259,13 @@ export class ThreadStore {
         if (patch.context !== undefined) set('context_json', toJson(patch.context));
         if (patch.turns !== undefined) set('turns', patch.turns);
         if (patch.location !== undefined) set('location_json', JSON.stringify(patch.location));
-        if (patch.goal !== undefined || patch.tokens !== undefined) {
+        if (patch.goal !== undefined || patch.tokens !== undefined || patch.queue !== undefined) {
             const extra = fromJson<ThreadExtra>(this.#row(threadId).extra_json, {});
             if (patch.goal) extra.goal = patch.goal;
             else if (patch.goal === null) delete extra.goal;
             if (patch.tokens) extra.tokens = patch.tokens;
+            if (patch.queue && patch.queue.length > 0) extra.queue = [...patch.queue];
+            else if (patch.queue) delete extra.queue;
             set('extra_json', JSON.stringify(extra));
         }
         if (options.touch !== false) set('updated_at', Date.now());
@@ -253,6 +275,11 @@ export class ThreadStore {
         const meta = this.get(threadId);
         this.#bus.broadcast('thread.meta', { thread: meta });
         return meta;
+    }
+
+    /** The messages waiting for the running turn of a thread to end, oldest first, with their attachments (03). */
+    queue(threadId: string): QueuedMessage[] {
+        return [...(fromJson<ThreadExtra>(this.#row(threadId).extra_json, {}).queue ?? [])];
     }
 
     #log(threadId: string): EventLog {

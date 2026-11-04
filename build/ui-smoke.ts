@@ -148,6 +148,17 @@ server.respondWith((request) => {
                   },
               ]);
     }
+    // 03: waiting messages and editing a sent one, in plain words; the first answer takes a while.
+    const asked = messages.at(-1)?.role === 'user' ? JSON.stringify(messages.at(-1)) : '';
+    if (asked.includes('慢慢数到三')) {
+        return { ...openaiText('一、二、三。'), delayMs: 2500 };
+    }
+    if (asked.includes('数到五')) {
+        return openaiText('一、二、三、四、五。');
+    }
+    if (asked.includes('数到十')) {
+        return openaiText('一到十，数完了。');
+    }
     // The scout the chief handed the job to answers it.
     if (messages.at(-1)?.role === 'user' && JSON.stringify(messages.at(-1)).includes('看看hello.txt里写了什么')) {
         return openaiText('hello.txt里只有一行：hello world。');
@@ -360,6 +371,12 @@ try {
     await page.getByRole('menuitemradio', { name: /新建对话/ }).click();
     // 03: a new conversation opens in the main area; its composer starts it. Typed key by key: a box that takes the
     // focus back on every render loses all but the first character.
+    // `@` offers the team's members to hand the message to (06 §19).
+    await page.locator('.new-thread textarea').pressSequentially('@');
+    await page.locator('.new-thread .mention--members button').first().waitFor();
+    await step(page, '新建对话里@出成员候选');
+    await page.keyboard.press('Escape');
+    await page.locator('.new-thread textarea').fill('');
     await page.locator('.new-thread textarea').pressSequentially('把hello.txt里的hello改成hello world');
     await step(page, '新建对话直接在主区域里写，不弹框');
     await page.locator('.new-thread').getByRole('button', { name: '发送', exact: true }).click();
@@ -416,6 +433,27 @@ try {
         throw new Error('going back without files changed the files');
     }
     await step(page, '回到这一轮之前');
+
+    // 03: a message sent while a turn runs waits for it, then goes by itself; a sent message can be edited.
+    await page.locator('.composer textarea').pressSequentially('慢慢数到三');
+    await page.keyboard.press('Enter');
+    await page.locator('.composer').getByRole('button', { name: '停止' }).waitFor();
+    await page.locator('.composer textarea').pressSequentially('再补一句，数到五');
+    await page.locator('.composer').getByRole('button', { name: '排队' }).click();
+    await page.locator('.queued__item', { hasText: '再补一句，数到五' }).waitFor();
+    await step(page, '跑着的时候发的消息排队等着');
+    await page.locator('.queued').waitFor({ state: 'detached', timeout: 30_000 });
+    await page.locator('.user-message', { hasText: '再补一句，数到五' }).waitFor();
+    await page.locator('.turn', { hasText: '一、二、三、四、五。' }).waitFor();
+    await step(page, '这一轮结束后排队的消息自动发出');
+    const last = page.locator('.turn', { hasText: '再补一句，数到五' }).last();
+    await last.hover();
+    await last.getByRole('button', { name: '编辑' }).click();
+    await page.locator('.user-message__editor').fill('改过了，数到十');
+    await page.locator('.user-message--editing').getByRole('button', { name: '发送' }).click();
+    await page.locator('.turn', { hasText: '一到十，数完了。' }).waitFor();
+    await page.locator('.turn--rewound', { hasText: '再补一句，数到五' }).waitFor();
+    await step(page, '编辑刚发的消息后从这里重新开始');
 
     await mkdir(path.join(repo, '.xora', 'commands'), { recursive: true });
     await writeFile(

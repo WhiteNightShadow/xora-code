@@ -5,6 +5,7 @@ import { attempt, selectThread, useApp, useStrings } from '../store.ts';
 import { ConversationArt } from './Art.tsx';
 import { Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
+import { MemberMentionList, useMemberMention } from './Mentions.tsx';
 import { AutoFocusTextarea, IconButton, Select, Spinner } from './primitives.tsx';
 
 const MODES: PermissionMode[] = ['ask', 'auto_edit', 'plan', 'full'];
@@ -32,6 +33,8 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
     const [model, setModel] = useState(settings?.defaultModel ? key(settings.defaultModel) : '');
     const [mode, setMode] = useState<PermissionMode>(settings?.defaultMode ?? 'ask');
     const [text, setText] = useState('');
+    // `@member` hands the first message to a member (06 §19); only Xora's own engine hands work on.
+    const mention = useMemberMention(text, setText);
     // Best-of-n: the same task on several models, each in a worktree.
     const [picked, setPicked] = useState<string[]>([]);
     const [busy, setBusy] = useState(false);
@@ -112,14 +115,19 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
                 <p>{s.newThread.hint}</p>
             </div>
             <div className="new-thread__composer">
+                {engine === 'xora' && <MemberMentionList mention={mention} />}
                 <AutoFocusTextarea
                     className="new-thread__input"
                     rows={3}
                     value={text}
                     placeholder={s.thread.placeholder}
                     aria-label={s.newThread.title}
-                    onChange={(event) => setText(event.target.value)}
+                    onChange={(event) => {
+                        setText(event.target.value);
+                        if (engine === 'xora') mention.update(event.target.value, event.target.selectionStart);
+                    }}
                     onKeyDown={(event) => {
+                        if (engine === 'xora' && mention.keyDown(event)) return;
                         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                             event.preventDefault();
                             void start();

@@ -1441,6 +1441,70 @@ pre {
     margin-top: var(--xk-space-2);
 }
 
+/* Editing a sent message (03): a pencil at the bubble's edge on hover, then the text in place. */
+.user-message {
+    position: relative;
+}
+
+.user-message__edit {
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 6px);
+    transform: translateY(-50%);
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: var(--xk-radius-md);
+    background: none;
+    color: var(--xk-text-faint);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.turn:hover .user-message__edit,
+.user-message__edit:focus-visible {
+    opacity: 1;
+}
+
+.user-message__edit:hover {
+    background: var(--xk-bg-hover);
+    color: var(--xk-text);
+}
+
+.user-message--editing {
+    width: min(80%, 640px);
+}
+
+.user-message__editor {
+    display: block;
+    width: 100%;
+    resize: vertical;
+    border: 0;
+    outline: none;
+    background: none;
+    color: var(--xk-text);
+    font: inherit;
+    line-height: 1.6;
+}
+
+.user-message__hint {
+    margin: var(--xk-space-1) 0 0;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+}
+
+.user-message__actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--xk-space-2);
+    margin-top: var(--xk-space-2);
+}
+
 .turn__items {
     display: flex;
     flex-direction: column;
@@ -4538,4 +4602,74 @@ button.tool__header:hover {
         opacity: 1;
         transform: translateY(-2px);
     }
+}
+
+/* Messages waiting for the running turn (03), above the composer. */
+.queued {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: var(--xk-space-2);
+    padding: 6px 8px;
+    border: 1px dashed var(--xk-border);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg-subtle);
+    font-size: var(--xk-text-sm);
+}
+
+.queued__head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 2px 2px;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+}
+
+.queued__item {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+    min-height: 28px;
+    padding: 2px 4px;
+    border-radius: var(--xk-radius-md);
+}
+
+.queued__item:hover {
+    background: var(--xk-bg-hover);
+}
+
+.queued__text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--xk-text);
+}
+
+.queued__files {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--xk-text-muted);
+    font-size: var(--xk-text-xs);
+}
+
+.queued__item .link {
+    flex: none;
+    font-size: var(--xk-text-xs);
+}
+
+.queued__editor {
+    flex: 1;
+    min-width: 0;
+    resize: vertical;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-elevated);
+    padding: 4px 8px;
+    color: var(--xk-text);
+    font: inherit;
 }

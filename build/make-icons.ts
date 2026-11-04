@@ -2,10 +2,13 @@
  * Renders the app icon from its source, apps/desktop/build-resources/icon.svg, into what each platform takes:
  *
  *   build-resources/icon.png     1024 px, the macOS grid (the plate in the middle 824 px), also the README's icon
- *   build-resources/icon.icns    macOS, every size of an iconset, made with iconutil
+ *   build-resources/icon.icns    macOS, every size of an iconset, made with iconutil; 16 and 32 px draw the
+ *                                moon and star alone, in a bolder line (the wires vanish at that size)
  *   build-resources/icon.ico     Windows, 16 to 256 px, the plate filling the square
  *   build-resources/icon-linux.png   1024 px, the plate filling the square
- *   static/tray.png              32 px for the tray and menu bar (the shell scales it to 16)
+ *   static/tray.png              32 px for the Windows and Linux tray (the shell scales it to 16)
+ *   static/trayTemplate.png      18 and 36 px (@2x) for the macOS menu bar: a template image, the drawing alone in
+ *                                black, which macOS tints for a light or dark menu bar
  *
  * The SVG is drawn by Google Chrome through playwright-core, so gradients, filters and anti-aliasing look the same
  * at every size; each size is rendered from the vector rather than scaled down.
@@ -28,15 +31,49 @@ const source = await readFile(path.join(resources, 'icon.svg'), 'utf8');
  * The macOS icon keeps Apple's margins; Windows and Linux icons fill the square, so their plate is cropped close
  * and has no drop shadow (it would be cut off at the edge, and small sizes read better without it).
  */
-function variant(kind: 'mac' | 'full'): string {
+function variant(kind: 'mac' | 'full' | 'small' | 'tray'): string {
     if (kind === 'mac') return source;
-    return source.replace('viewBox="0 0 1024 1024"', 'viewBox="72 72 880 880"').replace(' filter="url(#drop)"', '');
+    if (kind === 'full') {
+        return source.replace('viewBox="0 0 1024 1024"', 'viewBox="72 72 880 880"').replace(' filter="url(#drop)"', '');
+    }
+    // The small drawing: the moon in a bolder line and a larger star, without the wires and nodes, centred again.
+    const small = must(
+        source
+            .replace('stroke-width="22" stroke-linejoin="round"', 'stroke-width="46" stroke-linejoin="round"')
+            .replace(/\s*<g fill="none" stroke="#111111" stroke-width="7"[\s\S]*?<\/g>/, '')
+            .replace(/\s*<circle [^>]*\/>/g, '')
+            .replace(
+                /(<path d="M628 340C[^"]*" fill="#111111"\/>)/,
+                '<g transform="translate(628 440) scale(1.3) translate(-628 -440)">$1</g>',
+            )
+            .replace(
+                'translate(522 507) scale(0.92) translate(-507 -541)',
+                'translate(518 510) scale(0.92) translate(-484 -541)',
+            ),
+        source,
+    );
+    if (kind === 'small') return small;
+    // The menu bar: the drawing alone, in black on nothing, the plate and its rim dropped.
+    return must(
+        small
+            .replace(/\s*<g filter="url\(#drop\)">[\s\S]*?<\/g>/, '')
+            .replace(/\s*<use href="#shape" fill="none"[^>]*\/>/, '')
+            .replace('viewBox="0 0 1024 1024"', 'viewBox="225.5 220 580 580"')
+            .replaceAll('#111111', '#000000'),
+        small,
+    );
+}
+
+/** A variant must differ from what it was made from: a source that no longer matches fails loudly. */
+function must(changed: string, from: string): string {
+    if (changed === from) throw new Error('icon.svg changed: build/make-icons.ts no longer finds what it adapts');
+    return changed;
 }
 
 const browser = await chromium.launch({ channel: 'chrome' });
 const page = await browser.newPage({ deviceScaleFactor: 1 });
 
-async function render(kind: 'mac' | 'full', size: number): Promise<Buffer> {
+async function render(kind: 'mac' | 'full' | 'small' | 'tray', size: number): Promise<Buffer> {
     const svg = variant(kind).replace(/width="1024" height="1024"/, `width="${size}" height="${size}"`);
     await page.setViewportSize({ width: size, height: size });
     await page.setContent(
@@ -76,8 +113,13 @@ try {
     const iconset = path.join(work, 'icon.iconset');
     await mkdir(iconset);
     for (const points of [16, 32, 128, 256, 512]) {
-        await writeFile(path.join(iconset, `icon_${points}x${points}.png`), await render('mac', points));
-        await writeFile(path.join(iconset, `icon_${points}x${points}@2x.png`), await render('mac', points * 2));
+        // 16 and 32 px images draw the simpler drawing; 64 px and up the whole one.
+        const kind = (pixels: number) => (pixels <= 32 ? 'small' : 'mac');
+        await writeFile(path.join(iconset, `icon_${points}x${points}.png`), await render(kind(points), points));
+        await writeFile(
+            path.join(iconset, `icon_${points}x${points}@2x.png`),
+            await render(kind(points * 2), points * 2),
+        );
     }
     if (process.platform === 'darwin') {
         execFileSync('iconutil', ['-c', 'icns', iconset, '-o', path.join(resources, 'icon.icns')]);
@@ -90,8 +132,11 @@ try {
     for (const size of sizes) images.push({ size, png: await render('full', size) });
     await writeFile(path.join(resources, 'icon.ico'), ico(images));
 
-    await writeFile(path.join(repoRoot, 'apps', 'desktop', 'static', 'tray.png'), await render('full', 32));
-    console.log(`icons written to ${path.relative(repoRoot, resources)} and apps/desktop/static/tray.png`);
+    const statics = path.join(repoRoot, 'apps', 'desktop', 'static');
+    await writeFile(path.join(statics, 'tray.png'), await render('full', 32));
+    await writeFile(path.join(statics, 'trayTemplate.png'), await render('tray', 18));
+    await writeFile(path.join(statics, 'trayTemplate@2x.png'), await render('tray', 36));
+    console.log(`icons written to ${path.relative(repoRoot, resources)} and ${path.relative(repoRoot, statics)}`);
 } finally {
     await browser.close();
     await rm(work, { recursive: true, force: true });

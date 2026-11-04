@@ -6,6 +6,7 @@ import {
     choiceOf,
     cronOf,
     initialOf,
+    memberJob,
     type SchedulePreset,
     sortMembers,
     type WorkKind,
@@ -48,13 +49,7 @@ export function roleLine(member: Member, s: Strings): string {
     return [role, member.model ?? format(s.members.tierLabel, { tier }), s.members.modes[member.mode]].join(' · ');
 }
 
-/** A built-in member's job in the UI language until the user writes another. */
-function descriptionOf(member: Member, s: Strings): string | undefined {
-    if (member.source === 'builtin' && !member.customized) {
-        return (s.members.builtinJobs as Record<string, string>)[member.id] ?? member.description;
-    }
-    return member.description;
-}
+const descriptionOf = memberJob;
 
 function SourceBadge({ member }: { member: Member }) {
     const s = useStrings();

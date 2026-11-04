@@ -107,6 +107,11 @@ export const ThreadMetaSchema = z.object({
     tier: z.string().optional(),
     group: z.string().optional(),
     goal: GoalSchema.optional(),
+    /**
+     * Messages waiting for the running turn to end, oldest first (03): each starts a turn of its own once the turn
+     * before it ended by itself. Attachments by name.
+     */
+    queued: z.array(z.object({ id: z.string(), text: z.string(), attachments: z.array(z.string()) })).optional(),
 });
 export type ThreadMeta = z.infer<typeof ThreadMetaSchema>;
 

@@ -48,6 +48,7 @@ const TEXT = bilingual(
     {
         busy: '这个线程正在运行，等它完成或先停止',
         emptyMessage: '消息不能为空',
+        noQueued: '这条消息已经不在排队了',
         projectMissing: (dir: string) => `项目文件夹不存在：${dir}`,
         worktreeGone: '这个线程的worktree已经删除，不能继续运行',
         unknownEngine: (id: string) => `未知的引擎：${id}`,
@@ -74,6 +75,7 @@ const TEXT = bilingual(
     {
         busy: 'This thread is running; wait for it to finish or stop it first',
         emptyMessage: 'The message cannot be empty',
+        noQueued: 'That message is no longer waiting',
         projectMissing: (dir) => `The project folder does not exist: ${dir}`,
         worktreeGone: "This thread's worktree was deleted, so it cannot run anymore",
         unknownEngine: (id) => `Unknown engine: ${id}`,
@@ -118,6 +120,17 @@ const READ_KINDS: ReadonlySet<string> = new Set(['read', 'search', 'think']);
 
 /** Model requests the engine makes in one turn at most. */
 const MAX_TURN_REQUESTS = 200;
+
+/**
+ * How long after a turn ended by itself the oldest waiting message starts the next one (03): long enough for a team
+ * or the chief to start a turn of their own on the thread first, which the message then waits for.
+ */
+const QUEUE_DELAY_MS = 150;
+
+/** Threads whose turns the user starts: a team's, a workflow's and a subagent's are started by the host. */
+function queues(thread: ThreadMeta): boolean {
+    return !thread.parent && !thread.teamRunId && !thread.workflowRunId;
+}
 /** Times a Stop or SubagentStop hook may send the agent back to work within one turn (09 §4). */
 export const MAX_STOP_CONTINUATIONS = 3;
 /** How long SessionEnd hooks may take: closing a thread or quitting does not wait longer (09 §4). */
@@ -1986,23 +1999,132 @@ export class TurnService {
         changedFiles: string[],
     ): void {
         const hook = this.#deps.onTurnEnded;
-        if (!hook) return;
         // After the bookkeeping of this turn, and outside its call stack, so the hook may start the next turn.
         setTimeout(() => {
-            try {
-                hook({
-                    threadId: running.threadId,
-                    turnId: running.turnId,
-                    outcome,
-                    ...(stopReason ? { stopReason } : {}),
-                    lastText: running.lastText,
-                    changedFiles,
-                    requests: running.modelCalls,
-                });
-            } catch (error) {
-                this.#deps.log.warn(`turn hook failed: ${error instanceof Error ? error.message : String(error)}`);
+            if (hook) {
+                try {
+                    hook({
+                        threadId: running.threadId,
+                        turnId: running.turnId,
+                        outcome,
+                        ...(stopReason ? { stopReason } : {}),
+                        lastText: running.lastText,
+                        changedFiles,
+                        requests: running.modelCalls,
+                    });
+                } catch (error) {
+                    this.#deps.log.warn(`turn hook failed: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            }
+            // 03: a turn that ended by itself hands over to the message waiting for it; a stopped or failed one
+            // leaves the waiting messages to the user.
+            if (outcome === 'completed' && !this.#disposed) {
+                this.#startQueued(running.threadId);
             }
         }, 0);
+    }
+
+    // Waiting messages (03) ---------------------------------------------------------------------------------
+
+    /**
+     * A message for a thread that may be busy: a turn at once when the thread is free and nothing waits; otherwise it
+     * waits its turn, after the messages before it, and starts one when the running turn has ended by itself.
+     */
+    async queue(
+        threadId: string,
+        text: string,
+        attachments: readonly Attachment[] = [],
+    ): Promise<{ turnId?: string; queuedId?: string }> {
+        const { threads } = this.#deps;
+        const thread = threads.get(threadId);
+        const waiting = threads.queue(threadId);
+        if (!this.#running.has(threadId) && waiting.length === 0) {
+            return { turnId: await this.start(threadId, text, attachments) };
+        }
+        if (text.trim().length === 0 && attachments.length === 0) {
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).emptyMessage);
+        }
+        if (!queues(thread)) {
+            throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).busy);
+        }
+        const id = newId('q');
+        threads.update(
+            threadId,
+            { queue: [...waiting, { id, text, attachments: [...attachments] }] },
+            { touch: false },
+        );
+        // Nothing runs: the user stopped the last turn or it failed, and the message waits until they send it.
+        return { queuedId: id };
+    }
+
+    unqueue(threadId: string, id: string): void {
+        const { threads } = this.#deps;
+        threads.update(threadId, { queue: threads.queue(threadId).filter((item) => item.id !== id) }, { touch: false });
+    }
+
+    editQueued(threadId: string, id: string, text: string): void {
+        const { threads } = this.#deps;
+        const waiting = threads.queue(threadId);
+        const item = waiting.find((entry) => entry.id === id);
+        if (!item) {
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noQueued);
+        }
+        if (text.trim().length === 0 && item.attachments.length === 0) {
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).emptyMessage);
+        }
+        threads.update(
+            threadId,
+            { queue: waiting.map((entry) => (entry.id === id ? { ...entry, text } : entry)) },
+            { touch: false },
+        );
+    }
+
+    /**
+     * A waiting message now: into the running turn, which takes it before its next model request (06 §20), or as a
+     * turn of its own when nothing runs. `steered` is false when the running turn did not take it; it still waits.
+     */
+    async sendQueued(threadId: string, id: string): Promise<{ turnId?: string; steered?: boolean }> {
+        const { threads } = this.#deps;
+        const item = threads.queue(threadId).find((entry) => entry.id === id);
+        if (!item) {
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noQueued);
+        }
+        if (this.#running.has(threadId)) {
+            if (item.attachments.length > 0 || !(await this.steer(threadId, item.text))) {
+                return { steered: false };
+            }
+            this.unqueue(threadId, id);
+            return { steered: true };
+        }
+        const turnId = await this.start(threadId, item.text, item.attachments);
+        this.unqueue(threadId, id);
+        return { turnId };
+    }
+
+    /** 03: the oldest waiting message starts the next turn, unless the host started one on the thread meanwhile. */
+    #startQueued(threadId: string): void {
+        setTimeout(() => {
+            if (this.#disposed || this.#running.has(threadId)) {
+                return;
+            }
+            const { threads, log } = this.#deps;
+            const thread = threads.find(threadId);
+            if (!thread || !queues(thread)) {
+                return;
+            }
+            const [next, ...rest] = threads.queue(threadId);
+            if (!next) {
+                return;
+            }
+            threads.update(threadId, { queue: rest }, { touch: false });
+            void this.start(threadId, next.text, next.attachments).catch((error: unknown) => {
+                // It waits again, first in line, for the user to send it.
+                threads.update(threadId, { queue: [next, ...threads.queue(threadId)] }, { touch: false });
+                log.warn(
+                    `the waiting message of ${threadId} did not start: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            });
+        }, QUEUE_DELAY_MS);
     }
 
     #title(running: RunningTurn): string {

@@ -1,4 +1,5 @@
 import type { Member, ThreadMeta } from '@xora/protocol';
+import type { Strings } from './strings.ts';
 
 /** The schedules the routine form offers; anything else is written as cron. */
 export type SchedulePreset = 'daily' | 'weekdays' | 'weekly' | 'hourly' | 'custom';
@@ -85,4 +86,12 @@ export function sortMembers(members: readonly Member[]): Member[] {
     return [...members].sort(
         (a, b) => order[a.source] - order[b.source] || (a.source === 'builtin' ? 0 : a.name.localeCompare(b.name)),
     );
+}
+
+/** A built-in member's job in the UI language until the user writes another. */
+export function memberJob(member: Member, s: Strings): string | undefined {
+    if (member.source === 'builtin' && !member.customized) {
+        return (s.members.builtinJobs as Record<string, string>)[member.id] ?? member.description;
+    }
+    return member.description;
 }

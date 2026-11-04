@@ -3,8 +3,10 @@ import { useState } from 'react';
 import { host } from '../host.ts';
 import { attempt, isChief, openProject, openRun, selectThread, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { LogoMark } from './Art.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
+import { MemberMentionList, useMemberMention } from './Mentions.tsx';
 import { Badge, formatMoney, relativeTime, Select, Spinner } from './primitives.tsx';
 import '../chief.css';
 
@@ -27,6 +29,8 @@ export function ChiefHome() {
     );
     const [text, setText] = useState('');
     const [busy, setBusy] = useState(false);
+    // `@member` hands the request to a member (06 §19).
+    const mention = useMemberMention(text, setText);
     const threads = useApp((state) => state.threads);
     const teamRuns = useApp((state) => state.teamRuns);
     const workflowRuns = useApp((state) => state.workflowRuns);
@@ -81,9 +85,7 @@ export function ChiefHome() {
         return (
             <div className="chief-home">
                 <div className="chief-home__hero">
-                    <span className="chief-home__mark">
-                        <Icon name="sparkle" size={22} />
-                    </span>
+                    <LogoMark size={52} className="chief-home__mark" />
                     <h1>{s.chief.title}</h1>
                     <p>{s.chief.noProject}</p>
                     <button type="button" className="button button--primary" onClick={() => void openProject()}>
@@ -97,21 +99,24 @@ export function ChiefHome() {
     return (
         <div className="chief-home">
             <div className="chief-home__hero">
-                <span className="chief-home__mark">
-                    <Icon name="sparkle" size={22} />
-                </span>
+                <LogoMark size={52} className="chief-home__mark" />
                 <h1>{s.chief.title}</h1>
                 <p>{s.chief.subtitle}</p>
             </div>
             <div className="chief-home__composer">
+                <MemberMentionList mention={mention} />
                 <textarea
                     className="chief-home__input"
                     value={text}
                     rows={4}
                     placeholder={s.chief.placeholder}
                     aria-label={s.chief.title}
-                    onChange={(event) => setText(event.target.value)}
+                    onChange={(event) => {
+                        setText(event.target.value);
+                        mention.update(event.target.value, event.target.selectionStart);
+                    }}
                     onKeyDown={(event) => {
+                        if (mention.keyDown(event)) return;
                         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                             event.preventDefault();
                             void send();

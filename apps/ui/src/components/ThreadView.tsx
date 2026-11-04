@@ -23,7 +23,16 @@ import { ContextMeter, EffortPicker, ModelPicker, ModePicker, Popover } from './
 import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { MemberChip } from './MembersView.tsx';
-import { AutoFocusInput, formatMoney, formatTokens, Spinner, Toggle } from './primitives.tsx';
+import { memberMentions } from './Mentions.tsx';
+import {
+    AutoFocusInput,
+    AutoFocusTextarea,
+    formatMoney,
+    formatTokens,
+    IconButton,
+    Spinner,
+    Toggle,
+} from './primitives.tsx';
 
 /** A subagent's thread links back to the thread whose agent started it. */
 function ParentLink({ threadId }: { threadId: string }) {
@@ -358,6 +367,120 @@ function TurnHistory({ thread, turn, isLast }: { thread: ThreadMeta; turn: TurnV
 
 const COMPACT_COMMAND = /^\/compact(?:\s+([\s\S]*))?$/;
 
+/** Threads whose turns the user starts (a team's, a workflow's and a subagent's are started by the host). */
+function userDriven(thread: ThreadMeta): boolean {
+    return !thread.parent && !thread.teamRunId && !thread.workflowRunId;
+}
+
+const isBusy = (thread: ThreadMeta | undefined) =>
+    thread?.status === 'running' || thread?.status === 'awaiting_approval';
+
+/** Resolves once the thread's turn has ended, or after `timeoutMs`. */
+async function settled(threadId: string, timeoutMs = 15_000): Promise<void> {
+    const started = Date.now();
+    while (isBusy(useApp.getState().threads[threadId]) && Date.now() - started < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+}
+
+/**
+ * The user's message of a turn, which they can edit (03): the edited text goes out again from where the message
+ * stood, the conversation from it on is taken back (the xora engine forgets it), and a turn still running is
+ * stopped first. Images were not kept, so they do not go out again.
+ */
+function UserMessage({ thread, turn }: { thread: ThreadMeta; turn: TurnView }) {
+    const s = useStrings();
+    const [draft, setDraft] = useState<string | undefined>();
+    const [files, setFiles] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const editable = thread.engine === 'xora' && userDriven(thread);
+    const submit = async () => {
+        if (busy || draft === undefined || !draft.trim()) return;
+        setBusy(true);
+        try {
+            if (isBusy(useApp.getState().threads[thread.id])) {
+                await attempt(() => host.call('turn.cancel', { threadId: thread.id }));
+                await settled(thread.id);
+            }
+            const rewound = await attempt(() =>
+                host.call('thread.rewind', { threadId: thread.id, turnId: turn.turnId, files }),
+            );
+            if (!rewound) return;
+            if (rewound.conflicts.length > 0) {
+                toast(format(s.thread.rewindConflicts, { count: rewound.conflicts.length }), 'error');
+            }
+            const attachments = turn.input.attachments.filter((attachment) => attachment.kind !== 'image');
+            const started = await attempt(() =>
+                host.call('turn.start', { threadId: thread.id, text: draft, attachments }),
+            );
+            if (started) setDraft(undefined);
+        } finally {
+            setBusy(false);
+        }
+    };
+    if (draft !== undefined) {
+        return (
+            <div className="user-message user-message--editing">
+                <AutoFocusTextarea
+                    className="user-message__editor"
+                    value={draft}
+                    rows={Math.min(10, Math.max(2, draft.split('\n').length))}
+                    aria-label={s.thread.editMessage}
+                    onChange={(event) => setDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                        if (event.key === 'Escape') setDraft(undefined);
+                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                            event.preventDefault();
+                            void submit();
+                        }
+                    }}
+                />
+                <p className="user-message__hint">{s.thread.editHint}</p>
+                <div className="user-message__actions">
+                    <Toggle label={s.thread.rewindFiles} checked={files} onChange={setFiles} />
+                    <span className="composer__spacer" />
+                    <button type="button" className="button button--small" onClick={() => setDraft(undefined)}>
+                        {s.common.cancel}
+                    </button>
+                    <button
+                        type="button"
+                        className="button button--small button--primary"
+                        disabled={busy || !draft.trim()}
+                        onClick={() => void submit()}
+                    >
+                        {busy ? <Spinner /> : <Icon name="send" size={12} />} {s.thread.send}
+                    </button>
+                </div>
+            </div>
+        );
+    }
+    return (
+        <div className="user-message">
+            <div className="user-message__text">{turn.input.text}</div>
+            {turn.input.attachments.length > 0 && (
+                <div className="user-message__attachments">
+                    {turn.input.attachments.map((attachment) => (
+                        <span key={attachment.name} className="chip">
+                            <Icon name="clip" size={11} /> {attachment.name}
+                        </span>
+                    ))}
+                </div>
+            )}
+            {editable && (
+                <button
+                    type="button"
+                    className="user-message__edit"
+                    title={s.thread.editMessage}
+                    aria-label={s.thread.editMessage}
+                    onClick={() => setDraft(turn.input.text)}
+                >
+                    <Icon name="pencil" size={12} />
+                </button>
+            )}
+        </div>
+    );
+}
+
 function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; thread: ThreadMeta }) {
     const s = useStrings();
     const running = turn.status === 'running';
@@ -395,18 +518,7 @@ function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; 
     }
     return (
         <section className="turn">
-            <div className="user-message">
-                <div className="user-message__text">{turn.input.text}</div>
-                {turn.input.attachments.length > 0 && (
-                    <div className="user-message__attachments">
-                        {turn.input.attachments.map((attachment) => (
-                            <span key={attachment.name} className="chip">
-                                <Icon name="clip" size={11} /> {attachment.name}
-                            </span>
-                        ))}
-                    </div>
-                )}
-            </div>
+            <UserMessage thread={thread} turn={turn} />
             <div className="turn__items">
                 {items.map((item) => (
                     <ItemView key={item.id} item={item} live={running && item === lastItem} turnRunning={running} />
@@ -474,6 +586,94 @@ interface Suggestion {
     /** File path, command name or agent name. */
     readonly value: string;
     readonly hint?: string;
+}
+
+/**
+ * Messages waiting for the running turn (03): sent in order once it ends by itself; each can be edited, removed or
+ * sent now, which puts it into the running turn when there is one.
+ */
+function QueuedMessages({ thread, running }: { thread: ThreadMeta; running: boolean }) {
+    const s = useStrings();
+    const [editing, setEditing] = useState<{ id: string; text: string } | undefined>();
+    const queued = thread.queued ?? [];
+    const save = async () => {
+        if (!editing) return;
+        const done = await attempt(() =>
+            host.call('turn.editQueued', { threadId: thread.id, id: editing.id, text: editing.text }),
+        );
+        if (done) setEditing(undefined);
+    };
+    const sendNow = async (id: string) => {
+        const result = await attempt(() => host.call('turn.sendQueued', { threadId: thread.id, id }));
+        if (result?.steered === false) toast(s.thread.notSteered, 'info');
+    };
+    return (
+        <div className="queued">
+            <div className="queued__head">
+                <Icon name="list" size={12} /> {s.thread.queued} ·{' '}
+                {running ? s.thread.queueHint : s.thread.queueStopped}
+            </div>
+            {queued.map((item) =>
+                editing?.id === item.id ? (
+                    <div key={item.id} className="queued__item is-editing">
+                        <AutoFocusTextarea
+                            className="queued__editor"
+                            rows={2}
+                            value={editing.text}
+                            aria-label={s.thread.editQueued}
+                            onChange={(event) => setEditing({ id: item.id, text: event.target.value })}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Escape') setEditing(undefined);
+                                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                                    event.preventDefault();
+                                    void save();
+                                }
+                            }}
+                        />
+                        <button type="button" className="link" onClick={() => void save()}>
+                            {s.common.save}
+                        </button>
+                        <button type="button" className="link" onClick={() => setEditing(undefined)}>
+                            {s.common.cancel}
+                        </button>
+                    </div>
+                ) : (
+                    <div key={item.id} className="queued__item">
+                        <span className="queued__text">{item.text}</span>
+                        {item.attachments.length > 0 && (
+                            <span className="queued__files">
+                                <Icon name="clip" size={11} /> {item.attachments.length}
+                            </span>
+                        )}
+                        <button
+                            type="button"
+                            className="link"
+                            title={running ? s.thread.sendNowRunning : undefined}
+                            onClick={() => void sendNow(item.id)}
+                        >
+                            {s.thread.sendNow}
+                        </button>
+                        <button
+                            type="button"
+                            className="link"
+                            onClick={() => setEditing({ id: item.id, text: item.text })}
+                        >
+                            {s.thread.editQueued}
+                        </button>
+                        <button
+                            type="button"
+                            className="link"
+                            onClick={() =>
+                                void attempt(() => host.call('turn.unqueue', { threadId: thread.id, id: item.id }))
+                            }
+                        >
+                            {s.thread.removeQueued}
+                        </button>
+                    </div>
+                ),
+            )}
+        </div>
+    );
 }
 
 function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnView[] }) {
@@ -573,10 +773,22 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
         }
         const query = match[2] ?? '';
         const start = caret - query.length - 1;
-        const agentsFor = (agents: readonly Suggestion[]) =>
-            delegates
-                ? agents.filter((agent) => agent.value.toLowerCase().includes(query.toLowerCase())).slice(0, 8)
-                : [];
+        // Agents the project defines, then the team's members (06 §19), a name only once.
+        const agentsFor = (agents: readonly Suggestion[]) => {
+            if (!delegates) return [];
+            const own = agents.filter((agent) => agent.value.toLowerCase().includes(query.toLowerCase())).slice(0, 8);
+            const taken = new Set(own.map((agent) => agent.value.toLowerCase()));
+            const team = memberMentions(useApp.getState().members, query, s)
+                .filter((member) => !taken.has(member.value.toLowerCase()))
+                .map(
+                    (member): Suggestion => ({
+                        kind: 'agent',
+                        value: member.value,
+                        ...(member.hint ? { hint: member.hint } : {}),
+                    }),
+                );
+            return [...own, ...team].slice(0, 10);
+        };
         const files = (items: readonly Suggestion[]) => items.filter((item) => item.kind === 'file');
         setMention((current) => ({
             kind: 'file',
@@ -641,10 +853,13 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
         setMention(undefined);
         area.current?.focus();
     };
+    // While a turn runs, a message waits its turn (03); `/compact` only goes when nothing runs.
+    const queueable = userDriven(thread);
     const send = async () => {
-        if (running || sending || (!text.trim() && attachments.length === 0)) return;
-        setSending(true);
+        if (sending || (!text.trim() && attachments.length === 0)) return;
         const compact = COMPACT_COMMAND.exec(text.trim());
+        if (running && (compact || !queueable)) return;
+        setSending(true);
         const result = compact
             ? await attempt(() =>
                   host.call('turn.compact', {
@@ -652,7 +867,9 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
                       ...(compact[1]?.trim() ? { focus: compact[1].trim() } : {}),
                   }),
               )
-            : await attempt(() => host.call('turn.start', { threadId: thread.id, text, attachments }));
+            : running
+              ? await attempt(() => host.call('turn.queue', { threadId: thread.id, text, attachments }))
+              : await attempt(() => host.call('turn.start', { threadId: thread.id, text, attachments }));
         setSending(false);
         if (result) {
             setText('');
@@ -665,6 +882,7 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
     };
     return (
         <div className="composer">
+            {(thread.queued?.length ?? 0) > 0 && <QueuedMessages thread={thread} running={running} />}
             {/* The box is not positioned, so the suggestion list still hangs off the composer above it. */}
             <div className="composer__box">
                 {attachments.length > 0 && (
@@ -723,7 +941,7 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
                     className="composer__input"
                     value={text}
                     rows={2}
-                    placeholder={s.thread.placeholder}
+                    placeholder={running && queueable ? s.thread.placeholderQueue : s.thread.placeholder}
                     onChange={(event) => {
                         setText(event.target.value);
                         updateMention(event.target.value, event.target.selectionStart);
@@ -785,6 +1003,14 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
                     {thread.engine === 'xora' && <EffortPicker thread={thread} />}
                     <span className="composer__spacer" />
                     <ContextMeter thread={thread} turns={turns} />
+                    {running && queueable && (
+                        <IconButton
+                            icon="list"
+                            label={s.thread.queue}
+                            disabled={sending || (!text.trim() && attachments.length === 0)}
+                            onClick={() => void send()}
+                        />
+                    )}
                     {running ? (
                         <button
                             type="button"

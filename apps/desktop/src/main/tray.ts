@@ -50,7 +50,12 @@ export class AppTray {
             return;
         }
         if (!this.#tray) {
-            const image = nativeImage.createFromPath(this.#iconPath).resize({ width: 16, height: 16 });
+            // macOS: a template image (black drawing, its @2x beside it) that the menu bar tints; elsewhere the icon.
+            const image =
+                process.platform === 'darwin'
+                    ? nativeImage.createFromPath(this.#iconPath)
+                    : nativeImage.createFromPath(this.#iconPath).resize({ width: 16, height: 16 });
+            if (process.platform === 'darwin') image.setTemplateImage(true);
             this.#tray = new Tray(image);
             this.#tray.on('click', () => this.#show());
         }
@@ -76,7 +81,7 @@ export class AppTray {
 }
 
 export function trayIconPath(): string {
-    return path.join(__dirname, '..', 'static', 'tray.png');
+    return path.join(__dirname, '..', 'static', process.platform === 'darwin' ? 'trayTemplate.png' : 'tray.png');
 }
 
 /** Quitting from the tray must not be swallowed by the hide-on-close behaviour. */
