@@ -20,7 +20,9 @@ import {
     PermissionModeSchema,
     PresetSummarySchema,
     ProjectSchema,
+    PromptFileSchema,
     PromptLayerSchema,
+    PromptLibrarySchema,
     PromptScopeSchema,
     RuleSchema,
     SettingsSchema,
@@ -893,6 +895,26 @@ export const methods = {
         result: ok,
     },
     'prompt.effective': { params: threadRef, result: z.array(PromptLayerSchema) },
+    /** The prompt directory (08 §1.4): every `.md` file in it is a global prompt, and one of them is in use. */
+    'prompt.list': { params: empty, result: PromptLibrarySchema },
+    'prompt.read': {
+        params: z.object({ name: z.string().min(1).max(400) }).strict(),
+        result: z.object({ text: z.string(), path: z.string() }),
+    },
+    /** A new prompt without `previous`; with it, that prompt saved under `name` (a rename when they differ). */
+    'prompt.save': {
+        params: z
+            .object({
+                name: z.string().min(1).max(400),
+                text: z.string().max(200_000),
+                previous: z.string().min(1).max(400).optional(),
+            })
+            .strict(),
+        result: PromptFileSchema,
+    },
+    'prompt.remove': { params: z.object({ name: z.string().min(1).max(400) }).strict(), result: ok },
+    /** Puts a prompt in use as the user global layer; `null` for none. */
+    'prompt.select': { params: z.object({ name: z.string().min(1).max(400).nullable() }).strict(), result: ok },
 
     'usage.summary': {
         params: z

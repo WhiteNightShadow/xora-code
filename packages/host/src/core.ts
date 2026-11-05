@@ -190,7 +190,11 @@ export class HostCore {
         this.projects = new ProjectService(this.db, this.bus);
         this.threads = new ThreadStore(this.db, this.bus, this.paths.threadsDir);
         this.connections = new ConnectionService(this.db, options.shell, this.bus, this.log, userAgent);
-        this.prompts = new PromptService(this.paths.promptsDir, this.paths.projectsDir);
+        this.prompts = new PromptService(
+            this.paths.promptsDir,
+            this.paths.projectsDir,
+            () => this.settings.get().globalPrompt,
+        );
         this.approvals = new ApprovalService(this.db, this.bus);
         this.review = new ReviewService(this.paths.checkpointsDir, this.log);
         this.usage = new UsageService(this.db, () => this.settings.get());
@@ -1172,7 +1176,10 @@ export class HostCore {
         peer.handle('settings.update', ({ patch }) => this.#applySettings(patch));
 
         peer.handle('prompt.get', ({ scope, projectId, threadId }) => {
-            if (scope === 'global') return { text: prompts.readGlobal(), path: prompts.globalFile() };
+            if (scope === 'global') {
+                const file = prompts.selectedFile();
+                return { text: prompts.readGlobal(), ...(file ? { path: file } : {}) };
+            }
             if (scope === 'project') {
                 if (!projectId) throw new RpcError(RpcErrorCode.InvalidParams, 'projectId is required');
                 return { text: prompts.readProject(projectId), path: prompts.projectFile(projectId) };
@@ -1182,7 +1189,9 @@ export class HostCore {
         });
         peer.handle('prompt.set', ({ scope, projectId, threadId, text }) => {
             if (scope === 'global') {
-                prompts.writeGlobal(text);
+                // The prompt in use; with none, the legacy one, which then is.
+                const name = prompts.writeGlobal(text);
+                if (prompts.selected() !== name) this.#applySettings({ globalPrompt: name });
             } else if (scope === 'project') {
                 if (!projectId) throw new RpcError(RpcErrorCode.InvalidParams, 'projectId is required');
                 prompts.writeProject(projectId, text);
@@ -1194,6 +1203,35 @@ export class HostCore {
             return ok;
         });
         peer.handle('prompt.effective', ({ threadId }) => this.#effectiveLayers(threads.get(threadId)));
+        // The prompt directory (08 §1.4).
+        peer.handle('prompt.list', () => ({
+            dir: prompts.dir(),
+            selected: prompts.selected() ?? null,
+            items: prompts.list(),
+        }));
+        peer.handle('prompt.read', ({ name }) => prompts.read(name));
+        peer.handle('prompt.save', ({ name, text, previous }) => {
+            const inUse = prompts.selected();
+            const renamed = previous === undefined ? undefined : prompts.named(previous);
+            const saved = prompts.save(name, text, previous);
+            // The prompt in use stays in use under its new name.
+            if (renamed !== undefined && renamed === inUse && saved.name !== inUse) {
+                this.#applySettings({ globalPrompt: saved.name });
+            }
+            return saved;
+        });
+        peer.handle('prompt.remove', ({ name }) => {
+            const inUse = prompts.selected();
+            const removed = prompts.named(name);
+            prompts.remove(removed);
+            // None in use rather than a later prompt that happens to get the name.
+            if (removed === inUse) this.#applySettings({ globalPrompt: null });
+            return ok;
+        });
+        peer.handle('prompt.select', ({ name }) => {
+            this.#applySettings({ globalPrompt: name === null ? null : prompts.named(name) });
+            return ok;
+        });
 
         peer.handle('usage.summary', ({ range, groupBy }) =>
             usage.summary(range, groupBy, {

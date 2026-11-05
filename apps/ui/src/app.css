@@ -2994,6 +2994,114 @@ button.tool__header:hover {
     gap: var(--xk-space-2);
 }
 
+/* Settings → prompts: the prompt directory, one .md file per prompt (08 §1.4). */
+.prompt-library {
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--xk-space-2);
+    min-width: 0;
+}
+
+.prompt-library__dir {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px var(--xk-space-2);
+    max-width: 100%;
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+.prompt-library__dir code {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--xk-font-mono);
+}
+
+.prompt-library__missing {
+    margin: 0;
+    padding: 6px 10px;
+    border: 1px solid var(--xk-warn-border);
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-warn-subtle);
+    font-size: var(--xk-text-sm);
+}
+
+.prompt-library__list {
+    align-self: stretch;
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg-elevated);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.prompt-item {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+    padding: 5px 8px;
+    border-radius: var(--xk-radius-md);
+    font-size: var(--xk-text-sm);
+}
+
+.prompt-item:hover {
+    background: var(--xk-bg-hover);
+}
+
+.prompt-item.is-active {
+    background: var(--xk-accent-subtle);
+}
+
+.prompt-item__pick {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-2);
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.prompt-item__name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.prompt-item__meta {
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+    white-space: nowrap;
+}
+
+.prompt-editor {
+    align-self: stretch;
+}
+
+.prompt-editor__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: var(--xk-text-sm);
+    color: var(--xk-text-muted);
+}
+
+.prompt-editor__field .input,
+.prompt-editor__field .textarea {
+    width: 100%;
+}
+
 .usage {
     padding: 20px 24px 24px;
     display: flex;

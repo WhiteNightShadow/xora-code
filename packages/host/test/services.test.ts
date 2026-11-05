@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { XoraDatabase } from '@xora/storage';
@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { type ApprovalOutcome, ApprovalService, type FollowsMode } from '../src/approvals.ts';
 import { Bus, type Subscriber } from '../src/bus.ts';
 import type { CallFacts } from '../src/policy.ts';
-import { PromptService } from '../src/prompts.ts';
+import { PromptService, promptName } from '../src/prompts.ts';
 import { SettingsService } from '../src/settings.ts';
 import { ThreadStore } from '../src/threads.ts';
 import { UsageService } from '../src/usage.ts';
@@ -321,5 +321,101 @@ describe('PromptService', () => {
         ]);
         const shared = layers.find((layer) => layer.id === 'project_instructions')?.text ?? '';
         expect(shared.indexOf('root rules')).toBeLessThan(shared.indexOf('pkg rules'));
+    });
+});
+
+describe('prompt directory', () => {
+    const layersOf = (prompts: PromptService) =>
+        prompts.layers({ projectId: 'p1', projectRoot: tmpdir(), cwd: tmpdir(), sessionPrompt: '' });
+
+    it('lists every .md file, folders included, and skips hidden files, other files and deep folders', () => {
+        const dir = path.join(mkdtempSync(path.join(tmpdir(), 'xora-prompt-dir-')), 'prompts');
+        mkdirSync(path.join(dir, 'mac', 'work', 'deep'), { recursive: true });
+        mkdirSync(path.join(dir, '.hidden'), { recursive: true });
+        writeFileSync(path.join(dir, 'daily.md'), '每天');
+        writeFileSync(path.join(dir, 'mac', 'shell.MD'), 'zsh');
+        writeFileSync(path.join(dir, 'mac', 'work', 'review.md'), 'review');
+        writeFileSync(path.join(dir, 'mac', 'work', 'deep', 'too-deep.md'), 'no');
+        writeFileSync(path.join(dir, '.hidden', 'secret.md'), 'no');
+        writeFileSync(path.join(dir, '.draft.md'), 'no');
+        writeFileSync(path.join(dir, 'notes.txt'), 'no');
+        const prompts = new PromptService(dir, path.join(dir, '..', 'projects'));
+        expect(prompts.list().map((item) => [item.name, item.chars])).toEqual([
+            ['daily', 2],
+            ['mac/shell', 3],
+            ['mac/work/review', 6],
+        ]);
+        expect(prompts.read('mac/shell').text).toBe('zsh');
+    });
+
+    it('keeps global.md of 1.1.0 in use until the user picks, and applies only the prompt picked', () => {
+        const dir = path.join(mkdtempSync(path.join(tmpdir(), 'xora-prompt-dir-')), 'prompts');
+        let selection: string | null | undefined;
+        const prompts = new PromptService(dir, path.join(dir, '..', 'projects'), () => selection);
+        expect(prompts.selected()).toBeUndefined();
+        expect(layersOf(prompts)).toEqual([]);
+
+        prompts.writeGlobal('always answer in Chinese');
+        expect(prompts.selected()).toBe('global');
+        expect(layersOf(prompts)[0]).toMatchObject({
+            id: 'user_global_instructions',
+            text: 'always answer in Chinese',
+            source: path.join(dir, 'global.md'),
+        });
+
+        prompts.save('mac/daily', 'use zsh');
+        selection = 'mac/daily';
+        expect(layersOf(prompts)[0]).toMatchObject({ text: 'use zsh', source: path.join(dir, 'mac', 'daily.md') });
+        expect(prompts.readGlobal()).toBe('use zsh');
+
+        selection = null;
+        expect(prompts.selected()).toBeUndefined();
+        expect(layersOf(prompts)).toEqual([]);
+
+        // A prompt in use that went away applies nothing.
+        selection = 'gone';
+        expect(prompts.selected()).toBe('gone');
+        expect(prompts.selectedFile()).toBeUndefined();
+        expect(layersOf(prompts)).toEqual([]);
+    });
+
+    it('creates, renames into folders and removes prompts, refusing names that are taken or unsafe', () => {
+        const dir = path.join(mkdtempSync(path.join(tmpdir(), 'xora-prompt-dir-')), 'prompts');
+        const prompts = new PromptService(dir, path.join(dir, '..', 'projects'));
+        expect(prompts.save(' daily.md ', 'a').name).toBe('daily');
+        expect(() => prompts.save('daily', 'b')).toThrow(/daily/);
+        prompts.save('other', 'c');
+        expect(() => prompts.save('other', 'd', 'daily')).toThrow(/other/);
+
+        const moved = prompts.save('linux/daily', 'e', 'daily');
+        expect(moved).toMatchObject({ name: 'linux/daily', path: path.join(dir, 'linux', 'daily.md'), chars: 1 });
+        expect(existsSync(path.join(dir, 'daily.md'))).toBe(false);
+        prompts.save('daily', 'f', 'linux/daily');
+        // The folder the rename emptied is gone.
+        expect(existsSync(path.join(dir, 'linux'))).toBe(false);
+        expect(readFileSync(path.join(dir, 'daily.md'), 'utf8')).toBe('f');
+
+        prompts.remove('other');
+        expect(prompts.list().map((item) => item.name)).toEqual(['daily']);
+        expect(() => prompts.remove('other')).toThrow(/other/);
+        expect(() => prompts.read('../outside')).toThrow();
+        for (const bad of ['', '.hidden', 'a/../b', 'what?', 'con', 'a/b/c/d', 'x'.repeat(81)]) {
+            expect(() => prompts.save(bad, 'x')).toThrow();
+        }
+    });
+
+    it('lets a file the user put there keep a name new prompts cannot have', () => {
+        expect(promptName('notes: work')).toBeUndefined();
+        expect(promptName('notes: work', false)).toBe('notes: work');
+        expect(promptName('a\\b.md')).toBe('a/b');
+        if (process.platform === 'win32') return;
+        const dir = path.join(mkdtempSync(path.join(tmpdir(), 'xora-prompt-dir-')), 'prompts');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(path.join(dir, 'notes: work.md'), 'old');
+        const prompts = new PromptService(dir, path.join(dir, '..', 'projects'));
+        expect(prompts.list().map((item) => item.name)).toEqual(['notes: work']);
+        prompts.save('notes: work', 'new', 'notes: work');
+        expect(prompts.read('notes: work').text).toBe('new');
+        expect(() => prompts.save('notes: home', 'x', 'notes: work')).toThrow();
     });
 });

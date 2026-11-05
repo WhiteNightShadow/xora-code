@@ -167,7 +167,7 @@ xora-code/
 ├─ engines/       外部agent，按版本存放
 ├─ presets/       在线更新的预设数据，按版本存放
 ├─ extensions/    已安装的插件、skills、mcp配置
-├─ prompts/       全局提示词（见08）
+├─ prompts/       提示词目录：每个md文件是一个全局提示词，可以分子文件夹（见08）
 ├─ data/
 │  ├─ xora.db     sqlite：项目、线程、索引、设置、用量
 │  ├─ threads/<threadId>/

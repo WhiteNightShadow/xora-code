@@ -470,6 +470,26 @@ try {
     await page.locator('.settings__nav').getByRole('button', { name: '扩展' }).click();
     await page.locator('.settings-section code', { hasText: '/greet' }).waitFor();
     await step(page, '设置的扩展页列出项目命令');
+
+    // 08 §1.4: global prompts are .md files in the prompt directory; one of them, picked here, is in use.
+    await page.locator('.settings__nav').getByRole('button', { name: '提示词' }).click();
+    await page.getByRole('button', { name: '+ 新建提示词' }).click();
+    await page.locator('.prompt-editor input.input').fill('mac/日常');
+    await page.locator('.prompt-editor textarea').fill('命令按zsh写');
+    await page.locator('.prompt-editor').getByRole('button', { name: '保存', exact: true }).click();
+    await page.locator('.prompt-item.is-active', { hasText: 'mac/日常' }).waitFor();
+    if ((await readFile(path.join(dataDir, 'prompts', 'mac', '日常.md'), 'utf8')) !== '命令按zsh写') {
+        throw new Error('the new prompt is not a .md file in the prompt directory');
+    }
+    await step(page, '设置里新建全局提示词，第一个直接用上');
+    await mkdir(path.join(dataDir, 'prompts', 'linux'), { recursive: true });
+    await writeFile(path.join(dataDir, 'prompts', 'linux', '日常.md'), '命令按bash写');
+    await page.locator('.prompt-library__dir').getByRole('button', { name: '刷新' }).click();
+    await page.locator('.prompt-item', { hasText: 'linux/日常' }).getByRole('radio').click();
+    await page.locator('.prompt-item.is-active', { hasText: 'linux/日常' }).waitFor();
+    await step(page, '放进提示词目录的md文件能选来用');
+    await page.locator('.prompt-item', { hasText: '不用全局提示词' }).getByRole('radio').click();
+    await page.locator('.prompt-item.is-active', { hasText: '不用全局提示词' }).waitFor();
     await page.keyboard.press('Escape');
 
     // The composer's choices: the mode switches at once and becomes the default; the context meter opens.

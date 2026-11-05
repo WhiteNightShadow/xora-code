@@ -1,4 +1,4 @@
-import type { Connection, PresetSummary, Rule, Settings } from '@xora/protocol';
+import type { Connection, PresetSummary, PromptLibrary, Rule, Settings } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { LogoMark } from '../components/Art.tsx';
 import { Badge, Field, Modal, type Option, Select, Spinner, Toggle } from '../components/primitives.tsx';
@@ -542,6 +542,169 @@ function Models() {
     );
 }
 
+/** A prompt being written: a new one without `previous`. */
+interface PromptDraft {
+    readonly previous?: string;
+    readonly name: string;
+    readonly text: string;
+}
+
+/** The prompt directory (08 §1.4): every .md file in it is a global prompt; one of them, or none, is in use. */
+function GlobalPrompts() {
+    const s = useStrings();
+    const [library, setLibrary] = useState<PromptLibrary | undefined>();
+    const [draft, setDraft] = useState<PromptDraft | undefined>();
+    const [useIt, setUseIt] = useState(false);
+    const load = () => void attempt(async () => setLibrary(await host.call('prompt.list', {})));
+    useEffect(load, []);
+    if (!library) return <Spinner />;
+    const { selected, items } = library;
+    const missing = selected !== null && !items.some((item) => item.name === selected);
+    const select = (name: string | null) =>
+        void attempt(async () => {
+            await host.call('prompt.select', { name });
+            setLibrary(await host.call('prompt.list', {}));
+        });
+    const edit = (name: string) =>
+        void attempt(async () => {
+            const { text } = await host.call('prompt.read', { name });
+            setDraft({ previous: name, name, text });
+            setUseIt(false);
+        });
+    const create = () => {
+        setDraft({ name: '', text: '' });
+        // A first prompt is meant to be used.
+        setUseIt(selected === null || missing);
+    };
+    const save = () =>
+        void attempt(async () => {
+            if (!draft) return;
+            const saved = await host.call('prompt.save', {
+                name: draft.name,
+                text: draft.text,
+                ...(draft.previous ? { previous: draft.previous } : {}),
+            });
+            if (useIt) await host.call('prompt.select', { name: saved.name });
+            setDraft(undefined);
+            setLibrary(await host.call('prompt.list', {}));
+            toast(s.settings.saved, 'success');
+        });
+    const remove = (name: string) => {
+        if (!window.confirm(format(s.settings.promptConfirmDelete, { name }))) return;
+        void attempt(async () => {
+            await host.call('prompt.remove', { name });
+            setDraft(undefined);
+            setLibrary(await host.call('prompt.list', {}));
+        });
+    };
+    return (
+        <div className="prompt-library">
+            <div className="prompt-library__dir">
+                <span>{s.settings.promptDir}</span>
+                <code title={library.dir}>{library.dir}</code>
+                <button
+                    type="button"
+                    className="link"
+                    onClick={() => void attempt(() => host.call('system.open', { kind: 'path', target: library.dir }))}
+                >
+                    {s.settings.openPromptDir}
+                </button>
+                <button type="button" className="link" onClick={load}>
+                    {s.common.refresh}
+                </button>
+            </div>
+            {missing && (
+                <p className="prompt-library__missing">{format(s.settings.promptMissing, { name: selected })}</p>
+            )}
+            <ul className="prompt-library__list" aria-label={s.settings.globalPrompt}>
+                <li className={`prompt-item${selected === null ? ' is-active' : ''}`}>
+                    <label className="prompt-item__pick">
+                        <input
+                            type="radio"
+                            name="global-prompt"
+                            checked={selected === null}
+                            onChange={() => select(null)}
+                        />
+                        <span>{s.settings.promptNone}</span>
+                    </label>
+                </li>
+                {items.map((item) => (
+                    <li key={item.name} className={`prompt-item${item.name === selected ? ' is-active' : ''}`}>
+                        <label className="prompt-item__pick">
+                            <input
+                                type="radio"
+                                name="global-prompt"
+                                checked={item.name === selected}
+                                onChange={() => select(item.name)}
+                            />
+                            <span className="prompt-item__name">{item.name}</span>
+                        </label>
+                        {item.name === selected && <Badge tone="ok">{s.settings.promptInUse}</Badge>}
+                        <span className="prompt-item__meta">
+                            {format(s.settings.promptChars, { chars: item.chars })}
+                        </span>
+                        <button type="button" className="link" onClick={() => edit(item.name)}>
+                            {s.settings.promptEdit}
+                        </button>
+                    </li>
+                ))}
+            </ul>
+            {items.length === 0 && <p className="muted">{s.settings.promptEmpty}</p>}
+            {draft ? (
+                <div className="connection-editor prompt-editor">
+                    <label className="prompt-editor__field">
+                        <span>{s.settings.promptName}</span>
+                        <input
+                            className="input"
+                            value={draft.name}
+                            placeholder={s.settings.promptNamePlaceholder}
+                            onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                        />
+                    </label>
+                    <label className="prompt-editor__field">
+                        <span>{s.settings.promptText}</span>
+                        <textarea
+                            className="textarea"
+                            rows={14}
+                            value={draft.text}
+                            onChange={(event) => setDraft({ ...draft, text: event.target.value })}
+                        />
+                    </label>
+                    {draft.previous === undefined || draft.previous !== selected ? (
+                        <Toggle checked={useIt} label={s.settings.promptUseAfterSave} onChange={setUseIt} />
+                    ) : null}
+                    <div className="row">
+                        <button
+                            type="button"
+                            className="button button--small button--primary"
+                            disabled={!draft.name.trim()}
+                            onClick={save}
+                        >
+                            {s.settings.save}
+                        </button>
+                        <button type="button" className="button button--small" onClick={() => setDraft(undefined)}>
+                            {s.common.cancel}
+                        </button>
+                        {draft.previous !== undefined && (
+                            <button
+                                type="button"
+                                className="button button--small button--danger"
+                                onClick={() => draft.previous !== undefined && remove(draft.previous)}
+                            >
+                                {s.settings.promptDelete}
+                            </button>
+                        )}
+                    </div>
+                </div>
+            ) : (
+                <button type="button" className="button button--small" onClick={create}>
+                    + {s.settings.promptNew}
+                </button>
+            )}
+        </div>
+    );
+}
+
 function Prompts() {
     const s = useStrings();
     const projects = useApp((state) => state.projects);
@@ -550,11 +713,7 @@ function Prompts() {
     const [projectId, setProjectId] = useState<string | undefined>(
         projects.some((project) => project.id === selectedProjectId) ? selectedProjectId : projects[0]?.id,
     );
-    const [global, setGlobal] = useState<string | undefined>();
     const [projectText, setProjectText] = useState<string | undefined>();
-    useEffect(() => {
-        void host.call('prompt.get', { scope: 'global' }).then((result) => setGlobal(result.text));
-    }, []);
     useEffect(() => {
         setProjectText(undefined);
         if (!projectId) return;
@@ -566,28 +725,15 @@ function Prompts() {
             current = false;
         };
     }, [projectId]);
-    const save = async (scope: 'global' | 'project', text: string) => {
-        const done = await attempt(() =>
-            host.call('prompt.set', { scope, text, ...(scope === 'project' && projectId ? { projectId } : {}) }),
-        );
+    const save = async (text: string) => {
+        if (!projectId) return;
+        const done = await attempt(() => host.call('prompt.set', { scope: 'project', text, projectId }));
         if (done) toast(s.settings.saved, 'success');
     };
     return (
         <div className="settings-section">
             <Field label={s.settings.globalPrompt} hint={s.settings.globalPromptHint}>
-                <textarea
-                    className="textarea"
-                    rows={8}
-                    value={global ?? ''}
-                    onChange={(event) => setGlobal(event.target.value)}
-                />
-                <button
-                    type="button"
-                    className="button button--small"
-                    onClick={() => void save('global', global ?? '')}
-                >
-                    {s.settings.save}
-                </button>
+                <GlobalPrompts />
             </Field>
             {projectId && (
                 <Field label={s.settings.projectPrompt} hint={s.settings.projectPromptHint}>
@@ -608,7 +754,7 @@ function Prompts() {
                         type="button"
                         className="button button--small"
                         disabled={projectText === undefined}
-                        onClick={() => void save('project', projectText ?? '')}
+                        onClick={() => void save(projectText ?? '')}
                     >
                         {s.settings.save}
                     </button>

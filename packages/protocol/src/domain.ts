@@ -567,6 +567,11 @@ export const SettingsSchema = z.object({
      * only mass deletion and dropping a database reach the user; `user` asks the user.
      */
     approvals: z.object({ reviewer: z.enum(['supervisor', 'user']) }),
+    /**
+     * The prompt of the prompt directory in use as the user global layer (08 §1.4), by name; `null` for none.
+     * Absent until the user first picks one: then `global`, the one global prompt of ≤1.1.0, when it exists.
+     */
+    globalPrompt: z.string().max(400).nullable().optional(),
     /** What the user chose when they last started a team run or a workflow: the next one starts from it. */
     lastChoices: z.object({
         teamAutonomy: z.enum(['L0', 'L1', 'L2', 'L3']),
@@ -596,6 +601,23 @@ export const PromptLayerSchema = z.object({
     editable: z.boolean(),
 });
 export type PromptLayer = z.infer<typeof PromptLayerSchema>;
+
+/** A prompt of the prompt directory (08 §1.4): its name is its path there without `.md`, folders joined by `/`. */
+export const PromptFileSchema = z.object({
+    name: z.string(),
+    path: z.string(),
+    chars: z.number(),
+    modifiedAt: z.number(),
+});
+export type PromptFile = z.infer<typeof PromptFileSchema>;
+
+export const PromptLibrarySchema = z.object({
+    dir: z.string(),
+    /** The prompt in use, which may be missing from `items` when its file went away. */
+    selected: z.string().nullable(),
+    items: z.array(PromptFileSchema),
+});
+export type PromptLibrary = z.infer<typeof PromptLibrarySchema>;
 
 // ---------------------------------------------------------------------------------------------------------
 // Usage
