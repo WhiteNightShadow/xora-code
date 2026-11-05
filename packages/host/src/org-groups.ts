@@ -150,7 +150,14 @@ export function groupOfMember(groups: readonly OrgGroup[], memberId: string): Or
  */
 export function supervisorOf(groups: readonly OrgGroup[], memberId: string): string | undefined {
     const led = groups.find((group) => group.leaderId === memberId);
-    if (led) return led.parentId === undefined ? undefined : leadOf(groups, led.parentId);
+    if (led) {
+        // Someone may lead the organization above as well, and has no say over itself.
+        return groupChain(groups, led.id)
+            .slice(0, -1)
+            .reverse()
+            .map((group) => group.leaderId)
+            .find((id) => id && id !== memberId);
+    }
     const group = groups.find((item) => item.memberIds.includes(memberId));
     return group ? leadOf(groups, group.id) : undefined;
 }

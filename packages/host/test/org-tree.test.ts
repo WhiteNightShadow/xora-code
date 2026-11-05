@@ -161,9 +161,6 @@ describe('the organization tree', () => {
         const boss = await lead(ui, '老大');
         const group = await ui.request('org.saveGroup', { name: 'Web', leaderId: boss.id });
         const other = await ui.request('org.saveGroup', { name: 'Api' });
-        await expect(ui.request('org.saveGroup', { id: other.id, name: 'Api', leaderId: boss.id })).rejects.toThrow(
-            '老大',
-        );
         await expect(ui.request('org.moveMember', { memberId: boss.id, groupId: other.id })).rejects.toThrow('老大');
         await expect(ui.request('org.saveGroup', { name: 'Bad', leaderId: 'coder' })).rejects.toThrow('coder');
 
@@ -209,6 +206,46 @@ describe('the organization tree', () => {
         // The backup is of the old format only: saving again leaves it.
         await ui.request('org.saveGroup', { name: 'Sub2', parentId: 'web' });
         expect(JSON.parse(readFileSync(path.join(dir, 'groups.v1.json'), 'utf8'))).toEqual(old);
+    });
+
+    it('lets a lead take several organizations, the way 1.1.0 kept them', async () => {
+        const data = newData();
+        const dir = path.join(data, 'orgs', 'default');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+            path.join(dir, 'groups.json'),
+            JSON.stringify({
+                version: 1,
+                groups: [
+                    { id: 'default', name: '研发团队', leaderId: 'supervisor', memberIds: ['writer'] },
+                    { id: 'web', name: 'Web', leaderId: 'supervisor', memberIds: ['coder'] },
+                    { id: 'ios', name: 'Ios', leaderId: 'supervisor', memberIds: ['scout'] },
+                ],
+            }),
+        );
+        const { ui } = await host.start(data);
+
+        // Editing one keeps its lead, and a new one can have the same lead.
+        await ui.request('org.saveGroup', { id: 'web', name: 'Web', prompt: '逆向的规矩' });
+        const api = await ui.request('org.saveGroup', { name: 'Api', leaderId: 'supervisor' });
+        expect(api.leaderId).toBe('supervisor');
+
+        // A template led by the same supervisor takes it from nobody: a group without a lead takes no work.
+        await ui.request('org.applyTemplate', { template: 'dev-team', replace: false });
+        const leads = new Map((await groupsOf(ui)).map((group) => [group.id, group.leaderId]));
+        for (const id of ['default', 'web', 'ios', api.id, 'dev']) expect(leads.get(id)).toBe('supervisor');
+
+        // Leading the organization above as well, in either order in the file, it is nobody's supervisor but its own.
+        const line: OrgGroup[] = [
+            { id: 'top', name: 'Top', leaderId: 'boss', memberIds: [] },
+            { id: 'mid', name: 'Mid', parentId: 'top', leaderId: 'boss', memberIds: [] },
+            { id: 'low', name: 'Low', parentId: 'mid', leaderId: 'sub', memberIds: ['one'] },
+        ];
+        for (const groups of [line, [...line].reverse()]) {
+            expect(supervisorOf(groups, 'one')).toBe('sub');
+            expect(supervisorOf(groups, 'sub')).toBe('boss');
+            expect(supervisorOf(groups, 'boss')).toBeUndefined();
+        }
     });
 
     it('reads a file with a parent gone or a circle as a tree', async () => {

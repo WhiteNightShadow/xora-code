@@ -675,6 +675,11 @@ try {
     await page.locator('.onode', { hasText: '研发团队' }).locator('.omember', { hasText: '侦察' }).first().waitFor();
     await step(page, '团队页是横向的组织树，成员在组织里');
     await page.getByRole('button', { name: '新建组织', exact: true }).click();
+    // The supervisor leads the default team, and can lead this one too (19 §4).
+    const leadOptions = await page.locator('select[aria-label="负责人"] option').allTextContents();
+    if (!leadOptions.includes('主管')) {
+        throw new Error(`the new organization cannot have the lead of another: ${leadOptions.join(', ')}`);
+    }
     const groupDialog = page.locator('.group-editor');
     await groupDialog.getByPlaceholder('比如：研发中心、前端组、运营组').fill('冒烟中心');
     await groupDialog.getByRole('button', { name: '保存', exact: true }).click();

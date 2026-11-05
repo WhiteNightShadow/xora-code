@@ -135,7 +135,6 @@ const TEXT = bilingual(
         mcpLayer: (servers: readonly string[]) =>
             `你带着这些MCP服务：${servers.join('、')}。它们的工具名是mcp__<服务名>__<工具>；遇到它们擅长的事先用它们，用不了再换别的办法，并在结果里说明。`,
         leadsGroup: (name: string, group: string) => `${name}是“${group}”的负责人：先换个负责人再挪它`,
-        leadsOther: (name: string, group: string) => `${name}已经是“${group}”的负责人了`,
         leadNotMember: (name: string) => `${name}是主管角色，只当负责人，不当组员`,
         hasLead: (group: string) => `“${group}”已经有负责人了`,
         groupTooDeep: '组织最多三层',
@@ -255,7 +254,6 @@ const TEXT = bilingual(
         mcpLayer: (servers) =>
             `You bring these MCP servers: ${servers.join(', ')}. Their tools are named mcp__<server>__<tool>; use them first for what they are made for, and if they cannot help, take another way and say so in your result.`,
         leadsGroup: (name, group) => `${name} leads “${group}”: give it another lead first`,
-        leadsOther: (name, group) => `${name} leads “${group}” already`,
         leadNotMember: (name) => `${name} has the supervisor role: it leads, it is not a member of a group`,
         hasLead: (group) => `“${group}” has a lead already`,
         groupTooDeep: 'Organizations go three levels deep at most',
@@ -878,8 +876,6 @@ export class MemberService {
             if (group.leaderId && group.leaderId !== id) {
                 throw new RpcError(RpcErrorCode.Rejected, text.hasLead(group.name));
             }
-            const other = groups.find((item) => item.id !== group.id && item.leaderId === id);
-            if (other) throw new RpcError(RpcErrorCode.Rejected, text.leadsOther(name, other.name));
         }
         const dir =
             input.scope === 'project' && project
@@ -1106,10 +1102,6 @@ export class MemberService {
                 const leader = roster.org.roster.find((agent) => agent.id === leaderId);
                 if (leader?.role !== 'supervisor') {
                     throw new RpcError(RpcErrorCode.InvalidParams, text.badLeader(leaderId));
-                }
-                const other = groups.find((group) => group.id !== input.id && group.leaderId === leaderId);
-                if (other) {
-                    throw new RpcError(RpcErrorCode.Rejected, text.leadsOther(memberName(leader), other.name));
                 }
             }
             const parentId = input.parentId === undefined ? current?.parentId : (input.parentId ?? undefined);
@@ -1351,12 +1343,7 @@ export class MemberService {
                 ? []
                 : (await this.#groups())
                       .filter((entry) => entry.id !== group.id)
-                      .map((entry) => ({
-                          ...entry,
-                          memberIds: entry.memberIds.filter((id) => !moved.has(id)),
-                          // A member leads one group: the template's lead leaves the one it led (19 §4).
-                          leaderId: entry.leaderId === group.leaderId ? '' : entry.leaderId,
-                      }));
+                      .map((entry) => ({ ...entry, memberIds: entry.memberIds.filter((id) => !moved.has(id)) }));
             await writeGroups(this.#deps.orgsDir, [group, ...others]);
         });
         this.#deps.log.info(`organization: template ${input.template} applied${input.replace ? ', replacing' : ''}`);

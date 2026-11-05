@@ -78,6 +78,10 @@ export function MemberPanel({
         };
     }, [member.id]);
     const group = groupOfMember(groups, member.id);
+    const led = groups.filter((item) => item.leaderId === member.id);
+    const where = (led.length > 0 ? led : group ? [group] : [])
+        .map((item) => groupPath(groups, item.id))
+        .join(s.workflow.listSep);
     const job = memberJob(member, s);
     const savePrompt = () =>
         void attempt(async () => {
@@ -117,7 +121,7 @@ export function MemberPanel({
                 <MemberAvatar member={member} size={44} />
                 <div className="org-panel__title">
                     <h2>{member.name}</h2>
-                    <p>{[group ? groupPath(groups, group.id) : s.org.loose, job].filter(Boolean).join(' · ')}</p>
+                    <p>{[where || s.org.loose, job].filter(Boolean).join(' · ')}</p>
                 </div>
                 <IconButton icon="x" label={s.org.close} onClick={onClose} />
             </header>
@@ -475,12 +479,8 @@ export function GroupDialog({
     const parents = groups.filter(
         (item) => !inside.has(item.id) && groupChain(groups, item.id).length + levels <= MAX_GROUP_DEPTH,
     );
-    // A supervisor who leads no other organization.
-    const leads = members.filter(
-        (member) =>
-            member.role === 'supervisor' &&
-            !groups.some((item) => item.id !== group?.id && item.leaderId === member.id),
-    );
+    // One lead can take several organizations (19 §4).
+    const leads = members.filter((member) => member.role === 'supervisor');
     const workers = sortMembers(members.filter((member) => member.role !== 'supervisor'));
     const elsewhere = (memberId: string) =>
         groups.find((item) => item.id !== group?.id && item.memberIds.includes(memberId));
