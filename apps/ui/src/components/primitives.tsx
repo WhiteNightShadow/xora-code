@@ -64,7 +64,8 @@ export function Select<T extends string>({
             disabled={disabled}
             onChange={(event) => onChange(event.target.value as T)}
         >
-            {value === '' && <option value="">—</option>}
+            {/* A dash only when the caller has no choice of its own for "none": two empty options show the first. */}
+            {value === '' && !options.some((option) => option.value === '') && <option value="">—</option>}
             {options.map((option) => (
                 <option key={option.value} value={option.value} title={option.hint}>
                     {option.label}

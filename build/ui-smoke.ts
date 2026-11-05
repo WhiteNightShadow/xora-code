@@ -680,6 +680,9 @@ try {
     if (!leadOptions.includes('主管')) {
         throw new Error(`the new organization cannot have the lead of another: ${leadOptions.join(', ')}`);
     }
+    // An empty choice shows under its own name, not as a dash.
+    const leadShown = await page.locator('select[aria-label="负责人"] option:checked').textContent();
+    if (leadShown !== '稍后再设') throw new Error(`no lead yet shows as "${leadShown}"`);
     const groupDialog = page.locator('.group-editor');
     await groupDialog.getByPlaceholder('比如：研发中心、前端组、运营组').fill('冒烟中心');
     await groupDialog.getByRole('button', { name: '保存', exact: true }).click();
