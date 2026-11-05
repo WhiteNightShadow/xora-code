@@ -284,6 +284,9 @@ const zh = {
         teamParallelHint: '一次团队运行里同时工作的成员数（1～8），改了马上生效',
         teamModels: '团队成员用的模型',
         teamModelChoices: { default: '都用默认模型（推荐）', tiers: '按档位自动挑' },
+        teamScoring: '主管评分',
+        teamScoringOn: '团队任务结束后由主管打分',
+        teamScoringHint: '每次运行多一个小请求，按验收结果和交付内容给每张任务卡打分，显示在成员面板上',
         teamModelsHints: {
             default: '主管、成员、总助手都用上面的默认模型；给成员单独设了模型、或开工前在任务卡上指定了的，用那个',
             tiers: '按成员的档位挑已连接的模型：旗舰档用强模型，经济档和快速档用便宜的模型',
@@ -1496,6 +1499,10 @@ const en: Widen<Strings> = {
         teamParallelHint: 'Members of one team run working at the same time (1–8); applies right away',
         teamModels: 'Model for team members',
         teamModelChoices: { default: 'The default model (recommended)', tiers: 'Pick by tier' },
+        teamScoring: 'Supervisor scores',
+        teamScoringOn: 'The supervisor scores a team run when it ends',
+        teamScoringHint:
+            'One small extra request per run scores each card from its acceptance and what was handed in; it shows on the member panel',
         teamModelsHints: {
             default:
                 'Supervisors, members and the chief run on the default model above; a member or a card with a model of its own runs on that',

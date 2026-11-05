@@ -561,6 +561,8 @@ export const SettingsSchema = z.object({
     team: z.object({
         maxParallel: z.number().int().min(1).max(8),
         models: z.enum(['default', 'tiers']).optional(),
+        /** Supervisors score the cards of a finished run (19 §9); absent: they do. */
+        scoring: z.boolean().optional(),
     }),
     /**
      * Who answers approval cards (06 §24): `supervisor` has a supervisor agent decide them on the user's behalf, and
@@ -983,6 +985,8 @@ export const MemberSchema = z.object({
     /** All its own notes (general and per project); `projects`: the projects it has notes in. */
     memory: z.object({ chars: z.number(), updatedAt: z.number().optional(), projects: z.number().optional() }),
     routines: z.array(MemberRoutineSchema),
+    /** The average of its supervisor's last scores (19 §9), out of 100; absent below 3 scores. */
+    score: z.number().optional(),
 });
 export type Member = z.infer<typeof MemberSchema>;
 

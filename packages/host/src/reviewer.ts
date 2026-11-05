@@ -12,7 +12,7 @@ import type { SettingsService } from './settings.ts';
 import type { TeamService } from './team.ts';
 import { loadTeamOrganization, shorten } from './team-agents.ts';
 import { hostLanguage, textOf } from './text.ts';
-import type { ThreadStore } from './threads.ts';
+import { type ThreadStore, workerOf } from './threads.ts';
 import type { UsageService } from './usage.ts';
 
 /**
@@ -68,6 +68,8 @@ export interface ReviewerDeps {
     readonly settings: SettingsService;
     readonly usage: UsageService;
     readonly bus: Bus;
+    /** A member's supervisor (19 §4); undefined: the chief. */
+    readonly supervisorOf?: (memberId: string) => Promise<string | undefined>;
     readonly log: Logger;
     readonly orgsDir: string;
     readonly team: TeamService;
@@ -161,7 +163,13 @@ export class ApprovalReviewer {
             projectDir: project.path,
             trusted: project.trusted,
         });
-        const supervisor = org.roster.find((agent) => agent.role === 'supervisor');
+        // 19 §8: the supervisor of the member whose thread it is; other threads have the first one's model.
+        const thread = this.#deps.threads.find(approval.threadId);
+        const worker = thread ? workerOf(thread, (id) => this.#deps.threads.find(id)) : undefined;
+        const boss = worker ? await this.#deps.supervisorOf?.(worker) : undefined;
+        const supervisor =
+            (boss ? org.roster.find((agent) => agent.id === boss) : undefined) ??
+            org.roster.find((agent) => agent.role === 'supervisor');
         const pick = pickTierModel(this.#deps, {
             org,
             project,
@@ -190,6 +198,7 @@ export class ApprovalReviewer {
             threadId: approval.threadId,
             turnId: approval.turnId,
             agentPath: 'review',
+            ...(boss ? { memberId: boss } : {}),
             engine: 'xora',
             provider: connection.preset.id,
             channel: connection.preset.channel,

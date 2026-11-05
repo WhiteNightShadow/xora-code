@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | 系统（xora统一） | 所有会话和agent | 引擎内置：行为准则、工具用法、安全要求、协作协议、交付单格式；按模型家族的小段适配 | xora | 只读，可以查看 |
 | 用户全局 | 本机所有项目 | 提示词目录`<数据目录>/prompts/`里选中的那个md文件（见1.4） | 用户 | 新会话 |
-| 组织 | 该组织的所有agent | `org.md`（用户级目录或项目里的`.xora/org.md`，见06） | 组织维护者 | 新会话 |
+| 组织 | 该组织的所有agent | `org.md`（用户级目录或项目里的`.xora/org.md`，见06）是全体提示词；组织树上一路下来每个组织的`groups/<id>/prompt.md`（见19第6节） | 组织维护者 | 新会话 |
 | 项目·共享 | 一个仓库 | 仓库里的`AGENTS.md`层级（生态通用，不另造文件） | 团队，入库 | 新会话 |
 | 项目·个人 | 一个项目，只对自己 | `<数据目录>/projects/<projectId>/instructions.md`，不写进仓库 | 用户 | 新会话 |
 | agent | 单个agent，或当前模式 | agent定义的正文（见06），或计划、审查等内置模式 | 用户或模板 | 新会话、切换时 |
@@ -24,6 +24,7 @@
   系统层（xora统一）                          ← 最稳定，所有agent相同
   <user_global_instructions>
   <org_instructions org="…">                 ← 同一组织的agent相同
+  <group_instructions>                       ← 组织树上一路下来的组织提示词（见19第6节）
   <project_instructions source="AGENTS.md路径列表">
   <project_private_instructions>
   <agent_instructions name="…">              ← 同一角色的agent相同

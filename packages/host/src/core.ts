@@ -46,6 +46,7 @@ import { ProjectService } from './projects.ts';
 import { PromptService } from './prompts.ts';
 import { ReviewService } from './review.ts';
 import { ApprovalReviewer } from './reviewer.ts';
+import { ScoreService } from './scores.ts';
 import { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
 import { mergePath, resolveLoginPath } from './shell-env.ts';
@@ -151,6 +152,7 @@ export class HostCore {
     readonly threads: ThreadStore;
     readonly connections: ConnectionService;
     readonly prompts: PromptService;
+    readonly scores: ScoreService;
     readonly approvals: ApprovalService;
     readonly review: ReviewService;
     readonly usage: UsageService;
@@ -198,6 +200,7 @@ export class HostCore {
         this.approvals = new ApprovalService(this.db, this.bus);
         this.review = new ReviewService(this.paths.checkpointsDir, this.log);
         this.usage = new UsageService(this.db, () => this.settings.get());
+        this.scores = new ScoreService(this.db);
         this.worktrees = new WorktreeService({ rootDir: this.paths.worktreesDir, log: this.log, review: this.review });
         this.extensions = new ExtensionService({
             dir: this.paths.extensionsDir,
@@ -289,6 +292,7 @@ export class HostCore {
             orgsDir: this.paths.orgsDir,
             membersDir: this.paths.membersDir,
             usage: this.usage,
+            scores: this.scores,
             skillLibraryDir: this.paths.skillLibraryDir,
             approvals: this.approvals,
             // The organization assistant's GitHub search goes through the host's fetch (tests give a fake one).
@@ -326,6 +330,7 @@ export class HostCore {
             turns: this.turns,
             orgsDir: this.paths.orgsDir,
             members: this.members,
+            scores: this.scores,
             userAgent,
         });
         // The webhook keeps its port across restarts, so the URL given out stays valid (06 §12).
@@ -391,6 +396,7 @@ export class HostCore {
             log: this.log,
             orgsDir: this.paths.orgsDir,
             team: this.team,
+            supervisorOf: (memberId) => this.members.supervisorOf(memberId),
             userAgent,
         });
         this.distill = new DistillService({

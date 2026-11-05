@@ -98,6 +98,30 @@ describe('the supervisor reviews approvals', () => {
         expect(parseReview('hmm')).toBeUndefined();
     });
 
+    it('reviews a member’s request as its supervisor, whose work it counts as (19 §8, §10)', async () => {
+        agentRuns('touch made.txt', () => '{"decision":"allow","reason":"建文件是任务要的"}');
+        const { core, ui, project } = await setUp();
+        const boss = await ui.request('member.save', {
+            scope: 'user',
+            member: { name: '负责人', role: 'supervisor', tier: 'flagship', mode: 'plan', prompt: '' },
+            groupId: null,
+        });
+        const group = await ui.request('org.saveGroup', { name: 'Web', leaderId: boss.id });
+        const member = await ui.request('member.save', {
+            scope: 'user',
+            member: { name: '干活的', role: 'executor', tier: 'economy', mode: 'ask', prompt: '' },
+            groupId: group.id,
+        });
+        const thread = await ui.request('member.chat', { projectId: project.id, memberId: member.id, text: '建文件' });
+        await settled(ui, thread.id);
+        const rows = core.db.all<{ member: string | null; path: string }>(
+            'select member_id as member, agent_path as path from usage_events where thread_id = ?',
+            [thread.id],
+        );
+        expect(rows.filter((row) => row.path === 'review').map((row) => row.member)).toEqual([boss.id]);
+        expect(rows.filter((row) => row.path !== 'review').every((row) => row.member === member.id)).toBe(true);
+    });
+
     it('allows a command the task needs, without the user, and records why', async () => {
         agentRuns('touch made.txt', () => '{"decision":"allow","reason":"建文件是任务要的"}');
         const { ui, project, repo, seen } = await setUp();

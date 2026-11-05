@@ -792,13 +792,12 @@ try {
     );
 
     phase('members');
-    // The organization chart (06 §24), and one member in full.
+    // The organization tree (19 §11), and the panel of one member.
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
-    await page.locator('.org-member', { hasText: '抓包侦察' }).waitFor();
+    await page.locator('.omember', { hasText: '抓包侦察' }).waitFor();
     await shot(page, 'xora-members');
-    await page.locator('.org-member', { hasText: '抓包侦察' }).locator('.org-member__main').click();
-    await page.locator('.member-memory', { hasText: '127.0.0.1:9090' }).waitFor();
-    await page.locator('.member-work__row').first().waitFor();
+    await page.locator('.omember', { hasText: '抓包侦察' }).click();
+    await page.locator('.org-panel [data-block=tokens]').waitFor();
     await shot(page, 'xora-member');
 
     phase('workflow view');

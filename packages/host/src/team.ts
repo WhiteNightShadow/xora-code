@@ -95,6 +95,7 @@ import type { Logger } from './log.ts';
 import { type MemberService, memberName } from './members.ts';
 import { type CallFacts, graveOf, highRiskLabel, highRiskOf } from './policy.ts';
 import type { ProjectService } from './projects.ts';
+import { baseScore, type CardFacts, finalScore, parseScores, type ScoreService, scoreSystem } from './scores.ts';
 import type { SettingsService } from './settings.ts';
 import {
     ApprovalDecideInput,
@@ -290,6 +291,8 @@ interface TaskHost {
     stopping?: { decision: 'escalate' | 'stop'; reason: string };
     /** The latest watch report on the running executor. */
     watch?: { rule: WatchRule; at: number };
+    /** Times the watch caught it, for its score (19 §9). */
+    watches?: number;
     /** Who works the card and with what, set by the user before it starts (06 §22). */
     preset?: StaffPreset & { memberId?: string };
 }
@@ -354,6 +357,8 @@ interface RunHost {
     supervisorId?: string;
     /** The group the run was handed to (06 §24). */
     group?: { id: string; name: string };
+    /** The supervisor's scores of the run's cards (19 §9): to give, given, or not to be had. */
+    scoring?: 'pending' | 'done' | 'skipped';
     /** The gist of the goal, for lists (06 §28). */
     title?: string;
     /** The report for the user once the run is over (06 §22). */
@@ -411,6 +416,8 @@ interface RunState {
     internalTurn: boolean;
     /** The report for the user is being written (06 §22). */
     briefing: boolean;
+    /** The supervisor's scores are being asked for (19 §9). */
+    scoringNow: boolean;
     abort: AbortController;
     supervisorStarting: boolean;
     reviewingPlan: boolean;
@@ -458,7 +465,9 @@ export interface TeamDeps {
     readonly orgsDir: string;
     readonly commandTimeoutMs?: number;
     /** Gives the supervisor and the members working cards their memory and the `remember` tool (06 §19). */
-    readonly members?: Pick<MemberService, 'withMemory' | 'group'>;
+    readonly members?: Pick<MemberService, 'withMemory' | 'team' | 'chainOf'>;
+    /** Where the supervisors' scores go (19 §9). */
+    readonly scores?: Pick<ScoreService, 'add'>;
     readonly userAgent?: string;
     /** The gist of a goal as the run's title (06 §28). */
     readonly titles?: TitleService;
@@ -496,6 +505,8 @@ const BRIEF_SYSTEM = {
     ].join('\n'),
 } as const;
 const BRIEF_OUTPUT_TOKENS = 4_000;
+/** A line of JSON per card (19 §9). */
+const SCORE_OUTPUT_TOKENS = 2_000;
 
 // ---------------------------------------------------------------------------------------------------------
 // What the user sees: errors, notes, warnings, notices, approval cards, board notes, thread titles, the report
@@ -508,7 +519,9 @@ const TEXT = bilingual(
         l3Subscription: 'L3没人看着，不用订阅额度：给团队连一个按量计费的模型（api、本地或自定义）',
         l3Budget: 'L3没人看着，要给这次运行设一个花费上限',
         noSupervisor: '组织里没有主管',
-        noGroup: (id: string) => `没有小组${id}`,
+        noGroup: (id: string) => `没有组织${id}`,
+        noLead: (group: string) => `“${group}”和上级都还没有负责人：先设一个`,
+        noWorkers: (group: string) => `“${group}”里还没有能干活的成员`,
         carried: '项目里有没提交的改动：已带进各任务的worktree，整合时只合入任务自己的改动',
         supervisorTitle: (goal: string) => `团队：${goal}`,
         supervisorNotStarted: (error: string) => `主管线程没能启动：${error}`,
@@ -630,7 +643,9 @@ const TEXT = bilingual(
             'Nobody watches an L3 run, so it does not use subscription quotas: connect a pay-as-you-go model (api, local or custom)',
         l3Budget: 'Nobody watches an L3 run: give it a spending cap',
         noSupervisor: 'The organization has no supervisor',
-        noGroup: (id: string) => `No group ${id}`,
+        noGroup: (id: string) => `No organization ${id}`,
+        noLead: (group: string) => `“${group}” has no lead, and neither have the organizations above it: set one first`,
+        noWorkers: (group: string) => `No member of “${group}” can do the work yet`,
         carried:
             "The project has uncommitted changes: each task's worktree starts from them, and only the task's own changes are integrated",
         supervisorTitle: (goal) => `Team: ${goal}`,
@@ -838,6 +853,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 // ---------------------------------------------------------------------------------------------------------
 
+/** A card of a finished run as its supervisor scores it (19 §9). */
+interface ScoredCard {
+    readonly taskId: string;
+    readonly memberId: string;
+    readonly title: string;
+    readonly facts: CardFacts;
+    readonly base: number;
+    readonly task: BoardTask;
+}
+
+/** The organization as the supervisor of a run sees it: the people who work in the run (19 §8). */
+function staffed(host: Pick<RunHost, 'org' | 'staff'>): Organization {
+    const { org, staff } = host;
+    if (!staff) return org;
+    return { ...org, roster: org.roster.filter((agent) => agent.role === 'supervisor' || staff[agent.id]) };
+}
+
 export class TeamService {
     readonly #deps: TeamDeps;
     readonly #store: SqliteTeamStore;
@@ -927,24 +959,28 @@ export class TeamService {
                 ),
             );
         }
-        // A group's lead supervises the run and its members are the staff (06 §24).
-        const group = input.groupId ? await this.#deps.members?.group(input.groupId) : undefined;
-        if (input.groupId && !group) {
+        // 19 §8: the nearest lead supervises; the people of the group's whole subtree are the staff. A group with
+        // nobody to do the work is refused here: without staff the supervisor could hand it to anyone.
+        const team = input.groupId ? await this.#deps.members?.team(input.groupId) : undefined;
+        if (input.groupId && !team) {
             throw new RpcError(RpcErrorCode.NotFound, text.noGroup(input.groupId));
         }
-        const lead = group ? findAgent(org, group.leaderId) : undefined;
-        const supervisor =
-            (lead?.role === 'supervisor' ? lead : undefined) ?? org.roster.find((agent) => agent.role === 'supervisor');
+        const group = team?.group;
+        const lead = team ? findAgent(org, team.leadId) : undefined;
+        if (team && lead?.role !== 'supervisor') {
+            throw new RpcError(RpcErrorCode.Rejected, text.noLead(team.group.name));
+        }
+        const supervisor = lead ?? org.roster.find((agent) => agent.role === 'supervisor');
         if (!supervisor) {
             throw new RpcError(RpcErrorCode.Rejected, text.noSupervisor);
         }
         let staff: Record<string, StaffPreset> | undefined;
-        if (group && (!input.members || input.members.length === 0)) {
-            const working = group.memberIds.filter((id) => {
-                const agent = findAgent(org, id);
-                return agent !== undefined && agent.role !== 'supervisor';
-            });
-            if (working.length > 0) staff = Object.fromEntries(working.map((id) => [id, {}]));
+        if (team && (!input.members || input.members.length === 0)) {
+            const working = team.memberIds.filter((id) => findAgent(org, id) !== undefined);
+            if (working.length === 0) {
+                throw new RpcError(RpcErrorCode.Rejected, text.noWorkers(team.group.name));
+            }
+            staff = Object.fromEntries(working.map((id) => [id, {}]));
         }
         if (input.members && input.members.length > 0) {
             staff = {};
@@ -1114,7 +1150,11 @@ export class TeamService {
     #agentOf(state: RunState, task: BoardTask): AgentSpec {
         const { org, staff } = state.host;
         if (task.handler === 'supervisor') {
-            return agentFor(org, task);
+            const expert = agentFor(org, task);
+            if (!staff || staff[expert.id]) return expert;
+            // 19 §8: a run handed to an organization stays in it.
+            const people = Object.keys(staff).flatMap((id) => findAgent(org, id) ?? []);
+            return people.find((agent) => agent.role === 'specialist') ?? people[0] ?? expert;
         }
         const usable = (id: string | undefined) => {
             const agent = id ? findAgent(org, id) : undefined;
@@ -1489,6 +1529,7 @@ export class TeamService {
             delegated: new Map(),
             internalTurn: false,
             briefing: false,
+            scoringNow: false,
             abort: new AbortController(),
             supervisorStarting: false,
             reviewingPlan: false,
@@ -1521,6 +1562,16 @@ export class TeamService {
                 this.#save(state);
             }
             this.#attachTools(state);
+        }
+        // 19 §9: runs that ended while the app went down still get their scores.
+        for (const run of await this.#store.listRuns({ status: ['completed', 'failed'] })) {
+            if (this.#store.readHost<RunHost>(run.id)?.scoring !== 'pending') continue;
+            const state = await this.#load(run.id);
+            if (state) {
+                void this.#scoreRun(state).catch((error) =>
+                    this.#deps.log.warn(`team ${run.id}: no scores: ${errorText(error)}`),
+                );
+            }
         }
     }
 
@@ -1885,6 +1936,15 @@ export class TeamService {
         }
     }
 
+    /** A reviewer's layers: it reviews against the prompts of the organization the run was handed to (19 §6). */
+    #reviewLayers(host: RunHost, reviewer: AgentSpec): NonNullable<HostToolProvider['layers']> {
+        const layers = systemLayers(host.org, reviewer);
+        const chain = host.group ? this.#deps.members?.chainOf(host.group.id) : undefined;
+        if (!chain) return layers;
+        const after = layers.findIndex((layer) => layer.id === 'org_instructions') + 1;
+        return [...layers.slice(0, after), chain, ...layers.slice(after)];
+    }
+
     #supervisorProvider(state: RunState, agent: AgentSpec): HostToolProvider {
         const allowed = new Set(toolsOf(agent));
         const runId = state.run.id;
@@ -1892,7 +1952,7 @@ export class TeamService {
             tools: SUPERVISOR_TOOLS.filter((tool) => allowed.has(tool.name)),
             disabledTools: disabledBuiltins(agent),
             mcpTools: mcpToolsOf(agent),
-            layers: systemLayers(state.host.org, agent),
+            layers: systemLayers(staffed(state.host), agent),
             highRiskApproval: true,
             // 06 §29: planning is the critical path, and the run's threads keep a smaller context.
             maxTurnRequests: () => (state.host.status === 'planning' ? PLAN_REQUESTS : undefined),
@@ -1903,7 +1963,11 @@ export class TeamService {
 
     /** The run's supervisor and members are members of the team: they bring their memory along (06 §19). */
     #withMemory(state: RunState, agent: AgentSpec, provider: HostToolProvider): HostToolProvider {
-        return this.#deps.members?.withMemory(provider, agent, state.host.projectId) ?? provider;
+        return (
+            this.#deps.members?.withMemory(provider, agent, state.host.projectId, {
+                groupId: state.host.group?.id,
+            }) ?? provider
+        );
     }
 
     #memberProvider(state: RunState, taskId: string, agent: AgentSpec): HostToolProvider {
@@ -2338,7 +2402,7 @@ export class TeamService {
             tools: [],
             disabledTools: disabledBuiltins(reviewer),
             mcpTools: mcpToolsOf(reviewer),
-            layers: systemLayers(host.org, reviewer),
+            layers: this.#reviewLayers(host, reviewer),
             highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),
         });
@@ -3670,7 +3734,7 @@ export class TeamService {
             tools: [],
             disabledTools: disabledBuiltins(reviewer),
             mcpTools: mcpToolsOf(reviewer),
-            layers: systemLayers(state.host.org, reviewer),
+            layers: this.#reviewLayers(state.host, reviewer),
             highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),
         });
@@ -4452,6 +4516,7 @@ export class TeamService {
         const info = this.#taskHost(state, taskId);
         const owner = info.agentId ?? taskId;
         info.watch = { rule, at: Date.now() };
+        info.watches = (info.watches ?? 0) + 1;
         const what =
             rule === 'repeat'
                 ? `made the same call ${WATCH_REPEATS} times in a row`
@@ -4534,7 +4599,7 @@ export class TeamService {
             reviewer.crossFamily === false ? undefined : (info.family ?? ''),
             supervisorReview ? undefined : reviewer,
         );
-        const reviewerId = supervisorReview ? 'supervisor' : reviewer.id;
+        const reviewerId = supervisorReview ? (host.supervisorId ?? 'supervisor') : reviewer.id;
         const thread = this.#createThread(state, {
             title: textOf(TEXT).reviewThread(taskId),
             role: 'reviewer',
@@ -4552,7 +4617,7 @@ export class TeamService {
             tools: [],
             disabledTools: disabledBuiltins(reviewer),
             mcpTools: mcpToolsOf(reviewer),
-            layers: systemLayers(host.org, reviewer),
+            layers: this.#reviewLayers(host, reviewer),
             highRiskApproval: true,
             handle: async (name) => fail(`Tool ${name} is not available here.`),
         });
@@ -4870,6 +4935,11 @@ export class TeamService {
         if (this.#disposed || state.briefing) return;
         state.briefing = true;
         state.host.brief = { status: 'writing', at: Date.now() };
+        // 19 §9: once per run, and not for one the user stopped.
+        state.host.scoring ??=
+            state.host.status === 'cancelled' || this.#deps.settings.get().team.scoring === false
+                ? 'skipped'
+                : 'pending';
         this.#save(state);
         void this.#writeBrief(state).catch((error) =>
             this.#deps.log.warn(`team ${state.run.id}: report not written: ${errorText(error)}`),
@@ -4887,6 +4957,142 @@ export class TeamService {
         if (this.#disposed) return;
         state.host.brief = brief;
         this.#save(state);
+        await this.#scoreRun(state);
+    }
+
+    /**
+     * The supervisor scores the run's cards in one request (19 §9). A run still `pending` after a restart asks again,
+     * and a score stored already stays as it is. What cannot be had is left out: no score is made up.
+     */
+    async #scoreRun(state: RunState): Promise<void> {
+        const { host, run } = state;
+        const { scores, bus, log } = this.#deps;
+        if (host.scoring !== 'pending' || !scores || state.scoringNow) return;
+        state.scoringNow = true;
+        const finish = (outcome: 'done' | 'skipped') => {
+            host.scoring = outcome;
+            this.#save(state);
+        };
+        try {
+            const cards = this.#scoredCards(state);
+            if (cards.length === 0) {
+                finish('skipped');
+                return;
+            }
+            const given = parseScores(await this.#askScores(state, cards));
+            if (this.#disposed) return;
+            const at = Date.now();
+            const rows = cards.flatMap((card) => {
+                const verdict = given.get(card.taskId);
+                if (!verdict) return [];
+                const score = finalScore(card.base, verdict.adjust, card.facts.status);
+                return [
+                    {
+                        runId: run.id,
+                        taskId: card.taskId,
+                        memberId: card.memberId,
+                        at,
+                        projectId: host.projectId,
+                        scorerId: host.supervisorId ?? 'supervisor',
+                        title: card.title,
+                        base: card.base,
+                        adjust: score - card.base,
+                        score,
+                        reason: verdict.reason,
+                    },
+                ];
+            });
+            scores.add(rows);
+            finish(rows.length > 0 ? 'done' : 'skipped');
+            for (const memberId of new Set(rows.map((row) => row.memberId))) {
+                bus.broadcast('member.changed', { memberId });
+            }
+        } catch (error) {
+            if (this.#disposed) return;
+            log.warn(`team ${run.id}: no scores: ${errorText(error)}`);
+            finish('skipped');
+        } finally {
+            state.scoringNow = false;
+        }
+    }
+
+    /** The cards worth a score: done, failed or blocked after someone worked on them, and whose work it was. */
+    #scoredCards(state: RunState): ScoredCard[] {
+        const { board, host } = state;
+        return board.topologicalOrder().flatMap((taskId) => {
+            const task = board.get(taskId);
+            const info = host.tasks[taskId];
+            const memberId = info?.specId;
+            if (!task || !memberId || memberId === host.supervisorId) return [];
+            if (task.status !== 'done' && task.status !== 'failed' && task.status !== 'blocked') return [];
+            if (task.attempts.length === 0 && !task.deliverable) return [];
+            const facts: CardFacts = {
+                status: task.status,
+                fails: task.attempts.filter((attempt) => attempt.outcome === 'fail').length,
+                escalations: task.attempts.filter((attempt) => attempt.outcome === 'escalate').length,
+                watches: info.watches ?? 0,
+            };
+            return [{ taskId, memberId, title: task.card.title, facts, base: baseScore(facts), task }];
+        });
+    }
+
+    async #askScores(state: RunState, cards: readonly ScoredCard[]): Promise<string> {
+        const { connections, usage, bus, threads, projects } = this.#deps;
+        const { host, run } = state;
+        const project = await projects.get(host.projectId);
+        const ref =
+            threads.find(host.supervisorThreadId)?.model ??
+            this.#pickModel(host.org, run.autonomy, project, 'flagship', []).ref;
+        const connection = await connections.providerConnection(ref.connectionId);
+        const clip = (value: string, limit: number) => (value.length > limit ? `${value.slice(0, limit)}…` : value);
+        const lines = ['<run_record>', `Goal: ${run.goal}`, `Run status: ${host.status}`, 'Cards:'];
+        for (const { taskId, memberId, facts, base, task } of cards) {
+            const handed = task.deliverable;
+            lines.push(
+                `- ${taskId} "${task.card.title}" by ${memberId}: ${facts.status}, base score ${base}`,
+                `  failed acceptance ${facts.fails} times, moved up ${facts.escalations} times, caught by the watch ${facts.watches} times`,
+                `  goal: ${clip(task.card.goal, 500)}`,
+            );
+            if (handed?.summary) lines.push(`  handed in: ${clip(handed.summary, 700)}`);
+            if (handed?.remaining?.length) lines.push(`  left: ${handed.remaining.slice(0, 6).join('; ')}`);
+            if (task.status !== 'done' && task.note) lines.push(`  why: ${clip(task.note, 300)}`);
+        }
+        lines.push('</run_record>');
+        const language = hostLanguage() === 'zh-CN' ? 'Simplified Chinese' : 'English';
+        const done = await completeModel(
+            connection,
+            {
+                model: ref.model,
+                system: [scoreSystem(language)],
+                messages: [{ role: 'user', content: [{ type: 'text', text: lines.join('\n') }] }],
+                effort: 'low',
+                maxOutputTokens: SCORE_OUTPUT_TOKENS,
+            },
+            { userAgent: this.#deps.userAgent ?? 'XoraCode', signal: AbortSignal.timeout(120_000) },
+        );
+        const pricing = findModel(connection, ref.model).pricing;
+        const recorded = usage.record({
+            projectId: host.projectId,
+            threadId: host.supervisorThreadId,
+            turnId: 'team-score',
+            agentPath: 'score',
+            ...(host.supervisorId ? { memberId: host.supervisorId } : {}),
+            engine: 'xora',
+            provider: connection.preset.id,
+            channel: connection.preset.channel,
+            model: ref.model,
+            ...(pricing ? { pricing } : {}),
+            usage: done.usage ?? null,
+            latencyMs: done.latencyMs,
+            ...(done.ttftMs !== undefined ? { ttftMs: done.ttftMs } : {}),
+            stopReason: done.stopReason,
+            status: 'ok',
+            source: done.usage ? 'vendor' : 'estimate',
+        });
+        if (recorded.cost) {
+            bus.broadcast('usage.changed', { threadId: host.supervisorThreadId, cost: recorded.cost });
+        }
+        return done.message.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
     }
 
     /** The supervisor's model writes the report from the run's record; the request counts in the run's cost. */

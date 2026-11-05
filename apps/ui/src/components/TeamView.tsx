@@ -2,6 +2,7 @@ import type { TeamRun, TeamTask } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
+import { groupPath, groupSubtree } from '../members.ts';
 import {
     ALL_PROJECTS,
     attempt,
@@ -774,8 +775,10 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
     const defaultParallel = useApp((state) => state.settings?.team.maxParallel ?? 3);
     const [parallel, setParallel] = useState(String(defaultParallel));
     // 06 §22: the supervisor picks the members, or the user does, each with its model, thinking and permissions.
+    // 19 §8: the people of the organization and of the ones under it.
+    const subtree = new Set(group ? groupSubtree(groups, group.id).flatMap((item) => item.memberIds) : []);
     const members = useApp((state) => state.members).filter(
-        (member) => member.role !== 'supervisor' && (!group || group.memberIds.includes(member.id)),
+        (member) => member.role !== 'supervisor' && (!group || subtree.has(member.id)),
     );
     const connected = useApp((state) => state.models);
     const [staffMode, setStaffMode] = useState<'auto' | 'manual'>('auto');
@@ -856,7 +859,7 @@ export function TeamStartDialog({ projectId: initial }: { projectId: string }) {
                         <Select
                             label={s.org.handToGroup}
                             value={groupId}
-                            options={groups.map((item) => ({ value: item.id, label: item.name }))}
+                            options={groups.map((item) => ({ value: item.id, label: groupPath(groups, item.id) }))}
                             onChange={(value) => {
                                 setGroupId(value);
                                 setStaff({});

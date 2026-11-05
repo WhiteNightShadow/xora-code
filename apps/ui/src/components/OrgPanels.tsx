@@ -300,7 +300,7 @@ function ScoreBlock({ score }: { score: MemberStats['score'] }) {
                             <strong>{item.score}</strong> {item.title}
                         </span>
                         <span className="muted">
-                            {item.project} · {relativeTime(item.at)}
+                            {item.project} · {item.by} · {relativeTime(item.at)}
                         </span>
                         <span className="org-panel__reason">{item.reason}</span>
                     </li>
@@ -451,7 +451,8 @@ export function GroupDialog({
     const [description, setDescription] = useState(group?.description ?? '');
     const [parentId, setParentId] = useState(group ? (group.parentId ?? '') : (initialParent ?? ''));
     const [leaderId, setLeaderId] = useState(group?.leaderId ?? '');
-    const [prompt, setPrompt] = useState('');
+    // Unknown until it is read: saving before that must not wipe what is there.
+    const [prompt, setPrompt] = useState<string | undefined>(group ? undefined : '');
     const [chosen, setChosen] = useState<Set<string>>(new Set(group?.memberIds ?? []));
     const [picking, setPicking] = useState(false);
     const [busy, setBusy] = useState(false);
@@ -495,7 +496,7 @@ export function GroupDialog({
                 parentId: parentId || null,
                 leaderId,
                 memberIds: [...chosen],
-                prompt,
+                ...(prompt !== undefined ? { prompt } : {}),
             }),
         );
         setBusy(false);
@@ -541,7 +542,8 @@ export function GroupDialog({
                         className="textarea"
                         rows={6}
                         maxLength={PROMPT_LIMIT}
-                        value={prompt}
+                        value={prompt ?? ''}
+                        disabled={prompt === undefined}
                         onChange={(event) => setPrompt(event.target.value)}
                     />
                 </Field>
@@ -593,7 +595,7 @@ export function GroupDialog({
                     <button
                         type="button"
                         className="button button--primary"
-                        disabled={busy || !name.trim()}
+                        disabled={busy || !name.trim() || prompt === undefined}
                         onClick={() => void save()}
                     >
                         {busy ? <Spinner /> : null} {s.members.save}

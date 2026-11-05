@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { OrgGroup, PermissionMode, UiLanguage } from '@xora/protocol';
@@ -28,12 +29,20 @@ export function groupsFile(orgsDir: string): string {
 
 /** The stored groups, or undefined while the user has not changed the default team. */
 export async function readGroups(orgsDir: string): Promise<OrgGroup[] | undefined> {
-    let text: string;
+    const text = await readFile(groupsFile(orgsDir), 'utf8').catch(() => undefined);
+    return text === undefined ? undefined : parseGroups(text);
+}
+
+/** The same, for the layers a thread gets as it starts. */
+export function readGroupsSync(orgsDir: string): OrgGroup[] | undefined {
     try {
-        text = await readFile(groupsFile(orgsDir), 'utf8');
+        return parseGroups(readFileSync(groupsFile(orgsDir), 'utf8'));
     } catch {
         return undefined;
     }
+}
+
+function parseGroups(text: string): OrgGroup[] | undefined {
     try {
         const parsed = JSON.parse(text) as Partial<StoredGroups>;
         if (!Array.isArray(parsed.groups)) return undefined;
@@ -128,6 +137,11 @@ export function leadOf(groups: readonly OrgGroup[], groupId: string): string | u
     return groupChain(groups, groupId)
         .reverse()
         .find((group) => group.leaderId)?.leaderId;
+}
+
+/** The group a member is in: as its lead, or as a member. */
+export function groupOfMember(groups: readonly OrgGroup[], memberId: string): OrgGroup | undefined {
+    return groups.find((group) => group.leaderId === memberId || group.memberIds.includes(memberId));
 }
 
 /**

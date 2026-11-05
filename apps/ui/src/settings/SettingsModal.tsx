@@ -113,6 +113,14 @@ function General() {
                     onChange={(models) => update({ team: { ...settings.team, models } })}
                 />
             </Field>
+            {/* 19 §9: each card of a finished run costs part of one short request. */}
+            <Field label={s.settings.teamScoring} hint={s.settings.teamScoringHint}>
+                <Toggle
+                    checked={settings.team.scoring !== false}
+                    label={s.settings.teamScoringOn}
+                    onChange={(scoring) => update({ team: { ...settings.team, scoring } })}
+                />
+            </Field>
         </div>
     );
 }

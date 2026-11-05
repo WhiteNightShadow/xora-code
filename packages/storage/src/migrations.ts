@@ -236,4 +236,25 @@ end;
 create index usage_by_member on usage_events (member_id, ts);
 `,
     },
+    {
+        // What a member's supervisor gave its work (19 §9): one score per card of a run, whatever runs twice.
+        version: 7,
+        sql: `
+create table member_scores (
+    run_id text not null,
+    task_id text not null,
+    member_id text not null,
+    ts integer not null,
+    project_id text not null,
+    scorer_id text not null,
+    title text not null,
+    base integer not null,
+    adjust integer not null,
+    score integer not null,
+    reason text not null,
+    primary key (run_id, task_id, member_id)
+);
+create index member_scores_by_member on member_scores (member_id, ts);
+`,
+    },
 ];

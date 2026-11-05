@@ -363,7 +363,7 @@ describe('members', () => {
         expect(found.content).toContain('找到1条');
         expect(found.content).toContain(`(编码 · ${project.name})`);
         expect(found.content).toContain('构建用 pnpm build');
-        expect((await scout.handle('recall', { query: '接口文档' }, signal())).content).toContain('(团队 · ');
+        expect((await scout.handle('recall', { query: '接口文档' }, signal())).content).toContain('(全体 · ');
         expect((await scout.handle('recall', { query: '不存在的事' }, signal())).content).toBe(
             '记忆里没有和“不存在的事”有关的笔记',
         );

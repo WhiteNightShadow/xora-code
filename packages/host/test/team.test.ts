@@ -426,13 +426,15 @@ describe('agent team run', () => {
         }, 'run done');
         expect(done.status).toBe('done');
         expect(again.map((approval) => approval.toolName)).toEqual(['team_delivery', 'acceptance']);
-        // Nothing more for the team after the restart: the one request is the report for the user (06 §22), written
-        // once the run is over.
+        // Nothing more for the team after the restart: the two requests are the report for the user (06 §22) and the
+        // supervisor's scores (19 §9), once the run is over.
         await waitFor(async () => {
             const run = await second.ui.request('team.get', { runId: started.id });
             return run.brief?.status === 'ready' || run.brief?.status === 'failed' ? run : undefined;
         }, 'the report');
+        await waitFor(() => server.requests.length - before >= 2 || undefined, 'the scores');
         expect(server.requests.slice(before).map((request) => agentOf(request.body as ChatBody | undefined))).toEqual([
+            'none',
             'none',
         ]);
         expect(readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('final\n');

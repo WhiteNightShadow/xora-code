@@ -360,6 +360,11 @@ function MemberRow({ member, lead }: { member: Member; lead?: boolean }) {
             <MemberAvatar member={member} size={22} />
             <span className="omember__name">{member.name}</span>
             <span className="omember__job">{lead ? s.org.lead : memberJob(member, s)}</span>
+            {member.score !== undefined && (
+                <span className="omember__score" title={s.org.score}>
+                    {member.score}
+                </span>
+            )}
         </button>
     );
 }
