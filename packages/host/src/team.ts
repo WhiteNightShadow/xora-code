@@ -4915,6 +4915,7 @@ export class TeamService {
             threadId: host.supervisorThreadId,
             turnId: 'team-brief',
             agentPath: 'brief',
+            ...(host.supervisorId ? { memberId: host.supervisorId } : {}),
             engine: 'xora',
             provider: connection.preset.id,
             channel: connection.preset.channel,

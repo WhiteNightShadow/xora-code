@@ -1,4 +1,4 @@
-import type { Member, ThreadMeta } from '@xora/protocol';
+import type { Member, OrgGroup, ThreadMeta } from '@xora/protocol';
 import type { Strings } from './strings.ts';
 
 /** The schedules the routine form offers; anything else is written as cron. */
@@ -94,4 +94,57 @@ export function memberJob(member: Member, s: Strings): string | undefined {
         return (s.members.builtinJobs as Record<string, string>)[member.id] ?? member.description;
     }
     return member.description;
+}
+
+/** Levels of the organization tree (19 §4). */
+export const MAX_GROUP_DEPTH = 3;
+
+/** A group and the groups above it, the first level first. */
+export function groupChain(groups: readonly OrgGroup[], groupId: string): OrgGroup[] {
+    const chain: OrgGroup[] = [];
+    const seen = new Set<string>();
+    for (let current = groups.find((group) => group.id === groupId); current && !seen.has(current.id); ) {
+        seen.add(current.id);
+        chain.unshift(current);
+        const parent: string | undefined = current.parentId;
+        current = parent === undefined ? undefined : groups.find((group) => group.id === parent);
+    }
+    return chain;
+}
+
+/** A group and every group under it. */
+export function groupSubtree(groups: readonly OrgGroup[], groupId: string): OrgGroup[] {
+    const found = groups.filter((group) => group.id === groupId);
+    for (let index = 0; index < found.length; index++) {
+        const id = found[index]?.id;
+        for (const group of groups) {
+            if (group.parentId === id && !found.includes(group)) found.push(group);
+        }
+    }
+    return found;
+}
+
+/** The levels a group's subtree takes, 1 when it has no groups under it. */
+export function groupHeight(groups: readonly OrgGroup[], groupId: string): number {
+    const below = groups.filter((group) => group.parentId === groupId);
+    return 1 + Math.max(0, ...below.map((group) => groupHeight(groups, group.id)));
+}
+
+/** Who takes a group's work (19 §4): its lead, or the nearest one above it. */
+export function groupLead(groups: readonly OrgGroup[], groupId: string): string | undefined {
+    return groupChain(groups, groupId)
+        .reverse()
+        .find((group) => group.leaderId)?.leaderId;
+}
+
+/** Where a group sits, for a line of text: `Engineering / Frontend`. */
+export function groupPath(groups: readonly OrgGroup[], groupId: string): string {
+    return groupChain(groups, groupId)
+        .map((group) => group.name)
+        .join(' / ');
+}
+
+/** The group a member is in: as a member, or as its lead. */
+export function groupOfMember(groups: readonly OrgGroup[], memberId: string): OrgGroup | undefined {
+    return groups.find((group) => group.leaderId === memberId || group.memberIds.includes(memberId));
 }

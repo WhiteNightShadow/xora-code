@@ -340,7 +340,6 @@ export function toolsOf(agent: AgentSpec): readonly string[] {
 
 export type OrgIssueCode =
     | 'missing_supervisor'
-    | 'multiple_supervisors'
     | 'duplicate_agent'
     | 'recursive_delegation'
     | 'empty_tier'
@@ -358,11 +357,6 @@ export function validateOrganization(org: Organization): OrgIssue[] {
     const supervisors = org.roster.filter((agent) => agent.role === 'supervisor');
     if (supervisors.length === 0) {
         issues.push({ code: 'missing_supervisor', message: 'the roster has no supervisor' });
-    } else if (supervisors.length > 1) {
-        issues.push({
-            code: 'multiple_supervisors',
-            message: `the roster has ${supervisors.length} supervisors; a team has one`,
-        });
     }
     const seen = new Set<string>();
     for (const agent of org.roster) {

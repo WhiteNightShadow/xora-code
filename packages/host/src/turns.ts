@@ -40,7 +40,7 @@ import type { ReviewService } from './review.ts';
 import type { SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
 import { hostLanguage, textOf } from './text.ts';
-import type { ThreadStore } from './threads.ts';
+import { type ThreadStore, workerOf } from './threads.ts';
 import { openingLine, type TitleService } from './titles.ts';
 import type { UsageService } from './usage.ts';
 
@@ -1570,11 +1570,13 @@ export class TurnService {
         let cost: Money | null = null;
         if (request) {
             const owner = threads.find(running.threadId);
+            const worker = owner ? workerOf(owner, (id) => threads.find(id)) : undefined;
             const recorded = usage.record({
                 projectId: running.projectId,
                 threadId: running.threadId,
                 turnId: running.turnId,
                 ...(owner?.agentId ? { agentId: owner.agentId, agentPath: owner.agentId } : {}),
+                ...(worker ? { memberId: worker } : {}),
                 ...(owner?.taskId ? { taskId: owner.taskId } : {}),
                 ...(owner?.workflowRunId || owner?.teamRunId
                     ? { workflowRunId: owner.workflowRunId ?? owner.teamRunId }

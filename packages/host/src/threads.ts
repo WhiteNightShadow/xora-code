@@ -125,6 +125,28 @@ export interface NewThread {
     readonly extra?: ThreadExtra;
 }
 
+/** The member a thread works as: its `agentId`, without the task suffix team runs add (`coder-T1` is `coder`). */
+export function memberIdOf(thread: Pick<ThreadMeta, 'agentId' | 'taskId' | 'teamRunId'>): string | undefined {
+    const id = thread.agentId;
+    if (!id) return undefined;
+    return thread.teamRunId && thread.taskId && id.endsWith(`-${thread.taskId}`)
+        ? id.slice(0, -thread.taskId.length - 1)
+        : id;
+}
+
+/**
+ * The member whose work a thread's requests are (19 §10): the member it works as; a helper that is no member (a
+ * subagent without a role) works for the member of the thread that started it.
+ */
+export function workerOf(thread: ThreadMeta, find: (threadId: string) => ThreadMeta | undefined): string | undefined {
+    let current: ThreadMeta | undefined = thread;
+    for (let depth = 0; current && depth < 8; depth++) {
+        if (!current.parent || current.role) return memberIdOf(current);
+        current = find(current.parent.threadId);
+    }
+    return undefined;
+}
+
 /**
  * Thread rows (index) plus their append-only event logs (history). Every appended event is pushed to the
  * UIs subscribed to the thread; metadata changes are broadcast to all UIs for the sidebar.

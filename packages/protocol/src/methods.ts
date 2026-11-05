@@ -12,6 +12,7 @@ import {
     IdSchema,
     ItemSchema,
     MemberSchema,
+    MemberStatsSchema,
     ModelOptionSchema,
     ModelRefSchema,
     MoneySchema,
@@ -572,9 +573,14 @@ export const methods = {
     },
     /** Puts a built-in member back as it comes: a changed one loses the changes, a deleted one returns. */
     'member.reset': { params: z.object({ memberId: z.string() }).strict(), result: ok },
+    /** What its panel shows (19 §9, §10): recent projects, tokens, its supervisor's scores, and its folder. */
+    'member.stats': { params: z.object({ memberId: z.string() }).strict(), result: MemberStatsSchema },
     /** The organization chart (06 §24): groups with their leaders and members, and deleted built-in members. */
     'org.get': { params: z.object({ projectId: IdSchema.optional() }).strict(), result: OrgChartSchema },
-    /** Creates or changes a group; the members listed leave any other group. */
+    /**
+     * Creates or changes a group (19 §4): the members listed leave any other group. Left out, `leaderId`,
+     * `memberIds` and `parentId` stay as they are (a new group: none); `parentId: null` is the first level.
+     */
     'org.saveGroup': {
         params: z
             .object({
@@ -582,14 +588,24 @@ export const methods = {
                 id: z.string().max(64).optional(),
                 name: z.string().min(1).max(60),
                 description: z.string().max(300).optional(),
-                leaderId: z.string(),
-                memberIds: z.array(z.string()).max(60),
+                parentId: z.string().nullable().optional(),
+                leaderId: z.string().optional(),
+                memberIds: z.array(z.string()).max(60).optional(),
+                prompt: z.string().max(3000).optional(),
             })
             .strict(),
         result: OrgGroupSchema,
     },
-    /** Deletes a group; its members are left without one. */
+    /** A group's prompt and the folder of its memory (19 §5). */
+    'org.readGroup': {
+        params: z.object({ groupId: z.string() }).strict(),
+        result: z.object({ prompt: z.string(), dir: z.string() }),
+    },
+    /** Deletes a group: what was in it moves up a level, and its folder goes to the trash (19 §4). */
     'org.deleteGroup': { params: z.object({ groupId: z.string() }).strict(), result: ok },
+    /** The prompt of everyone in the organization, the body of `org.md` (19 §6). */
+    'org.root': { params: empty, result: z.object({ prompt: z.string(), dir: z.string() }) },
+    'org.saveRoot': { params: z.object({ prompt: z.string().max(12_000) }).strict(), result: ok },
     /** Moves a member to a group, or out of every group (`null`). */
     'org.moveMember': {
         params: z

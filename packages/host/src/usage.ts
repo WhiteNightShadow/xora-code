@@ -18,6 +18,8 @@ export interface RequestReport {
     readonly turnId: string;
     readonly agentPath?: string;
     readonly agentId?: string;
+    /** The member whose work it is (19 §10): the supervisor's for reviews, reports and scores in a member's thread. */
+    readonly memberId?: string;
     readonly taskId?: string;
     readonly workflowRunId?: string;
     readonly role?: string;
@@ -133,10 +135,10 @@ export class UsageService {
             complete = report.status === 'error';
         }
         this.#db.run(
-            `insert into usage_events (id, ts, project_id, thread_id, turn_id, agent_path, agent_id, task_id, workflow_run_id, role, tier,
+            `insert into usage_events (id, ts, project_id, thread_id, turn_id, agent_path, agent_id, member_id, task_id, workflow_run_id, role, tier,
                 engine, provider, channel, model, input_tokens, cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
                 latency_ms, ttft_ms, cost_amount, cost_currency, cost_table, cost_period, cost_complete, status, error_class, stop_reason, source)
-             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 newId('u'),
                 at.getTime(),
@@ -145,6 +147,7 @@ export class UsageService {
                 report.turnId,
                 report.agentPath ?? 'main',
                 report.agentId ?? null,
+                report.memberId ?? null,
                 report.taskId ?? null,
                 report.workflowRunId ?? null,
                 report.role ?? null,
@@ -224,6 +227,24 @@ export class UsageService {
                 ...(row.stop_reason ? { stopReason: row.stop_reason } : {}),
             })),
         };
+    }
+
+    /** A member's requests since `since` (19 §10). */
+    member(memberId: string, since = 0): UsageTotals {
+        return this.#totals(
+            this.#db.all<UsageRowDb>('select * from usage_events where member_id = ? and ts >= ?', [memberId, since]),
+        );
+    }
+
+    /** The projects a member worked in, the latest first; a run or a thread is one piece of work (19 §10). */
+    memberProjects(memberId: string, limit: number): { projectId: string; lastAt: number; works: number }[] {
+        return this.#db.all<{ projectId: string; lastAt: number; works: number }>(
+            `select project_id as projectId, max(ts) as lastAt,
+                    count(distinct coalesce(workflow_run_id, thread_id)) as works
+             from usage_events where member_id = ? and project_id is not null
+             group by project_id order by lastAt desc limit ?`,
+            [memberId, limit],
+        );
     }
 
     /** Spend in the display currency since `since`, for budget checks. */

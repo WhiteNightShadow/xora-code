@@ -220,4 +220,20 @@ create table host_values (
 alter table connections add column selected_json text;
 `,
     },
+    {
+        // Whose work a request was (19 §10), settled when it is recorded. Older rows: the member the agent id names,
+        // without the task suffix team runs add (`coder-T1` is `coder`).
+        version: 6,
+        sql: `
+alter table usage_events add column member_id text;
+update usage_events set member_id = case
+    when agent_id is null then null
+    when task_id is not null and length(agent_id) > length(task_id) + 1
+        and substr(agent_id, length(agent_id) - length(task_id)) = '-' || task_id
+        then substr(agent_id, 1, length(agent_id) - length(task_id) - 1)
+    else agent_id
+end;
+create index usage_by_member on usage_events (member_id, ts);
+`,
+    },
 ];

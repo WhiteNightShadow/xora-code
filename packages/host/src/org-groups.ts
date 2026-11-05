@@ -5,14 +5,20 @@ import type { OrgGroup, PermissionMode, UiLanguage } from '@xora/protocol';
 import { CODER_PROMPT, type Role, type Tier } from '@xora/workflows';
 
 /**
- * The groups of the organization (06 §24): `<data>/orgs/default/groups.json`. Until the user changes them there is
- * one group, the default team: the first supervisor leads it and every other member of the user's works in it.
+ * The organization tree (19 §4), the groups of 06 §24 with a parent each: `<data>/orgs/default/groups.json`. Until
+ * the user changes them there is one group, the default team: the first supervisor leads it and every other member
+ * of the user's works in it.
  */
 
 const FILE = 'groups.json';
+/** The file as 1.1.0 wrote it, kept when the tree format replaces it. */
+const BACKUP = 'groups.v1.json';
+
+/** Levels of the tree: more would pass work through too many hands, and not fit the window (19 §4). */
+export const MAX_GROUP_DEPTH = 3;
 
 interface StoredGroups {
-    readonly version: 1;
+    readonly version: 1 | 2;
     readonly groups: readonly OrgGroup[];
 }
 
@@ -31,9 +37,9 @@ export async function readGroups(orgsDir: string): Promise<OrgGroup[] | undefine
     try {
         const parsed = JSON.parse(text) as Partial<StoredGroups>;
         if (!Array.isArray(parsed.groups)) return undefined;
-        return parsed.groups.flatMap((group): OrgGroup[] => {
+        const groups = parsed.groups.flatMap((group): OrgGroup[] => {
             const entry = group as Partial<OrgGroup>;
-            if (typeof entry.id !== 'string' || typeof entry.name !== 'string' || typeof entry.leaderId !== 'string') {
+            if (typeof entry.id !== 'string' || typeof entry.name !== 'string') {
                 return [];
             }
             return [
@@ -43,24 +49,96 @@ export async function readGroups(orgsDir: string): Promise<OrgGroup[] | undefine
                     ...(typeof entry.description === 'string' && entry.description
                         ? { description: entry.description }
                         : {}),
-                    leaderId: entry.leaderId,
+                    ...(typeof entry.parentId === 'string' && entry.parentId ? { parentId: entry.parentId } : {}),
+                    leaderId: typeof entry.leaderId === 'string' ? entry.leaderId : '',
                     memberIds: Array.isArray(entry.memberIds)
                         ? entry.memberIds.filter((id): id is string => typeof id === 'string')
                         : [],
                 },
             ];
         });
+        return wellFormed(groups);
     } catch {
         return undefined;
     }
 }
 
+/** A file edited by hand can point at a group that is gone, or in a circle: such a group moves to the first level. */
+function wellFormed(groups: readonly OrgGroup[]): OrgGroup[] {
+    const byId = new Map(groups.map((group) => [group.id, group]));
+    return groups.map((group) => {
+        const seen = new Set([group.id]);
+        for (let parent = group.parentId; parent !== undefined; parent = byId.get(parent)?.parentId) {
+            if (!byId.has(parent) || seen.has(parent)) {
+                const { parentId: _gone, ...rest } = group;
+                return rest;
+            }
+            seen.add(parent);
+        }
+        return group;
+    });
+}
+
 export async function writeGroups(orgsDir: string, groups: readonly OrgGroup[]): Promise<void> {
     const file = groupsFile(orgsDir);
     await mkdir(path.dirname(file), { recursive: true });
+    // Going back to 1.1.0 finds the groups it knew.
+    const before = await readFile(file, 'utf8').catch(() => undefined);
+    if (before !== undefined && !/"version":\s*2/.test(before)) {
+        await writeFile(path.join(path.dirname(file), BACKUP), before, { flag: 'wx' }).catch(() => undefined);
+    }
     const temp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-    await writeFile(temp, `${JSON.stringify({ version: 1, groups } satisfies StoredGroups, null, 2)}\n`, 'utf8');
+    await writeFile(temp, `${JSON.stringify({ version: 2, groups } satisfies StoredGroups, null, 2)}\n`, 'utf8');
     await rename(temp, file);
+}
+
+/** A group and the groups above it, the first level first. */
+export function groupChain(groups: readonly OrgGroup[], groupId: string): OrgGroup[] {
+    const byId = new Map(groups.map((group) => [group.id, group]));
+    const chain: OrgGroup[] = [];
+    const seen = new Set<string>();
+    for (let current = byId.get(groupId); current && !seen.has(current.id); ) {
+        seen.add(current.id);
+        chain.unshift(current);
+        current = current.parentId === undefined ? undefined : byId.get(current.parentId);
+    }
+    return chain;
+}
+
+/** A group and every group under it. */
+export function groupSubtree(groups: readonly OrgGroup[], groupId: string): OrgGroup[] {
+    const found = groups.filter((group) => group.id === groupId);
+    for (let index = 0; index < found.length; index++) {
+        const id = found[index]?.id;
+        for (const group of groups) {
+            if (group.parentId === id && !found.includes(group)) found.push(group);
+        }
+    }
+    return found;
+}
+
+/** The levels a group's subtree takes, 1 when it has no groups under it. */
+export function groupHeight(groups: readonly OrgGroup[], groupId: string): number {
+    const below = groups.filter((group) => group.parentId === groupId);
+    return 1 + Math.max(0, ...below.map((group) => groupHeight(groups, group.id)));
+}
+
+/** Who takes a group's work (19 §4): its lead, or the nearest one above it. */
+export function leadOf(groups: readonly OrgGroup[], groupId: string): string | undefined {
+    return groupChain(groups, groupId)
+        .reverse()
+        .find((group) => group.leaderId)?.leaderId;
+}
+
+/**
+ * A member's supervisor (19 §4): the lead of its group; for a lead, the lead above its group. Undefined: the chief,
+ * for those who report straight to it.
+ */
+export function supervisorOf(groups: readonly OrgGroup[], memberId: string): string | undefined {
+    const led = groups.find((group) => group.leaderId === memberId);
+    if (led) return led.parentId === undefined ? undefined : leadOf(groups, led.parentId);
+    const group = groups.find((item) => item.memberIds.includes(memberId));
+    return group ? leadOf(groups, group.id) : undefined;
 }
 
 /** An id for a new group: its name as `[a-z0-9-]` when that has a letter, else `group-<6 hex>`. */

@@ -175,7 +175,9 @@ server.respondWith((request) => {
         messages.at(-1)?.role === 'user' &&
         JSON.stringify(messages.at(-1)).includes('记住：')
     ) {
-        return openaiToolCalls([{ name: 'remember', arguments: JSON.stringify({ note: 'hello.txt是冒烟用的文件' }) }]);
+        return openaiToolCalls([{ name: 'remember', arguments: JSON.stringify({ note: 'hello.txt是冒烟用的文件' }) }], {
+            usage: { prompt_tokens: 3000, completion_tokens: 400 },
+        });
     }
     // A workflow step's agent hands its result in.
     if (body?.tools?.some((tool) => tool.function?.name === 'step_result')) {
@@ -666,31 +668,84 @@ try {
     await page.locator('.wf-ask').getByRole('button', { name: '提问', exact: true }).click();
     await page.locator('.user-message', { hasText: 'hello.txt里写的是什么？' }).waitFor();
     await step(page, '追问会开一个带着运行记录的线程');
-    // Members (06 §19): the built-in ones are there; a new one made from a template is handed work, writes down
-    // what it learned, and gets a routine that can also run right away.
-    // 06 §24: members are on the team's page, in their groups.
+    // 19 §11: the team's page is the organization lying on its side, organizations and members are made in dialogs
+    // right there, and a click on a member shows five things. Then the member is handed work, writes down what it
+    // learned, and gets a routine that can also run right away.
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
-    await page
-        .locator('.org-group', { hasText: '研发团队' })
-        .locator('.org-member', { hasText: '侦察' })
-        .first()
-        .waitFor();
-    await step(page, '团队页的组织架构里，成员都在小组里');
-    await page.getByRole('button', { name: '新建成员', exact: true }).click();
+    await page.locator('.onode', { hasText: '研发团队' }).locator('.omember', { hasText: '侦察' }).first().waitFor();
+    await step(page, '团队页是横向的组织树，成员在组织里');
+    await page.getByRole('button', { name: '新建组织', exact: true }).click();
+    const groupDialog = page.locator('.group-editor');
+    await groupDialog.getByPlaceholder('比如：研发中心、前端组、运营组').fill('冒烟中心');
+    await groupDialog.getByRole('button', { name: '保存', exact: true }).click();
+    const centre = page.locator('.onode', { hasText: '冒烟中心' });
+    await centre.waitFor();
+    await step(page, '弹窗里新建组织，不开对话');
+    await centre.getByRole('button', { name: '新建', exact: true }).click();
+    await page.locator('.menu-list').getByRole('button', { name: '新建子组织' }).click();
+    await groupDialog.getByPlaceholder('比如：研发中心、前端组、运营组').fill('冒烟小队');
+    await groupDialog.getByRole('button', { name: '保存', exact: true }).click();
+    const squad = page.locator('.onode', { hasText: '冒烟小队' });
+    await squad.waitFor();
+    const [above, below, root] = await Promise.all([
+        centre.boundingBox(),
+        squad.boundingBox(),
+        page.locator('.onode--root').boundingBox(),
+    ]);
+    if (!above || !below || !root || !(root.x < above.x && above.x < below.x)) {
+        throw new Error('the tree does not run from the left: root, organization, sub-organization');
+    }
+    await step(page, '子组织挂在上级的右边，最左边是我和总助手');
+    await squad.locator('.onode__name').click();
+    const squadPanel = page.locator('.org-panel', { hasText: '组织提示词' });
+    await squadPanel.locator('textarea').fill('冒烟小队只看文件');
+    await squadPanel.getByRole('button', { name: '保存', exact: true }).click();
+    await page.locator('.toast', { hasText: '已保存' }).first().waitFor();
+    const groups = (await hostCall(page, 'org.get', {})) as { groups: { id: string; name: string }[] };
+    const squadId = groups.groups.find((group) => group.name === '冒烟小队')?.id ?? '';
+    const read = (await hostCall(page, 'org.readGroup', { groupId: squadId })) as { prompt: string; dir: string };
+    if ((await readFile(path.join(read.dir, 'prompt.md'), 'utf8')).trim() !== '冒烟小队只看文件') {
+        throw new Error('the organization prompt is not in its folder');
+    }
+    await step(page, '组织提示词能改，存在组织自己的目录里');
+    await squad.getByRole('button', { name: '新建', exact: true }).click();
+    await page.locator('.menu-list').getByRole('button', { name: '新建成员' }).click();
     const memberEditor = page.locator('.member-editor');
     await memberEditor.getByPlaceholder('比如：抓包侦察、日报员').pressSequentially('冒烟侦察');
-    await memberEditor.getByPlaceholder('比如：抓app的接口、整理请求链路').fill('看冒烟仓库里的文件');
+    await memberEditor.getByRole('combobox', { name: '岗位' }).selectOption('scout');
     await memberEditor.getByRole('button', { name: '保存', exact: true }).click();
-    await page.locator('.member-detail h1', { hasText: '冒烟侦察' }).waitFor();
-    await step(page, '新建成员后进入它的页面');
-    await page.locator('.member-detail__actions').getByRole('button', { name: '派活' }).click();
+    const panel = page.locator('.org-panel', { hasText: '主管评分' });
+    await panel.locator('h2', { hasText: '冒烟侦察' }).waitFor();
+    await squad.locator('.omember', { hasText: '冒烟侦察' }).waitFor();
+    const blocks = await panel
+        .locator('.org-panel__block')
+        .evaluateAll((items) => items.map((item) => (item as HTMLElement).dataset.block));
+    if (blocks.join() !== 'prompt,projects,score,tokens') {
+        throw new Error(`the member panel shows ${blocks.join()}`);
+    }
+    await step(page, '弹窗里建成员，点开只看到名字、提示词、最近项目、主管评分、token');
+    await panel.locator('.org-panel__actions').getByRole('button', { name: '派活' }).click();
     await page.locator('.modal textarea').pressSequentially('记住：hello.txt是冒烟用的文件');
     await page.getByRole('button', { name: '派给它', exact: true }).click();
     await page.locator('.thread-header .member-chip', { hasText: '冒烟侦察' }).waitFor();
     await step(page, '派活给成员会开一个它的线程');
+    await page.locator('.composer').getByRole('button', { name: '停止' }).waitFor({ state: 'detached' });
     await page.locator('.thread-header .member-chip').click();
+    await panel.locator('[data-block=projects]', { hasText: 'repo' }).waitFor();
+    const tokens = await panel.locator('[data-block=tokens] .org-panel__tokens strong').first().textContent();
+    if (tokens === null || tokens.trim() === '0') {
+        throw new Error('the member panel shows no tokens after its work');
+    }
+    await step(page, '干完活后面板上有最近的项目和token');
+    const panelMenu = async (item: string) => {
+        await panel.locator('.org-panel__actions').getByRole('button', { name: '更多' }).click();
+        await page.locator('.menu-list').getByRole('button', { name: item }).click();
+    };
+    await panelMenu('记忆');
     await page.locator('.member-memory', { hasText: 'hello.txt是冒烟用的文件' }).waitFor();
     await step(page, '成员会把学到的事记进自己的记忆');
+    await page.keyboard.press('Escape');
+    await panelMenu('例行任务');
     await page.getByRole('button', { name: '添加例行任务' }).click();
     const routineForm = page.locator('.routine-form');
     await routineForm.getByPlaceholder('比如：早上检查抓包链路').fill('冒烟早检');
@@ -704,16 +759,12 @@ try {
     await step(page, '例行任务可以马上跑一次');
     // A routine on a schedule keeps the app in the tray when its window closes; switched off, it no longer does.
     await page.locator('.thread-header .member-chip').click();
+    await panelMenu('例行任务');
     // The switch follows the saved routine, so it flips once the change is saved.
     await routine.locator('.toggle').click();
     await page.locator('.routine.is-off', { hasText: '冒烟早检' }).waitFor();
     await step(page, '停用例行任务');
-    // Designing a member in a conversation starts from what the user needs (06 §21; not sent here).
-    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
-    await page.getByRole('button', { name: '对话建人', exact: true }).click();
-    await page.locator('.modal textarea').waitFor();
-    await page.locator('.modal').getByRole('button', { name: '取消', exact: true }).click();
-    await step(page, '成员页能对话建人');
+    await page.keyboard.press('Escape');
     // The chief assistant (06 §23): one place to say what is needed. It hands the job to a member, and a card in its
     // conversation follows the work to its answer and opens it.
     await page.locator('.sidebar__nav', { hasText: '总助手' }).click();
@@ -733,18 +784,18 @@ try {
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
     await page.getByRole('button', { name: '用模板建团队', exact: true }).click();
     await page.locator('.modal').getByRole('button', { name: '建团队', exact: true }).click();
-    const devGroup = page.locator('.org-group', { hasText: '开发组' });
-    await devGroup.locator('.org-member', { hasText: '前端工程师' }).waitFor();
-    await devGroup.locator('.org-member.is-lead', { hasText: '技术负责人' }).waitFor();
+    const devGroup = page.locator('.onode', { hasText: '开发组' });
+    await devGroup.locator('.omember', { hasText: '前端工程师' }).waitFor();
+    await devGroup.locator('.omember.is-lead', { hasText: '技术负责人' }).waitFor();
     await step(page, '用模板建出常规开发团队');
-    const expert = devGroup.locator('.org-member', { hasText: '资深专家' });
-    await expert.hover();
-    await expert.getByRole('button', { name: '更多' }).click();
+    const expert = devGroup.locator('.omember', { hasText: '资深专家' });
+    await expert.click();
+    await page.locator('.org-panel__actions').getByRole('button', { name: '更多' }).click();
     await page.locator('.menu-list').getByRole('button', { name: '删除' }).click();
     await expert.waitFor({ state: 'detached' });
     await page.getByRole('button', { name: /已删除的成员/ }).click();
     await page.locator('.org__removed li', { hasText: '专家' }).getByRole('button', { name: '恢复' }).click();
-    await page.locator('.org-member', { hasText: '专家' }).first().waitFor();
+    await page.locator('.omember', { hasText: '专家' }).first().waitFor();
     await step(page, '内置成员也能删，删了还能恢复');
     // The supervisor answers approvals for the user: an edit the task asks for goes ahead without a question.
     await hostCall(page, 'settings.update', { patch: { approvals: { reviewer: 'supervisor' } } });

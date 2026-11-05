@@ -987,14 +987,18 @@ export const MemberSchema = z.object({
 export type Member = z.infer<typeof MemberSchema>;
 
 /**
- * A group of the organization (06 §24), the way a company has teams: a leader (a supervisor, who plans and hands
- * out the group's work) and its members. A member is in one group at most; one not in any reports to the user.
+ * A unit of the organization tree (19), a group of 06 §24 grown into a tree: the UI calls it an organization or a
+ * sub-organization. It has a lead (a supervisor, who plans and hands out its work) and members; a member is in one
+ * at most, and one not in any reports to the chief.
  */
 export const OrgGroupSchema = z.object({
     id: z.string(),
     name: z.string(),
     /** One line: what the group does. */
     description: z.string().optional(),
+    /** The group it sits under; absent: the first level, under the user and the chief. */
+    parentId: z.string().optional(),
+    /** Empty until it has a lead of its own: the nearest lead above it takes its work. */
     leaderId: z.string(),
     memberIds: z.array(z.string()),
 });
@@ -1006,6 +1010,38 @@ export const OrgChartSchema = z.object({
     removed: z.array(z.object({ id: z.string(), name: z.string() })),
 });
 export type OrgChart = z.infer<typeof OrgChartSchema>;
+
+/** One score a member's supervisor gave a piece of its work (19 §9), out of 100. */
+export const MemberScoreSchema = z.object({
+    at: z.number(),
+    score: z.number(),
+    reason: z.string(),
+    /** Who gave it: a member's name, or the chief. */
+    by: z.string(),
+    projectId: z.string(),
+    project: z.string(),
+    title: z.string(),
+});
+export type MemberScore = z.infer<typeof MemberScoreSchema>;
+
+/** What the member panel shows besides the member itself (19 §9, §10). */
+export const MemberStatsSchema = z.object({
+    /** The folder of its memory and routines. */
+    dir: z.string(),
+    /** The projects it worked in lately, the latest first; `works`: runs and threads it worked in there. */
+    projects: z.array(z.object({ projectId: z.string(), name: z.string(), lastAt: z.number(), works: z.number() })),
+    /** Its model requests: the last 30 days, and all of them. */
+    usage: z.object({ recent: UsageTotalsSchema, all: UsageTotalsSchema }),
+    score: z.object({
+        /** Over the last 10 scores; absent below 3 scores. */
+        average: z.number().optional(),
+        count: z.number(),
+        /** Against the 10 before those. */
+        trend: z.enum(['up', 'down', 'flat']).optional(),
+        recent: z.array(MemberScoreSchema),
+    }),
+});
+export type MemberStats = z.infer<typeof MemberStatsSchema>;
 
 /**
  * The report for whoever ordered a run (06 §11): what came of it, what is wrong, what to do next, without the

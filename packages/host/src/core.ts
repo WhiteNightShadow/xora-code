@@ -288,6 +288,7 @@ export class HostCore {
             log: this.log,
             orgsDir: this.paths.orgsDir,
             membersDir: this.paths.membersDir,
+            usage: this.usage,
             skillLibraryDir: this.paths.skillLibraryDir,
             approvals: this.approvals,
             // The organization assistant's GitHub search goes through the host's fetch (tests give a fake one).

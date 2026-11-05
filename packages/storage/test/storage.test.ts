@@ -18,6 +18,34 @@ describe('XoraDatabase', () => {
         db.close();
     });
 
+    it('works out whose requests the usage already recorded was (19 §10)', () => {
+        const db = new XoraDatabase(':memory:');
+        // The schema as it was before the member column.
+        for (const migration of MIGRATIONS.filter((item) => item.version < 6)) {
+            db.transaction(() => db.exec(migration.sql));
+        }
+        const row = (id: string, agent: string | null, task: string | null) =>
+            db.run(
+                `insert into usage_events (id, ts, agent_id, task_id, engine, provider, model, status, source)
+                 values (?, 1, ?, ?, 'xora', 'p', 'm', 'ok', 'vendor')`,
+                [id, agent, task],
+            );
+        row('a', 'coder-T1', 'T1');
+        row('b', 'coder-2', null);
+        row('c', 'coder-2-T7', 'T7');
+        row('d', 'coder-T1', 'T2');
+        row('e', null, null);
+        db.exec(MIGRATIONS.find((item) => item.version === 6)?.sql ?? '');
+        expect(db.all('select id, member_id as member from usage_events order by id')).toEqual([
+            { id: 'a', member: 'coder' },
+            { id: 'b', member: 'coder-2' },
+            { id: 'c', member: 'coder-2' },
+            { id: 'd', member: 'coder-T1' },
+            { id: 'e', member: null },
+        ]);
+        db.close();
+    });
+
     it('runs statements and rolls back failed transactions', () => {
         const db = new XoraDatabase(':memory:');
         db.migrate();

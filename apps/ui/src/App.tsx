@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { ChiefHome } from './components/ChiefView.tsx';
-import { DispatchDialog, MembersPage } from './components/MembersView.tsx';
+import { DispatchDialog } from './components/MembersView.tsx';
 import { NewThreadPage } from './components/NewThreadDialog.tsx';
 import { TeamOrgPage } from './components/OrgView.tsx';
 import { Spinner } from './components/primitives.tsx';
@@ -45,7 +45,6 @@ export function App() {
     const teamsFor = useApp((state) => state.teamsFor);
     const workflowDraftFor = useApp((state) => state.workflowDraftFor);
     const membersOpen = useApp((state) => state.membersOpen);
-    const memberId = useApp((state) => state.memberId);
     const dispatchTo = useApp((state) => state.dispatchTo);
     const chiefOpen = useApp((state) => state.chiefOpen);
     // With a project and a model the home is the chief assistant (06 §23); before that, the first steps.
@@ -91,12 +90,8 @@ export function App() {
                 ) : teamsFor ? (
                     <TeamBoard key={teamsFor} projectId={teamsFor} />
                 ) : membersOpen ? (
-                    // 06 §24: the organization chart, or one member in full.
-                    memberId ? (
-                        <MembersPage />
-                    ) : (
-                        <TeamOrgPage />
-                    )
+                    // 19 §11: the organization tree; a member opens in a panel beside it.
+                    <TeamOrgPage />
                 ) : chiefOpen ? (
                     <ChiefHome />
                 ) : split.length > 1 ? (

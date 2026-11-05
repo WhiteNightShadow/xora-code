@@ -1,22 +1,12 @@
-import type { Member, MemberRoutine, PermissionMode, ThreadMeta } from '@xora/protocol';
+import type { Member, MemberRoutine, PermissionMode } from '@xora/protocol';
 import { type CSSProperties, useEffect, useState } from 'react';
 import { host } from '../host.ts';
-import {
-    avatarHue,
-    choiceOf,
-    cronOf,
-    initialOf,
-    memberJob,
-    type SchedulePreset,
-    sortMembers,
-    type WorkKind,
-    workKind,
-} from '../members.ts';
+import { avatarHue, choiceOf, cronOf, groupPath, initialOf, memberJob, type SchedulePreset } from '../members.ts';
 import { attempt, loadMembers, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format, type Strings } from '../strings.ts';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
-import { Badge, Empty, Field, IconButton, Modal, relativeTime, Select, Spinner, Toggle } from './primitives.tsx';
+import { Field, IconButton, Modal, relativeTime, Select, Spinner, Toggle } from './primitives.tsx';
 import '../members.css';
 import '../task.css';
 
@@ -51,19 +41,6 @@ export function roleLine(member: Member, s: Strings): string {
 
 const descriptionOf = memberJob;
 
-function SourceBadge({ member }: { member: Member }) {
-    const s = useStrings();
-    if (member.source === 'builtin') {
-        return member.customized ? (
-            <Badge tone="accent">{s.members.customized}</Badge>
-        ) : (
-            <Badge>{s.members.builtin}</Badge>
-        );
-    }
-    return <Badge tone="ok">{member.source === 'project' ? s.members.project : s.members.mine}</Badge>;
-}
-
-/** When a routine runs, in words: every day at nine, on weekdays, every hour, or its cron. */
 function scheduleText(schedule: string, s: Strings): string {
     const choice = choiceOf(schedule);
     switch (choice.preset) {
@@ -76,52 +53,6 @@ function scheduleText(schedule: string, s: Strings): string {
     }
 }
 
-function MemberCard({ member }: { member: Member }) {
-    const s = useStrings();
-    const description = descriptionOf(member, s);
-    return (
-        <article className="member-card">
-            <button type="button" className="member-card__main" onClick={() => openMembers(member.id)}>
-                <MemberAvatar member={member} size={42} />
-                <span className="member-card__text">
-                    <span className="member-card__name">
-                        {member.name}
-                        <SourceBadge member={member} />
-                    </span>
-                    <span className="member-card__role">{roleLine(member, s)}</span>
-                </span>
-            </button>
-            {description && <p className="member-card__desc">{description}</p>}
-            <div className="member-card__stats">
-                <span>
-                    <Icon name="brain" size={12} />
-                    {member.memory.chars > 0
-                        ? format(s.members.memoryChars, { count: member.memory.chars })
-                        : s.members.noMemory}
-                </span>
-                {member.routines.length > 0 && (
-                    <span>
-                        <Icon name="refresh" size={12} />
-                        {format(s.members.routinesCount, { count: member.routines.length })}
-                    </span>
-                )}
-            </div>
-            <footer className="member-card__foot">
-                <button
-                    type="button"
-                    className="button button--small button--primary"
-                    onClick={() => useApp.setState({ dispatchTo: member.id })}
-                >
-                    {s.members.dispatch}
-                </button>
-                <button type="button" className="link" onClick={() => openMembers(member.id)}>
-                    {s.members.details}
-                </button>
-            </footer>
-        </article>
-    );
-}
-
 /** The user's memory text of a member, with an editor and a way to clear it. */
 /** Which part of a member's memory is shown (06 §21): `member`, `project:<id>` or `team:<id>`. */
 type MemoryPart = string;
@@ -131,7 +62,7 @@ function partRequest(part: MemoryPart): { scope: 'member' | 'project' | 'team'; 
     return projectId ? { scope, projectId } : { scope: 'member' };
 }
 
-function MemorySection({ member }: { member: Member }) {
+export function MemorySection({ member }: { member: Member }) {
     const s = useStrings();
     const current = useApp((state) => state.projects.find((item) => item.id === state.selectedProjectId));
     const [part, setPart] = useState<MemoryPart>(current ? `project:${current.id}` : 'member');
@@ -448,7 +379,7 @@ function RoutineRow({ member, routine, onEdit }: { member: Member; routine: Memb
     );
 }
 
-function RoutinesSection({ member }: { member: Member }) {
+export function RoutinesSection({ member }: { member: Member }) {
     const s = useStrings();
     const selectedProjectId = useApp((state) => state.selectedProjectId);
     const projects = useApp((state) => state.projects);
@@ -500,187 +431,6 @@ function RoutinesSection({ member }: { member: Member }) {
     );
 }
 
-function WorkSection({ member }: { member: Member }) {
-    const s = useStrings();
-    const projects = useApp((state) => state.projects);
-    const [threads, setThreads] = useState<ThreadMeta[] | undefined>();
-    // A new conversation or routine run changes the member, which reloads the list.
-    useEffect(() => {
-        let live = true;
-        host.call('member.threads', { memberId: member.id, limit: 30 })
-            .then((value) => live && setThreads(value))
-            .catch(() => live && setThreads([]));
-        return () => {
-            live = false;
-        };
-    }, [member]);
-    return (
-        <section className="member-section member-work" aria-label={s.members.work}>
-            <h3>{s.members.work}</h3>
-            {threads === undefined ? (
-                <Spinner />
-            ) : threads.length === 0 ? (
-                <p className="overview-muted">{s.members.workEmpty}</p>
-            ) : (
-                <ul className="member-work__list">
-                    {threads.map((thread) => {
-                        const kind: WorkKind = workKind(thread);
-                        return (
-                            <li key={thread.id}>
-                                <button
-                                    type="button"
-                                    className="member-work__row"
-                                    onClick={() => void selectThread(thread.id)}
-                                >
-                                    <span className={`member-work__kind is-${kind}`}>{s.members.workKinds[kind]}</span>
-                                    <span className="member-work__title">{thread.title}</span>
-                                    <span className="member-work__meta">
-                                        {projects.find((project) => project.id === thread.projectId)?.name} ·{' '}
-                                        {relativeTime(thread.updatedAt)}
-                                    </span>
-                                </button>
-                            </li>
-                        );
-                    })}
-                </ul>
-            )}
-        </section>
-    );
-}
-
-function MemberDetail({ member, onEdit }: { member: Member; onEdit: (member: Member) => void }) {
-    const s = useStrings();
-    const selectedProjectId = useApp((state) => state.selectedProjectId);
-    const [showPrompt, setShowPrompt] = useState(false);
-    const description = descriptionOf(member, s);
-    const groups = useApp((state) => state.org?.groups ?? []);
-    const group = groups.find((item) => item.memberIds.includes(member.id));
-    const leads = groups.filter((item) => item.leaderId === member.id);
-    // 06 §24: every member can go; a built-in one can come back, and a changed one can go back to how it came.
-    const remove = () => {
-        const question = member.source === 'builtin' ? s.org.confirmDeleteBuiltin : s.members.confirmDelete;
-        if (!window.confirm(format(question, { name: member.name }))) return;
-        void attempt(() =>
-            host.call('member.delete', {
-                ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
-                memberId: member.id,
-            }),
-        ).then(async (done) => {
-            if (!done) return;
-            await loadMembers(selectedProjectId);
-            openMembers();
-        });
-    };
-    const reset = () => {
-        if (!window.confirm(format(s.members.confirmReset, { name: member.name }))) return;
-        void attempt(() => host.call('member.reset', { memberId: member.id })).then(async (done) => {
-            if (done) await loadMembers(selectedProjectId);
-        });
-    };
-    const move = (target: string) =>
-        void attempt(() =>
-            host.call('org.moveMember', {
-                ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
-                memberId: member.id,
-                groupId: target || null,
-            }),
-        ).then((org) => org && useApp.setState({ org }));
-    return (
-        <div className="member-detail">
-            <button type="button" className="link member-detail__back" onClick={() => openMembers()}>
-                <Icon name="chevronLeft" size={13} /> {s.members.back}
-            </button>
-            <header className="member-detail__head">
-                <MemberAvatar member={member} size={56} />
-                <div className="member-detail__title">
-                    <h1>
-                        {member.name}
-                        <SourceBadge member={member} />
-                    </h1>
-                    <div className="member-detail__meta">{roleLine(member, s)}</div>
-                    {description && <p className="member-detail__desc">{description}</p>}
-                    <div className="member-detail__group">
-                        {leads.length > 0 ? (
-                            <span>{format(s.org.leads, { groups: leads.map((item) => item.name).join('、') })}</span>
-                        ) : (
-                            groups.length > 0 && (
-                                <span className="member-detail__move">
-                                    <span>{s.org.group}</span>
-                                    <Select
-                                        compact
-                                        label={s.org.group}
-                                        value={group?.id ?? ''}
-                                        options={[
-                                            ...groups.map((item) => ({ value: item.id, label: item.name })),
-                                            { value: '', label: s.org.noGroup },
-                                        ]}
-                                        onChange={move}
-                                    />
-                                </span>
-                            )
-                        )}
-                    </div>
-                    {((member.skills?.length ?? 0) > 0 || (member.mcp?.length ?? 0) > 0) && (
-                        <div className="member-detail__skills">
-                            {member.skills?.map((skill) => (
-                                <Badge key={skill} tone="accent">
-                                    {skill}
-                                </Badge>
-                            ))}
-                            {member.mcp?.map((server) => (
-                                <Badge key={`mcp:${server}`} tone="ok">
-                                    MCP · {server}
-                                </Badge>
-                            ))}
-                        </div>
-                    )}
-                </div>
-                <div className="row member-detail__actions">
-                    <button
-                        type="button"
-                        className="button button--primary"
-                        onClick={() => useApp.setState({ dispatchTo: member.id })}
-                    >
-                        <Icon name="send" size={13} /> {s.members.dispatch}
-                    </button>
-                    <button type="button" className="button" onClick={() => onEdit(member)}>
-                        {s.members.edit}
-                    </button>
-                    {member.customized && (
-                        <button type="button" className="button" onClick={reset}>
-                            {s.members.reset}
-                        </button>
-                    )}
-                    <button type="button" className="button button--danger" onClick={remove}>
-                        {s.members.delete}
-                    </button>
-                </div>
-            </header>
-            <p className="member-detail__mention">{format(s.members.mentionHint, { name: member.name })}</p>
-            <section className="member-section">
-                <button
-                    type="button"
-                    className="wf-process__toggle"
-                    aria-expanded={showPrompt}
-                    onClick={() => setShowPrompt(!showPrompt)}
-                >
-                    <Icon name="chevronRight" size={14} className="wf-process__chevron" />
-                    <span className="wf-process__title">{s.members.prompt}</span>
-                    <span className="wf-process__summary">{s.members.promptHint}</span>
-                </button>
-                {showPrompt && (
-                    <div className="overview-card member-prompt">
-                        <Markdown text={member.prompt || '—'} />
-                    </div>
-                )}
-            </section>
-            <MemorySection member={member} />
-            <RoutinesSection member={member} />
-            <WorkSection member={member} />
-        </div>
-    );
-}
-
 export interface Editing {
     /** The member being changed; a new one when absent. */
     readonly member?: Member;
@@ -688,13 +438,14 @@ export interface Editing {
     readonly groupId?: string | null;
 }
 
-/** Creates a member from a built-in one, or changes a member: name, job, instructions, tier, permissions. */
+/**
+ * Creates a member from a built-in one, or changes a member (19 §11): name, where it works, its position and its
+ * instructions; the rest waits under "more settings".
+ */
 export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => void }) {
     const s = useStrings();
     const members = useApp((state) => state.members);
     const selectedProjectId = useApp((state) => state.selectedProjectId);
-    // A lead of a group is made from the supervisor (06 §24).
-    const templates = members.filter((member) => member.source === 'builtin');
     const groups = useApp((state) => state.org?.groups ?? []);
     const currentGroup = editing.member
         ? (groups.find((group) => group.memberIds.includes(editing.member?.id ?? ''))?.id ?? '')
@@ -702,6 +453,11 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
           ? ''
           : (editing.groupId ?? groups[0]?.id ?? '');
     const [groupId, setGroupId] = useState(currentGroup);
+    // 19 §4: a supervisor leads, so its position is there only for a group that has no lead yet.
+    const openLead = groups.find((group) => group.id === groupId)?.leaderId === '';
+    const templates = members.filter(
+        (member) => member.source === 'builtin' && (member.role !== 'supervisor' || openLead),
+    );
     // 06 §27: the MCP servers it works with, from the ones configured in settings.
     const [mcp, setMcp] = useState<string[]>([...(editing.member?.mcp ?? [])]);
     const [servers, setServers] = useState<string[]>([]);
@@ -716,7 +472,7 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
             current.includes(server) ? current.filter((item) => item !== server) : [...current, server],
         );
     const existing = editing.member;
-    const start = existing ?? templates.find((member) => member.id === 'scout') ?? templates[0];
+    const start = existing ?? templates.find((member) => member.id === 'coder') ?? templates[0];
     const [template, setTemplate] = useState(start?.id ?? '');
     const [name, setName] = useState(existing?.name ?? '');
     const [description, setDescription] = useState(existing ? (descriptionOf(existing, s) ?? '') : '');
@@ -736,6 +492,7 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
     // 06 §26: a member belongs to the organization and works in every project; one a project defined stays there.
     const scope: 'user' | 'project' = existing?.source === 'project' ? 'project' : 'user';
     const [busy, setBusy] = useState(false);
+    const [more, setMore] = useState(false);
     const pick = (id: string) => {
         const next = templates.find((member) => member.id === id);
         setTemplate(id);
@@ -744,7 +501,9 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
         setTier(next.tier);
         setMode(next.mode);
     };
-    const base = existing ?? templates.find((member) => member.id === template);
+    // A position that went away with the organization picked stays out of the new member.
+    const base = existing ?? templates.find((member) => member.id === template) ?? templates[0];
+    const leads = base?.role === 'supervisor';
     const save = async () => {
         if (!base) return;
         setBusy(true);
@@ -767,10 +526,14 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                     ...(existing?.skills ? { skills: [...existing.skills] } : {}),
                     ...(mcp.length > 0 ? { mcp } : {}),
                 },
-                // A lead leads groups rather than working in one.
-                ...(base.role !== 'supervisor' && (!existing || groupId !== currentGroup)
-                    ? { groupId: groupId || null }
-                    : {}),
+                // A new lead takes the group it is made in; the leads there are change in the group's dialog.
+                ...(leads
+                    ? !existing && groupId
+                        ? { groupId }
+                        : {}
+                    : !existing || groupId !== currentGroup
+                      ? { groupId: groupId || null }
+                      : {}),
             }),
         );
         setBusy(false);
@@ -787,19 +550,6 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
             onClose={onClose}
         >
             <div className="dialog member-editor">
-                {!existing && (
-                    <Field label={s.members.template} hint={s.members.templateHint}>
-                        <Select
-                            label={s.members.template}
-                            value={template}
-                            options={templates.map((member) => ({
-                                value: member.id,
-                                label: `${member.name}：${descriptionOf(member, s) ?? ''}`,
-                            }))}
-                            onChange={pick}
-                        />
-                    </Field>
-                )}
                 <Field label={s.members.name}>
                     <input
                         className="input"
@@ -809,15 +559,29 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                         onChange={(event) => setName(event.target.value)}
                     />
                 </Field>
-                <Field label={s.members.job} hint={s.members.jobHint}>
-                    <input
-                        className="input"
-                        value={description}
-                        placeholder={s.members.jobPlaceholder}
-                        maxLength={500}
-                        onChange={(event) => setDescription(event.target.value)}
-                    />
-                </Field>
+                {!(existing && leads) && groups.length > 0 && (
+                    <Field label={s.org.group} hint={s.org.groupHint}>
+                        <Select
+                            label={s.org.group}
+                            value={groupId}
+                            options={[
+                                ...groups.map((group) => ({ value: group.id, label: groupPath(groups, group.id) })),
+                                { value: '', label: s.org.noGroup },
+                            ]}
+                            onChange={setGroupId}
+                        />
+                    </Field>
+                )}
+                {!existing && (
+                    <Field label={s.org.position} hint={s.org.positionHint}>
+                        <Select
+                            label={s.org.position}
+                            value={base?.id ?? ''}
+                            options={templates.map((member) => ({ value: member.id, label: member.name }))}
+                            onChange={pick}
+                        />
+                    </Field>
+                )}
                 <Field label={s.members.prompt} hint={s.members.promptHint}>
                     <textarea
                         className="textarea"
@@ -826,65 +590,79 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                         onChange={(event) => setPrompt(event.target.value)}
                     />
                 </Field>
-                <div className="member-editor__row">
-                    <Field label={s.members.tier} hint={s.members.tierHint}>
-                        <Select
-                            label={s.members.tier}
-                            value={tier}
-                            options={TIERS.map((value) => ({
-                                value,
-                                label: (s.team.tiers as Record<string, string>)[value] ?? value,
-                            }))}
-                            onChange={setTier}
-                        />
-                    </Field>
-                    <Field label={s.members.model} hint={s.members.modelHint}>
-                        <Select label={s.members.model} value={model} options={modelChoices} onChange={setModel} />
-                    </Field>
-                    <Field label={s.members.mode}>
-                        <Select
-                            label={s.members.mode}
-                            value={mode}
-                            options={MODES.map((value) => ({
-                                value,
-                                label: s.members.modes[value],
-                                hint: s.members.modeHints[value],
-                            }))}
-                            onChange={setMode}
-                        />
-                    </Field>
-                </div>
-                {[...new Set([...servers, ...mcp])].length > 0 && (
-                    <Field label={s.members.mcp} hint={s.members.mcpHint}>
-                        <div className="member-editor__mcp">
-                            {[...new Set([...servers, ...mcp])].map((server) => (
-                                <label key={server} className="group-editor__member">
-                                    <input
-                                        type="checkbox"
-                                        checked={mcp.includes(server)}
-                                        onChange={() => toggleMcp(server)}
-                                    />
-                                    <span className="group-editor__name">
-                                        {server}
-                                        {!servers.includes(server) ? `（${s.members.mcpMissing}）` : ''}
-                                    </span>
-                                </label>
-                            ))}
+                <button
+                    type="button"
+                    className="wf-process__toggle"
+                    aria-expanded={more}
+                    onClick={() => setMore(!more)}
+                >
+                    <Icon name="chevronRight" size={14} className="wf-process__chevron" />
+                    <span className="wf-process__title">{s.org.moreSettings}</span>
+                </button>
+                {more && (
+                    <>
+                        <Field label={s.members.job} hint={s.members.jobHint}>
+                            <input
+                                className="input"
+                                value={description}
+                                placeholder={s.members.jobPlaceholder}
+                                maxLength={500}
+                                onChange={(event) => setDescription(event.target.value)}
+                            />
+                        </Field>
+                        <div className="member-editor__row">
+                            <Field label={s.members.tier} hint={s.members.tierHint}>
+                                <Select
+                                    label={s.members.tier}
+                                    value={tier}
+                                    options={TIERS.map((value) => ({
+                                        value,
+                                        label: (s.team.tiers as Record<string, string>)[value] ?? value,
+                                    }))}
+                                    onChange={setTier}
+                                />
+                            </Field>
+                            <Field label={s.members.model} hint={s.members.modelHint}>
+                                <Select
+                                    label={s.members.model}
+                                    value={model}
+                                    options={modelChoices}
+                                    onChange={setModel}
+                                />
+                            </Field>
+                            <Field label={s.members.mode}>
+                                <Select
+                                    label={s.members.mode}
+                                    value={mode}
+                                    options={MODES.map((value) => ({
+                                        value,
+                                        label: s.members.modes[value],
+                                        hint: s.members.modeHints[value],
+                                    }))}
+                                    onChange={setMode}
+                                />
+                            </Field>
                         </div>
-                    </Field>
-                )}
-                {base?.role !== 'supervisor' && groups.length > 0 && (
-                    <Field label={s.org.group} hint={s.org.groupHint}>
-                        <Select
-                            label={s.org.group}
-                            value={groupId}
-                            options={[
-                                ...groups.map((group) => ({ value: group.id, label: group.name })),
-                                { value: '', label: s.org.noGroup },
-                            ]}
-                            onChange={setGroupId}
-                        />
-                    </Field>
+                        {[...new Set([...servers, ...mcp])].length > 0 && (
+                            <Field label={s.members.mcp} hint={s.members.mcpHint}>
+                                <div className="member-editor__mcp">
+                                    {[...new Set([...servers, ...mcp])].map((server) => (
+                                        <label key={server} className="group-editor__member">
+                                            <input
+                                                type="checkbox"
+                                                checked={mcp.includes(server)}
+                                                onChange={() => toggleMcp(server)}
+                                            />
+                                            <span className="group-editor__name">
+                                                {server}
+                                                {!servers.includes(server) ? `（${s.members.mcpMissing}）` : ''}
+                                            </span>
+                                        </label>
+                                    ))}
+                                </div>
+                            </Field>
+                        )}
+                    </>
                 )}
                 <div className="row">
                     <button
@@ -901,127 +679,6 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                 </div>
             </div>
         </Modal>
-    );
-}
-
-/** The members page in the main area (06 §19): every member as a card, or one member in full. */
-/**
- * 06 §26: "design a member in a conversation" is the chief assistant's work. The user says what they need and which
- * group it joins; the chief asks what it must, finds skills on GitHub when they help, installs them (a card each)
- * and saves the member in that group. A member belongs to the organization, not to a project.
- */
-export function AssistantDialog({ onClose, groupId: initial }: { onClose: () => void; groupId?: string }) {
-    const s = useStrings();
-    const projects = useApp((state) => state.projects);
-    const selected = useApp((state) => state.selectedProjectId);
-    const groups = useApp((state) => state.org?.groups ?? []);
-    const [groupId, setGroupId] = useState(initial ?? groups[0]?.id ?? '');
-    const [text, setText] = useState('');
-    const [busy, setBusy] = useState(false);
-    // The chief's conversation starts somewhere; the member it makes works in every project.
-    const projectId = projects.some((project) => project.id === selected) ? (selected ?? '') : (projects[0]?.id ?? '');
-    const start = async () => {
-        const group = groups.find((item) => item.id === groupId);
-        const request = group
-            ? format(s.members.assistantRequest, { group: group.name, text: text.trim() })
-            : format(s.members.assistantRequestLoose, { text: text.trim() });
-        setBusy(true);
-        const thread = await attempt(() =>
-            host.call('chief.start', { projectId, text: request }, { timeoutMs: 120_000 }),
-        );
-        setBusy(false);
-        if (thread) {
-            useApp.setState((state) => ({ threads: { ...state.threads, [thread.id]: thread } }));
-            onClose();
-            await selectThread(thread.id);
-        }
-    };
-    return (
-        <Modal title={s.members.assistant} onClose={onClose}>
-            <div className="dialog">
-                <Field label={s.members.assistantAsk} hint={s.members.assistantHint}>
-                    <textarea
-                        className="textarea"
-                        rows={4}
-                        value={text}
-                        placeholder={s.members.assistantPlaceholder}
-                        onChange={(event) => setText(event.target.value)}
-                    />
-                </Field>
-                {groups.length > 0 && (
-                    <Field label={s.org.group} hint={s.org.groupHint}>
-                        <Select
-                            label={s.org.group}
-                            value={groupId}
-                            options={[
-                                ...groups.map((group) => ({ value: group.id, label: group.name })),
-                                { value: '', label: s.org.noGroup },
-                            ]}
-                            onChange={setGroupId}
-                        />
-                    </Field>
-                )}
-                <div className="row">
-                    <button
-                        type="button"
-                        className="button button--primary"
-                        disabled={busy || !text.trim() || !projectId}
-                        onClick={() => void start()}
-                    >
-                        {busy ? <Spinner /> : null} {s.members.assistantStart}
-                    </button>
-                    <button type="button" className="button" onClick={onClose}>
-                        {s.common.cancel}
-                    </button>
-                </div>
-            </div>
-        </Modal>
-    );
-}
-
-export function MembersPage() {
-    const s = useStrings();
-    const members = useApp((state) => state.members);
-    const memberId = useApp((state) => state.memberId);
-    const [editing, setEditing] = useState<Editing | undefined>();
-    const [assisting, setAssisting] = useState(false);
-    const selected = memberId ? members.find((member) => member.id === memberId) : undefined;
-    return (
-        <div className="members">
-            {selected ? (
-                <MemberDetail member={selected} onEdit={(member) => setEditing({ member })} />
-            ) : (
-                <>
-                    <header className="members__header">
-                        <div>
-                            <h1>{s.members.title}</h1>
-                            <p className="members__intro">{s.members.intro}</p>
-                        </div>
-                        <div className="row">
-                            <button type="button" className="button" onClick={() => setEditing({})}>
-                                <Icon name="plus" size={14} /> {s.members.create}
-                            </button>
-                            <button type="button" className="button button--primary" onClick={() => setAssisting(true)}>
-                                <Icon name="message" size={14} /> {s.members.assistant}
-                            </button>
-                        </div>
-                    </header>
-                    {members.length === 0 ? (
-                        <Empty>
-                            <Spinner />
-                        </Empty>
-                    ) : (
-                        <div className="members__grid">
-                            {sortMembers(members).map((member) => (
-                                <MemberCard key={member.id} member={member} />
-                            ))}
-                        </div>
-                    )}
-                </>
-            )}
-            {editing && <MemberEditor editing={editing} onClose={() => setEditing(undefined)} />}
-            {assisting && <AssistantDialog onClose={() => setAssisting(false)} />}
-        </div>
     );
 }
 

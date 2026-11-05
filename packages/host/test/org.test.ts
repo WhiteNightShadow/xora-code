@@ -124,7 +124,7 @@ describe('the organization chart', () => {
         expect(existsSync(path.join(dataDir, 'orgs', 'default', 'agents', `${mine.id}.md`))).toBe(false);
     });
 
-    it('makes groups with their own lead, moves members, and keeps a lead until the group has another', async () => {
+    it('makes groups with their own lead, moves members, and lets a lead go', async () => {
         const { ui, project } = await setUp();
         const lead = await ui.request('member.save', {
             projectId: project.id,
@@ -153,9 +153,9 @@ describe('the organization chart', () => {
         );
         await ui.request('org.moveMember', { projectId: project.id, memberId: 'coder', groupId: null });
         expect((await ui.request('org.get', {})).groups.some((item) => item.memberIds.includes('coder'))).toBe(false);
-        await expect(ui.request('member.delete', { projectId: project.id, memberId: lead.id })).rejects.toThrow('Data');
-        await ui.request('org.deleteGroup', { groupId: 'data' });
+        // A lead that goes leaves its group without one (19 §4).
         await ui.request('member.delete', { projectId: project.id, memberId: lead.id });
+        expect((await ui.request('org.get', {})).groups.find((item) => item.id === 'data')?.leaderId).toBe('');
     });
 
     it('hands a team run to a group: its lead supervises and only its members work', async () => {

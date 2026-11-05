@@ -11,6 +11,7 @@ import {
     type ItemOf,
     type Member,
     type MemberRoutine,
+    type MemberStats,
     type OrgChart,
     type OrgGroup,
     type PermissionMode,
@@ -42,7 +43,16 @@ import type { ConnectionService } from './connections.ts';
 import type { HostToolResult } from './engines/manager.ts';
 import { newId } from './ids.ts';
 import { type Logger, redact } from './log.ts';
-import { groupId, ORG_TEMPLATES, readGroups, writeGroups } from './org-groups.ts';
+import {
+    groupChain,
+    groupHeight,
+    groupId,
+    groupSubtree,
+    MAX_GROUP_DEPTH,
+    ORG_TEMPLATES,
+    readGroups,
+    writeGroups,
+} from './org-groups.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import {
@@ -55,10 +65,11 @@ import {
 } from './skill-hub.ts';
 import { disabledBuiltins, loadTeamOrganization, mcpToolsOf, shorten, systemLayers } from './team-agents.ts';
 import { hostLanguage, textOf } from './text.ts';
-import type { ThreadStore } from './threads.ts';
+import { memberIdOf, type ThreadStore } from './threads.ts';
 import type { TitleService } from './titles.ts';
 import type { TriggerTarget } from './triggers.ts';
 import type { HostToolProvider, TurnService } from './turns.ts';
+import type { UsageService } from './usage.ts';
 
 /**
  * Members of the team (06 §19): the organization's agents as the user sees and uses them. A member has a name, a
@@ -118,14 +129,19 @@ const TEXT = bilingual(
         mcpTitle: '你的MCP服务',
         mcpLayer: (servers: readonly string[]) =>
             `你带着这些MCP服务：${servers.join('、')}。它们的工具名是mcp__<服务名>__<工具>；遇到它们擅长的事先用它们，用不了再换别的办法，并在结果里说明。`,
-        leadsGroup: (name: string, group: string) => `${name}带着“${group}”：先给这个组换个组长再删它`,
+        leadsGroup: (name: string, group: string) => `${name}是“${group}”的负责人：先换个负责人再挪它`,
+        leadsOther: (name: string, group: string) => `${name}已经是“${group}”的负责人了`,
+        leadNotMember: (name: string) => `${name}是主管角色，只当负责人，不当组员`,
+        hasLead: (group: string) => `“${group}”已经有负责人了`,
+        groupTooDeep: '组织最多三层',
+        groupCircle: '不能把组织挂到它自己或者它的子组织下面',
         notBuiltin: (id: string) => `${id}不是内置成员，没有默认可恢复`,
         defaultGroup: '研发团队',
         defaultGroupJob: '默认的团队：主管带着所有成员',
-        groupMissing: (id: string) => `没有小组${id}`,
-        noGroupName: '先给小组起个名字',
-        groupNameTaken: (name: string) => `已经有小组叫“${name}”了`,
-        badLeader: (id: string) => `${id}不能当组长：组长要是主管角色的成员`,
+        groupMissing: (id: string) => `没有组织${id}`,
+        noGroupName: '先给组织起个名字',
+        groupNameTaken: (name: string) => `已经有组织叫“${name}”了`,
+        badLeader: (id: string) => `${id}不能当负责人：负责人要是主管角色的成员`,
         routineMissing: '没有这个例行任务',
         badSchedule: (error: string) => `时间写得不对：${error}`,
         badTimezone: (zone: string) => `不认识时区${zone}`,
@@ -225,14 +241,19 @@ const TEXT = bilingual(
         mcpTitle: 'Your MCP servers',
         mcpLayer: (servers) =>
             `You bring these MCP servers: ${servers.join(', ')}. Their tools are named mcp__<server>__<tool>; use them first for what they are made for, and if they cannot help, take another way and say so in your result.`,
-        leadsGroup: (name, group) => `${name} leads “${group}”: give the group another lead first`,
+        leadsGroup: (name, group) => `${name} leads “${group}”: give it another lead first`,
+        leadsOther: (name, group) => `${name} leads “${group}” already`,
+        leadNotMember: (name) => `${name} has the supervisor role: it leads, it is not a member of a group`,
+        hasLead: (group) => `“${group}” has a lead already`,
+        groupTooDeep: 'Organizations go three levels deep at most',
+        groupCircle: 'An organization cannot go under itself or one of its sub-organizations',
         notBuiltin: (id) => `${id} is not built in: there is no default to bring back`,
         defaultGroup: 'Dev team',
         defaultGroupJob: 'The default team: the supervisor leads every member',
-        groupMissing: (id) => `No group ${id}`,
-        noGroupName: 'Give the group a name first',
-        groupNameTaken: (name) => `There is a group called “${name}” already`,
-        badLeader: (id) => `${id} cannot lead a group: a lead is a member with the supervisor role`,
+        groupMissing: (id) => `No organization ${id}`,
+        noGroupName: 'Give the organization a name first',
+        groupNameTaken: (name) => `There is an organization called “${name}” already`,
+        badLeader: (id) => `${id} cannot lead: a lead is a member with the supervisor role`,
         routineMissing: 'There is no such routine',
         badSchedule: (error) => `The schedule cannot be read: ${error}`,
         badTimezone: (zone) => `Unknown time zone ${zone}`,
@@ -394,6 +415,8 @@ export interface MemberDeps {
     readonly orgsDir: string;
     /** `<data>/members`: each member's `memory.md` and `routines.json`. */
     readonly membersDir: string;
+    /** Tokens and recent projects of a member's panel (19 §10). */
+    readonly usage: Pick<UsageService, 'member' | 'memberProjects'>;
     /** `<data>/skill-library`: skills installed from GitHub, which members list by name (06 §21). */
     readonly skillLibraryDir?: string;
     /** For the organization assistant's install cards (06 §21). */
@@ -408,6 +431,11 @@ export interface MemberDeps {
 }
 
 const BUILTIN_IDS = new Set(DEFAULT_ORG.roster.map((agent) => agent.id));
+
+/** The settings at the top of `org.md`. */
+const ORG_FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
+const RECENT_USAGE_MS = 30 * 24 * 60 * 60 * 1000;
+const RECENT_PROJECTS = 5;
 
 function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
@@ -424,15 +452,6 @@ function oneLine(text: string): string {
 export function memberName(agent: Pick<AgentSpec, 'id' | 'name'>): string {
     const builtin = DEFAULT_ORG.roster.find((spec) => spec.id === agent.id);
     return builtin && builtin.name === agent.name ? (textOf(TEXT).names[agent.id] ?? agent.name) : agent.name;
-}
-
-/** The member a thread works as: its `agentId`, without the task suffix team runs add (`coder-T1` is `coder`). */
-export function memberIdOf(thread: Pick<ThreadMeta, 'agentId' | 'taskId' | 'teamRunId'>): string | undefined {
-    const id = thread.agentId;
-    if (!id) return undefined;
-    return thread.teamRunId && thread.taskId && id.endsWith(`-${thread.taskId}`)
-        ? id.slice(0, -thread.taskId.length - 1)
-        : id;
 }
 
 /** The trigger key of a routine. */
@@ -818,6 +837,17 @@ export class MemberService {
         ) {
             throw new RpcError(RpcErrorCode.Rejected, text.nameTaken(name));
         }
+        // A supervisor told where to go leads that group: refused before anything is written (19 §4).
+        if (!input.keepGroups && role === 'supervisor' && input.groupId) {
+            const groups = await this.#groups();
+            const group = groups.find((item) => item.id === input.groupId);
+            if (!group) throw new RpcError(RpcErrorCode.NotFound, text.groupMissing(input.groupId));
+            if (group.leaderId && group.leaderId !== id) {
+                throw new RpcError(RpcErrorCode.Rejected, text.hasLead(group.name));
+            }
+            const other = groups.find((item) => item.id !== group.id && item.leaderId === id);
+            if (other) throw new RpcError(RpcErrorCode.Rejected, text.leadsOther(name, other.name));
+        }
         const dir =
             input.scope === 'project' && project
                 ? path.join(project.path, '.xora', 'agents')
@@ -854,7 +884,8 @@ export class MemberService {
             await unlink(before.file).catch(() => undefined);
         }
         this.#deps.log.info(`member ${id} saved in ${file}`);
-        // Its place in the organization (06 §24): where the user put it, or a new one in the first group.
+        // Its place in the organization (06 §24): where the user put it, or a new one in the first group. A
+        // supervisor leads rather than works in one (19 §4).
         if (!input.keepGroups && role !== 'supervisor') {
             if (input.groupId !== undefined) {
                 await this.#place(id, input.groupId, true);
@@ -862,6 +893,8 @@ export class MemberService {
                 const first = (await this.#groups())[0];
                 if (first) await this.#place(id, first.id, false);
             }
+        } else if (!input.keepGroups && input.groupId) {
+            await this.#lead(id, input.groupId);
         }
         this.#changed(id);
         return this.#member(id, project?.id);
@@ -870,7 +903,8 @@ export class MemberService {
     /**
      * Deletes a member (06 §24). One the user made leaves with its file (to the trash) and its routines; a built-in
      * one leaves the organization through a file that disables it, until `reset` brings it back. Its memory stays.
-     * The last supervisor and the leader of a group stay until another takes their place.
+     * The last supervisor stays until there is another; a lead's groups go without one until the user gives them
+     * another, and the lead above takes their work (19 §4).
      */
     async remove(memberId: string, projectId?: string): Promise<void> {
         const text = textOf(TEXT);
@@ -882,10 +916,6 @@ export class MemberService {
         }
         if (agent.role === 'supervisor' && roster.org.roster.filter((item) => item.role === 'supervisor').length <= 1) {
             throw new RpcError(RpcErrorCode.Rejected, text.lastSupervisor(memberName(agent)));
-        }
-        const led = (await this.#groups()).find((group) => group.leaderId === memberId);
-        if (led) {
-            throw new RpcError(RpcErrorCode.Rejected, text.leadsGroup(memberName(agent), led.name));
         }
         const file = roster.files.get(memberId);
         if (BUILTIN_IDS.has(memberId)) {
@@ -977,14 +1007,29 @@ export class MemberService {
         return (await this.#groups()).find((group) => group.id === groupId);
     }
 
-    /** Creates or changes a group: a lead with the supervisor role and members, who leave any other group. */
+    /** The folder of a group: its prompt and what it keeps of each project (19 §5). */
+    #groupDir(groupId: string): string {
+        return path.join(this.#deps.orgsDir, 'default', 'groups', folderName(groupId));
+    }
+
+    /** Group ids in use, a folder left behind included: a new group never picks up an old prompt or old notes. */
+    async #takenGroupIds(groups: readonly OrgGroup[]): Promise<Set<string>> {
+        const folders = await readdir(path.join(this.#deps.orgsDir, 'default', 'groups')).catch(() => []);
+        return new Set([...groups.map((group) => group.id), ...folders]);
+    }
+
+    /** Creates or changes a group of the tree (19 §4); what the input leaves out stays as it is. */
     async saveGroup(input: {
         projectId?: string | undefined;
         id?: string | undefined;
         name: string;
         description?: string | undefined;
-        leaderId: string;
-        memberIds: readonly string[];
+        /** `null`: the first level. */
+        parentId?: string | null | undefined;
+        /** Empty: no lead of its own. */
+        leaderId?: string | undefined;
+        memberIds?: readonly string[] | undefined;
+        prompt?: string | undefined;
     }): Promise<OrgGroup> {
         return this.#serial('groups', async () => {
             const text = textOf(TEXT);
@@ -992,65 +1037,162 @@ export class MemberService {
             if (!name) throw new RpcError(RpcErrorCode.InvalidParams, text.noGroupName);
             const project = input.projectId ? await this.#deps.projects.get(input.projectId) : undefined;
             const roster = await this.#roster(project);
-            const leader = roster.org.roster.find((agent) => agent.id === input.leaderId);
-            if (leader?.role !== 'supervisor')
-                throw new RpcError(RpcErrorCode.InvalidParams, text.badLeader(input.leaderId));
             const groups = await this.#groups();
-            if (input.id !== undefined && !groups.some((group) => group.id === input.id)) {
+            const current = groups.find((group) => group.id === input.id);
+            if (input.id !== undefined && !current) {
                 throw new RpcError(RpcErrorCode.NotFound, text.groupMissing(input.id));
             }
             if (groups.some((group) => group.id !== input.id && group.name.toLowerCase() === name.toLowerCase())) {
                 throw new RpcError(RpcErrorCode.Rejected, text.groupNameTaken(name));
             }
-            const known = new Set(roster.org.roster.map((agent) => agent.id));
-            const members = [...new Set(input.memberIds)].filter((id) => known.has(id) && id !== leader.id);
-            const id = input.id ?? groupId(name, new Set(groups.map((group) => group.id)));
-            const description = input.description ? oneLine(input.description) : '';
+            const leaderId = input.leaderId ?? current?.leaderId ?? '';
+            if (leaderId && leaderId !== current?.leaderId) {
+                const leader = roster.org.roster.find((agent) => agent.id === leaderId);
+                if (leader?.role !== 'supervisor') {
+                    throw new RpcError(RpcErrorCode.InvalidParams, text.badLeader(leaderId));
+                }
+                const other = groups.find((group) => group.id !== input.id && group.leaderId === leaderId);
+                if (other) {
+                    throw new RpcError(RpcErrorCode.Rejected, text.leadsOther(memberName(leader), other.name));
+                }
+            }
+            const parentId = input.parentId === undefined ? current?.parentId : (input.parentId ?? undefined);
+            if (parentId !== undefined) {
+                if (!groups.some((group) => group.id === parentId)) {
+                    throw new RpcError(RpcErrorCode.NotFound, text.groupMissing(parentId));
+                }
+                if (current && groupSubtree(groups, current.id).some((group) => group.id === parentId)) {
+                    throw new RpcError(RpcErrorCode.Rejected, text.groupCircle);
+                }
+            }
+            const levels = current ? groupHeight(groups, current.id) : 1;
+            if ((parentId === undefined ? 0 : groupChain(groups, parentId).length) + levels > MAX_GROUP_DEPTH) {
+                throw new RpcError(RpcErrorCode.Rejected, text.groupTooDeep);
+            }
+            const workers = new Set(
+                roster.org.roster.filter((agent) => agent.role !== 'supervisor').map((agent) => agent.id),
+            );
+            const members = input.memberIds
+                ? [...new Set(input.memberIds)].filter((id) => workers.has(id))
+                : [...(current?.memberIds ?? [])];
+            const id = input.id ?? groupId(name, await this.#takenGroupIds(groups));
+            const description =
+                input.description === undefined ? (current?.description ?? '') : oneLine(input.description);
             const group: OrgGroup = {
                 id,
                 name,
                 ...(description ? { description } : {}),
-                leaderId: leader.id,
-                memberIds: members,
+                ...(parentId !== undefined ? { parentId } : {}),
+                leaderId,
+                memberIds: members.filter((member) => member !== leaderId),
             };
-            const moved = new Set(members);
+            const moved = new Set(group.memberIds);
             const next = groups.map((entry) =>
                 entry.id === id
                     ? group
                     : { ...entry, memberIds: entry.memberIds.filter((member) => !moved.has(member)) },
             );
-            if (!groups.some((entry) => entry.id === id)) next.push(group);
+            if (!current) next.push(group);
             await writeGroups(this.#deps.orgsDir, next);
-            this.#deps.log.info(`group ${id} saved: lead ${leader.id}, ${members.length} members`);
+            if (input.prompt !== undefined) {
+                await mkdir(this.#groupDir(id), { recursive: true });
+                await writeAtomic(path.join(this.#groupDir(id), 'prompt.md'), `${input.prompt.trim()}\n`);
+            }
+            this.#deps.log.info(`group ${id} saved: lead ${leaderId || 'none'}, ${group.memberIds.length} members`);
             this.#changed('*');
             return group;
         });
     }
 
-    /** Deletes a group; its members are left without one. */
+    /** A group's prompt and folder, which exists from here on so the user can open it (19 §5). */
+    async readGroup(groupId: string): Promise<{ prompt: string; dir: string }> {
+        if (!(await this.group(groupId))) {
+            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).groupMissing(groupId));
+        }
+        const dir = this.#groupDir(groupId);
+        await mkdir(dir, { recursive: true });
+        const prompt = await readFile(path.join(dir, 'prompt.md'), 'utf8').catch(() => '');
+        return { prompt: prompt.trim(), dir };
+    }
+
+    /**
+     * Deletes a group (19 §4): the groups and members in it move up a level, the first level's members and its lead
+     * then report to the chief. Its folder goes to the trash, so no later group gets its prompt or notes.
+     */
     async deleteGroup(groupId: string): Promise<void> {
         await this.#serial('groups', async () => {
             const groups = await this.#groups();
-            if (!groups.some((group) => group.id === groupId)) {
+            const target = groups.find((group) => group.id === groupId);
+            if (!target) {
                 throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).groupMissing(groupId));
             }
             await writeGroups(
                 this.#deps.orgsDir,
-                groups.filter((group) => group.id !== groupId),
+                groups
+                    .filter((group) => group.id !== groupId)
+                    .map((group): OrgGroup => {
+                        if (group.parentId === groupId) {
+                            const { parentId: _gone, ...rest } = group;
+                            return target.parentId === undefined ? rest : { ...rest, parentId: target.parentId };
+                        }
+                        return group.id === target.parentId
+                            ? { ...group, memberIds: [...group.memberIds, ...target.memberIds] }
+                            : group;
+                    }),
             );
+            await this.#trashGroup(groupId);
+            this.#changed('*');
+        });
+    }
+
+    async #trashGroup(groupId: string): Promise<void> {
+        const stamp = new Date(this.#now()).toISOString().replace(/[:.]/g, '-');
+        const trash = path.join(this.#deps.orgsDir, 'default', '.trash', 'groups');
+        await mkdir(trash, { recursive: true });
+        await rename(this.#groupDir(groupId), path.join(trash, `${folderName(groupId)}-${stamp}`)).catch(
+            () => undefined,
+        );
+    }
+
+    /** The prompt of everyone in the organization: the body of `org.md`, or the built-in one (19 §6). */
+    async rootPrompt(): Promise<{ prompt: string; dir: string }> {
+        const dir = path.join(this.#deps.orgsDir, 'default');
+        await mkdir(dir, { recursive: true });
+        const saved = await readFile(path.join(dir, 'org.md'), 'utf8').catch(() => '');
+        const body = saved.replace(ORG_FRONTMATTER, '').trim();
+        return { prompt: body || DEFAULT_ORG.prompt, dir };
+    }
+
+    /** Changes the body of `org.md`, its settings stay; empty brings the built-in prompt back. */
+    async saveRootPrompt(prompt: string): Promise<void> {
+        await this.#serial('org', async () => {
+            const file = path.join(this.#deps.orgsDir, 'default', 'org.md');
+            const saved = await readFile(file, 'utf8').catch(() => '');
+            const head = ORG_FRONTMATTER.exec(saved)?.[0] ?? '';
+            const body = prompt.trim();
+            await mkdir(path.dirname(file), { recursive: true });
+            await writeAtomic(file, `${head}${body === DEFAULT_ORG.prompt.trim() ? '' : body}\n`);
             this.#changed('*');
         });
     }
 
     /** Moves a member into a group, or out of every group (`null`). */
     async moveMember(memberId: string, target: string | null, projectId?: string): Promise<OrgChart> {
+        const text = textOf(TEXT);
         const project = projectId ? await this.#deps.projects.get(projectId) : undefined;
         const roster = await this.#roster(project);
-        if (!roster.org.roster.some((agent) => agent.id === memberId)) {
-            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).notFound(memberId));
+        const agent = roster.org.roster.find((item) => item.id === memberId);
+        if (!agent) {
+            throw new RpcError(RpcErrorCode.NotFound, text.notFound(memberId));
         }
-        if (target !== null && !(await this.#groups()).some((group) => group.id === target)) {
-            throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).groupMissing(target));
+        const groups = await this.#groups();
+        if (target !== null && !groups.some((group) => group.id === target)) {
+            throw new RpcError(RpcErrorCode.NotFound, text.groupMissing(target));
+        }
+        const led = groups.find((group) => group.leaderId === memberId);
+        if (led) throw new RpcError(RpcErrorCode.Rejected, text.leadsGroup(memberName(agent), led.name));
+        if (target !== null && agent.role === 'supervisor') {
+            throw new RpcError(RpcErrorCode.Rejected, text.leadNotMember(memberName(agent)));
         }
         await this.#place(memberId, target, true);
         return this.org();
@@ -1068,10 +1210,28 @@ export class MemberService {
             const next = groups.map((group) => ({
                 ...group,
                 memberIds: group.memberIds.filter((id) => id !== memberId),
+                // A lead that is gone leaves its group to the next lead up.
+                leaderId: target === null && group.leaderId === memberId ? '' : group.leaderId,
             }));
             const into = next.find((group) => group.id === target);
             if (into && into.leaderId !== memberId) into.memberIds.push(memberId);
             await writeGroups(this.#deps.orgsDir, next);
+            this.#changed('*');
+        });
+    }
+
+    /** Makes a member the lead of a group that has none. */
+    async #lead(memberId: string, target: string): Promise<void> {
+        await this.#serial('groups', async () => {
+            const text = textOf(TEXT);
+            const groups = await this.#groups();
+            if (!groups.some((item) => item.id === target)) {
+                throw new RpcError(RpcErrorCode.NotFound, text.groupMissing(target));
+            }
+            await writeGroups(
+                this.#deps.orgsDir,
+                groups.map((item) => (item.id === target ? { ...item, leaderId: memberId } : item)),
+            );
             this.#changed('*');
         });
     }
@@ -1092,7 +1252,9 @@ export class MemberService {
             }
         }
         if (input.replace) {
+            const gone = (await this.#groups()).filter((group) => group.id !== template.group.id);
             await this.#serial('groups', () => writeGroups(this.#deps.orgsDir, []));
+            for (const group of gone) await this.#trashGroup(group.id);
             for (const agent of (await this.#roster()).org.roster) {
                 if (!wanted.has(agent.id)) await this.remove(agent.id);
             }
@@ -1133,7 +1295,12 @@ export class MemberService {
                 ? []
                 : (await this.#groups())
                       .filter((entry) => entry.id !== group.id)
-                      .map((entry) => ({ ...entry, memberIds: entry.memberIds.filter((id) => !moved.has(id)) }));
+                      .map((entry) => ({
+                          ...entry,
+                          memberIds: entry.memberIds.filter((id) => !moved.has(id)),
+                          // A member leads one group: the template's lead leaves the one it led (19 §4).
+                          leaderId: entry.leaderId === group.leaderId ? '' : entry.leaderId,
+                      }));
             await writeGroups(this.#deps.orgsDir, [group, ...others]);
         });
         this.#deps.log.info(`organization: template ${input.template} applied${input.replace ? ', replacing' : ''}`);
@@ -1148,6 +1315,24 @@ export class MemberService {
             .filter((thread) => memberIdOf(thread) === memberId)
             .sort((a, b) => b.updatedAt - a.updatedAt)
             .slice(0, limit);
+    }
+
+    /** What a member's panel shows besides the member (19 §9, §10). */
+    async stats(memberId: string): Promise<MemberStats> {
+        const { usage, projects, membersDir } = this.#deps;
+        const dir = path.join(membersDir, folderName(memberId));
+        await mkdir(dir, { recursive: true });
+        const names = new Map((await projects.list()).map((project) => [project.id, project.name]));
+        const since = this.#now() - RECENT_USAGE_MS;
+        return {
+            dir,
+            projects: usage.memberProjects(memberId, RECENT_PROJECTS).map((project) => ({
+                ...project,
+                name: names.get(project.projectId) ?? project.projectId,
+            })),
+            usage: { recent: usage.member(memberId, since), all: usage.member(memberId) },
+            score: { count: 0, recent: [] },
+        };
     }
 
     /** The organization of a project with each member's display name, for `@` mentions and the `agent` tool. */
@@ -2330,6 +2515,13 @@ export function registerMemberHandlers(peer: UiPeer, members: MemberService): vo
     });
     peer.handle('org.get', () => members.org());
     peer.handle('org.saveGroup', (params) => members.saveGroup(params));
+    peer.handle('org.readGroup', ({ groupId }) => members.readGroup(groupId));
+    peer.handle('org.root', () => members.rootPrompt());
+    peer.handle('org.saveRoot', async ({ prompt }) => {
+        await members.saveRootPrompt(prompt);
+        return { ok: true } as const;
+    });
+    peer.handle('member.stats', ({ memberId }) => members.stats(memberId));
     peer.handle('org.deleteGroup', async ({ groupId }) => {
         await members.deleteGroup(groupId);
         return { ok: true } as const;
