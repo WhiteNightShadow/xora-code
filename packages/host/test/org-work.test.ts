@@ -144,6 +144,7 @@ describe('work in the organization tree', () => {
         expect(order.every((index) => index >= 0)).toBe(true);
         expect([...order].sort((a, b) => a - b)).toEqual(order);
         expect(system).toContain('中心/小队');
+        expect(system).toContain('以靠后的为准');
         expect(system).not.toContain('别组的规矩');
     });
 

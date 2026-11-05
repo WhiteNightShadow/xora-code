@@ -490,6 +490,10 @@
     margin: 0;
 }
 
+.org-panel__block > .badge {
+    align-self: flex-start;
+}
+
 .org-panel__block h3 {
     margin: 0;
     font-size: var(--xk-text-xs);

@@ -65,7 +65,7 @@ export const scoreSystem = (
     language: string,
 ) => `You are the supervisor of a team run that has ended, scoring how your members did on their cards, for the user who owns the team.
 
-Each card comes with a base score the host worked out from the facts: whether it was done, how often it failed acceptance, moved up a tier or was caught by the watch. Do not work it out again. Move it by at most ${MAX_ADJUST} points either way, and only for what the record shows and those facts miss: does the work really meet the card's goal, is it correct and well made, did the member report plainly and say what it could not do. 0 is the usual answer when nothing stands out. Cost and time are no part of the score. Go by what the record shows; confident wording earns nothing.
+Each card comes with a base score the host worked out from the facts: whether it was done, how often it failed acceptance, moved up a tier or was caught by the watch. Do not work it out again. Move it by at most ${MAX_ADJUST} points either way, and only for what the record shows and those facts miss: does the work really meet the card's goal, is it correct and well made, did the member report plainly and say what it could not do. 0 is the usual answer when nothing stands out, and the answer when the record does not show enough to tell: then the reason says so. Cost and time are no part of the score. Go by what the record shows; confident wording earns nothing.
 
 Answer with one line of JSON and nothing else: {"scores":[{"task":"<card id>","adjust":<number from -${MAX_ADJUST} to ${MAX_ADJUST}>,"reason":"<one short sentence in ${language}, naming what in the record it rests on>"}]}`;
 

@@ -196,6 +196,7 @@ const TEXT = bilingual(
         recallHeader: (count: number) => `找到${count}条：`,
         teamLabel: '全体',
         groupsTitle: (where: string) => `组织：${where}`,
+        groupsOrder: '这些提示词从上级组织到下级组织排列；和全体提示词或彼此不一致时，以靠后的为准。',
         noLead: (group: string) => `“${group}”和上级都还没有负责人：先设一个`,
         noWorkers: (group: string) => `“${group}”里还没有能干活的成员`,
         skillsTitle: '你的skills',
@@ -317,6 +318,8 @@ const TEXT = bilingual(
         recallHeader: (count) => `${count} found:`,
         teamLabel: 'everyone',
         groupsTitle: (where) => `Organization: ${where}`,
+        groupsOrder:
+            'These go from the top organization down; where they disagree with each other or with the prompt for everyone, the later one holds.',
         noLead: (group) => `“${group}” has no lead, and neither have the organizations above it: set one first`,
         noWorkers: (group) => `No member of “${group}” can do the work yet`,
         skillsTitle: 'Your skills',
@@ -1822,7 +1825,8 @@ export class MemberService {
         return {
             id: 'group_instructions',
             title: textOf(TEXT).groupsTitle(where(chain.length - 1)),
-            text: parts.join('\n\n'),
+            // A model given two rules that disagree may follow either: being later does not settle it by itself.
+            text: [textOf(TEXT).groupsOrder, ...parts].join('\n\n'),
         };
     }
 

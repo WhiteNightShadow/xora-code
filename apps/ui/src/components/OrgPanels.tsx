@@ -261,6 +261,7 @@ export function MemberPanel({
                         <h3>{s.org.tokens}</h3>
                         <TokenLine label={s.org.last30} totals={stats.usage.recent} />
                         <TokenLine label={s.org.allTime} totals={stats.usage.all} />
+                        {!stats.usage.all.complete && <Badge tone="warn">{s.usage.incomplete}</Badge>}
                     </section>
                 </>
             )}
@@ -312,14 +313,19 @@ function ScoreBlock({ score }: { score: MemberStats['score'] }) {
 
 function TokenLine({ label, totals }: { label: string; totals: MemberStats['usage']['all'] }) {
     const s = useStrings();
+    // 19 §10: every request sends the history again, so cache hits are nearly all the input of long work. They stay
+    // beside the headline, not in it, or it would say next to nothing about what the work took.
+    const fresh = Math.max(0, totals.inputTokens - totals.cachedTokens);
+    // Nothing priced is a cost not known, not a cost of zero.
+    const cost = totals.complete || totals.cost.amount > 0 ? totals.cost : null;
     return (
         <div className="org-panel__tokens">
             <span>{label}</span>
-            <strong>{formatTokens(totals.inputTokens + totals.outputTokens)}</strong>
-            <strong className="org-panel__cost">{formatMoney(totals.cost)}</strong>
+            <strong>{formatTokens(fresh + totals.outputTokens)}</strong>
+            <strong className="org-panel__cost">{formatMoney(cost)}</strong>
             <span className="muted">
-                {s.org.tokenInput} {formatTokens(totals.inputTokens)} · {s.org.tokenOutput}{' '}
-                {formatTokens(totals.outputTokens)} · {s.org.tokenCached} {formatTokens(totals.cachedTokens)}
+                {s.org.tokenInput} {formatTokens(fresh)} · {s.org.tokenOutput} {formatTokens(totals.outputTokens)} ·{' '}
+                {s.org.tokenCached} {formatTokens(totals.cachedTokens)}
             </span>
         </div>
     );

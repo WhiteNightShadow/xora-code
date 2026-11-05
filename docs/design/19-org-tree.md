@@ -43,6 +43,27 @@
 - paperclip的评测计划和camel都是先做硬检查、再用窄的标准打分，token和耗时单列，不混进质量分；第9节的基础分和“成本不算分”照这个做。
 - 没有采用的：memory目录做成git仓库（letta、paperclip），第一版用不到回滚；提示词修改历史（paperclip），以后再加；多层转派（camel的嵌套workforce），见第8节。
 
+2026-11-05补充的博客和文档。内容是调研agent读原文整理的，标★的我又对过原文，数字和说法都对得上。
+
+| 来源 | 说了什么 | 对xora |
+|---|---|---|
+| ★[cognition：multi-agents: what's actually working](https://cognition.com/blog/multi-agents-working)（2026-04-22） | 一个写者、其他agent贡献意见可行；经理容易指挥过细，还会以为子agent和自己共享状态 | 一张卡一个写者；卡写目标和验收，不规定实现 |
+| ★[google research：scaling agent systems](https://research.google/blog/towards-a-science-of-scaling-agent-systems-when-and-why-agent-systems-work/)（2026-01-28） | 可并行的任务，中心协调比单agent好80.9%；顺序任务，测过的多agent变体都差39%～70% | 一个人能做完的派给一个成员，不层层转派 |
+| [anthropic：multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)（2025-06-13） | 多agent的token约是普通对话的15倍，coding能并行的部分少 | 同上 |
+| [cursor：self-driving codebases](https://cursor.com/blog/self-driving-codebases)（2026-02-05） | 平级自协调和中央集成都失败，递归planner加不知全局的worker撑到几百个agent | 几十个并发以前用不到，这一版不做 |
+| ★[claude code：costs](https://code.claude.com/docs/en/costs) | 文档里的例子：输出5.3k、cache read 940k；agent teams在plan模式约7倍token | 第10节主数字不含缓存命中 |
+| ★[claude code：memory](https://code.claude.com/docs/en/memory) | 两条规则矛盾时模型可能任选一条，排在后面也不等于覆盖 | 第6节写明以靠后的为准 |
+| ★[anthropic：demystifying evals](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)（2026-01-09） | 能用确定性评分就别用模型；评产出不评路径；给模型评审“不知道”的出口 | 基础分由事实算；第9节“看不出来答0” |
+| ★[self-preference bias in rubric-based evaluation](https://arxiv.org/abs/2604.06996)（2026-04-08） | 未达标的项，评自己的输出时判成达标的可能性相对高50%以上；多评委只能缓解 | 事实占大头，主管只能±10；换一家模型评分以后再说 |
+| [metr：reward hacking](https://metr.org/blog/2025-06-05-recent-reward-hacking/)（2025-06-05） | 模型会改评分器刷分，叮嘱别作弊几乎没用 | 分数和打分规则不进成员的上下文（查过代码：只到界面） |
+| ★[langchain：benchmarking multi-agent architectures](https://www.langchain.com/blog/benchmarking-multi-agent-architectures)（2025-06-10） | supervisor转述子agent的回复容易出错，让它把回复直接转给用户后提升近50% | 任务卡片显示报告原文（截到400字），不经总助手转述 |
+| [pragmatic engineer：tokenmaxxing](https://blog.pragmaticengineer.com/the-pulse-tokenmaxxing-as-a-weird-new-trend/)（2026-04-23） | token排行榜会被刷 | token不进质量分，不做排行 |
+| [evaluating agents.md](https://arxiv.org/abs/2602.11988)（2026-02-12） | 上下文文件对成功率没有普遍提升，成本多20%以上 | 提示词和记忆都有上限 |
+| [langchain：agent builder memory](https://www.langchain.com/blog/how-we-built-agent-builders-memory-system)（2026-02-21）、[letta：context repositories](https://www.letta.com/blog/context-repositories)（2026-02-12） | 记忆写入要人批防注入；后台整理、git管理 | 这一版不做（第3节第8条） |
+
+- 推特：抓取被拒，下面几条只看到搜索摘要，没有当依据：[karpathy](https://x.com/karpathy/status/2027521323275325622)（8个agent试独立和“首席+初级”，效果不好）、[boris cherny](https://x.com/bcherny/status/2019472394696683904)（agent teams发布帖）、[matt van horn](https://x.com/mvanhorn/article/2070966613994795489)（218个记忆文件砍到6个）、[robert youssef](https://x.com/rryssf/status/2109940688595153234)（subagent空闲超5分钟缓存失效）。
+- 按分数派活只找到论文，没找到生产实践，这一版不做。
+
 ## 3. 评估后的修正（2026-11-04）
 
 初稿交给一个独立的agent对照代码评估，核实后采纳的主要修正：
@@ -55,6 +76,15 @@
 6. **组织树的约束**：改上级要防环，挪完层数仍不超过3；名字全局唯一；负责人不能同时是别的组织的组员；删掉负责人就清空负责人，不拦着；回退到1.1.0不能把树压平（第4节）。
 7. **界面别太宽**：成员是组织节点里的一行，不单独占一列；直属成员挂在一个“直属成员”节点下；节点上的“+”和“⋯”一直显示，不只在悬停时出现。
 8. **v1不做的**：组织通用记忆和只有负责人能写的作用域、上级组织的记忆进提示词、多层转派、带队分、按分数派活、派活评分、运行后的记忆整理。
+
+博客和文档调研回来后又改了四处（2026-11-05）：
+
+9. **token主数字不含缓存命中**：每次请求都重发历史，缓存命中几乎就是全部输入。用户自己的2209次请求里，缓存命中占输入的97.7%，算上是2.32亿，不算是710万。主数字改成新输入加输出，缓存命中单列（第10节）。
+10. **价格不全要说**：653次请求没有价格（650次是`MiniMax-M3.1-Flash`），面板却直接显示合计，等于当成免费。现在和用量页一样标“部分价格未知，合计偏低”，一次都没计价时显示“—”，不显示0。
+11. **主管评分给出口**：记录看不出来时答0，并在理由里说明，不硬凑（第9节）。
+12. **组织提示词冲突时以靠后的为准**：组织链开头写明这一句（第6节）。不写的话，排在后面也不算数，模型可能任选一条。
+
+看过但这一版不改的：换一家模型评分、成员预算和80%预警、组织节点汇总token、模板按代码模块分组、成员提示词和组织提示词冲突时听谁的（内置成员的模板不是用户写的，不能简单让它优先）。
 
 ## 4. 模型：根、组织、成员
 
@@ -101,6 +131,7 @@
 ```
 
 - 组织链是一层`group_instructions`，每个组织一个小标题（“组织：研发中心”“组织：研发中心/前端组”）。每个组织的提示词保存时限3000字，不在运行时截断。
+- 组织链开头写明：和全体提示词或彼此不一致时，以靠后的为准，也就是越具体的组织越优先。用户一个人写所有层，上下级之间没有信任边界。成员提示词不在这条规则里。
 - 一个成员拿到的是它自己所在组织的链；团队运行里，它的组织不在运行所属组织下面时（比如上级负责人带子组织的活、用户点名别的组织的人），拿运行所属组织的链。同一个组织的成员共享这段前缀。
 - 组织链在线程开始时定下来，之后不变：改了组织提示词、成员提示词，新开的线程才用上（团队运行里新开的卡也是），已经开着的线程不受影响，缓存不失效。
 - 审查和计划评审线程带运行所属组织的链（它们按组织的规范审），不带记忆。
@@ -134,7 +165,7 @@
 - **什么时候打**：团队运行的报告写好后，一次请求给这次所有做过卡的成员打分（每张卡一个分）。被取消、没开工的卡不打；派给单个成员的活、例行任务、子agent在v1里不打。设置里可以关掉（`team.scoring`，默认开）。
 - **怎么打**：
   - **基础分**（host按事实算）：卡完成80分；每次退回扣5、每次升档扣5、每次巡检命中扣3，最低50；一次就通过验收加5。卡失败或受阻40分，同样扣，最低10。
-  - **主管调整**：用这次运行主管的模型，给它每张卡的目标、交付摘要、还剩什么、验收结果和基础分，让它在基础分上±10并写一句理由，回json。
+  - **主管调整**：用这次运行主管的模型，给它每张卡的目标、交付摘要、还剩什么、验收结果和基础分，让它在基础分上±10并写一句理由，回json。没什么特别的答0，记录看不出来也答0，并在理由里说明。
   - 最终分在0～100之间；失败、受阻的卡最高50。
 - **状态**：运行记下`scoring`（pending、done、skipped）。应用重启后pending的补打一次；按（运行、卡、成员）去重；没有模型、请求出错、回答解析不了就记skipped，不编分数。打分的请求算进主管的用量。
 - **存**：数据库表`member_scores`（成员、分数、基础分、调整、理由、谁打的、项目、运行、卡、标题、时间）。
@@ -147,7 +178,9 @@
   - 子agent的线程：它自己是成员就算它，否则算父线程的成员。
   - 主管代审、团队报告、评分这些直接调模型的请求：算负责的主管。
   - 以前的数据按规则回填：`agent_id`就是成员id；或者`task_id`不为空且`agent_id`是“成员id-卡号”。
-- **token**：近30天和累计，各自的输入、输出（含思考）、缓存命中和花费（按设置的币种）。
+- **token**：近30天和累计。主数字是新输入加输出（含思考），旁边是花费（按设置的币种），下面一行分列新输入、输出、缓存命中。
+  - 新输入是`inputTokens - cachedTokens`：`inputTokens`含缓存命中和缓存写入。用量页（`UsageModal`）还是按总输入加命中率显示，两边都标得清楚，不一样是因为要回答的问题不同：这里看成员做这些活花了多少，那里看缓存用得好不好。
+  - 有请求没价格时标“部分价格未知，合计偏低”；一次都没计价时花费显示“—”。
 - **最近的项目**：从`usage_events`按成员和项目汇总，按最近一次排，最多5个：项目名、最近一次、做过几件（同一次运行或同一个线程算一件）。删掉运行、归档线程都不影响。
 
 ## 11. 界面

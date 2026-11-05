@@ -176,7 +176,7 @@ server.respondWith((request) => {
         JSON.stringify(messages.at(-1)).includes('记住：')
     ) {
         return openaiToolCalls([{ name: 'remember', arguments: JSON.stringify({ note: 'hello.txt是冒烟用的文件' }) }], {
-            usage: { prompt_tokens: 3000, completion_tokens: 400 },
+            usage: { prompt_tokens: 3000, completion_tokens: 400, prompt_tokens_details: { cached_tokens: 2000 } },
         });
     }
     // A workflow step's agent hands its result in.
@@ -732,10 +732,17 @@ try {
     await page.locator('.composer').getByRole('button', { name: '停止' }).waitFor({ state: 'detached' });
     await page.locator('.thread-header .member-chip').click();
     await panel.locator('[data-block=projects]', { hasText: 'repo' }).waitFor();
-    const tokens = await panel.locator('[data-block=tokens] .org-panel__tokens strong').first().textContent();
-    if (tokens === null || tokens.trim() === '0') {
-        throw new Error('the member panel shows no tokens after its work');
+    // 3000 in, 2000 of them from the cache, 400 out: cache hits show beside the headline, not in it (19 §10).
+    const tokens = panel.locator('[data-block=tokens] .org-panel__tokens').first();
+    const headline = await tokens.locator('strong').first().textContent();
+    if (headline !== '1.4k') throw new Error(`the member panel counts ${headline} tokens, not 1.4k`);
+    if (!(await tokens.textContent())?.includes('缓存命中 2.0k')) {
+        throw new Error('the member panel does not show its cache hits');
     }
+    // The mock model has no price: a cost not known, not a cost of zero.
+    const cost = await tokens.locator('.org-panel__cost').textContent();
+    if (cost !== '—') throw new Error(`the member panel prices unpriced work at ${cost}`);
+    await panel.locator('[data-block=tokens] .badge', { hasText: '部分价格未知' }).waitFor();
     await step(page, '干完活后面板上有最近的项目和token');
     const panelMenu = async (item: string) => {
         await panel.locator('.org-panel__actions').getByRole('button', { name: '更多' }).click();
