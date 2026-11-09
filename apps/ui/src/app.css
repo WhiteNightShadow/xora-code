@@ -4820,6 +4820,10 @@ button.tool__header:hover {
 }
 
 /* The app's own confirm dialog (Confirm.tsx). */
+.confirm {
+    padding: var(--xk-space-4) var(--xk-space-5) var(--xk-space-5);
+}
+
 .confirm__message {
     margin: 0 0 var(--xk-space-4);
     white-space: pre-wrap;
