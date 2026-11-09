@@ -16,6 +16,7 @@ import {
     useApp,
     useStrings,
 } from '../store.ts';
+import { confirmDialog } from './Confirm.tsx';
 import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { MemberAvatar } from './MembersView.tsx';
@@ -114,9 +115,9 @@ function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean
                         <button
                             type="button"
                             className="is-danger"
-                            onClick={() => {
+                            onClick={async () => {
                                 setMenu(false);
-                                if (window.confirm(s.sidebar.confirmDelete)) {
+                                if (await confirmDialog(s.sidebar.confirmDelete)) {
                                     void attempt(() => host.call('thread.delete', { threadId: thread.id }));
                                 }
                             }}
@@ -268,15 +269,44 @@ function ChiefNav() {
     const news = useApp((state) =>
         Object.values(state.threads).some((thread) => isChief(thread) && !thread.archived && thread.unread),
     );
+    // Its conversations live here, not in the projects' lists (06 §23): the latest few, and a way to start one.
+    const threads = useApp((state) => state.threads);
+    const projects = useApp((state) => state.projects);
+    const selectedThreadId = useApp((state) => (state.chiefOpen ? undefined : state.selectedThreadId));
+    const recent = Object.values(threads)
+        .filter((thread) => isChief(thread) && !thread.archived)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, NAV_RUNS);
+    const several = projects.length > 1;
     return (
-        <button
-            type="button"
-            className={`sidebar__nav sidebar__nav--chief${selected ? ' is-selected' : ''}`}
-            onClick={() => openChief()}
-        >
-            <Icon name="sparkle" size={14} /> {s.sidebar.chief}
-            {news && <span className="dot-badge" />}
-        </button>
+        <>
+            <div className="sidebar__nav-row">
+                <button
+                    type="button"
+                    className={`sidebar__nav sidebar__nav--chief${selected ? ' is-selected' : ''}`}
+                    onClick={() => openChief()}
+                >
+                    <Icon name="sparkle" size={14} /> {s.sidebar.chief}
+                    {news && <span className="dot-badge" />}
+                </button>
+                <IconButton icon="plus" label={s.chief.newChat} onClick={() => openChief(true)} />
+            </div>
+            {recent.map((thread) => (
+                <button
+                    key={thread.id}
+                    type="button"
+                    className={`run-row sidebar__run${selectedThreadId === thread.id ? ' is-selected' : ''}`}
+                    onClick={() => void selectThread(thread.id)}
+                >
+                    <span className="thread-row__title">{thread.title}</span>
+                    <span className="thread-row__meta">
+                        {several ? `${projects.find((project) => project.id === thread.projectId)?.name ?? ''} · ` : ''}
+                        {relativeTime(thread.updatedAt)}
+                    </span>
+                    {thread.unread && <span className="dot-badge" />}
+                </button>
+            ))}
+        </>
     );
 }
 

@@ -14,6 +14,7 @@ import {
 } from '../members.ts';
 import { attempt, loadMembers, openMembers, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { confirmDialog } from './Confirm.tsx';
 import { Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
@@ -94,9 +95,9 @@ export function MemberPanel({
             setDraft(undefined);
             toast(s.members.saved, 'success');
         });
-    const remove = () => {
+    const remove = async () => {
         const question = member.source === 'builtin' ? s.org.confirmDeleteBuiltin : s.members.confirmDelete;
-        if (!window.confirm(format(question, { name: member.name }))) return;
+        if (!(await confirmDialog(format(question, { name: member.name })))) return;
         void attempt(() =>
             host.call('member.delete', {
                 ...(selectedProjectId ? { projectId: selectedProjectId } : {}),
@@ -108,8 +109,8 @@ export function MemberPanel({
             onClose();
         });
     };
-    const reset = () => {
-        if (!window.confirm(format(s.members.confirmReset, { name: member.name }))) return;
+    const reset = async () => {
+        if (!(await confirmDialog(format(s.members.confirmReset, { name: member.name })))) return;
         void attempt(() => host.call('member.reset', { memberId: member.id })).then(async (done) => {
             if (done) await loadMembers(selectedProjectId);
         });

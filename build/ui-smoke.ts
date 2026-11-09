@@ -374,6 +374,11 @@ try {
     // 03: a new conversation opens in the main area; its composer starts it. Typed key by key: a box that takes the
     // focus back on every render loses all but the first character.
     // `@` offers the team's members to hand the message to (06 §19).
+    // The thinking level is picked here too, but only for a model with levels: the mock model has none.
+    await page.locator('.new-thread select[aria-label="模型"]').waitFor();
+    if ((await page.locator('.new-thread select[aria-label="思考强度"]').count()) !== 0) {
+        throw new Error('a new conversation offers thinking levels for a model that has none');
+    }
     await page.locator('.new-thread textarea').pressSequentially('@');
     await page.locator('.new-thread .mention--members button').first().waitFor();
     await step(page, '新建对话里@出成员候选');
@@ -401,6 +406,7 @@ try {
     await step(page, '变更面板显示diff');
 
     await page.getByRole('button', { name: '撤销这一轮' }).click();
+    await page.locator('.confirm').getByRole('button', { name: '确定', exact: true }).click();
     await page.locator('.toast', { hasText: '已恢复' }).waitFor();
     if ((await readFile(path.join(repo, 'hello.txt'), 'utf8')) !== 'hello\n') {
         throw new Error('undo did not restore the file');
@@ -620,6 +626,8 @@ try {
         throw new Error('the workflow cannot run once the project is trusted');
     }
     await tidy.getByRole('button', { name: '删除', exact: true }).click();
+    // Confirmations are the app's own dialog, not the system's (which could hide behind the window).
+    await page.locator('.confirm').getByRole('button', { name: '确定', exact: true }).click();
     await tidy.waitFor({ state: 'detached' });
     if (existsSync(path.join(repo, '.xora', 'workflows', 'tidy.yaml'))) {
         throw new Error('the deleted workflow file is still there');
@@ -786,6 +794,9 @@ try {
     await page.locator('.chief-home textarea').pressSequentially('让侦察看看hello.txt');
     await page.locator('.chief-home').getByRole('button', { name: '发送', exact: true }).click();
     await page.locator('.thread-header h1', { hasText: '总助手：' }).waitFor();
+    // The conversation is marked as the chief's and listed under its entry, not among the project's conversations.
+    await page.locator('.thread-header__chief').waitFor();
+    await page.locator('.sidebar__run', { hasText: '总助手：' }).waitFor();
     const delegation = page.locator('.delegation', { hasText: '侦察' }).first();
     await delegation.waitFor();
     await step(page, '总助手把活派给成员，对话里有跟进卡片');
@@ -795,6 +806,27 @@ try {
     await delegation.locator('.delegation__open').click();
     await page.locator('.thread-header .member-chip', { hasText: '侦察' }).waitFor();
     await step(page, '卡片能打开成员的对话');
+    // 19 §15: the talent market lists every built-in persona, searchable; one is hired into an organization from it.
+    await page.locator('.sidebar__nav', { hasText: '团队' }).click();
+    await page.getByRole('tab', { name: '人才市场' }).click();
+    const personas = page.locator('.talent');
+    await personas.first().waitFor();
+    if ((await personas.count()) < 12)
+        throw new Error(`the talent market lists only ${await personas.count()} personas`);
+    await page.locator('.talent-page__search').fill('前端');
+    const frontend = page.locator('.talent', { hasText: '前端工程师' });
+    await frontend.locator('.badge', { hasText: '可聘用' }).waitFor();
+    if ((await personas.count()) !== 1) throw new Error('the search did not narrow the market down');
+    await frontend.getByRole('button', { name: '看提示词' }).click();
+    await frontend.locator('.talent__prompt').waitFor();
+    await step(page, '人才市场能搜系统自带的人选，看它的提示词');
+    await frontend.getByRole('button', { name: '聘用', exact: true }).click();
+    await page.locator('.member-editor').getByRole('button', { name: '保存', exact: true }).click();
+    await page.locator('.onode', { hasText: '研发团队' }).locator('.omember', { hasText: '前端工程师' }).waitFor();
+    await page.getByRole('tab', { name: '人才市场' }).click();
+    await page.locator('.talent', { hasText: '前端工程师' }).locator('.badge', { hasText: '已在：研发团队' }).waitFor();
+    await step(page, '从人才市场聘的人进了组织，市场上标成已在职');
+
     // 06 §24: a regular software team from the template; any member can be deleted, a built-in one comes back.
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
     await page.getByRole('button', { name: '用模板建团队', exact: true }).click();
@@ -807,6 +839,7 @@ try {
     await expert.click();
     await page.locator('.org-panel__actions').getByRole('button', { name: '更多' }).click();
     await page.locator('.menu-list').getByRole('button', { name: '删除' }).click();
+    await page.locator('.confirm').getByRole('button', { name: '确定', exact: true }).click();
     await expert.waitFor({ state: 'detached' });
     await page.getByRole('button', { name: /已删除的成员/ }).click();
     await page.locator('.org__removed li', { hasText: '专家' }).getByRole('button', { name: '恢复' }).click();

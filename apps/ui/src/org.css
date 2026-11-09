@@ -580,3 +580,109 @@
 .menu-list button.menu-list__danger svg {
     color: var(--xk-error);
 }
+
+/* The talent market (19 §15). */
+.talent-page__body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0 var(--xk-space-6) var(--xk-space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-3);
+}
+
+.talent-page__intro {
+    margin: 0;
+}
+
+.talent-page__filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--xk-space-2) var(--xk-space-3);
+}
+
+.talent-page__search {
+    flex: 0 1 280px;
+}
+
+.talent-page__roles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.talent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--xk-space-3);
+    align-items: start;
+}
+
+.talent {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xk-space-2);
+    padding: var(--xk-space-3) var(--xk-space-4);
+    border: 1px solid var(--xk-border-subtle);
+    border-radius: var(--xk-radius-lg);
+    background: var(--xk-bg);
+    font-size: var(--xk-text-sm);
+}
+
+.talent__head {
+    display: flex;
+    align-items: center;
+    gap: var(--xk-space-3);
+}
+
+.talent__title {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.talent__title .muted {
+    font-size: var(--xk-text-xs);
+}
+
+.talent__job {
+    margin: 0;
+    color: var(--xk-text-muted);
+}
+
+.talent__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--xk-space-2);
+}
+
+.talent__prompt {
+    margin: 0;
+    max-height: 320px;
+    overflow: auto;
+    padding: var(--xk-space-3);
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-subtle);
+    font: inherit;
+    font-size: var(--xk-text-xs);
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
+.talent-page__roles .chip {
+    border: 1px solid transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--xk-text-xs);
+    color: var(--xk-text-muted);
+}
+
+.talent-page__roles .chip.is-active {
+    border-color: var(--xk-accent);
+    color: var(--xk-accent-text);
+    background: var(--xk-accent-subtle);
+}

@@ -1347,6 +1347,43 @@ pre {
     font-weight: var(--xk-weight-semibold);
 }
 
+/* A conversation with the chief assistant says so (06 §23). */
+.thread-header__chief {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    gap: 4px;
+    flex: none;
+    margin: 2px 0;
+    padding: 1px 8px;
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+    font-size: var(--xk-text-xs);
+    font-weight: var(--xk-weight-medium);
+}
+
+/* The chief's entry with the button for a new conversation beside it. */
+.sidebar__nav-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding-right: 10px;
+}
+
+.sidebar__nav-row > .sidebar__nav {
+    flex: 1;
+    min-width: 0;
+    margin-right: 0;
+}
+
+.sidebar__nav-row > .icon-button {
+    flex: none;
+    width: 24px;
+    height: 24px;
+    color: var(--xk-text-muted);
+}
+
 .thread-header__project {
     font-size: var(--xk-text-xs);
     color: var(--xk-text-faint);
@@ -4780,4 +4817,17 @@ button.tool__header:hover {
     padding: 4px 8px;
     color: var(--xk-text);
     font: inherit;
+}
+
+/* The app's own confirm dialog (Confirm.tsx). */
+.confirm__message {
+    margin: 0 0 var(--xk-space-4);
+    white-space: pre-wrap;
+    line-height: 1.55;
+}
+
+.confirm__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--xk-space-2);
 }

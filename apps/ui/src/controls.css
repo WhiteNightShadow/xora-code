@@ -41,6 +41,30 @@
     -webkit-app-region: no-drag;
 }
 
+/* Blank parts of the window drag it too: the sidebar's background, the organization chart's canvas and the start
+   pages. Regions are rectangles, so what is clickable inside them is cut out one by one; the scroll containers
+   themselves stay out of it, or their scrollbars would move the window. */
+.sidebar__main,
+.sidebar__bottom,
+.project__header,
+.otree,
+.welcome,
+.chief-home__hero,
+.chief-home__grid,
+.new-thread__body {
+    -webkit-app-region: drag;
+}
+
+.sidebar__main :is(button, input, select, textarea, a, [role="menu"], .popover__panel, .run-row),
+.sidebar__bottom :is(button, a),
+.project__header :is(button, input, a, .popover__panel, [role="menu"]),
+.otree :is(.onode, button, a, input, select, textarea, .popover__panel),
+.welcome :is(button, input, select, textarea, a, pre, code),
+.chief-home__grid :is(.chief-home__row, button, a),
+.new-thread__body :is(button, input, select, textarea, a, .popover__panel, .mention, .new-thread__composer) {
+    -webkit-app-region: no-drag;
+}
+
 /* Pages without a top bar of their own (the welcome page, the chief's home, the team's pages): their empty top
    drags the window, right across to the window buttons. */
 .main:has(> :is(.welcome, .chief-home, .members)) {

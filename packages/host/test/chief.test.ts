@@ -116,8 +116,16 @@ describe('the chief assistant', () => {
                 : say('交给编码了，它改完我告诉你。');
         });
         const { ui, project } = await setUp();
+        // The user's own conversation thinks at the level they set for new conversations, not the tier's.
+        const { team } = await ui.request('settings.get', {});
+        await ui.request('settings.update', { patch: { team, defaultEffort: 'max' } });
         const thread = await ui.request('chief.start', { projectId: project.id, text: '让编码把hello改成hello world' });
-        expect(thread).toMatchObject({ role: 'chief', mode: 'plan', title: '总助手：让编码把hello改成hello world' });
+        expect(thread).toMatchObject({
+            role: 'chief',
+            mode: 'plan',
+            effort: 'max',
+            title: '总助手：让编码把hello改成hello world',
+        });
         expect(await settled(ui, thread.id)).toBe('turn.completed');
 
         // It saw every project and the members to pick from.

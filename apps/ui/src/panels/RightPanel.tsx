@@ -1,5 +1,6 @@
 import type { FileChange, PromptLayer, ThreadMeta, UsageRequest, UsageTotals } from '@xora/protocol';
 import { useEffect, useState } from 'react';
+import { confirmDialog } from '../components/Confirm.tsx';
 import { DiffView } from '../components/DiffView.tsx';
 import { Badge, Empty, formatMoney, formatTokens, IconButton, Spinner } from '../components/primitives.tsx';
 import { errorMessage, host } from '../host.ts';
@@ -71,7 +72,7 @@ function ChangesPanel({ thread }: { thread: ThreadMeta }) {
     if (files.length === 0) return <Empty>{s.review.empty}</Empty>;
 
     const revert = async (paths?: string[]) => {
-        if (!window.confirm(s.review.confirmRevert)) return;
+        if (!(await confirmDialog(s.review.confirmRevert))) return;
         setBusy(true);
         const result = await attempt(() =>
             host.call('review.revert', { threadId: thread.id, turnId, ...(paths ? { paths } : {}) }),

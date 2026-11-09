@@ -129,6 +129,11 @@ function Header({ thread }: { thread: ThreadMeta }) {
                         {thread.title}
                     </h1>
                 )}
+                {isChief(thread) && (
+                    <span className="thread-header__chief" title={s.chief.subtitle}>
+                        <Icon name="sparkle" size={12} /> {s.chief.title}
+                    </span>
+                )}
                 <span className="thread-header__project">
                     {project?.name}
                     {thread.location.kind === 'worktree'
@@ -941,7 +946,13 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
                     className="composer__input"
                     value={text}
                     rows={2}
-                    placeholder={running && queueable ? s.thread.placeholderQueue : s.thread.placeholder}
+                    placeholder={
+                        running && queueable
+                            ? s.thread.placeholderQueue
+                            : isChief(thread)
+                              ? s.chief.placeholder
+                              : s.thread.placeholder
+                    }
                     onChange={(event) => {
                         setText(event.target.value);
                         updateMention(event.target.value, event.target.selectionStart);

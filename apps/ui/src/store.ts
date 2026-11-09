@@ -92,6 +92,8 @@ interface AppState {
     members: Member[];
     /** The members page is in the main area; `memberId` shows one member. */
     membersOpen: boolean;
+    /** The talent market tab of the team's page (19 §15). */
+    marketOpen: boolean;
     memberId: string | undefined;
     /** The member the "hand it work" dialog is open for. */
     dispatchTo: string | undefined;
@@ -139,6 +141,7 @@ export const useApp = create<AppState>(() => ({
     workflowDraftFor: undefined,
     members: [],
     membersOpen: false,
+    marketOpen: false,
     memberId: undefined,
     dispatchTo: undefined,
     chiefOpen: false,
@@ -365,7 +368,24 @@ export async function loadMembers(projectId: string | undefined): Promise<void> 
 export function openMembers(memberId?: string): void {
     set({
         membersOpen: true,
+        marketOpen: false,
         memberId,
+        teamRunId: undefined,
+        workflowRunId: undefined,
+        workflowsFor: undefined,
+        teamsFor: undefined,
+        chiefOpen: false,
+        newThreadFor: undefined,
+    });
+    void loadMembers(get().selectedProjectId);
+}
+
+/** The talent market (19 §15): the team page's third tab. */
+export function openMarket(): void {
+    set({
+        membersOpen: true,
+        marketOpen: true,
+        memberId: undefined,
         teamRunId: undefined,
         workflowRunId: undefined,
         workflowsFor: undefined,

@@ -1,4 +1,5 @@
 import type { ThreadMeta } from '@xora/protocol';
+import { confirmDialog } from '../components/Confirm.tsx';
 import { Badge, formatMoney } from '../components/primitives.tsx';
 import { host } from '../host.ts';
 import { attempt, selectThread, toast, useApp, useStrings } from '../store.ts';
@@ -12,7 +13,7 @@ export function ComparePanel({ thread }: { thread: ThreadMeta }) {
     );
     const views = useApp((state) => state.views);
     const apply = async (candidate: ThreadMeta) => {
-        if (!window.confirm(format(s.compare.confirmApply, { title: candidate.title }))) return;
+        if (!(await confirmDialog(format(s.compare.confirmApply, { title: candidate.title })))) return;
         const result = await attempt(() =>
             host.call('worktree.apply', { threadId: candidate.id }, { timeoutMs: 120_000 }),
         );
@@ -23,7 +24,7 @@ export function ComparePanel({ thread }: { thread: ThreadMeta }) {
         else toast(`${s.compare.conflicts}${result.conflicts.map((conflict) => conflict.path).join(', ')}`, 'error');
     };
     const remove = async (candidate: ThreadMeta) => {
-        if (!window.confirm(format(s.compare.confirmRemove, { title: candidate.title }))) return;
+        if (!(await confirmDialog(format(s.compare.confirmRemove, { title: candidate.title })))) return;
         await attempt(() => host.call('worktree.remove', { threadId: candidate.id, force: true }));
     };
     return (

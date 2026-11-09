@@ -19,6 +19,7 @@ import {
     OrgChartSchema,
     OrgGroupSchema,
     PermissionModeSchema,
+    PersonaSchema,
     PresetSummarySchema,
     ProjectSchema,
     PromptFileSchema,
@@ -559,6 +560,8 @@ export const methods = {
                     .strict(),
                 /** The group it works in (06 §24); a new member goes to the first group when absent. */
                 groupId: z.string().nullable().optional(),
+                /** The talent market (19 §15): `member.id` names a new member when the id is free. */
+                allowNewId: z.boolean().optional(),
             })
             .strict(),
         result: MemberSchema,
@@ -575,6 +578,11 @@ export const methods = {
     'member.reset': { params: z.object({ memberId: z.string() }).strict(), result: ok },
     /** What its panel shows (19 §9, §10): recent projects, tokens, its supervisor's scores, and its folder. */
     'member.stats': { params: z.object({ memberId: z.string() }).strict(), result: MemberStatsSchema },
+    /** The built-in members there are to hire (19 §15), and whether each is in the organization already. */
+    'member.catalog': {
+        params: z.object({ projectId: IdSchema.optional() }).strict(),
+        result: z.object({ personas: z.array(PersonaSchema) }),
+    },
     /** The organization chart (06 §24): groups with their leaders and members, and deleted built-in members. */
     'org.get': { params: z.object({ projectId: IdSchema.optional() }).strict(), result: OrgChartSchema },
     /**

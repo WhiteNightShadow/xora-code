@@ -248,6 +248,54 @@ describe('the organization tree', () => {
         }
     });
 
+    it('lists every built-in persona to hire, and which of them are in the organization (19 §15)', async () => {
+        const { ui } = await host.start(newData());
+        const { personas } = await ui.request('member.catalog', {});
+        expect(personas.length).toBeGreaterThanOrEqual(12);
+        const byId = new Map(personas.map((persona) => [persona.id, persona]));
+        expect(byId.get('coder')).toMatchObject({ state: 'hired', groupId: 'default', name: '编码', role: 'executor' });
+        expect(byId.get('frontend')).toMatchObject({ state: 'available', name: '前端工程师', role: 'executor' });
+        expect(byId.get('frontend')?.prompt).toContain('frontend');
+        expect(byId.get('frontend')?.groupId).toBeUndefined();
+
+        // One hired from the market keeps its id, so the market knows it; a deleted built-in shows as such.
+        await ui.request('member.delete', { memberId: 'scout' });
+        const hired = await ui.request('member.save', {
+            scope: 'user',
+            member: {
+                id: 'frontend',
+                name: '前端工程师',
+                role: 'executor',
+                tier: 'economy',
+                mode: 'auto_edit',
+                prompt: byId.get('frontend')?.prompt ?? '',
+            },
+            groupId: 'default',
+            allowNewId: true,
+        });
+        expect(hired.id).toBe('frontend');
+        const after = new Map(
+            (await ui.request('member.catalog', {})).personas.map((persona) => [persona.id, persona]),
+        );
+        expect(after.get('scout')?.state).toBe('removed');
+        expect(after.get('frontend')).toMatchObject({ state: 'hired', groupId: 'default' });
+        // An id that is not free, or not a persona's shape, is still refused.
+        await expect(
+            ui.request('member.save', {
+                scope: 'user',
+                member: {
+                    id: 'Not Valid',
+                    name: '怪名',
+                    role: 'executor',
+                    tier: 'economy',
+                    mode: 'auto_edit',
+                    prompt: '',
+                },
+                allowNewId: true,
+            }),
+        ).rejects.toThrow();
+    });
+
     it('reads a file with a parent gone or a circle as a tree', async () => {
         const data = newData();
         const dir = path.join(data, 'orgs');

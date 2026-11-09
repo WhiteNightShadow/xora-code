@@ -4,6 +4,7 @@ import { host } from '../host.ts';
 import { groupChain, groupLead, groupSubtree, MAX_GROUP_DEPTH, memberJob, sortMembers } from '../members.ts';
 import { attempt, loadMembers, openChief, openMembers, openSettings, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { confirmDialog } from './Confirm.tsx';
 import { Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { MemberAvatar } from './MembersView.tsx';
@@ -252,8 +253,8 @@ function GroupNode({
             const { dir } = await host.call('org.readGroup', { groupId: group.id });
             await host.call('system.open', { kind: 'path', target: dir });
         });
-    const remove = () => {
-        if (!window.confirm(format(s.org.confirmDeleteGroup, { name: group.name }))) return;
+    const remove = async () => {
+        if (!(await confirmDialog(format(s.org.confirmDeleteGroup, { name: group.name })))) return;
         void attempt(() => host.call('org.deleteGroup', { groupId: group.id })).then((done) => {
             if (!done) return;
             toast(format(s.org.deleted, { name: group.name }), 'success');

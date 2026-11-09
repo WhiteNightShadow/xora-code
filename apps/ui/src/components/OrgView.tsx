@@ -1,7 +1,7 @@
 import type { OrgGroup } from '@xora/protocol';
 import { type ReactNode, useEffect, useState } from 'react';
 import { host } from '../host.ts';
-import { attempt, loadMembers, openMembers, openTeamBoard, toast, useApp, useStrings } from '../store.ts';
+import { attempt, loadMembers, openMarket, openMembers, openTeamBoard, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { Icon } from './Icon.tsx';
 import { type Editing, MemberEditor } from './MembersView.tsx';
@@ -14,7 +14,7 @@ import '../org.css';
  * The team's one entry (06 §24): the organization chart and the team's work are two tabs of the same page, the
  * way a company's teams and what they do belong together.
  */
-export function TeamTabs({ active, actions }: { active: 'org' | 'runs'; actions?: ReactNode }) {
+export function TeamTabs({ active, actions }: { active: 'org' | 'runs' | 'market'; actions?: ReactNode }) {
     const s = useStrings();
     return (
         <header className="team-page__header">
@@ -38,6 +38,15 @@ export function TeamTabs({ active, actions }: { active: 'org' | 'runs'; actions?
                         onClick={() => openTeamBoard()}
                     >
                         <Icon name="users" size={13} /> {s.org.runs}
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={active === 'market'}
+                        className={active === 'market' ? 'is-active' : ''}
+                        onClick={() => openMarket()}
+                    >
+                        <Icon name="sparkle" size={13} /> {s.talent.title}
                     </button>
                 </div>
             </div>

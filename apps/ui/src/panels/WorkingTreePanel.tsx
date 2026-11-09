@@ -1,5 +1,6 @@
 import type { DiffFile, ThreadMeta } from '@xora/protocol';
 import { useCallback, useEffect, useState } from 'react';
+import { confirmDialog } from '../components/Confirm.tsx';
 import { AutoFocusTextarea, Empty, Spinner } from '../components/primitives.tsx';
 import { errorMessage, host } from '../host.ts';
 import { attempt, toast, useApp, useStrings } from '../store.ts';
@@ -48,7 +49,7 @@ export function WorkingTreePanel({ thread }: { thread: ThreadMeta }) {
     if (!data.isRepo) return <Empty>{s.workingTree.notRepo}</Empty>;
 
     const act = async (file: string, action: 'stage' | 'unstage' | 'revert', hunkIds: string[]) => {
-        if (action === 'revert' && !window.confirm(s.workingTree.confirmRevert)) return;
+        if (action === 'revert' && !(await confirmDialog(s.workingTree.confirmRevert))) return;
         const done = await attempt(() =>
             host.call('git.hunks', { threadId: thread.id, path: file, hunkIds, action, staged }),
         );

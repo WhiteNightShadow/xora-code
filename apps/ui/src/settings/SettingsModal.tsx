@@ -1,6 +1,7 @@
 import type { Connection, PresetSummary, PromptLibrary, Rule, Settings } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { LogoMark } from '../components/Art.tsx';
+import { confirmDialog } from '../components/Confirm.tsx';
 import { Badge, Field, Modal, type Option, Select, Spinner, Toggle } from '../components/primitives.tsx';
 import { errorMessage, host } from '../host.ts';
 import { attempt, refreshConnections, type SettingsSection, toast, uiLanguage, useApp, useStrings } from '../store.ts';
@@ -366,8 +367,8 @@ function ConnectionCard({ connection }: { connection: Connection }) {
                 <button
                     type="button"
                     className="button button--small button--danger"
-                    onClick={() => {
-                        if (window.confirm(`${s.settings.remove}：${connection.name}？`)) {
+                    onClick={async () => {
+                        if (await confirmDialog(`${s.settings.remove}：${connection.name}？`)) {
                             void attempt(async () => {
                                 await host.call('provider.remove', { connectionId: connection.id });
                                 await refreshConnections();
@@ -597,8 +598,8 @@ function GlobalPrompts() {
             setLibrary(await host.call('prompt.list', {}));
             toast(s.settings.saved, 'success');
         });
-    const remove = (name: string) => {
-        if (!window.confirm(format(s.settings.promptConfirmDelete, { name }))) return;
+    const remove = async (name: string) => {
+        if (!(await confirmDialog(format(s.settings.promptConfirmDelete, { name })))) return;
         void attempt(async () => {
             await host.call('prompt.remove', { name });
             setDraft(undefined);

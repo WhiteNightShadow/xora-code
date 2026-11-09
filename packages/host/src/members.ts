@@ -15,6 +15,7 @@ import {
     type OrgChart,
     type OrgGroup,
     type PermissionMode,
+    type Persona,
     type Project,
     RpcError,
     RpcErrorCode,
@@ -1395,6 +1396,52 @@ export class MemberService {
         };
     }
 
+    /**
+     * The built-in members there are to hire (19 §15): the roster's and the ones only a team template has, each with
+     * whether it is in the organization now, deleted, or free to take on.
+     */
+    async catalog(projectId?: string): Promise<Persona[]> {
+        const language = hostLanguage();
+        const project = projectId ? await this.#deps.projects.get(projectId) : undefined;
+        const { org } = await this.#roster(project);
+        const groups = await this.#groups();
+        const present = new Set(org.roster.map((agent) => agent.id));
+        const standing = (id: string): Pick<Persona, 'state' | 'groupId'> => {
+            if (!present.has(id)) return { state: BUILTIN_IDS.has(id) ? 'removed' : 'available' };
+            const group = groupOfMember(groups, id);
+            return { state: 'hired', ...(group ? { groupId: group.id } : {}) };
+        };
+        const personas: Persona[] = DEFAULT_ORG.roster.map((spec) => ({
+            id: spec.id,
+            name: memberName(spec),
+            role: spec.role,
+            ...(spec.category ? { category: spec.category } : {}),
+            tier: spec.tier,
+            mode: spec.mode,
+            ...(spec.description ? { description: spec.description } : {}),
+            prompt: spec.prompt,
+            ...standing(spec.id),
+        }));
+        for (const template of Object.values(ORG_TEMPLATES)) {
+            for (const spec of template.members) {
+                if (personas.some((persona) => persona.id === spec.id)) continue;
+                const builtin = DEFAULT_ORG.roster.find((agent) => agent.id === spec.id);
+                personas.push({
+                    id: spec.id,
+                    name: spec.name[language],
+                    role: spec.role,
+                    ...(spec.category ? { category: spec.category } : {}),
+                    tier: spec.tier ?? builtin?.tier ?? 'standard',
+                    mode: spec.mode ?? builtin?.mode ?? 'auto_edit',
+                    description: spec.description[language],
+                    prompt: spec.prompt ?? builtin?.prompt ?? '',
+                    ...standing(spec.id),
+                });
+            }
+        }
+        return personas;
+    }
+
     /** The organization of a project with each member's display name, for `@` mentions and the `agent` tool. */
     async roster(projectId: string): Promise<{ org: Organization; project: Project; members: AgentSpec[] }> {
         const project = await this.#deps.projects.get(projectId);
@@ -2677,6 +2724,7 @@ export function registerMemberHandlers(peer: UiPeer, members: MemberService): vo
         return { ok: true } as const;
     });
     peer.handle('member.stats', ({ memberId }) => members.stats(memberId));
+    peer.handle('member.catalog', async ({ projectId }) => ({ personas: await members.catalog(projectId) }));
     peer.handle('org.deleteGroup', async ({ groupId }) => {
         await members.deleteGroup(groupId);
         return { ok: true } as const;

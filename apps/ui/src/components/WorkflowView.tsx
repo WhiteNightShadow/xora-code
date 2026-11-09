@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { attempt, openRun, openWorkflowBoard, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { confirmDialog } from './Confirm.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import {
     Badge,
@@ -125,7 +126,7 @@ function WorkflowCard({
                 ? info.path.slice(projectPath.length).replace(/^[\\/]/, '')
                 : info.path;
         const question = info.source === 'user' ? s.workflow.confirmRemoveUser : s.workflow.confirmRemove;
-        if (!window.confirm(format(question, { title: info.title, path: file }))) return;
+        if (!(await confirmDialog(format(question, { title: info.title, path: file })))) return;
         const removed = await attempt(() => host.call('workflow.delete', { projectId, key: info.key }));
         if (removed) {
             toast(s.workflow.removed, 'success');

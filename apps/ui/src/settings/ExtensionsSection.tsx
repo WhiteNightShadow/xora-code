@@ -1,5 +1,6 @@
 import type { ExtensionsSnapshot, McpServerInfo } from '@xora/protocol';
 import { useEffect, useState } from 'react';
+import { confirmDialog } from '../components/Confirm.tsx';
 import { Badge, Field, Select, Spinner, Toggle } from '../components/primitives.tsx';
 import { host } from '../host.ts';
 import { attempt, toast, useApp, useStrings } from '../store.ts';
@@ -739,16 +740,16 @@ export function ExtensionsSection() {
                                         label={plugin.name}
                                         text={s.extensions.enabled}
                                         checked={plugin.enabled}
-                                        onChange={(enabled) => {
+                                        onChange={async (enabled) => {
                                             if (
                                                 enabled &&
                                                 plugin.permissions.length > 0 &&
-                                                !window.confirm(
+                                                !(await confirmDialog(
                                                     format(s.extensions.confirmEnable, {
                                                         name: plugin.name,
                                                         permissions: plugin.permissions.join('\n'),
                                                     }),
-                                                )
+                                                ))
                                             ) {
                                                 return;
                                             }

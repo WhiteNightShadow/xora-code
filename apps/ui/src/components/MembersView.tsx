@@ -1,9 +1,10 @@
-import type { Member, MemberRoutine, PermissionMode } from '@xora/protocol';
+import type { Member, MemberRoutine, PermissionMode, Persona } from '@xora/protocol';
 import { type CSSProperties, useEffect, useState } from 'react';
 import { host } from '../host.ts';
 import { avatarHue, choiceOf, cronOf, groupPath, initialOf, memberJob, type SchedulePreset } from '../members.ts';
 import { attempt, loadMembers, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format, type Strings } from '../strings.ts';
+import { confirmDialog } from './Confirm.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import { Field, IconButton, Modal, relativeTime, Select, Spinner, Toggle } from './primitives.tsx';
@@ -133,8 +134,8 @@ export function MemorySection({ member }: { member: Member }) {
                     <button
                         type="button"
                         className="button button--small"
-                        onClick={() => {
-                            if (window.confirm(format(s.members.memoryConfirmClear, { name: member.name }))) {
+                        onClick={async () => {
+                            if (await confirmDialog(format(s.members.memoryConfirmClear, { name: member.name }))) {
                                 void save('');
                             }
                         }}
@@ -333,8 +334,8 @@ function RoutineRow({ member, routine, onEdit }: { member: Member; routine: Memb
             await selectThread(thread.id);
         }
     };
-    const remove = () => {
-        if (!window.confirm(format(s.members.routineConfirmDelete, { title: routine.title }))) return;
+    const remove = async () => {
+        if (!(await confirmDialog(format(s.members.routineConfirmDelete, { title: routine.title })))) return;
         void attempt(() => host.call('member.deleteRoutine', { memberId: member.id, routineId: routine.id })).then(
             (saved) => saved && reload(),
         );
@@ -436,7 +437,14 @@ export interface Editing {
     readonly member?: Member;
     /** The group a new member joins (06 §24); the first one when absent. */
     readonly groupId?: string | null;
+    /** A persona from the talent market (19 §15) to make the new member from. */
+    readonly template?: Persona;
+    /** The name a new member starts with. */
+    readonly name?: string;
 }
+
+/** What a position of the editor is made from: a built-in member, or a persona of the talent market. */
+type Position = Pick<Member, 'id' | 'name' | 'role' | 'category' | 'tier' | 'mode' | 'prompt' | 'tools'>;
 
 /**
  * Creates a member from a built-in one, or changes a member (19 §11): name, where it works, its position and its
@@ -455,9 +463,21 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
     const [groupId, setGroupId] = useState(currentGroup);
     // 19 §4: a supervisor leads, so its position is there only for a group that has no lead yet.
     const openLead = groups.find((group) => group.id === groupId)?.leaderId === '';
-    const templates = members.filter(
+    const templates: Position[] = members.filter(
         (member) => member.source === 'builtin' && (member.role !== 'supervisor' || openLead),
     );
+    const persona = editing.template;
+    if (persona && !templates.some((item) => item.id === persona.id)) {
+        templates.unshift({
+            id: persona.id,
+            name: persona.name,
+            role: persona.role,
+            ...(persona.category ? { category: persona.category } : {}),
+            tier: persona.tier,
+            mode: persona.mode,
+            prompt: persona.prompt,
+        });
+    }
     // 06 §27: the MCP servers it works with, from the ones configured in settings.
     const [mcp, setMcp] = useState<string[]>([...(editing.member?.mcp ?? [])]);
     const [servers, setServers] = useState<string[]>([]);
@@ -472,9 +492,13 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
             current.includes(server) ? current.filter((item) => item !== server) : [...current, server],
         );
     const existing = editing.member;
-    const start = existing ?? templates.find((member) => member.id === 'coder') ?? templates[0];
+    const start: Position | undefined =
+        existing ??
+        (persona ? templates.find((member) => member.id === persona.id) : undefined) ??
+        templates.find((member) => member.id === 'coder') ??
+        templates[0];
     const [template, setTemplate] = useState(start?.id ?? '');
-    const [name, setName] = useState(existing?.name ?? '');
+    const [name, setName] = useState(existing?.name ?? editing.name ?? '');
     const [description, setDescription] = useState(existing ? (descriptionOf(existing, s) ?? '') : '');
     const [prompt, setPrompt] = useState(start?.prompt ?? '');
     const [tier, setTier] = useState(start?.tier ?? 'standard');
@@ -502,7 +526,7 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
         setMode(next.mode);
     };
     // A position that went away with the organization picked stays out of the new member.
-    const base = existing ?? templates.find((member) => member.id === template) ?? templates[0];
+    const base: Position | undefined = existing ?? templates.find((member) => member.id === template) ?? templates[0];
     const leads = base?.role === 'supervisor';
     const save = async () => {
         if (!base) return;
@@ -513,6 +537,10 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                 scope,
                 member: {
                     ...(existing ? { id: existing.id } : {}),
+                    // A persona not in the organization keeps its own id, so the market knows it is hired (19 §15).
+                    ...(!existing && persona && persona.state !== 'hired' && base.id === persona.id
+                        ? { id: persona.id }
+                        : {}),
                     name: name.trim(),
                     role: base.role,
                     ...(base.category ? { category: base.category } : {}),
@@ -526,6 +554,9 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                     ...(existing?.skills ? { skills: [...existing.skills] } : {}),
                     ...(mcp.length > 0 ? { mcp } : {}),
                 },
+                ...(!existing && persona && persona.state !== 'hired' && base.id === persona.id
+                    ? { allowNewId: true }
+                    : {}),
                 // A new lead takes the group it is made in; the leads there are change in the group's dialog.
                 ...(leads
                     ? !existing && groupId

@@ -1,7 +1,8 @@
-import type { ModelRef, PermissionMode } from '@xora/protocol';
+import type { Effort, ModelRef, PermissionMode } from '@xora/protocol';
 import { useEffect, useState } from 'react';
 import { host } from '../host.ts';
 import { attempt, selectThread, useApp, useStrings } from '../store.ts';
+import { effortsOf, startingEffort } from '../thinking.ts';
 import { ConversationArt } from './Art.tsx';
 import { Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
@@ -32,6 +33,14 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
     const [location, setLocation] = useState<'local' | 'worktree'>('local');
     const [model, setModel] = useState(settings?.defaultModel ? key(settings.defaultModel) : '');
     const [mode, setMode] = useState<PermissionMode>(settings?.defaultMode ?? 'ask');
+    // The thinking level (thinking.ts): what is picked here, else the user's default, else the model's; only what
+    // the model offers.
+    const [effort, setEffort] = useState<Effort | ''>('');
+    const chosen = models.find(
+        (option) => key({ connectionId: option.connectionId, model: option.model.id }) === model,
+    );
+    const efforts = effortsOf(chosen?.model.reasoning);
+    const effortValue = startingEffort(chosen?.model.reasoning, settings?.defaultEffort, effort);
     const [text, setText] = useState('');
     // `@member` hands the first message to a member (06 §19); only Xora's own engine hands work on.
     const mention = useMemberMention(text, setText);
@@ -82,7 +91,14 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
         const thread = await attempt(() =>
             host.call(
                 'thread.create',
-                { projectId, location, mode, engine, ...(ref && engine === 'xora' ? { model: ref } : {}) },
+                {
+                    projectId,
+                    location,
+                    mode,
+                    engine,
+                    ...(ref && engine === 'xora' ? { model: ref } : {}),
+                    ...(ref && engine === 'xora' && effortValue ? { effort: effortValue } : {}),
+                },
                 { timeoutMs: 120_000 },
             ),
         );
@@ -144,6 +160,15 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
                     />
                     {engine === 'xora' && !best && options.length > 0 && (
                         <Select compact label={s.thread.model} value={model} options={options} onChange={setModel} />
+                    )}
+                    {engine === 'xora' && !best && efforts.length > 1 && (
+                        <Select
+                            compact
+                            label={s.composer.effortTitle}
+                            value={effortValue ?? ''}
+                            options={efforts.map((item) => ({ value: item, label: s.efforts[item] }))}
+                            onChange={setEffort}
+                        />
                     )}
                     {isRepo && !best && (
                         <Select

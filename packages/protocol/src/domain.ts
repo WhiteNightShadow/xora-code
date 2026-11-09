@@ -1047,6 +1047,22 @@ export const MemberStatsSchema = z.object({
 });
 export type MemberStats = z.infer<typeof MemberStatsSchema>;
 
+/** A built-in member there is to hire (19 §15): one of the roster's, or one only a team template has. */
+export const PersonaSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    role: z.string(),
+    category: z.string().optional(),
+    tier: z.string(),
+    mode: PermissionModeSchema,
+    description: z.string().optional(),
+    prompt: z.string(),
+    /** `hired`: in the organization (`groupId`: where); `removed`: a built-in the user deleted; `available`: neither. */
+    state: z.enum(['available', 'hired', 'removed']),
+    groupId: z.string().optional(),
+});
+export type Persona = z.infer<typeof PersonaSchema>;
+
 /**
  * The report for whoever ordered a run (06 §11): what came of it, what is wrong, what to do next, without the
  * steps. Written once the run is over.

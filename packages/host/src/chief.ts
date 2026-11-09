@@ -541,7 +541,8 @@ export class ChiefService {
             engine: 'xora',
             model: pick.ref,
             mode: 'plan',
-            effort: pick.effort,
+            // The user's own conversation: the thinking level they set for new conversations, not the tier's.
+            effort: this.#deps.settings.get().defaultEffort,
             extra: { role: CHIEF_ROLE },
         });
         turns.setHostTools(thread.id, this.#provider(thread.id));

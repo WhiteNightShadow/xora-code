@@ -1,10 +1,12 @@
 import { useEffect } from 'react';
 import { ChiefHome } from './components/ChiefView.tsx';
+import { ConfirmHost } from './components/Confirm.tsx';
 import { DispatchDialog } from './components/MembersView.tsx';
 import { NewThreadPage } from './components/NewThreadDialog.tsx';
 import { TeamOrgPage } from './components/OrgView.tsx';
 import { Spinner } from './components/primitives.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
+import { TalentMarketPage } from './components/Talent.tsx';
 import { TeamBoard, TeamStartDialog, TeamView } from './components/TeamView.tsx';
 import { ThreadView } from './components/ThreadView.tsx';
 import { Welcome } from './components/Welcome.tsx';
@@ -45,6 +47,7 @@ export function App() {
     const teamsFor = useApp((state) => state.teamsFor);
     const workflowDraftFor = useApp((state) => state.workflowDraftFor);
     const membersOpen = useApp((state) => state.membersOpen);
+    const marketOpen = useApp((state) => state.marketOpen);
     const dispatchTo = useApp((state) => state.dispatchTo);
     const chiefOpen = useApp((state) => state.chiefOpen);
     // With a project and a model the home is the chief assistant (06 §23); before that, the first steps.
@@ -90,8 +93,12 @@ export function App() {
                 ) : teamsFor ? (
                     <TeamBoard key={teamsFor} projectId={teamsFor} />
                 ) : membersOpen ? (
-                    // 19 §11: the organization tree; a member opens in a panel beside it.
-                    <TeamOrgPage />
+                    // 19 §11: the organization tree; a member opens in a panel beside it. 19 §15: the talent market.
+                    marketOpen ? (
+                        <TalentMarketPage />
+                    ) : (
+                        <TeamOrgPage />
+                    )
                 ) : chiefOpen ? (
                     <ChiefHome />
                 ) : split.length > 1 ? (
@@ -116,6 +123,7 @@ export function App() {
             {dispatchTo && <DispatchDialog key={dispatchTo} memberId={dispatchTo} />}
             {!connected && <div className="banner">{s.app.disconnected}</div>}
             <Toasts />
+            <ConfirmHost />
         </div>
     );
 }
