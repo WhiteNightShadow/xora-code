@@ -388,6 +388,8 @@ try {
     await step(page, '新建对话直接在主区域里写，不弹框');
     await page.locator('.new-thread').getByRole('button', { name: '发送', exact: true }).click();
     await page.getByRole('button', { name: '允许一次' }).waitFor();
+    // The card waits on the user: the conversation is in the inbox.
+    await page.locator('.inbox__count', { hasText: '1' }).waitFor();
     await step(page, '出现审批卡片');
     if ((await readFile(path.join(repo, 'hello.txt'), 'utf8')) !== 'hello\n') {
         throw new Error('the file changed before approval');
@@ -398,6 +400,9 @@ try {
     if ((await readFile(path.join(repo, 'hello.txt'), 'utf8')) !== 'hello world\n') {
         throw new Error('the approved edit was not applied');
     }
+    // Work that finished is not something to handle (03 §4): its row is marked for review, and the inbox is empty.
+    await page.locator('.thread-row .mark--review').waitFor();
+    await page.locator('.inbox').waitFor({ state: 'detached' });
     await step(page, '批准后文件被修改并显示改动卡片');
 
     await page.locator('.changes-card').click();
@@ -796,7 +801,8 @@ try {
     await page.locator('.thread-header h1', { hasText: '总助手：' }).waitFor();
     // The conversation is marked as the chief's and listed under its entry, not among the project's conversations.
     await page.locator('.thread-header__chief').waitFor();
-    await page.locator('.sidebar__run', { hasText: '总助手：' }).waitFor();
+    const chiefRow = page.locator('.sidebar__chief-threads .thread-row', { hasText: '总助手：' });
+    await chiefRow.waitFor();
     const delegation = page.locator('.delegation', { hasText: '侦察' }).first();
     await delegation.waitFor();
     await step(page, '总助手把活派给成员，对话里有跟进卡片');
@@ -806,6 +812,22 @@ try {
     await delegation.locator('.delegation__open').click();
     await page.locator('.thread-header .member-chip', { hasText: '侦察' }).waitFor();
     await step(page, '卡片能打开成员的对话');
+    // The chief's conversations are archived and brought back like a project's: from the row's menu, found again on
+    // the chief's home, and restored from the conversation's own menu.
+    await chiefRow.hover();
+    await chiefRow.getByRole('button', { name: '更多', exact: true }).click();
+    // The whole menu shows over what is below it: its last item can be clicked too.
+    await chiefRow.getByRole('button', { name: '删除', exact: true }).click({ trial: true });
+    await chiefRow.getByRole('button', { name: '归档', exact: true }).click();
+    await chiefRow.waitFor({ state: 'detached' });
+    await page.locator('.sidebar__nav', { hasText: '总助手' }).click();
+    await page.locator('.chief-home__archived', { hasText: '已归档 (1)' }).click();
+    await page.locator('.chief-home__row.is-archived', { hasText: '总助手：' }).click();
+    await page.locator('.thread-header__chief').waitFor();
+    await page.locator('.thread-header').getByRole('button', { name: '更多', exact: true }).click();
+    await page.getByRole('button', { name: '取消归档', exact: true }).click();
+    await chiefRow.waitFor();
+    await step(page, '总助手的对话能归档，也能从它的首页找回来');
     // 19 §15: the talent market lists every built-in persona, searchable; one is hired into an organization from it.
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
     await page.getByRole('tab', { name: '人才市场' }).click();

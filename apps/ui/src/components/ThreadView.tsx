@@ -19,6 +19,7 @@ import {
 import { format } from '../strings.ts';
 import { type TurnView, visibleItems } from '../timeline.ts';
 import { ConversationArt } from './Art.tsx';
+import { confirmDialog } from './Confirm.tsx';
 import { ContextMeter, EffortPicker, ModelPicker, ModePicker, Popover } from './Controls.tsx';
 import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
 import { Icon, type IconName } from './Icon.tsx';
@@ -278,6 +279,32 @@ function Header({ thread }: { thread: ThreadMeta }) {
                             >
                                 <Icon name="panel" size={14} />{' '}
                                 {split.includes(thread.id) ? s.location.unsplit : s.location.split}
+                            </button>
+                            {/* Here too, for the conversations no project list holds: the chief's (06 §23). */}
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    close();
+                                    void attempt(() =>
+                                        host.call('thread.update', { threadId: thread.id, archived: !thread.archived }),
+                                    );
+                                }}
+                            >
+                                <Icon name="archive" size={14} />{' '}
+                                {thread.archived ? s.sidebar.unarchive : s.sidebar.archive}
+                            </button>
+                            <button
+                                type="button"
+                                className="is-danger"
+                                disabled={thread.status === 'running' || thread.status === 'awaiting_approval'}
+                                onClick={async () => {
+                                    close();
+                                    if (await confirmDialog(s.sidebar.confirmDelete)) {
+                                        void attempt(() => host.call('thread.delete', { threadId: thread.id }));
+                                    }
+                                }}
+                            >
+                                <Icon name="trash" size={14} /> {s.sidebar.delete}
                             </button>
                         </div>
                     )}

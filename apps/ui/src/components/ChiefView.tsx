@@ -40,6 +40,11 @@ export function ChiefHome() {
         .filter((thread) => isChief(thread) && !thread.archived)
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .slice(0, LISTED);
+    // Archived ones are only here: a project's list never holds the chief's conversations.
+    const archived = Object.values(threads)
+        .filter((thread) => isChief(thread) && thread.archived)
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+    const [showArchived, setShowArchived] = useState(false);
     const underway = [
         ...Object.values(teamRuns)
             .filter((run) => !TEAM_ENDED.includes(run.status))
@@ -193,7 +198,7 @@ export function ChiefHome() {
                         </button>
                     )}
                 </section>
-                {history.length > 0 && (
+                {(history.length > 0 || archived.length > 0) && (
                     <section className="chief-home__section">
                         <h3>{s.chief.history}</h3>
                         {history.map((thread) => (
@@ -209,6 +214,29 @@ export function ChiefHome() {
                                 {thread.unread && <span className="chief-home__dot" />}
                             </button>
                         ))}
+                        {archived.length > 0 && (
+                            <button
+                                type="button"
+                                className="chief-home__archived"
+                                aria-expanded={showArchived}
+                                onClick={() => setShowArchived(!showArchived)}
+                            >
+                                {s.sidebar.archived} ({archived.length})
+                            </button>
+                        )}
+                        {showArchived &&
+                            archived.map((thread) => (
+                                <button
+                                    key={thread.id}
+                                    type="button"
+                                    className="chief-home__row is-archived"
+                                    onClick={() => void selectThread(thread.id)}
+                                >
+                                    <Icon name="archive" size={13} />
+                                    <span className="chief-home__row-title">{thread.title}</span>
+                                    <span className="chief-home__row-meta">{relativeTime(thread.updatedAt)}</span>
+                                </button>
+                            ))}
                     </section>
                 )}
             </div>

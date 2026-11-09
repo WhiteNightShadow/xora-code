@@ -33,7 +33,9 @@ function StatusMark({ thread }: { thread: ThreadMeta }) {
     return <span className="mark" />;
 }
 
-function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean }) {
+/** One conversation: its mark, title and cost or age, with rename, pin, archive and delete behind "⋯". `project`: its
+ * project's name, when the list it is in spans several. */
+function ThreadRow({ thread, selected, project }: { thread: ThreadMeta; selected: boolean; project?: string }) {
     const s = useStrings();
     const member = useApp((state) => memberOf(thread, state.members));
     const [menu, setMenu] = useState(false);
@@ -78,6 +80,7 @@ function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean
                     {thread.title}
                 </span>
                 <span className="thread-row__meta">
+                    {project ? `${project} · ` : ''}
                     {thread.cost && thread.cost.amount > 0 ? formatMoney(thread.cost) : relativeTime(thread.updatedAt)}
                 </span>
             </button>
@@ -275,7 +278,7 @@ function ChiefNav() {
     const selectedThreadId = useApp((state) => (state.chiefOpen ? undefined : state.selectedThreadId));
     const recent = Object.values(threads)
         .filter((thread) => isChief(thread) && !thread.archived)
-        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
         .slice(0, NAV_RUNS);
     const several = projects.length > 1;
     return (
@@ -291,21 +294,21 @@ function ChiefNav() {
                 </button>
                 <IconButton icon="plus" label={s.chief.newChat} onClick={() => openChief(true)} />
             </div>
-            {recent.map((thread) => (
-                <button
-                    key={thread.id}
-                    type="button"
-                    className={`run-row sidebar__run${selectedThreadId === thread.id ? ' is-selected' : ''}`}
-                    onClick={() => void selectThread(thread.id)}
-                >
-                    <span className="thread-row__title">{thread.title}</span>
-                    <span className="thread-row__meta">
-                        {several ? `${projects.find((project) => project.id === thread.projectId)?.name ?? ''} · ` : ''}
-                        {relativeTime(thread.updatedAt)}
-                    </span>
-                    {thread.unread && <span className="dot-badge" />}
-                </button>
-            ))}
+            {recent.length > 0 && (
+                <div className="sidebar__chief-threads">
+                    {/* The same rows as a project's, so they can be renamed, pinned, archived and deleted alike. */}
+                    {recent.map((thread) => (
+                        <ThreadRow
+                            key={thread.id}
+                            thread={thread}
+                            selected={selectedThreadId === thread.id}
+                            {...(several
+                                ? { project: projects.find((project) => project.id === thread.projectId)?.name ?? '' }
+                                : {})}
+                        />
+                    ))}
+                </div>
+            )}
         </>
     );
 }
@@ -398,12 +401,14 @@ export function Sidebar() {
         return groups;
     }, [threadMap]);
 
-    // A subagent's failure goes back to its parent's agent; its approvals still need the user.
+    // What waits on the user: a card to approve, or a failure. Work that finished with changes is not it (03 §4):
+    // its row carries the review mark, and the member or chief who did it reports back. A subagent's failure goes
+    // back to its parent's agent, a team member's or workflow step's to its run; their approvals still need the user.
     const inbox = Object.values(threadMap).filter(
         (thread) =>
             !thread.archived &&
             (thread.status === 'awaiting_approval' ||
-                (!thread.parent && (thread.needsReview || thread.status === 'failed'))),
+                (thread.status === 'failed' && !thread.parent && !thread.teamRunId && !thread.workflowRunId)),
     );
 
     const search = async (text: string) => {

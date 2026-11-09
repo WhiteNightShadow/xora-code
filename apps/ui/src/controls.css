@@ -888,6 +888,15 @@
     margin-left: auto;
 }
 
+.menu-list button.is-danger:not(:disabled),
+.menu-list button.is-danger:not(:disabled) svg {
+    color: var(--xk-error);
+}
+
+.menu-list button.is-danger:hover:not(:disabled) {
+    background: var(--xk-error-subtle);
+}
+
 .menu-list .popover__title:not(:first-child) {
     margin-top: 4px;
     padding-top: 9px;

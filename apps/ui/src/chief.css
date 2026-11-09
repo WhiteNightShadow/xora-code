@@ -48,6 +48,22 @@
     font-size: var(--xk-text-xs);
 }
 
+/* The chief's conversations under its entry: a project's rows, set in like the runs. */
+.sidebar__chief-threads {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin: 0 10px 0 22px;
+}
+
+.sidebar__chief-threads .thread-row__main {
+    padding-left: 10px;
+}
+
+.sidebar__chief-threads .thread-row__title {
+    font-size: var(--xk-text-xs);
+}
+
 /* Home ------------------------------------------------------------------------------------------------- */
 
 .chief-home {
@@ -241,6 +257,31 @@
     height: 7px;
     border-radius: 50%;
     background: var(--xk-accent);
+}
+
+.chief-home__row.is-archived {
+    color: var(--xk-text-muted);
+}
+
+.chief-home__row.is-archived svg {
+    color: var(--xk-text-faint);
+}
+
+.chief-home__archived {
+    align-self: flex-start;
+    margin-top: var(--xk-space-1);
+    padding: 4px 10px;
+    border: 0;
+    border-radius: var(--xk-radius-sm);
+    background: none;
+    color: var(--xk-text-faint);
+    font-size: var(--xk-text-xs);
+    cursor: pointer;
+    transition: color var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.chief-home__archived:hover {
+    color: var(--xk-text);
 }
 
 /* Cards of work handed on --------------------------------------------------------------------------------- */
