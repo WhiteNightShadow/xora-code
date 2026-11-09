@@ -335,6 +335,13 @@ function farReach(word: ShellWord, context: Context): boolean {
         value = fixed === '' ? '.' : fixed;
     }
     if (WINDOWS_SYSTEM.test(value)) return true;
+    // A POSIX absolute path names the same places on every platform (`ssh prod 'rm -rf /var/www'` runs there),
+    // and resolved on Windows it would gain a drive letter and match none of them.
+    if (value.startsWith('/')) {
+        const posix = path.posix.normalize(value).replace(/\/+$/, '') || '/';
+        if (posix === '/' || path.posix.dirname(posix) === '/') return true;
+        if (SYSTEM_DIRS.some((dir) => posix === dir || path.posix.dirname(posix) === dir)) return true;
+    }
     const target = path.resolve(resolveToolPath(context.cwd, value, context.home));
     const home = path.resolve(context.home);
     const root = path.parse(target).root;
