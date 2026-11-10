@@ -98,5 +98,6 @@ describe('prompt directory', () => {
         const system = textOf(body.messages.find((message) => message.role === 'system')?.content);
         expect(system).toContain('命令按bash写');
         expect(system).not.toContain('命令按zsh写');
-    });
+        // A turn of the real engine: past five seconds on a slow machine (Windows CI, 7.4).
+    }, 60_000);
 });

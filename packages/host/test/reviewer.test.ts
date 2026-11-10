@@ -120,7 +120,8 @@ describe('the supervisor reviews approvals', () => {
         );
         expect(rows.filter((row) => row.path === 'review').map((row) => row.member)).toEqual([boss.id]);
         expect(rows.filter((row) => row.path !== 'review').every((row) => row.member === member.id)).toBe(true);
-    });
+        // A member's turn and its supervisor's review: past five seconds on a slow machine (Windows CI, 6.1).
+    }, 60_000);
 
     it('allows a command the task needs, without the user, and records why', async () => {
         agentRuns('touch made.txt', () => '{"decision":"allow","reason":"建文件是任务要的"}');
