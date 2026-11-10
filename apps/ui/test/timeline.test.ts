@@ -1,6 +1,15 @@
 import type { EventEnvelope } from '@xora/protocol';
 import { describe, expect, it } from 'vitest';
-import { applyDelta, applyEvent, latestPlan, viewFromSnapshot, visibleItems } from '../src/timeline.ts';
+import {
+    applyDelta,
+    applyEvent,
+    latestPlan,
+    latestPlanOf,
+    planProgress,
+    type TurnView,
+    viewFromSnapshot,
+    visibleItems,
+} from '../src/timeline.ts';
 
 function envelope(seq: number, kind: string, payload: unknown, turnId?: string): EventEnvelope {
     return { threadId: 't1', seq, ts: seq, kind, payload, ...(turnId ? { turnId } : {}) };
@@ -213,5 +222,67 @@ describe('subagent cards', () => {
             } as const,
         ];
         expect(visibleItems(items).map((item) => item.id)).toEqual(['d1']);
+    });
+});
+
+describe('the plan (03 §4)', () => {
+    const plan = (turnId: string, statuses: Array<'pending' | 'in_progress' | 'completed'>) =>
+        ({
+            id: `plan-${turnId}`,
+            turnId,
+            ts: 1,
+            type: 'plan',
+            entries: statuses.map((status, index) => ({ content: `第${index + 1}步`, status })),
+        }) as const;
+    const todoCall = (id: string) =>
+        ({
+            id,
+            turnId: 'u1',
+            ts: 1,
+            type: 'tool_call',
+            toolCallId: `c-${id}`,
+            name: 'todo',
+            title: 'Update todos (2)',
+            kind: 'think',
+            status: 'completed',
+        }) as const;
+    const turn = (turnId: string, items: TurnView['items'], status: TurnView['status'] = 'completed'): TurnView => ({
+        turnId,
+        input: { id: `in-${turnId}`, turnId, ts: 1, type: 'user_message', text: '', attachments: [] },
+        model: null,
+        mode: 'ask',
+        effort: 'high',
+        startedAt: 1,
+        items,
+        status,
+    });
+
+    it('shows each todo call where it was made, not the plan item, which an engine without them still shows', () => {
+        const items = [todoCall('t1'), plan('u1', ['in_progress', 'pending']), todoCall('t2')];
+        expect(visibleItems(items).map((item) => item.id)).toEqual(['t1', 't2']);
+        const other = [plan('u1', ['in_progress'])];
+        expect(visibleItems(other)).toBe(other);
+    });
+
+    it('finds the latest plan and the turn it is in, live only while that turn runs', () => {
+        const older = turn('u1', [plan('u1', ['completed', 'in_progress'])]);
+        const latest = turn('u2', [], 'running');
+        expect(latestPlanOf([older, latest])).toMatchObject({ turn: older, plan: { id: 'plan-u1' }, live: false });
+        expect(latestPlanOf([latest])).toBeUndefined();
+        const working = turn('u2', [plan('u2', ['in_progress'])], 'running');
+        expect(latestPlanOf([older, working])).toMatchObject({ turn: working, live: true });
+        // A turn gone back from is out of the agent's context: its plan does not count, nor does it count as latest.
+        const rewound = { ...turn('u2', [plan('u2', ['in_progress'])]), rewound: true };
+        expect(latestPlanOf([older, rewound])).toMatchObject({ turn: older, live: false });
+        expect(latestPlanOf([rewound])).toBeUndefined();
+    });
+
+    it('says how far along a plan is and the step in hand, or where it stopped', () => {
+        const entries = plan('u1', ['completed', 'in_progress', 'pending']).entries;
+        expect(planProgress(entries, true)).toEqual({ done: 1, total: 3, step: '第2步', state: 'now' });
+        expect(planProgress(entries, false)).toEqual({ done: 1, total: 3, step: '第2步', state: 'stopped' });
+        const waiting = plan('u1', ['completed', 'pending']).entries;
+        expect(planProgress(waiting, true)).toEqual({ done: 1, total: 2, step: '第2步', state: 'next' });
+        expect(planProgress(plan('u1', ['completed']).entries, true)).toEqual({ done: 1, total: 1, state: 'done' });
     });
 });

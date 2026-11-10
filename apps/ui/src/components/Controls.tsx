@@ -1,14 +1,14 @@
-import type { Effort, PermissionMode, ThreadMeta } from '@xora/protocol';
+import type { Effort, ModelRef, PermissionMode, ThreadMeta } from '@xora/protocol';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { host } from '../host.ts';
 import { attempt, openSettings, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { effortsOf } from '../thinking.ts';
 import type { TurnView } from '../timeline.ts';
 import { Icon, type IconName } from './Icon.tsx';
 import { formatMoney, formatTokens } from './primitives.tsx';
 
 export const MODES: PermissionMode[] = ['ask', 'auto_edit', 'plan', 'full'];
-const EFFORTS: Effort[] = ['off', 'low', 'medium', 'high', 'max'];
 
 export const MODE_ICONS: Record<PermissionMode, IconName> = {
     ask: 'shield',
@@ -174,7 +174,23 @@ function modelKey(option: { connectionId: string; model: string }): string {
     return `${option.connectionId}::${option.model}`;
 }
 
-export function ModelPicker({ thread }: { thread: ThreadMeta }) {
+/**
+ * The model to work with: shown as it is and changed with `onChange`, so the same control serves a conversation and
+ * a page that starts one.
+ */
+export function ModelChooser({
+    value,
+    onChange,
+    placement,
+    empty,
+}: {
+    value: ModelRef | undefined;
+    onChange: (model: ModelRef) => void;
+    /** Where its list opens: above the control unless it sits high on the page. */
+    placement?: 'up' | 'down';
+    /** What it says with no model chosen. */
+    empty?: string;
+}) {
     const s = useStrings();
     const models = useApp((state) => state.models);
     if (models.length === 0) {
@@ -185,19 +201,19 @@ export function ModelPicker({ thread }: { thread: ThreadMeta }) {
         );
     }
     const current = models.find(
-        (option) =>
-            thread.model && option.connectionId === thread.model.connectionId && option.model.id === thread.model.model,
+        (option) => value && option.connectionId === value.connectionId && option.model.id === value.model,
     );
     return (
         <Popover
             label={s.composer.modelTitle}
             className="picker"
             triggerClassName="picker__trigger"
+            {...(placement ? { placement } : {})}
             trigger={
                 <>
                     <Icon name="sparkle" size={13} />
                     <span className="picker__value">
-                        {current?.model.name ?? thread.model?.model ?? s.thread.noModel}
+                        {current?.model.name ?? value?.model ?? empty ?? s.thread.noModel}
                     </span>
                     <Icon name="chevronDown" size={12} className="picker__chevron" />
                 </>
@@ -208,18 +224,17 @@ export function ModelPicker({ thread }: { thread: ThreadMeta }) {
                     <div className="popover__title">{s.composer.modelTitle}</div>
                     <div className="popover__scroll">
                         <Choices
-                            value={thread.model ? modelKey(thread.model) : undefined}
+                            value={value ? modelKey(value) : undefined}
                             options={models.map((option) => ({
                                 value: modelKey({ connectionId: option.connectionId, model: option.model.id }),
                                 label: option.model.name,
                                 hint: option.connectionName,
                                 icon: 'sparkle' as const,
                             }))}
-                            onPick={(value) => {
+                            onPick={(picked) => {
                                 close();
-                                const [connectionId, model] = value.split('::');
-                                if (connectionId && model)
-                                    void updateThread(thread, { model: { connectionId, model } });
+                                const [connectionId, model] = picked.split('::');
+                                if (connectionId && model) onChange({ connectionId, model });
                             }}
                         />
                     </div>
@@ -239,29 +254,49 @@ export function ModelPicker({ thread }: { thread: ThreadMeta }) {
     );
 }
 
-/** Thinking effort, for models that have it. */
-export function EffortPicker({ thread }: { thread: ThreadMeta }) {
+export function ModelPicker({ thread }: { thread: ThreadMeta }) {
+    return (
+        <ModelChooser
+            value={thread.model ?? undefined}
+            onChange={(model) => {
+                if (model.connectionId !== thread.model?.connectionId || model.model !== thread.model?.model) {
+                    void updateThread(thread, { model });
+                }
+            }}
+        />
+    );
+}
+
+/** The thinking level, for a model that has one to choose (thinking.ts); nothing for one that has not. */
+export function EffortChooser({
+    model,
+    value,
+    onChange,
+    placement,
+}: {
+    model: ModelRef | undefined;
+    value: Effort | undefined;
+    onChange: (effort: Effort) => void;
+    placement?: 'up' | 'down';
+}) {
     const s = useStrings();
     const models = useApp((state) => state.models);
     const current = models.find(
-        (option) =>
-            thread.model && option.connectionId === thread.model.connectionId && option.model.id === thread.model.model,
+        (option) => model && option.connectionId === model.connectionId && option.model.id === model.model,
     );
-    if (!current || current.model.reasoning.mode === 'none') return null;
-    const efforts = EFFORTS.filter((effort) =>
-        effort === 'off' ? current.model.reasoning.mode === 'toggle' : current.model.reasoning.efforts.includes(effort),
-    );
+    const efforts = effortsOf(current?.model.reasoning);
     if (efforts.length < 2) return null;
-    const value = efforts.includes(thread.effort) ? thread.effort : undefined;
+    const shown = value && efforts.includes(value) ? value : undefined;
     return (
         <Popover
             label={s.composer.effortTitle}
             className="picker"
             triggerClassName="picker__trigger"
+            {...(placement ? { placement } : {})}
             trigger={
                 <>
                     <Icon name="brain" size={13} />
-                    {value ? s.efforts[value] : '—'}
+                    {shown ? s.efforts[shown] : '—'}
                     <Icon name="chevronDown" size={12} className="picker__chevron" />
                 </>
             }
@@ -270,7 +305,7 @@ export function EffortPicker({ thread }: { thread: ThreadMeta }) {
                 <>
                     <div className="popover__title">{s.composer.effortTitle}</div>
                     <Choices
-                        value={value}
+                        value={shown}
                         options={efforts.map((effort) => ({
                             value: effort,
                             label: s.efforts[effort],
@@ -278,12 +313,25 @@ export function EffortPicker({ thread }: { thread: ThreadMeta }) {
                         }))}
                         onPick={(effort) => {
                             close();
-                            if (effort !== thread.effort) void updateThread(thread, { effort });
+                            onChange(effort);
                         }}
                     />
                 </>
             )}
         </Popover>
+    );
+}
+
+/** Thinking effort, for models that have it. */
+export function EffortPicker({ thread }: { thread: ThreadMeta }) {
+    return (
+        <EffortChooser
+            model={thread.model ?? undefined}
+            value={thread.effort}
+            onChange={(effort) => {
+                if (effort !== thread.effort) void updateThread(thread, { effort });
+            }}
+        />
     );
 }
 

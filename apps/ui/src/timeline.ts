@@ -159,9 +159,15 @@ export function applyDelta(
     upsert(turn, { id: delta.itemId, turnId: delta.turnId, ts: Date.now(), type: delta.stream, text: delta.text });
 }
 
+/** Whether an item is a call of the todo tool: each one is a version of the plan (03 §4). */
+export function isTodoCall(item: Item): item is ItemOf<'tool_call'> {
+    return item.type === 'tool_call' && (item.name === 'todo' || item.display?.kind === 'todo');
+}
+
 /**
  * The items a turn shows: a tool call that started a subagent, or that the chief handed work on with, is shown by
- * that card instead.
+ * that card instead. A turn whose plan comes from todo calls shows those, each where it was made, not the plan item
+ * (it stays where the plan was first written, and the composer shows the latest version of it).
  */
 export function visibleItems(items: readonly Item[]): readonly Item[] {
     const paired = new Set(
@@ -169,17 +175,54 @@ export function visibleItems(items: readonly Item[]): readonly Item[] {
             (item.type === 'subagent' || item.type === 'delegation') && item.toolCallId ? [item.toolCallId] : [],
         ),
     );
-    return paired.size === 0
+    const todos = items.some(isTodoCall);
+    return paired.size === 0 && !todos
         ? items
-        : items.filter((item) => item.type !== 'tool_call' || !paired.has(item.toolCallId));
+        : items.filter(
+              (item) => !(item.type === 'tool_call' && paired.has(item.toolCallId)) && !(todos && item.type === 'plan'),
+          );
+}
+
+/**
+ * The plan of the latest turn that has one, that turn, and whether its turn is the one running. A turn gone back from
+ * is no longer part of the agent's context, and the engine put its todo list back as it was: its plan does not count.
+ */
+export function latestPlanOf(
+    turns: readonly TurnView[],
+): { readonly plan: ItemOf<'plan'>; readonly turn: TurnView; readonly live: boolean } | undefined {
+    const kept = turns.filter((turn) => !turn.rewound);
+    const latest = kept.at(-1);
+    for (let index = kept.length - 1; index >= 0; index--) {
+        const turn = kept[index];
+        const plan = turn?.items.find((item): item is ItemOf<'plan'> => item.type === 'plan');
+        if (turn && plan) return { plan, turn, live: turn === latest && turn.status === 'running' };
+    }
+    return undefined;
 }
 
 /** The plan of the latest turn that has one. */
 export function latestPlan(view: ThreadView | undefined): ItemOf<'plan'> | undefined {
-    if (!view) return undefined;
-    for (let index = view.turns.length - 1; index >= 0; index--) {
-        const plan = view.turns[index]?.items.find((item): item is ItemOf<'plan'> => item.type === 'plan');
-        if (plan) return plan;
-    }
-    return undefined;
+    return view ? latestPlanOf(view.turns)?.plan : undefined;
+}
+
+/**
+ * What the plan above the composer says: how far along it is, and the step in hand (`now` while the turn runs; the
+ * next one when none is started; where it stopped when the turn is over), or none when every step is done.
+ */
+export function planProgress(
+    entries: ItemOf<'plan'>['entries'],
+    running: boolean,
+): { done: number; total: number; step?: string; state: 'now' | 'next' | 'stopped' | 'done' } {
+    const done = entries.filter((entry) => entry.status === 'completed').length;
+    const total = entries.length;
+    if (done === total) return { done, total, state: 'done' };
+    const current = entries.find((entry) => entry.status === 'in_progress');
+    const pending = entries.find((entry) => entry.status === 'pending');
+    const step = (current ?? pending)?.content;
+    return {
+        done,
+        total,
+        ...(step ? { step } : {}),
+        state: !running ? 'stopped' : current ? 'now' : 'next',
+    };
 }

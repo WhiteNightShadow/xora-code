@@ -147,15 +147,22 @@
 .chief-home__bar {
     display: flex;
     align-items: center;
-    gap: var(--xk-space-2);
-    padding: var(--xk-space-2) var(--xk-space-3) var(--xk-space-3);
+    gap: 2px;
+    padding: var(--xk-space-1) var(--xk-space-3) var(--xk-space-3) var(--xk-space-2);
 }
 
-.chief-home__examples {
+.chief-home__spacer {
     flex: 1;
-    min-width: 0;
+}
+
+/* Things to say, under the composer: a click puts one in it. */
+.chief-home__examples {
+    width: 100%;
+    max-width: 720px;
+    margin-top: var(--xk-space-3);
     display: flex;
     flex-wrap: wrap;
+    justify-content: center;
     gap: 6px;
 }
 

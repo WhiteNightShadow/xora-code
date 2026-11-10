@@ -1,14 +1,16 @@
 import type { Attachment, ThreadMeta } from '@xora/protocol';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { host } from '../host.ts';
-import { ItemView } from '../items/ItemView.tsx';
+import { ItemView, PlanList, planLine } from '../items/ItemView.tsx';
 import { memberOf } from '../members.ts';
 import {
     attempt,
+    CHIEF_PANELS,
     isChief,
     openChief,
     openReview,
     openWorkflowBoard,
+    type RightPanel,
     selectThread,
     takeComposerInbox,
     toast,
@@ -17,7 +19,7 @@ import {
     watchThread,
 } from '../store.ts';
 import { format } from '../strings.ts';
-import { type TurnView, visibleItems } from '../timeline.ts';
+import { latestPlanOf, planProgress, type TurnView, visibleItems } from '../timeline.ts';
 import { ConversationArt } from './Art.tsx';
 import { confirmDialog } from './Confirm.tsx';
 import { ContextMeter, EffortPicker, ModelPicker, ModePicker, Popover } from './Controls.tsx';
@@ -47,17 +49,6 @@ function ParentLink({ threadId }: { threadId: string }) {
     );
 }
 
-type PanelName =
-    | 'changes'
-    | 'worktree'
-    | 'compare'
-    | 'plan'
-    | 'trajectory'
-    | 'prompt'
-    | 'terminal'
-    | 'preview'
-    | 'file';
-
 /**
  * The thread's top bar: its title and where it works. The per-message choices (mode, model, thinking, context)
  * sit under the composer; panels and thread actions are in the ⋯ menu.
@@ -86,19 +77,22 @@ function Header({ thread }: { thread: ThreadMeta }) {
                 result.result.status === 'conflicts' ? 'error' : 'success',
             );
     };
-    const panels: Array<{ panel: PanelName; icon: IconName; label: string }> = [
-        { panel: 'changes', icon: 'diff', label: s.panel.changes },
+    // The chief hands work on and changes nothing itself, in no project of its own: none of a project's panels and
+    // actions (changes, working tree, terminal, preview, files, worktrees, goals, distilling) belong to it.
+    const chief = isChief(thread);
+    const panels: Array<{ panel: RightPanel; icon: IconName; label: string }> = [
+        { panel: 'changes' as const, icon: 'diff' as const, label: s.panel.changes },
         ...(project?.git.isRepo
             ? [{ panel: 'worktree' as const, icon: 'pencil' as const, label: s.panel.worktree }]
             : []),
         ...(thread.group ? [{ panel: 'compare' as const, icon: 'chart' as const, label: s.panel.compare }] : []),
-        { panel: 'plan', icon: 'list', label: s.panel.plan },
-        { panel: 'trajectory', icon: 'route', label: s.panel.trajectory },
-        { panel: 'prompt', icon: 'brain', label: s.panel.prompt },
-        { panel: 'terminal', icon: 'terminal', label: s.panel.terminal },
-        { panel: 'preview', icon: 'globe', label: s.panel.preview },
-        { panel: 'file', icon: 'file', label: s.panel.file },
-    ];
+        { panel: 'plan' as const, icon: 'list' as const, label: s.panel.plan },
+        { panel: 'trajectory' as const, icon: 'route' as const, label: s.panel.trajectory },
+        { panel: 'prompt' as const, icon: 'brain' as const, label: s.panel.prompt },
+        { panel: 'terminal' as const, icon: 'terminal' as const, label: s.panel.terminal },
+        { panel: 'preview' as const, icon: 'globe' as const, label: s.panel.preview },
+        { panel: 'file' as const, icon: 'file' as const, label: s.panel.file },
+    ].filter((item) => !chief || CHIEF_PANELS.includes(item.panel));
     const distill = (kind: 'workflow' | 'skill') =>
         void attempt(() => host.call('thread.distill', { threadId: thread.id, kind })).then((created) => {
             if (!created) return;
@@ -130,24 +124,27 @@ function Header({ thread }: { thread: ThreadMeta }) {
                         {thread.title}
                     </h1>
                 )}
-                {isChief(thread) && (
+                {chief && (
                     <span className="thread-header__chief" title={s.chief.subtitle}>
                         <Icon name="sparkle" size={12} /> {s.chief.title}
                     </span>
                 )}
-                <span className="thread-header__project">
-                    {project?.name}
-                    {thread.location.kind === 'worktree'
-                        ? ` · ${s.location.worktree}`
-                        : project?.git.branch
-                          ? ` · ${project.git.branch}`
-                          : ''}
-                </span>
+                {/* A conversation with the chief belongs to no project (06 §23): no project or branch to show. */}
+                {!chief && (
+                    <span className="thread-header__project">
+                        {project?.name}
+                        {thread.location.kind === 'worktree'
+                            ? ` · ${s.location.worktree}`
+                            : project?.git.branch
+                              ? ` · ${project.git.branch}`
+                              : ''}
+                    </span>
+                )}
                 {member && <MemberChip member={member} />}
                 {thread.parent && <ParentLink threadId={thread.parent.threadId} />}
             </div>
             <div className="thread-header__controls">
-                {isChief(thread) && (
+                {chief && (
                     <button
                         type="button"
                         className="button button--small"
@@ -189,7 +186,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
                                 </button>
                             ))}
                             <div className="popover__title">{s.thread.actions}</div>
-                            {project?.git.isRepo && thread.location.kind === 'local' && !thread.parent && (
+                            {!chief && project?.git.isRepo && thread.location.kind === 'local' && !thread.parent && (
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -200,7 +197,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
                                     <Icon name="route" size={14} /> {s.location.toWorktree}
                                 </button>
                             )}
-                            {thread.location.kind === 'worktree' && !thread.parent && (
+                            {!chief && thread.location.kind === 'worktree' && !thread.parent && (
                                 <>
                                     <button
                                         type="button"
@@ -237,35 +234,39 @@ function Header({ thread }: { thread: ThreadMeta }) {
                                     </button>
                                 </>
                             )}
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    close();
-                                    setGoalOpen(true);
-                                }}
-                            >
-                                <Icon name="pin" size={14} /> {s.goal.setGoal}
-                            </button>
-                            <button
-                                type="button"
-                                disabled={thread.turns === 0}
-                                onClick={() => {
-                                    close();
-                                    distill('workflow');
-                                }}
-                            >
-                                <Icon name="bolt" size={14} /> {s.thread.distillWorkflow}
-                            </button>
-                            <button
-                                type="button"
-                                disabled={thread.turns === 0}
-                                onClick={() => {
-                                    close();
-                                    distill('skill');
-                                }}
-                            >
-                                <Icon name="sparkle" size={14} /> {s.thread.distillSkill}
-                            </button>
+                            {!chief && (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            close();
+                                            setGoalOpen(true);
+                                        }}
+                                    >
+                                        <Icon name="pin" size={14} /> {s.goal.setGoal}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={thread.turns === 0}
+                                        onClick={() => {
+                                            close();
+                                            distill('workflow');
+                                        }}
+                                    >
+                                        <Icon name="bolt" size={14} /> {s.thread.distillWorkflow}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={thread.turns === 0}
+                                        onClick={() => {
+                                            close();
+                                            distill('skill');
+                                        }}
+                                    >
+                                        <Icon name="sparkle" size={14} /> {s.thread.distillSkill}
+                                    </button>
+                                </>
+                            )}
                             <button
                                 type="button"
                                 onClick={() => {
@@ -280,32 +281,40 @@ function Header({ thread }: { thread: ThreadMeta }) {
                                 <Icon name="panel" size={14} />{' '}
                                 {split.includes(thread.id) ? s.location.unsplit : s.location.split}
                             </button>
-                            {/* Here too, for the conversations no project list holds: the chief's (06 §23). */}
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    close();
-                                    void attempt(() =>
-                                        host.call('thread.update', { threadId: thread.id, archived: !thread.archived }),
-                                    );
-                                }}
-                            >
-                                <Icon name="archive" size={14} />{' '}
-                                {thread.archived ? s.sidebar.unarchive : s.sidebar.archive}
-                            </button>
-                            <button
-                                type="button"
-                                className="is-danger"
-                                disabled={thread.status === 'running' || thread.status === 'awaiting_approval'}
-                                onClick={async () => {
-                                    close();
-                                    if (await confirmDialog(s.sidebar.confirmDelete)) {
-                                        void attempt(() => host.call('thread.delete', { threadId: thread.id }));
-                                    }
-                                }}
-                            >
-                                <Icon name="trash" size={14} /> {s.sidebar.delete}
-                            </button>
+                            {/* Here too, for the conversations no project list holds: the chief's (06 §23). Only the
+                                user's own: a team's or a workflow's thread belongs to its run, which breaks without it. */}
+                            {userDriven(thread) && (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            close();
+                                            void attempt(() =>
+                                                host.call('thread.update', {
+                                                    threadId: thread.id,
+                                                    archived: !thread.archived,
+                                                }),
+                                            );
+                                        }}
+                                    >
+                                        <Icon name="archive" size={14} />{' '}
+                                        {thread.archived ? s.sidebar.unarchive : s.sidebar.archive}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="is-danger"
+                                        disabled={isBusy(thread)}
+                                        onClick={async () => {
+                                            close();
+                                            if (await confirmDialog(s.sidebar.confirmDelete)) {
+                                                void attempt(() => host.call('thread.delete', { threadId: thread.id }));
+                                            }
+                                        }}
+                                    >
+                                        <Icon name="trash" size={14} /> {s.sidebar.delete}
+                                    </button>
+                                </>
+                            )}
                         </div>
                     )}
                 </Popover>
@@ -708,6 +717,44 @@ function QueuedMessages({ thread, running }: { thread: ThreadMeta; running: bool
     );
 }
 
+/**
+ * The plan of the work, above the composer (03 §4), where the user looks while it runs: how far along it is and the
+ * step in hand, the whole list a click away. It follows the latest version as the agent updates it, and shows while
+ * its turn is the latest one, or while a later turn works on what is left of it.
+ */
+function PlanDock({ turns }: { turns: readonly TurnView[] }) {
+    const s = useStrings();
+    const [open, setOpen] = useState(false);
+    const latest = turns.filter((turn) => !turn.rewound).at(-1);
+    const found = latestPlanOf(turns);
+    if (!latest || !found || found.plan.entries.length === 0) return null;
+    const running = latest.status === 'running';
+    // A plan from an earlier turn is where it stopped until the agent updates it in this one.
+    const { live } = found;
+    const line = planLine(s, found.plan.entries, live);
+    if (found.turn !== latest && !(running && !line.done)) return null;
+    const { done, total } = planProgress(found.plan.entries, live);
+    return (
+        <div className={`plan-dock${line.done ? ' is-done' : ''}`}>
+            <button type="button" className="plan-dock__head" aria-expanded={open} onClick={() => setOpen(!open)}>
+                <Icon name="list" size={13} />
+                <span className="plan-dock__title">{s.plan.title}</span>
+                <span className="plan-dock__count">{line.count}</span>
+                <span className="plan-dock__bar" aria-hidden="true">
+                    <span className="plan-dock__fill" style={{ width: `${(done / total) * 100}%` }} />
+                </span>
+                <span className="plan-dock__now">{line.text}</span>
+                <Icon name="chevronDown" size={12} className={`plan-dock__chevron${open ? ' is-open' : ''}`} />
+            </button>
+            {open && (
+                <div className="plan-dock__list">
+                    <PlanList entries={found.plan.entries} live={live} />
+                </div>
+            )}
+        </div>
+    );
+}
+
 function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnView[] }) {
     const s = useStrings();
     const [text, setText] = useState('');
@@ -914,6 +961,7 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
     };
     return (
         <div className="composer">
+            <PlanDock turns={turns} />
             {(thread.queued?.length ?? 0) > 0 && <QueuedMessages thread={thread} running={running} />}
             {/* The box is not positioned, so the suggestion list still hangs off the composer above it. */}
             <div className="composer__box">
@@ -1035,7 +1083,8 @@ function Composer({ thread, turns }: { thread: ThreadMeta; turns: readonly TurnV
                             onChange={(event) => event.target.files && void addFiles(event.target.files)}
                         />
                     </label>
-                    <ModePicker thread={thread} />
+                    {/* The chief only reads and hands work on (06 §23): no permissions to pick. */}
+                    {!isChief(thread) && <ModePicker thread={thread} />}
                     {/* Other engines pick their own model and thinking. */}
                     {thread.engine === 'xora' && <ModelPicker thread={thread} />}
                     {thread.engine === 'xora' && <EffortPicker thread={thread} />}
@@ -1092,6 +1141,17 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
             element.scrollTop = element.scrollHeight;
         }
     }, [signature]);
+    // The conversation also gets shorter when the composer grows (the plan opening, queued messages, more lines):
+    // the latest stays in view.
+    useEffect(() => {
+        const element = scroller.current;
+        if (!element) return;
+        const observer = new ResizeObserver(() => {
+            if (stick.current) element.scrollTop = element.scrollHeight;
+        });
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, []);
     // biome-ignore lint/correctness/useExhaustiveDependencies: only when entering a thread, not on every update
     useEffect(() => {
         stick.current = true;

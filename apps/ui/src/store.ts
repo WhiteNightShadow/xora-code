@@ -32,6 +32,8 @@ export type RightPanel =
     | 'terminal'
     | 'preview'
     | 'file';
+/** The panels of a conversation with the chief: it hands work on in no project of its own (06 §23). */
+export const CHIEF_PANELS: readonly RightPanel[] = ['plan', 'trajectory', 'prompt'];
 export type SettingsSection =
     | 'general'
     | 'models'
@@ -529,6 +531,9 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         return;
     }
     const thread = threadId ? current.threads[threadId] : undefined;
+    // A conversation with the chief belongs to no project (06 §23): it selects none, and a project's panel left open
+    // from another conversation closes.
+    const chief = isChief(thread);
     set({
         selectedThreadId: threadId,
         teamRunId: undefined,
@@ -539,7 +544,8 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         chiefOpen: false,
         newThreadFor: undefined,
         reviewTurnId: undefined,
-        ...(thread ? { selectedProjectId: thread.projectId } : {}),
+        ...(thread && !chief ? { selectedProjectId: thread.projectId } : {}),
+        ...(chief && current.rightPanel && !CHIEF_PANELS.includes(current.rightPanel) ? { rightPanel: undefined } : {}),
     });
     if (threadId && thread?.unread) {
         await attempt(() => host.call('thread.markRead', { threadId }));

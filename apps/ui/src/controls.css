@@ -65,6 +65,23 @@
     -webkit-app-region: no-drag;
 }
 
+/* While a panel or menu is open, the blank parts drag nothing: where two regions overlap Electron lets the later
+   one win, so one further down the page (the chief's home below its composer, the next project's row below a
+   project's menu) would take the clicks meant for the panel lying over it. */
+.app:has(.popover__panel, [role="menu"])
+    :is(
+        .sidebar__main,
+        .sidebar__bottom,
+        .project__header,
+        .otree,
+        .welcome,
+        .chief-home__hero,
+        .chief-home__grid,
+        .new-thread__body
+    ) {
+    -webkit-app-region: no-drag;
+}
+
 /* Pages without a top bar of their own (the welcome page, the chief's home, the team's pages): their empty top
    drags the window, right across to the window buttons. */
 .main:has(> :is(.welcome, .chief-home, .members)) {

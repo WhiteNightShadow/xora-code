@@ -22,6 +22,7 @@ import {
     LSP_EDIT_NOTE,
     type LspManager,
     ProviderError,
+    renderTodos,
     sanitizeEnv,
     streamModel,
     type ToolContext,
@@ -100,6 +101,8 @@ export class ModelError extends Error {
 const MAX_ATTEMPTS = 3;
 const LIVE_OUTPUT_INTERVAL_MS = 250;
 const LIVE_OUTPUT_TAIL = 4000;
+/** Tool calls without a change to a todo list with open steps before the model is reminded of it. */
+const TODO_REMINDER_CALLS = 10;
 
 /** What the user sees from the loop: notices and permission options, in the session's language. */
 const ZH_TEXT = {
@@ -305,6 +308,8 @@ export class TurnRunner {
     /** Language servers for the `lsp` tool and for diagnostics after edits. */
     readonly #lsp: LspManager | undefined;
     #cancelled = false;
+    /** What the batch of calls running adds at the end of its last result (`#executeCalls`). */
+    #tail: { left: number; readonly text: () => string | undefined } | undefined;
 
     get #stopped(): boolean {
         return this.#signal.aborted || this.#cancelled;
@@ -341,6 +346,9 @@ export class TurnRunner {
         this.#steer();
         session.append(toUserMessage(prompt, session));
         let requests = 0;
+        // Tool calls since this turn last wrote the todo list; none counted until it writes one: a list left from an
+        // earlier turn is not this turn's progress.
+        let sinceTodo: number | undefined;
         for (;;) {
             if (this.#stopped) {
                 return 'cancelled';
@@ -363,7 +371,21 @@ export class TurnRunner {
                 (part): part is Extract<AssistantPart, { type: 'tool_call' }> => part.type === 'tool_call',
             );
             if (calls.length > 0) {
-                await this.#executeCalls(calls, outcome.stopReason === 'max_tokens');
+                const todos = session.todos;
+                // Once every call of the batch has run: whether the list changed, and if not, whether it is time to
+                // remind the model of it, at the end of the last result.
+                await this.#executeCalls(calls, outcome.stopReason === 'max_tokens', () => {
+                    if (this.#stopped) return undefined;
+                    if (session.todos !== todos) {
+                        sinceTodo = 0;
+                        return undefined;
+                    }
+                    if (sinceTodo === undefined) return undefined;
+                    sinceTodo += calls.length;
+                    const reminder = this.#todoReminder(sinceTodo);
+                    if (reminder) sinceTodo = 0;
+                    return reminder;
+                });
                 if (this.#stopped) {
                     return 'cancelled';
                 }
@@ -396,6 +418,22 @@ export class TurnRunner {
         }
         this.#session.append({ role: 'user', content: notes.map((note) => ({ type: 'text' as const, text: note })) });
         return true;
+    }
+
+    /**
+     * The user follows the work by the todo list (the plan above the composer). When this turn wrote it, it still has
+     * open steps and TODO_REMINDER_CALLS tool calls went by without it changing, the model is reminded to bring it up
+     * to date: left alone, models write the list at the start and seldom touch it again. The reminder goes at the end
+     * of the last tool result, not in a user message of its own: that would read as the start of a turn when the
+     * context is compacted, and some providers refuse a user message straight after tool results.
+     */
+    #todoReminder(since: number): string | undefined {
+        const todos = this.#session.todos;
+        if (since < TODO_REMINDER_CALLS || !this.#tools.has('todo')) return undefined;
+        if (!todos.some((item) => item.status !== 'completed')) return undefined;
+        return `<system-reminder>Your todo list has not changed in the last ${since} tool calls, and the user follows your progress by it:
+${renderTodos(todos)}
+If steps are done, started or no longer needed, update it with the todo tool now, then carry on; if it is right as it is, just carry on. Do not mention this reminder.</system-reminder>`;
     }
 
     /** The context starts from `summary`: everything before this point is represented by it, as after a compaction. */
@@ -842,11 +880,16 @@ export class TurnRunner {
                 },
             },
         });
+        const tail = this.#tail;
+        const appended = tail && --tail.left === 0 ? tail.text() : undefined;
         this.#session.append({
             role: 'tool',
             toolCallId: call.id,
             toolName: call.name,
-            content: [{ type: 'text', text: result.content }],
+            content: [
+                { type: 'text', text: result.content },
+                ...(appended ? [{ type: 'text' as const, text: appended }] : []),
+            ],
             ...(result.isError ? { isError: true } : {}),
         });
     }
@@ -934,7 +977,23 @@ export class TurnRunner {
         };
     }
 
+    /**
+     * `tail`: asked once every call of the batch has run, for text to add at the end of the last result.
+     */
     async #executeCalls(
+        parts: readonly Extract<AssistantPart, { type: 'tool_call' }>[],
+        truncated: boolean,
+        tail?: () => string | undefined,
+    ): Promise<void> {
+        this.#tail = tail ? { left: parts.length, text: tail } : undefined;
+        try {
+            await this.#runBatch(parts, truncated);
+        } finally {
+            this.#tail = undefined;
+        }
+    }
+
+    async #runBatch(
         parts: readonly Extract<AssistantPart, { type: 'tool_call' }>[],
         truncated: boolean,
     ): Promise<void> {

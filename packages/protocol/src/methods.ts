@@ -643,10 +643,19 @@ export const methods = {
     },
     /**
      * A new conversation with the chief assistant (06 §23), the one place the user talks to: it answers, or hands
-     * the work to a member, a team or a workflow in any project. `projectId` is the project it starts in.
+     * the work to a member, a team or a workflow in any project. It belongs to no project: `projectId` only says
+     * where it runs (whose files it reads), the project the user worked in last when left out. `model` and `effort`:
+     * what the user picked, else the default model and their thinking level for new conversations.
      */
     'chief.start': {
-        params: z.object({ projectId: IdSchema, text: z.string().min(1).max(50_000) }).strict(),
+        params: z
+            .object({
+                projectId: IdSchema.optional(),
+                text: z.string().min(1).max(50_000),
+                model: ModelRefSchema.optional(),
+                effort: EffortSchema.optional(),
+            })
+            .strict(),
         result: ThreadMetaSchema,
     },
     'member.memory': {

@@ -7,7 +7,7 @@ import { errorMessage, host } from '../host.ts';
 import { PlanList } from '../items/ItemView.tsx';
 import { attempt, openFile, type RightPanel as Panel, toast, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
-import { latestPlan } from '../timeline.ts';
+import { latestPlanOf } from '../timeline.ts';
 import { ComparePanel } from './ComparePanel.tsx';
 import { FilePanel } from './FilePanel.tsx';
 import { PreviewPanel } from './PreviewPanel.tsx';
@@ -301,7 +301,7 @@ export function RightPanel({ thread, panel }: { thread: ThreadMeta; panel: Panel
         preview: s.panel.preview,
         file: s.panel.file,
     };
-    const plan = latestPlan(view);
+    const plan = view ? latestPlanOf(view.turns) : undefined;
     return (
         <aside className="right-panel" aria-label={titles[panel]}>
             <div className="right-panel__header">
@@ -312,7 +312,12 @@ export function RightPanel({ thread, panel }: { thread: ThreadMeta; panel: Panel
                 className={`right-panel__body${panel === 'terminal' || panel === 'preview' ? ' right-panel__body--flush' : ''}`}
             >
                 {panel === 'changes' && <ChangesPanel thread={thread} />}
-                {panel === 'plan' && (plan ? <PlanList entries={plan.entries} /> : <Empty>{s.panel.noPlan}</Empty>)}
+                {panel === 'plan' &&
+                    (plan ? (
+                        <PlanList entries={plan.plan.entries} live={plan.live} />
+                    ) : (
+                        <Empty>{s.panel.noPlan}</Empty>
+                    ))}
                 {panel === 'trajectory' && <TrajectoryPanel thread={thread} />}
                 {panel === 'prompt' && <PromptPanel thread={thread} />}
                 {panel === 'terminal' && <TerminalPanel thread={thread} />}

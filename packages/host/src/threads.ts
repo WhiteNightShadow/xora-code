@@ -236,6 +236,8 @@ export class ThreadStore {
     update(
         threadId: string,
         patch: Partial<{
+            /** Only for a conversation of no project whose folder went away (the chief's, 06 §23). */
+            projectId: string;
             title: string;
             status: ThreadStatus;
             needsReview: boolean;
@@ -263,6 +265,7 @@ export class ThreadStore {
             sets.push(`${column} = ?`);
             params.push(value);
         };
+        if (patch.projectId !== undefined) set('project_id', patch.projectId);
         if (patch.title !== undefined) set('title', patch.title);
         if (patch.status !== undefined) set('status', patch.status);
         if (patch.needsReview !== undefined) set('needs_review', patch.needsReview ? 1 : 0);

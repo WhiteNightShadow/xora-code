@@ -6,6 +6,7 @@ import {
     type HostNotifications,
     type ItemOf,
     type Member,
+    type ModelRef,
     type Money,
     type OrgGroup,
     type PermissionMode,
@@ -64,6 +65,7 @@ const TEXT = bilingual(
     {
         title: (text: string) => `总助手：${text}`,
         projectMissing: (folder: string) => `项目文件夹不存在：${folder}`,
+        noProject: '先打开一个项目',
         planning: '主管在拆任务',
         progress: (done: number, total: number) => `完成${done}/${total}张卡`,
         waitPlan: '等你确认计划',
@@ -81,6 +83,7 @@ const TEXT = bilingual(
     {
         title: (text: string) => `Chief: ${text}`,
         projectMissing: (folder: string) => `The project folder is missing: ${folder}`,
+        noProject: 'Open a project first',
         planning: 'The supervisor is planning',
         progress: (done: number, total: number) => `${done}/${total} cards done`,
         waitPlan: 'Waiting for you to confirm the plan',
@@ -97,7 +100,7 @@ const TEXT = bilingual(
     },
 );
 
-const CHIEF_PROMPT = `You are the chief assistant of Xora Code: the one place the user talks to. The user is the boss. You get their work done through the organization: members (specialists, each good at one job), teams (a supervisor plans the work and checks it, members do the cards) and workflows (processes a project keeps as files). You can read the project this conversation started in, but you do not change files or run commands yourself: you hand work on. The user's attention is the scarcest thing there is: ask only what you cannot decide yourself, and report results and the decisions they must make, not process.
+const CHIEF_PROMPT = `You are the chief assistant of Xora Code: the one place the user talks to. The user is the boss. You get their work done through the organization: members (specialists, each good at one job), teams (a supervisor plans the work and checks it, members do the cards) and workflows (processes a project keeps as files). You do not change files or run commands yourself: you hand work on. A conversation with you belongs to no project: the user may mean any of the projects listed below, or none (a question, advice, a sum). Work out which project they mean from what they say and from the work this conversation already handed on. The user's attention is the scarcest thing there is: ask only what you cannot decide yourself, and report results and the decisions they must make, not process.
 
 How to route a request
 1. Answer yourself when no work in a project is needed: a question, an explanation, advice, or how things stand (the status below; work_status for details).
@@ -124,7 +127,8 @@ Rules
 
 const PROJECT = {
     type: 'string',
-    description: 'Project name or id; the project this conversation started in if left out',
+    description:
+        'Project name or id. Leave it out only when one project is open, or for the project this conversation last handed work to',
 };
 
 const CHIEF_TOOLS: HostToolProvider['tools'] = [
@@ -142,8 +146,12 @@ const CHIEF_TOOLS: HostToolProvider['tools'] = [
     {
         name: 'member_list',
         description:
-            'The organization as it stands for a project: its groups with their leads and members (id, name, role, model tier or model, permissions, job, skills), members in no group, and deleted built-in members.',
-        parameters: { type: 'object', properties: { project: PROJECT }, additionalProperties: false },
+            'The organization: its groups with their leads and members (id, name, role, model tier or model, permissions, job, skills), members in no group, and deleted built-in members. A project can add members of its own: name it to see those too.',
+        parameters: {
+            type: 'object',
+            properties: { project: { type: 'string', description: 'Project name or id, for its own members too' } },
+            additionalProperties: false,
+        },
         kind: 'read',
     },
     {
@@ -520,29 +528,51 @@ export class ChiefService {
         this.#unlisten();
     }
 
-    /** A new conversation with the chief in a project, started with the user's first message. */
-    async start(input: { projectId: string; text: string }): Promise<ThreadMeta> {
-        const { threads, turns, projects } = this.#deps;
+    /**
+     * A new conversation with the chief, started with the user's first message. It belongs to no project (the user
+     * picks none): the chief works out which one they mean, and it runs in `#home`, whose files it can read. `model`
+     * and `effort`: what the user picked, else the default model and their thinking level for new conversations.
+     */
+    async start(input: { projectId?: string; text: string; model?: ModelRef; effort?: Effort }): Promise<ThreadMeta> {
+        const { threads, turns, projects, connections, settings } = this.#deps;
         await this.#load();
-        const project = await projects.get(input.projectId);
+        const project = input.projectId ? await projects.get(input.projectId) : await this.#home();
         if (project.missing) {
             throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).projectMissing(project.path));
         }
         this.#projects.set(project.id, project);
-        const { org } = await loadTeamOrganization({
-            orgsDir: this.#deps.orgsDir,
-            projectDir: project.path,
-            trusted: project.trusted,
-        });
-        const pick = pickTierModel(this.#deps, { org, project, tier: 'flagship', unattended: false, warnings: [] });
+        // A model picked on a connection removed meanwhile falls back like no pick at all.
+        const known = (ref: ModelRef) => {
+            try {
+                return connections.model(ref) !== undefined;
+            } catch {
+                return false;
+            }
+        };
+        const picked = input.model && known(input.model) ? input.model : undefined;
+        const model =
+            picked ??
+            pickTierModel(this.#deps, {
+                org: (
+                    await loadTeamOrganization({
+                        orgsDir: this.#deps.orgsDir,
+                        projectDir: project.path,
+                        trusted: project.trusted,
+                    })
+                ).org,
+                project,
+                tier: 'flagship',
+                unattended: false,
+                warnings: [],
+            }).ref;
         const thread = threads.create({
             projectId: project.id,
             title: textOf(TEXT).title(shorten(input.text, 24)),
             engine: 'xora',
-            model: pick.ref,
+            model,
             mode: 'plan',
             // The user's own conversation: the thinking level they set for new conversations, not the tier's.
-            effort: this.#deps.settings.get().defaultEffort,
+            effort: input.effort ?? settings.get().defaultEffort,
             extra: { role: CHIEF_ROLE },
         });
         turns.setHostTools(thread.id, this.#provider(thread.id));
@@ -554,8 +584,31 @@ export class ChiefService {
             throw error;
         }
         this.#deps.titles?.retitle(thread.id, input.text, (gist) => textOf(TEXT).title(gist));
-        this.#deps.log.info(`chief ${thread.id} in ${project.id}`);
+        this.#deps.log.info(`chief ${thread.id} runs in ${project.id}`);
         return threads.get(thread.id);
+    }
+
+    /**
+     * Where a conversation that names no project runs (whose files its own tools read): the project of the user's
+     * latest conversation of their own, not the chief's, a team's, a workflow's or a subagent's; else the first one
+     * open. The chief's home page names the same project in its examples.
+     */
+    async #home(): Promise<Project> {
+        const open = (await this.#deps.projects.list()).filter((project) => !project.missing);
+        const latest = this.#deps.threads
+            .list()
+            .filter(
+                (thread) =>
+                    !this.#isChief(thread) &&
+                    !thread.teamRunId &&
+                    !thread.workflowRunId &&
+                    !thread.parent &&
+                    open.some((project) => project.id === thread.projectId),
+            )
+            .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        const home = open.find((project) => project.id === latest?.projectId) ?? open[0];
+        if (!home) throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noProject);
+        return home;
     }
 
     /**
@@ -564,7 +617,8 @@ export class ChiefService {
      */
     async restore(): Promise<void> {
         const { threads, turns } = this.#deps;
-        const chiefs = threads.list({ includeArchived: false }).filter((thread) => this.#isChief(thread));
+        // Archived ones too: they can be opened again from the chief's home and talked to, and stay the chief's.
+        const chiefs = threads.list({ includeArchived: true }).filter((thread) => this.#isChief(thread));
         if (chiefs.length === 0) return;
         await this.#load();
         for (const thread of chiefs) {
@@ -888,6 +942,7 @@ export class ChiefService {
         const status = () => this.#statusText(threadId);
         return {
             tools: CHIEF_TOOLS,
+            noProject: true,
             get layers() {
                 return [
                     { id: 'chief', title: 'Chief assistant', text: CHIEF_PROMPT },
@@ -911,11 +966,17 @@ export class ChiefService {
                 case 'work_status':
                     return { content: await this.#status(threadId, stringArg(args, 'run')) };
                 case 'member_list':
-                    return { content: await this.#memberList(this.#projectOf(threadId, args.project)) };
+                    return {
+                        content: await this.#memberList(
+                            stringArg(args, 'project')
+                                ? this.#projectOf(threadId, args.project)
+                                : this.#homeOf(threadId),
+                        ),
+                    };
                 case 'member_save':
                     return { content: await this.#memberSave(threadId, args) };
                 case 'member_delete': {
-                    const project = this.#projectOf(threadId, undefined);
+                    const project = this.#homeOf(threadId);
                     const member = this.#memberOf(await this.#deps.members.list(project.id), stringArg(args, 'member'));
                     await this.#deps.members.remove(member.id, project.id);
                     return { content: `Deleted ${member.id} (${member.name}).` };
@@ -933,7 +994,7 @@ export class ChiefService {
                     return await this.#mcpAdd(threadId, args, call);
                 case 'mcp_test': {
                     const name = stringArg(args, 'name');
-                    const project = this.#projectOf(threadId, undefined);
+                    const project = this.#homeOf(threadId);
                     const tested = await this.#deps.extensions.testMcp(name, project.id);
                     return {
                         content: tested.ok
@@ -958,7 +1019,7 @@ export class ChiefService {
                 case 'skill_install':
                     return await this.#deps.members.installFound(
                         threadId,
-                        this.#projectOf(threadId, undefined).id,
+                        this.#homeOf(threadId).id,
                         args,
                         this.#found.get(threadId) ?? new Map(),
                     );
@@ -1008,15 +1069,21 @@ export class ChiefService {
         }
     }
 
-    /** A project named by id, name or path; the conversation's own when none is named. */
+    /**
+     * The project a piece of work is for: the one named (id, name or path); else the only one open, else the one this
+     * conversation last handed work to. A conversation with the chief belongs to no project: there is no other default.
+     */
     #projectOf(threadId: string, value: unknown): Project {
         const wanted = typeof value === 'string' ? value.trim() : '';
         const all = [...this.#projects.values()];
         const names = all.map((project) => project.name).join(', ');
         if (!wanted) {
-            const own = this.#projects.get(this.#deps.threads.find(threadId)?.projectId ?? '');
-            if (own) return own;
-            throw new ToolError(`Name the project: ${names}`);
+            const open = all.filter((project) => !project.missing);
+            if (open.length === 1 && open[0]) return open[0];
+            const last = [...this.#cards.values()].filter((card) => card.threadId === threadId).at(-1);
+            const recent = last ? this.#projects.get(last.item.projectId) : undefined;
+            if (recent && !recent.missing) return recent;
+            throw new ToolError(`Name the project (${names}); ask the user when it is not clear which one they mean.`);
         }
         const lower = wanted.toLowerCase();
         const found =
@@ -1029,6 +1096,14 @@ export class ChiefService {
         if (!found) throw new ToolError(`No project "${wanted}"; the projects are: ${names}`);
         if (found.missing) throw new ToolError(`The folder of project ${found.name} is missing: ${found.path}`);
         return found;
+    }
+
+    /** The project this conversation runs in: the context of changes to the organization, which hold in every project. */
+    #homeOf(threadId: string): Project {
+        const own = this.#projects.get(this.#deps.threads.find(threadId)?.projectId ?? '');
+        const home = own ?? [...this.#projects.values()].find((project) => !project.missing);
+        if (!home) throw new ToolError('No project is open');
+        return home;
     }
 
     async #membersOf(project: Project): Promise<Member[]> {
@@ -1101,7 +1176,7 @@ export class ChiefService {
     }
 
     async #memberSave(threadId: string, args: Record<string, unknown>): Promise<string> {
-        const project = this.#projectOf(threadId, undefined);
+        const project = this.#homeOf(threadId);
         const members = await this.#deps.members.list(project.id);
         const id = stringArg(args, 'id');
         const current = id ? this.#memberOf(members, id) : undefined;
@@ -1141,7 +1216,7 @@ export class ChiefService {
     }
 
     async #mcpList(threadId: string): Promise<string> {
-        const project = this.#projectOf(threadId, undefined);
+        const project = this.#homeOf(threadId);
         const servers = (await this.#deps.extensions.snapshot(project.id)).mcpServers;
         if (servers.length === 0) return 'No MCP server is configured.';
         return servers
@@ -1166,7 +1241,7 @@ export class ChiefService {
         if (!/^[a-zA-Z0-9_-]{1,40}$/.test(name))
             throw new ToolError('mcp_add needs a name of letters, digits, - and _');
         if (!url && !command) throw new ToolError('mcp_add needs a url (remote) or a command (local)');
-        const project = this.#projectOf(threadId, undefined);
+        const project = this.#homeOf(threadId);
         const strings = (value: unknown): Record<string, string> =>
             value && typeof value === 'object'
                 ? Object.fromEntries(
@@ -1281,7 +1356,7 @@ export class ChiefService {
     }
 
     async #groupSave(threadId: string, args: Record<string, unknown>): Promise<string> {
-        const project = this.#projectOf(threadId, undefined);
+        const project = this.#homeOf(threadId);
         const members = await this.#deps.members.list(project.id);
         const id = stringArg(args, 'id');
         const existing = id ? await this.#groupOf(id) : undefined;
@@ -1513,7 +1588,12 @@ export class ChiefService {
         const own = this.#deps.threads.find(threadId)?.projectId;
         const lines: string[] = [];
         const projects = [...this.#projects.values()];
-        lines.push(own ? `Projects (this conversation started in "${this.#projectName(own)}"):` : 'Projects:');
+        // It belongs to none of them; it runs in one, whose files its own tools read.
+        lines.push(
+            own
+                ? `Projects (your own tools read files in "${this.#projectName(own)}" only; the user may mean any of them):`
+                : 'Projects:',
+        );
         if (projects.length === 0) lines.push('- none open yet');
         for (const project of projects.slice(0, 30)) {
             lines.push(
@@ -1673,5 +1753,12 @@ export class ChiefService {
 
 /** The `chief.*` handlers, registered on every UI connection. */
 export function registerChiefHandlers(peer: UiPeer, chief: ChiefService): void {
-    peer.handle('chief.start', ({ projectId, text }) => chief.start({ projectId, text }));
+    peer.handle('chief.start', ({ projectId, text, model, effort }) =>
+        chief.start({
+            text,
+            ...(projectId ? { projectId } : {}),
+            ...(model ? { model } : {}),
+            ...(effort ? { effort } : {}),
+        }),
+    );
 }

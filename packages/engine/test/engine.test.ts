@@ -351,6 +351,58 @@ describe('xora engine over ACP', () => {
         h.close();
     });
 
+    it('reminds the model of a todo list this turn wrote that has not changed in ten tool calls, in a tool result', async () => {
+        server.reset();
+        const todo = (statuses: string[]) =>
+            openaiToolCalls([
+                {
+                    name: 'todo',
+                    arguments: JSON.stringify({
+                        items: statuses.map((status, index) => ({ content: `step ${index + 1}`, status })),
+                    }),
+                },
+            ]);
+        const read = () => openaiToolCalls([{ name: 'read', arguments: JSON.stringify({ path: 'a.txt' }) }]);
+        let step = 0;
+        server.respondWith(() => {
+            step++;
+            // Turn 1: a list with open steps, then ten calls that leave it as it is.
+            if (step === 1) return todo(['in_progress', 'pending']);
+            if (step <= 11) return read();
+            if (step === 12) return openaiText('stopped here');
+            // Turn 2: the list left from turn 1 is not this turn's: no reminder, however many calls.
+            if (step <= 24) return read();
+            if (step === 25) return openaiText('answered');
+            // Turn 3: every step done: nothing to remind of.
+            if (step === 26) return todo(['completed', 'completed']);
+            if (step <= 37) return read();
+            return openaiText('done');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace());
+        for (const text of ['go', 'something else', 'finish']) {
+            const response = await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
+            expect(response.stopReason).toBe('end_turn');
+        }
+        const bodies = server.requests.map(
+            (request) => request.body as { messages: Array<{ role: string; content: unknown }> },
+        );
+        expect(bodies).toHaveLength(38);
+        const reminded = bodies.flatMap((body, index) =>
+            JSON.stringify(body.messages.at(-1)?.content).includes('Your todo list has not changed') ? [index + 1] : [],
+        );
+        expect(reminded).toEqual([12]);
+        // It ends the last tool result: no user message of its own, which would read as the start of a turn.
+        const twelfth = bodies[11];
+        expect(twelfth?.messages.at(-1)?.role).toBe('tool');
+        expect(String(twelfth?.messages.at(-1)?.content)).toContain('in the last 10 tool calls');
+        expect(String(twelfth?.messages.at(-1)?.content)).toContain('[~] step 1');
+        expect(twelfth?.messages.filter((message) => message.role === 'user')).toHaveLength(1);
+        // The user sees each version of the list as a plan.
+        expect(h.updates.filter((update) => update.sessionUpdate === 'plan')).toHaveLength(2);
+        h.close();
+    });
+
     it('compacts older turns when the context passes the budget', async () => {
         server.reset();
         let summaries = 0;

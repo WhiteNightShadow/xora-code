@@ -1240,7 +1240,8 @@ export class ExtensionService {
         return skills.length > 0 ? [{ id: 'skills', title: 'Skills', text: skillIndex(skills) }] : [];
     }
 
-    async forSession(project: Project): Promise<SessionExtras> {
+    /** `project`: absent for a thread of no project (the chief's, 06 §23), which gets the user's extensions only. */
+    async forSession(project?: Project): Promise<SessionExtras> {
         const loaded = await this.load(project);
         const skills = this.#enabledSkills(loaded);
         const runnable = loaded.mcp.filter(

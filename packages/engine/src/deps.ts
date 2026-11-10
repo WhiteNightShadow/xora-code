@@ -11,6 +11,7 @@ export {
     isSensitivePath,
     LSP_EDIT_NOTE,
     LspManager,
+    renderTodos,
     sanitizeEnv,
     type ToolContext,
     type ToolResult,

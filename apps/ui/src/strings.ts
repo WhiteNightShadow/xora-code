@@ -142,6 +142,14 @@ const zh = {
         high: '高',
         max: '最高',
     },
+    plan: {
+        title: '计划',
+        now: '正在：{step}',
+        next: '下一步：{step}',
+        stopped: '停在：{step}',
+        done: '全部完成',
+        cleared: '清空了计划',
+    },
     composer: {
         modeTitle: '权限模式',
         modeNote: '立即生效，运行中也会用于接下来的操作；新建线程默认用你最后选的。',
@@ -525,8 +533,7 @@ const zh = {
         subtitle: '有事跟我说就行：能答的我直接答，要干活的我交给合适的成员、团队或工作流，做完把结果告诉你。',
         placeholder: '说说要做什么，比如：把登录页的报错修好；给keeta做一份竞品分析；现在各项目进展怎样',
         send: '发送',
-        project: '默认项目',
-        projectHint: '总助手能在任何项目里派活，没说哪个项目时用这个',
+        autoModel: '自动挑选模型',
         newChat: '新对话',
         newChatHint: '开一段新的对话；进行中的活不受影响',
         history: '以前的对话',
@@ -538,8 +545,8 @@ const zh = {
         report: '新进展',
         kinds: { team: '团队', workflow: '工作流', member: '成员' },
         statuses: { running: '进行中', waiting: '等你处理', done: '已完成', failed: '需要处理', cancelled: '已停止' },
-        noProject: '先打开一个项目：总助手从一个项目开始，之后可以在任何项目里派活。',
-        examples: ['现在各项目进展怎样？', '把这个项目的测试补齐', '调研一下同类产品，写份报告'],
+        noProject: '先打开一个项目：总助手把活派到项目里去做。',
+        examples: ['现在各项目进展怎样？', '把{project}的测试补齐', '调研一下同类产品，写份报告'],
     },
     talent: {
         title: '人才市场',
@@ -1374,6 +1381,14 @@ const en: Widen<Strings> = {
         full: 'Everything inside the workspace is allowed; leaving it or touching secrets still asks',
     },
     efforts: { off: 'Off', low: 'Low', medium: 'Medium', high: 'High', max: 'Max' },
+    plan: {
+        title: 'Plan',
+        now: 'Now: {step}',
+        next: 'Next: {step}',
+        stopped: 'Stopped at: {step}',
+        done: 'All done',
+        cleared: 'Cleared the plan',
+    },
     composer: {
         modeTitle: 'Permission mode',
         modeNote:
@@ -1765,8 +1780,7 @@ const en: Widen<Strings> = {
         placeholder:
             'What needs doing? e.g. fix the login page error; research competitors for keeta; how is everything going',
         send: 'Send',
-        project: 'Default project',
-        projectHint: 'The chief hands work on in any project; this one is used when you name none',
+        autoModel: 'Model picked for you',
         newChat: 'New chat',
         newChatHint: 'Start a new conversation; work under way goes on',
         history: 'Earlier chats',
@@ -1784,10 +1798,10 @@ const en: Widen<Strings> = {
             failed: 'Needs a look',
             cancelled: 'Stopped',
         },
-        noProject: 'Open a project first: the chief starts in one and can hand work on in any.',
+        noProject: 'Open a project first: the chief hands work on to be done in projects.',
         examples: [
             'How is everything going?',
-            'Fill in the tests of this project',
+            'Fill in the tests of {project}',
             'Research similar products and write a report',
         ],
     },

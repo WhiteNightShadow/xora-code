@@ -1,13 +1,15 @@
-import type { ItemOf } from '@xora/protocol';
+import type { Effort, ItemOf, ModelRef } from '@xora/protocol';
 import { useState } from 'react';
 import { host } from '../host.ts';
 import { attempt, isChief, openProject, openRun, selectThread, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { startingEffort } from '../thinking.ts';
 import { LogoMark } from './Art.tsx';
+import { EffortChooser, ModelChooser } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import { MemberMentionList, useMemberMention } from './Mentions.tsx';
-import { Badge, formatMoney, relativeTime, Select, Spinner } from './primitives.tsx';
+import { Badge, formatMoney, relativeTime, Spinner } from './primitives.tsx';
 import '../chief.css';
 
 const TEAM_ENDED = ['done', 'failed', 'cancelled'];
@@ -21,12 +23,8 @@ const LISTED = 8;
 export function ChiefHome() {
     const s = useStrings();
     const projects = useApp((state) => state.projects);
-    const selectedProjectId = useApp((state) => state.selectedProjectId);
-    const [projectId, setProjectId] = useState(
-        projects.some((project) => project.id === selectedProjectId)
-            ? (selectedProjectId ?? '')
-            : (projects[0]?.id ?? ''),
-    );
+    const models = useApp((state) => state.models);
+    const settings = useApp((state) => state.settings);
     const [text, setText] = useState('');
     const [busy, setBusy] = useState(false);
     // `@member` hands the request to a member (06 §19).
@@ -34,6 +32,19 @@ export function ChiefHome() {
     const threads = useApp((state) => state.threads);
     const teamRuns = useApp((state) => state.teamRuns);
     const workflowRuns = useApp((state) => state.workflowRuns);
+    // A conversation with the chief belongs to no project: no project to pick. What it is picked is the model and
+    // thinking level, the defaults for new conversations until the user picks others, as under a conversation.
+    const [picked, setPicked] = useState<ModelRef | undefined>();
+    const [effort, setEffort] = useState<Effort | ''>('');
+    const connected = (ref: ModelRef | null | undefined) =>
+        ref && models.some((option) => option.connectionId === ref.connectionId && option.model.id === ref.model)
+            ? ref
+            : undefined;
+    const model = connected(picked) ?? connected(settings?.defaultModel);
+    const reasoning = models.find(
+        (option) => model && option.connectionId === model.connectionId && option.model.id === model.model,
+    )?.model.reasoning;
+    const effortValue = startingEffort(reasoning, settings?.defaultEffort, effort);
     // Only the user's: the supervisor answers the rest (06 §24).
     const approvals = useApp((state) => state.approvals).filter((approval) => !approval.reviewer);
     const history = Object.values(threads)
@@ -45,6 +56,21 @@ export function ChiefHome() {
         .filter((thread) => isChief(thread) && thread.archived)
         .sort((a, b) => b.updatedAt - a.updatedAt);
     const [showArchived, setShowArchived] = useState(false);
+    // The examples name the project a new conversation runs in: that of the user's latest conversation of their own,
+    // as the host picks it (chief.ts `#home`).
+    const open = projects.filter((project) => !project.missing);
+    const latest = Object.values(threads)
+        .filter(
+            (thread) =>
+                !isChief(thread) &&
+                !thread.teamRunId &&
+                !thread.workflowRunId &&
+                !thread.parent &&
+                !thread.archived &&
+                open.some((project) => project.id === thread.projectId),
+        )
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    const example = open.find((project) => project.id === latest?.projectId) ?? open[0];
     const underway = [
         ...Object.values(teamRuns)
             .filter((run) => !TEAM_ENDED.includes(run.status))
@@ -73,10 +99,18 @@ export function ChiefHome() {
 
     const send = async () => {
         const value = text.trim();
-        if (!value || !projectId || busy) return;
+        if (!value || busy) return;
         setBusy(true);
         const thread = await attempt(() =>
-            host.call('chief.start', { projectId, text: value }, { timeoutMs: 120_000 }),
+            host.call(
+                'chief.start',
+                {
+                    text: value,
+                    ...(model ? { model } : {}),
+                    ...(effortValue ? { effort: effortValue } : {}),
+                },
+                { timeoutMs: 120_000 },
+            ),
         );
         setBusy(false);
         if (thread) {
@@ -129,38 +163,28 @@ export function ChiefHome() {
                     }}
                 />
                 <div className="chief-home__bar">
-                    <div className="chief-home__examples">
-                        {s.chief.examples.map((example) => (
-                            <button
-                                key={example}
-                                type="button"
-                                className="chief-home__example"
-                                onClick={() => setText(example)}
-                            >
-                                {example}
-                            </button>
-                        ))}
-                    </div>
-                    {projects.length > 1 && (
-                        <span title={s.chief.projectHint}>
-                            <Select
-                                compact
-                                label={s.chief.project}
-                                value={projectId}
-                                options={projects.map((project) => ({ value: project.id, label: project.name }))}
-                                onChange={setProjectId}
-                            />
-                        </span>
-                    )}
+                    <ModelChooser placement="down" value={model} onChange={setPicked} empty={s.chief.autoModel} />
+                    <EffortChooser placement="down" model={model} value={effortValue} onChange={setEffort} />
+                    <span className="chief-home__spacer" />
                     <button
                         type="button"
                         className="button button--primary"
-                        disabled={busy || !text.trim() || !projectId}
+                        disabled={busy || !text.trim()}
                         onClick={() => void send()}
                     >
                         {busy ? <Spinner /> : <Icon name="send" size={14} />} {s.chief.send}
                     </button>
                 </div>
+            </div>
+            <div className="chief-home__examples">
+                {s.chief.examples.map((line) => {
+                    const shown = format(line, { project: example?.name ?? '' });
+                    return (
+                        <button key={line} type="button" className="chief-home__example" onClick={() => setText(shown)}>
+                            {shown}
+                        </button>
+                    );
+                })}
             </div>
             <div className="chief-home__grid">
                 <section className="chief-home__section">

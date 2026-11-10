@@ -218,6 +218,12 @@ export interface HostToolProvider {
     }>;
     /** Built-in tools this thread must not have. */
     readonly disabledTools?: readonly string[];
+    /**
+     * The thread belongs to no project (the chief's, 06 §23): the project it runs in, which the user did not pick,
+     * brings neither instructions (its AGENTS.md, the user's prompt for it) nor extensions of its own, and when its
+     * folder is gone the thread moves to another project that is open.
+     */
+    readonly noProject?: boolean;
     /** Extra prompt layers for the thread (organisation and agent, 06 §4). */
     readonly layers?: ReadonlyArray<{ id: string; title: string; text: string }>;
     /**
@@ -556,14 +562,21 @@ export class TurnService {
         options: { readonly fresh?: string } = {},
     ): Promise<string> {
         const { threads, projects, connections, settings } = this.#deps;
-        const thread = threads.get(threadId);
+        let thread = threads.get(threadId);
         if (this.#running.has(threadId)) {
             throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).busy);
         }
         if (text.trim().length === 0 && attachments.length === 0) {
             throw new RpcError(RpcErrorCode.InvalidParams, textOf(TEXT).emptyMessage);
         }
-        const project = await projects.get(thread.projectId);
+        let project = await projects.get(thread.projectId);
+        if (project.missing && this.#hostTools.get(threadId)?.noProject) {
+            const other = (await projects.list()).find((item) => !item.missing);
+            if (other) {
+                thread = threads.update(threadId, { projectId: other.id }, { touch: false });
+                project = other;
+            }
+        }
         if (project.missing) {
             throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).projectMissing(project.path));
         }
@@ -690,12 +703,18 @@ export class TurnService {
             throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noModel);
         }
         const provider = this.#hostTools.get(thread.id);
-        const baseLayers = prompts.engineLayers({
-            projectId: project.id,
-            projectRoot: project.path,
-            cwd,
-            sessionPrompt: threads.sessionPrompt(thread.id),
-        });
+        const baseLayers = prompts
+            .engineLayers({
+                projectId: project.id,
+                projectRoot: project.path,
+                cwd,
+                sessionPrompt: threads.sessionPrompt(thread.id),
+            })
+            .filter(
+                (layer) =>
+                    !provider?.noProject ||
+                    (layer.id !== 'project_instructions' && layer.id !== 'project_private_instructions'),
+            );
         // Organisation and agent layers go after the user's global layer and before the project layers (08 §1.2).
         const extra = provider?.layers ?? [];
         const globalIndex = baseLayers.findIndex((layer) => layer.id === 'user_global_instructions');
@@ -879,7 +898,8 @@ export class TurnService {
     }
 
     /** Reads the project's extensions for a turn; a broken extension never stops the turn. */
-    async #loadExtras(project: Project): Promise<SessionExtras | undefined> {
+    /** The extensions of a turn: the user's and, given its project, the project's own. */
+    async #loadExtras(project: Project | undefined): Promise<SessionExtras | undefined> {
         const extensions = this.#deps.extensions;
         if (!extensions) {
             return undefined;
@@ -1125,7 +1145,7 @@ export class TurnService {
     ): Promise<void> {
         const { threads, review, engines } = this.#deps;
         try {
-            running.extras = await this.#loadExtras(project);
+            running.extras = await this.#loadExtras(this.#hostTools.get(thread.id)?.noProject ? undefined : project);
             const blocks = await prepare(running.extras);
             running.before = await review.snapshot(running.cwd, `thread-${running.threadId}`);
             threads.startTurn(running.threadId, running.turnId, running.before);
@@ -2210,7 +2230,9 @@ export class TurnService {
             { turnId: running.turnId },
         );
         const thread = threads.update(running.threadId, { status: 'failed', unread: !bus.focused });
-        if (settings.get().notifications.onFailure && !bus.focused && !thread.parent) {
+        // The user's own conversations, as in "等我处理" (03 §4): a subagent's failure goes back to its parent's agent,
+        // a team member's or a workflow step's to its run, which retries or reports it.
+        if (settings.get().notifications.onFailure && !bus.focused && queues(thread)) {
             const text = textOf(TEXT);
             shell
                 .notify(text.failed, text.inThread(thread.title, classified.message), running.threadId)

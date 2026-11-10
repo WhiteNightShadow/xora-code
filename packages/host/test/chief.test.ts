@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ItemOf } from '@xora/protocol';
@@ -42,9 +42,9 @@ const isChief = (body: ChatBody) => systemOf(body).includes('You are the chief a
 
 async function setUp(dataDir = mkdtempSync(path.join(tmpdir(), 'xora-chief-data-'))) {
     const harness = await host.start(dataDir);
-    await connectMock(harness.ui, server);
+    const connectionId = await connectMock(harness.ui, server);
     const project = await harness.ui.request('project.add', { path: gitRepo({ 'hello.txt': 'hello\n' }) });
-    return { ...harness, dataDir, project };
+    return { ...harness, dataDir, project, connectionId };
 }
 
 /** The end of a thread's latest turn. */
@@ -130,7 +130,9 @@ describe('the chief assistant', () => {
 
         // It saw every project and the members to pick from.
         const first = bodies().find(isChief) as ChatBody;
-        expect(systemOf(first)).toContain(`Projects (this conversation started in "${project.name}"):`);
+        expect(systemOf(first)).toContain(
+            `Projects (your own tools read files in "${project.name}" only; the user may mean any of them):`,
+        );
         expect(systemOf(first)).toContain('Work handed on in this conversation:\n- none yet');
         const listed = bodies().find((body) => isChief(body) && lastCall(body) === 'member_list');
         expect(textOf(listed?.messages.at(-1)?.content)).toContain('- coder (编码): executor');
@@ -220,6 +222,86 @@ describe('the chief assistant', () => {
         expect(systemOf(restored)).toContain(`- team run ${run?.id} in ${project.name}:`);
         expect(systemOf(restored)).toContain('— cancelled');
     }, 120_000);
+
+    it('belongs to no project: runs where the user worked last, takes the model and level picked, and asks which project when several could be meant', async () => {
+        let first = '';
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            if (!isChief(body)) return say('看过了。');
+            if (body.messages.at(-1)?.role === 'tool') return say('好的。');
+            // Only what the user said last: a project named in an earlier turn is not named again.
+            const named = textOf(body.messages.at(-1)?.content).includes('第一个项目');
+            return call({
+                name: 'member_dispatch',
+                arguments: { member: '编码', brief: '看看hello.txt', ...(named ? { project: first } : {}) },
+            });
+        });
+        const { ui, project, connectionId } = await setUp();
+        first = project.name;
+        // The user worked in the second project last: an unnamed conversation runs there.
+        const second = await ui.request('project.add', { path: gitRepo({ 'hello.txt': 'hi\n' }) });
+        await ui.request('thread.create', { projectId: second.id });
+        const thread = await ui.request('chief.start', {
+            text: '让编码看看hello.txt',
+            model: { connectionId, model: 'deepseek-flash' },
+            effort: 'low',
+        });
+        expect(thread).toMatchObject({
+            role: 'chief',
+            projectId: second.id,
+            effort: 'low',
+            model: { connectionId, model: 'deepseek-flash' },
+        });
+        expect(await settled(ui, thread.id)).toBe('turn.completed');
+        // Two projects and none named: no work goes anywhere, the model is told to name one or ask.
+        const refused = bodies().find((body) => isChief(body) && body.messages.at(-1)?.role === 'tool');
+        expect(textOf(refused?.messages.at(-1)?.content)).toContain('Name the project');
+        expect(systemOf(refused)).toContain(`your own tools read files in "${second.name}" only`);
+        expect(await cards(ui, thread.id)).toHaveLength(0);
+
+        // Named, the work goes to that project; more work with none named goes to the same one, not where it runs.
+        await ui.request('turn.start', { threadId: thread.id, text: '在第一个项目里看' });
+        expect(await settled(ui, thread.id)).toBe('turn.completed');
+        await ui.request('turn.start', { threadId: thread.id, text: '再看一遍' });
+        expect(await settled(ui, thread.id)).toBe('turn.completed');
+        const handed = await cards(ui, thread.id);
+        expect(handed.map((card) => card.projectId)).toEqual([project.id, project.id]);
+    }, 90_000);
+
+    it('takes nothing from the project it runs in, moves on when that folder is gone, and stays the chief’s archived', async () => {
+        server.respondWith((request) => ((request.body as ChatBody | undefined)?.messages ? say('好。') : undefined));
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-chief-data-'));
+        const { ui } = await host.start(dataDir);
+        await connectMock(ui, server);
+        const where = gitRepo({ 'AGENTS.md': '只用英文回答（A项目的规矩）' });
+        const first = await ui.request('project.add', { path: where });
+        const second = await ui.request('project.add', { path: gitRepo({ 'AGENTS.md': 'B项目的规矩' }) });
+        await ui.request('prompt.set', { scope: 'project', projectId: first.id, text: '我给A项目写的话' });
+        // The user worked in the first project last: the conversation runs there, but nothing of it is in its prompt.
+        await ui.request('thread.create', { projectId: first.id });
+        const thread = await ui.request('chief.start', { text: '现在各项目进展怎样？' });
+        expect(thread.projectId).toBe(first.id);
+        expect(await settled(ui, thread.id)).toBe('turn.completed');
+        const asked = bodies().filter(isChief).at(-1);
+        expect(systemOf(asked)).not.toContain('A项目的规矩');
+        expect(systemOf(asked)).not.toContain('我给A项目写的话');
+
+        // Archived and the app restarted, it is still the chief's.
+        await ui.request('thread.update', { threadId: thread.id, archived: true });
+        await host.closeLast();
+        const again = await host.start(dataDir);
+        server.reset();
+        server.respondWith((request) => ((request.body as ChatBody | undefined)?.messages ? say('好。') : undefined));
+        // Its folder gone, it moves to the other project instead of refusing every message.
+        renameSync(where, `${where}-moved`);
+        await again.ui.request('turn.start', { threadId: thread.id, text: '还在吗' });
+        expect(await settled(again.ui, thread.id)).toBe('turn.completed');
+        expect(bodies().some(isChief)).toBe(true);
+        const read = await again.ui.request('thread.read', { threadId: thread.id });
+        expect(read.thread.projectId).toBe(second.id);
+        expect(systemOf(bodies().filter(isChief).at(-1))).not.toContain('B项目的规矩');
+    }, 90_000);
 
     it('tells the model what went wrong when a tool cannot do it', async () => {
         server.respondWith((request) => {

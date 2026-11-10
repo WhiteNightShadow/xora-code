@@ -33,9 +33,8 @@ function StatusMark({ thread }: { thread: ThreadMeta }) {
     return <span className="mark" />;
 }
 
-/** One conversation: its mark, title and cost or age, with rename, pin, archive and delete behind "⋯". `project`: its
- * project's name, when the list it is in spans several. */
-function ThreadRow({ thread, selected, project }: { thread: ThreadMeta; selected: boolean; project?: string }) {
+/** One conversation: its mark, title and cost or age, with rename, pin, archive and delete behind "⋯". */
+function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean }) {
     const s = useStrings();
     const member = useApp((state) => memberOf(thread, state.members));
     const [menu, setMenu] = useState(false);
@@ -80,7 +79,6 @@ function ThreadRow({ thread, selected, project }: { thread: ThreadMeta; selected
                     {thread.title}
                 </span>
                 <span className="thread-row__meta">
-                    {project ? `${project} · ` : ''}
                     {thread.cost && thread.cost.amount > 0 ? formatMoney(thread.cost) : relativeTime(thread.updatedAt)}
                 </span>
             </button>
@@ -274,13 +272,11 @@ function ChiefNav() {
     );
     // Its conversations live here, not in the projects' lists (06 §23): the latest few, and a way to start one.
     const threads = useApp((state) => state.threads);
-    const projects = useApp((state) => state.projects);
     const selectedThreadId = useApp((state) => (state.chiefOpen ? undefined : state.selectedThreadId));
     const recent = Object.values(threads)
         .filter((thread) => isChief(thread) && !thread.archived)
         .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
         .slice(0, NAV_RUNS);
-    const several = projects.length > 1;
     return (
         <>
             <div className="sidebar__nav-row">
@@ -296,16 +292,10 @@ function ChiefNav() {
             </div>
             {recent.length > 0 && (
                 <div className="sidebar__chief-threads">
-                    {/* The same rows as a project's, so they can be renamed, pinned, archived and deleted alike. */}
+                    {/* The same rows as a project's, so they can be renamed, pinned, archived and deleted alike; no
+                        project to name, as they belong to none. */}
                     {recent.map((thread) => (
-                        <ThreadRow
-                            key={thread.id}
-                            thread={thread}
-                            selected={selectedThreadId === thread.id}
-                            {...(several
-                                ? { project: projects.find((project) => project.id === thread.projectId)?.name ?? '' }
-                                : {})}
-                        />
+                        <ThreadRow key={thread.id} thread={thread} selected={selectedThreadId === thread.id} />
                     ))}
                 </div>
             )}

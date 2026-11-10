@@ -159,6 +159,36 @@ server.respondWith((request) => {
     if (asked.includes('数到十')) {
         return openaiText('一到十，数完了。');
     }
+    // 03: thinking shows as it comes, its newest lines in view.
+    if (asked.includes('想一想怎么数')) {
+        const thinking = Array.from(
+            { length: 60 },
+            (_, index) => `第${index + 1}步：先想想${index + 1}后面是几。`,
+        ).join('\n');
+        return openaiText('想好了。', { reasoning: thinking, chunkSize: 16, delayMs: 60 });
+    }
+    // 03: a plan the agent keeps up to date as it goes; it waits a moment after its first version.
+    const userAt = messages.map((message) => message.role).lastIndexOf('user');
+    if (userAt >= 0 && JSON.stringify(messages[userAt]).includes('按计划数两步')) {
+        const done = messages.slice(userAt).filter((message) => message.role === 'tool').length;
+        const todo = (first: string, second: string) =>
+            openaiToolCalls([
+                {
+                    name: 'todo',
+                    arguments: JSON.stringify({
+                        items: [
+                            { content: '数到一', status: first },
+                            { content: '数到二', status: second },
+                        ],
+                    }),
+                },
+            ]);
+        if (done === 0) return todo('in_progress', 'pending');
+        // The delay is before each streamed frame: a few frames, two seconds or so.
+        if (done === 1) return { ...todo('completed', 'in_progress'), delayMs: 400 };
+        if (done === 2) return todo('completed', 'completed');
+        return openaiText('一、二，数完了。');
+    }
     // The scout the chief handed the job to answers it.
     if (messages.at(-1)?.role === 'user' && JSON.stringify(messages.at(-1)).includes('看看hello.txt里写了什么')) {
         return openaiText('hello.txt里只有一行：hello world。');
@@ -364,8 +394,24 @@ try {
     await step(page, '打开项目');
     // The first steps answer approval cards by hand; the supervisor's review comes at the end (06 §24).
     await hostCall(page, 'settings.update', { patch: { approvals: { reviewer: 'user' } } });
-    // With a model and a project, the home is the chief assistant (06 §23).
+    // With a model and a project, the home is the chief assistant (06 §23). A conversation with it belongs to no
+    // project: there is none to pick, but the model and thinking level are picked as under a conversation.
     await page.locator('.chief-home textarea').waitFor();
+    await page.locator('.chief-home__bar .picker__trigger', { hasText: 'mock-model' }).waitFor();
+    if ((await page.locator('.chief-home select').count()) !== 0) throw new Error('the chief home asks for a project');
+    // Its model list opens over the blank part below, which then drags nothing: Electron gives an overlap to the later
+    // region, and a click on the list would move the window.
+    const appRegion = () =>
+        page
+            .locator('.chief-home__grid')
+            .evaluate((element) => getComputedStyle(element).getPropertyValue('-webkit-app-region').trim());
+    if ((await appRegion()) !== 'drag') throw new Error('the blank part of the chief home does not drag the window');
+    await page.locator('.chief-home__bar .picker__trigger', { hasText: 'mock-model' }).click();
+    await page.locator('.chief-home .popover__panel').waitFor();
+    if ((await appRegion()) !== 'no-drag') throw new Error('an open list lies under a drag region');
+    await page.keyboard.press('Escape');
+    await page.locator('.chief-home .popover__panel').waitFor({ state: 'detached' });
+    await page.locator('.chief-home__example', { hasText: '把repo的测试补齐' }).waitFor();
     await step(page, '首页是总助手');
 
     // New things start from the project's "+": a thread, a team or a workflow.
@@ -467,6 +513,47 @@ try {
     await page.locator('.turn', { hasText: '一到十，数完了。' }).waitFor();
     await page.locator('.turn--rewound', { hasText: '再补一句，数到五' }).waitFor();
     await step(page, '编辑刚发的消息后从这里重新开始');
+
+    // 03: while the model thinks, its newest lines are in view and followed, not its first few.
+    await page.locator('.composer textarea').pressSequentially('想一想怎么数');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(
+        () => {
+            const box = document.querySelector('.reasoning.is-live .reasoning__text.is-tail');
+            return (
+                box !== null &&
+                box.scrollHeight > box.clientHeight + 40 &&
+                box.scrollHeight - box.clientHeight - box.scrollTop < 4 &&
+                box.hasAttribute('data-scrolled')
+            );
+        },
+        undefined,
+        { timeout: ms(30_000) },
+    );
+    await step(page, '思考时实时显示最新的内容');
+    await page.locator('.turn', { hasText: '想好了。' }).waitFor();
+    await page.locator('.reasoning.is-live').waitFor({ state: 'detached' });
+
+    // 03: the plan sits above the composer and follows the agent's updates; each update is a line where it was made.
+    await page.locator('.composer textarea').pressSequentially('按计划数两步');
+    await page.keyboard.press('Enter');
+    const dock = page.locator('.plan-dock');
+    await dock.locator('.plan-dock__now', { hasText: '正在：数到一' }).waitFor();
+    await dock.locator('.plan-dock__count', { hasText: '0/2' }).waitFor();
+    await step(page, '计划在输入框上方，显示做到哪一步');
+    await page.locator('.turn', { hasText: '一、二，数完了。' }).waitFor();
+    await dock.locator('.plan-dock__count', { hasText: '2/2' }).waitFor();
+    await page.locator('.plan-dock.is-done .plan-dock__now', { hasText: '全部完成' }).waitFor();
+    await dock.locator('.plan-dock__head').click();
+    if ((await dock.locator('.plan__entry--completed').count()) !== 2) throw new Error('the plan did not follow');
+    const planTurn = page.locator('.turn', { hasText: '按计划数两步' });
+    if ((await planTurn.locator('.todo-step').count()) !== 3) throw new Error('each version of the plan is a line');
+    if ((await planTurn.locator('.plan-card').count()) !== 0) throw new Error('the plan card stays at the top');
+    await planTurn
+        .locator('.todo-step', { hasText: '1/2' })
+        .locator('.todo-step__now', { hasText: '正在：数到二' })
+        .waitFor();
+    await step(page, '计划随进度更新，对话里每次更新是一行进度');
 
     await mkdir(path.join(repo, '.xora', 'commands'), { recursive: true });
     await writeFile(
@@ -799,8 +886,17 @@ try {
     await page.locator('.chief-home textarea').pressSequentially('让侦察看看hello.txt');
     await page.locator('.chief-home').getByRole('button', { name: '发送', exact: true }).click();
     await page.locator('.thread-header h1', { hasText: '总助手：' }).waitFor();
-    // The conversation is marked as the chief's and listed under its entry, not among the project's conversations.
+    // The conversation is marked as the chief's and listed under its entry, not among the project's conversations;
+    // it shows no project, no permissions to pick and none of a project's panels.
     await page.locator('.thread-header__chief').waitFor();
+    if ((await page.locator('.thread-header__project').count()) !== 0) throw new Error('the chief shows a project');
+    if ((await page.locator('.composer .mode-chip').count()) !== 0) throw new Error('the chief has permissions');
+    await page.locator('.composer .picker__trigger', { hasText: 'mock-model' }).waitFor();
+    await page.locator('.thread-header').getByRole('button', { name: '更多', exact: true }).click();
+    await page.getByRole('menuitemcheckbox', { name: /提示词/ }).waitFor();
+    if ((await page.getByRole('menuitemcheckbox', { name: /终端/ }).count()) !== 0)
+        throw new Error("the chief's menu offers a project's panels");
+    await page.keyboard.press('Escape');
     const chiefRow = page.locator('.sidebar__chief-threads .thread-row', { hasText: '总助手：' });
     await chiefRow.waitFor();
     const delegation = page.locator('.delegation', { hasText: '侦察' }).first();

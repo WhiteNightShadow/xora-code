@@ -1,5 +1,12 @@
-import type { Approval, ApprovalDecision, Item, ItemOf, ToolDisplay } from '@xora/protocol';
-import { useState } from 'react';
+import {
+    type Approval,
+    type ApprovalDecision,
+    type Item,
+    type ItemOf,
+    TodoEntrySchema,
+    type ToolDisplay,
+} from '@xora/protocol';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { DelegationCard } from '../components/ChiefView.tsx';
 import { DiffView } from '../components/DiffView.tsx';
 import { Icon, type IconName } from '../components/Icon.tsx';
@@ -8,6 +15,7 @@ import { AutoFocusInput, Badge, formatMoney, formatTokens, Spinner } from '../co
 import { host } from '../host.ts';
 import { attempt, openReview, selectThread, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
+import { isTodoCall, planProgress } from '../timeline.ts';
 
 const KIND_ICON: Record<string, IconName> = {
     read: 'file',
@@ -134,7 +142,8 @@ function ToolCallView({ item }: { item: ItemOf<'tool_call'> }) {
     );
 }
 
-export function PlanList({ entries }: { entries: ItemOf<'plan'>['entries'] }) {
+/** A plan's steps. `live`: its turn is running, so the step in hand turns; otherwise it is only marked. */
+export function PlanList({ entries, live = false }: { entries: ItemOf<'plan'>['entries']; live?: boolean }) {
     return (
         <ul className="plan">
             {entries.map((entry, index) => (
@@ -144,13 +153,87 @@ export function PlanList({ entries }: { entries: ItemOf<'plan'>['entries'] }) {
                         {entry.status === 'completed' ? (
                             <Icon name="check" size={11} />
                         ) : entry.status === 'in_progress' ? (
-                            <Spinner size={8} />
+                            live ? (
+                                <Spinner size={8} />
+                            ) : (
+                                <span className="plan__dot" />
+                            )
                         ) : null}
                     </span>
                     <span>{entry.content}</span>
                 </li>
             ))}
         </ul>
+    );
+}
+
+/** What a plan says in one line: how far along it is and the step in hand (timeline.ts `planProgress`). */
+export function planLine(
+    s: ReturnType<typeof useStrings>,
+    entries: ItemOf<'plan'>['entries'],
+    running: boolean,
+): { count: string; text: string; done: boolean } {
+    const progress = planProgress(entries, running);
+    const text =
+        progress.state === 'done' || !progress.step
+            ? s.plan.done
+            : format(s.plan[progress.state], { step: progress.step });
+    return { count: `${progress.done}/${progress.total}`, text, done: progress.state === 'done' };
+}
+
+/** The list a todo call wrote: from its result, else from what it was asked, while it runs. */
+function todoEntries(item: ItemOf<'tool_call'>): ItemOf<'plan'>['entries'] | undefined {
+    if (item.display?.kind === 'todo') return item.display.items;
+    const items = (item.input as { items?: unknown } | undefined)?.items;
+    if (!Array.isArray(items)) return undefined;
+    const entries = items.flatMap((entry): ItemOf<'plan'>['entries'] => {
+        const parsed = TodoEntrySchema.safeParse(entry);
+        return parsed.success ? [parsed.data] : [];
+    });
+    return entries.length > 0 ? entries : undefined;
+}
+
+/**
+ * A version of the plan, where the agent wrote it (03 §4): how far along the work was and the step in hand, the list
+ * a click away. A call that went wrong shows as a tool call, with its error.
+ */
+function TodoStep({ item }: { item: ItemOf<'tool_call'> }) {
+    const s = useStrings();
+    const [open, setOpen] = useState(false);
+    // A version only once written, or while being written: a call that failed, was refused or never ran (cancelled)
+    // changed nothing, and shows as the call it was.
+    const entries =
+        item.display?.kind === 'todo' || item.status === 'pending' || item.status === 'in_progress'
+            ? todoEntries(item)
+            : undefined;
+    if (!entries) return <ToolCallView item={item} />;
+    if (entries.length === 0) {
+        return (
+            <div className="todo-step">
+                <span className="todo-step__head is-static">
+                    <Icon name="list" size={13} />
+                    <span className="todo-step__title">{s.plan.title}</span>
+                    <span className="todo-step__now">{s.plan.cleared}</span>
+                </span>
+            </div>
+        );
+    }
+    const line = planLine(s, entries, true);
+    return (
+        <div className="todo-step">
+            <button type="button" className="todo-step__head" aria-expanded={open} onClick={() => setOpen(!open)}>
+                <Icon name="list" size={13} />
+                <span className="todo-step__title">{s.plan.title}</span>
+                <span className="todo-step__count">{line.count}</span>
+                <span className="todo-step__now">{line.text}</span>
+                <Icon name="chevronRight" size={11} className={`todo-step__chevron${open ? ' is-open' : ''}`} />
+            </button>
+            {open && (
+                <div className="todo-step__list">
+                    <PlanList entries={entries} />
+                </div>
+            )}
+        </div>
     );
 }
 
@@ -261,18 +344,43 @@ function ApprovalView({ item }: { item: ItemOf<'approval'> }) {
     );
 }
 
+/**
+ * The model's thinking. While it thinks, a window shows the newest lines as they come and follows them, unless the
+ * user scrolls back in it; opened, it shows all of it. Once over it folds away, a click from being read again.
+ */
 function ReasoningView({ item, live }: { item: ItemOf<'reasoning'>; live: boolean }) {
     const s = useStrings();
     const [open, setOpen] = useState(false);
+    const box = useRef<HTMLDivElement>(null);
+    const follow = useRef(true);
+    const tail = live && !open;
+    // biome-ignore lint/correctness/useExhaustiveDependencies: follow the text as it grows
+    useLayoutEffect(() => {
+        const element = box.current;
+        if (!tail || !element) return;
+        if (follow.current) element.scrollTop = element.scrollHeight;
+        // The top fades only when there is more above it.
+        element.toggleAttribute('data-scrolled', element.scrollTop > 0);
+    }, [tail, item.text.length]);
     return (
         <div className={`reasoning${live ? ' is-live' : ''}`}>
-            <button type="button" className="reasoning__toggle" onClick={() => setOpen(!open)}>
+            <button type="button" className="reasoning__toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
                 <Icon name="brain" size={13} />{' '}
                 <span className="reasoning__label">{live ? s.thread.thinking : s.thread.reasoning}</span>
                 <Icon name="chevronRight" size={11} className={`reasoning__chevron${open ? ' is-open' : ''}`} />
             </button>
             {(open || live) && (
-                <div className={`reasoning__text${live && !open ? ' is-clamped' : ''}`}>{item.text}</div>
+                <div
+                    ref={box}
+                    className={`reasoning__text${tail ? ' is-tail' : ''}`}
+                    onScroll={(event) => {
+                        const element = event.currentTarget;
+                        follow.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+                        element.toggleAttribute('data-scrolled', tail && element.scrollTop > 0);
+                    }}
+                >
+                    {item.text}
+                </div>
             )}
         </div>
     );
@@ -366,11 +474,11 @@ export function ItemView({ item, live, turnRunning = true }: { item: Item; live:
         case 'reasoning':
             return <ReasoningView item={item} live={live} />;
         case 'tool_call':
-            return <ToolCallView item={item} />;
+            return isTodoCall(item) ? <TodoStep item={item} /> : <ToolCallView item={item} />;
         case 'plan':
             return (
                 <div className="plan-card">
-                    <PlanList entries={item.entries} />
+                    <PlanList entries={item.entries} live={turnRunning} />
                 </div>
             );
         case 'approval':
