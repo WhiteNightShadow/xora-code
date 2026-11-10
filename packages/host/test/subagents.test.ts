@@ -197,6 +197,10 @@ describe('subagents', () => {
         const allStarted = new Promise<void>((resolve) => {
             all = resolve;
         });
+        let full: () => void = () => undefined;
+        const fourAtOnce = new Promise<void>((resolve) => {
+            full = resolve;
+        });
         server.respondWith(async (request) => {
             const body = request.body as Body | undefined;
             if (!body?.messages) return undefined;
@@ -205,8 +209,11 @@ describe('subagents', () => {
                 active++;
                 most = Math.max(most, active);
                 if (started === 5) all();
-                // With no limit all five would be here together.
-                await Promise.race([allStarted, sleep(1_500)]);
+                // They are held until four run at once, however slow the machine is to start them (a fixed wait
+                // let the first end before the fourth began on Windows CI); then a second more for a fifth to show
+                // up, as with no limit all five would be here together.
+                if (active === 4) setTimeout(full, 1_000);
+                await Promise.race([allStarted, fourAtOnce, sleep(15_000)]);
                 active--;
                 return say(`结果${/任务(\d)/.exec(userText(body))?.[1]}`);
             }
