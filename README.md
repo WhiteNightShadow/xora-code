@@ -5,14 +5,14 @@
   <p><strong>An agent-first coding desktop: a team of agents with their own memory, workflows that report back, and every change reviewable.</strong></p>
 
   <p>
-    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/release-v1.1.0-5856de?style=flat-square" alt="v1.1.0" /></a>
+    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.2.0"><img src="https://img.shields.io/badge/release-v1.2.0-5856de?style=flat-square" alt="v1.2.0" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="macOS, Windows, Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
   </p>
 
   <p>
-    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.1.0"><strong>下载 v1.1.0</strong></a> ·
+    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.2.0"><strong>下载 v1.2.0</strong></a> ·
     <a href="#产品界面">产品界面</a> ·
     <a href="#主要功能">主要功能</a> ·
     <a href="#快速开始">快速开始</a> ·
@@ -20,7 +20,7 @@
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
     <a href="#从源码构建">从源码构建</a> ·
-    <a href="docs/releases/v1.1.0.md">v1.1.0版本说明</a>
+    <a href="docs/releases/v1.2.0.md">v1.2.0版本说明</a>
   </p>
 </div>
 
@@ -31,6 +31,8 @@ Xora Code是一个三平台（macos、windows、linux）的agent编程桌面。�
 1.0是整体重写的版本，不再基于theia和grok build。它有自己的agent引擎，也能接codex、claude code、gemini cli等外部agent；模型可以用自己的api key（国际、国产、本地、中转站），也可以用已有的订阅。在单个对话之外，它把agent组织成**团队**：每个成员有自己的职责、模型、权限和一份长期记忆；复杂的目标交给主管拆卡、派工、验收，固定的流程写成**工作流**，跑完先给结论；成员还能按时间表自己做**例行任务**。
 
 1.1把这些收到一个入口：有事跟**总助手**说，它直接回答，或者交给合适的成员、团队或工作流，做完把结果告诉你。团队按小组组织，审批由主管替你审，只有大批量删除和删库才找你；团队任务卡住时会自己收尾出汇报。对话里跑着也能接着发（排队），发出的消息能改，`@`就能交给成员。
+
+1.2把团队页做成横向的组织树：组织下面还能分子组织，每个组织有自己的提示词和笔记，主管给成员做的每张卡打分；系统自带的人选都在**人才市场**里，搜得到、看得到提示词，聘进组织就能干活。总助手的对话不再属于某个项目，首页直接选模型和思考等级；计划放在输入框上方跟着进度更新，思考时实时显示最新的内容。
 
 > [!IMPORTANT]
 > 安装包还没有apple developer id签名和公证，也没有windows authenticode签名。mac第一次打开被拦下时，到“系统设置→隐私与安全性”里点“仍要打开”；windows的smartscreen提示选“仍要运行”。下载后请用release里的`SHA256SUMS`核对文件。1.0的数据目录和0.2.x分开，装新版不会动旧版的数据。
@@ -83,7 +85,7 @@ Xora Code是一个三平台（macos、windows、linux）的agent编程桌面。�
 ## 为什么用Xora Code
 
 - **一个入口，只看结果**：有事跟总助手说，它回答，或者交给成员、团队、工作流，做完告诉你结果；审批由主管按任务替你审，只有大批量删除和删库才找你。
-- **团队而不是单个助手**：主管、规划、侦察、编码、测试、文档、修bug、审查、专家各有分工，按小组组织；默认都用你设的默认模型，也可以按档位给需要判断的地方配更强的模型。
+- **团队而不是单个助手**：主管、规划、侦察、编码、测试、文档、修bug、审查、专家各有分工，按组织树组织，人才市场里还有前端、运维这些人选；默认都用你设的默认模型，也可以按档位给需要判断的地方配更强的模型。
 - **agent会记事**：成员的长期记忆跨对话、跨项目带着走，用得越久越懂你的项目和习惯；记什么、改什么，你随时能看能删。
 - **结论先行**：工作流和团队运行结束时先告诉你结果、问题和下一步，过程按需展开；运行中只把需要你确认的事推到眼前。
 - **改动可审、可撤**：每一轮的改动单独成卡，带diff和检查点；高风险动作（推送、发布、删除、对外发消息、付款）在任何权限模式下都要你点头。
@@ -98,10 +100,10 @@ Xora Code是一个三平台（macos、windows、linux）的agent编程桌面。�
 | **项目与对话** | 按项目组织对话，新建对话直接在主区域里写；可以在项目目录或独立的git worktree里工作；跑着的时候还能接着发（排队，这一轮结束后按顺序发出，可以改、删或插进这一轮）；发出的消息能编辑后从那里重来；从某一轮分叉、回到某一轮之前；标题自动换成内容摘要；长对话按步压缩，上下文用量在输入框旁随时可见。 |
 | **可审查的改动** | 每轮结束显示“改动了几个文件”，右侧变更面板看diff，可以撤销整轮或单个文件；命令和写文件按权限模式走审批，默认由主管按任务替你审，只有大批量删除和删库找你，也可以改成自己审。 |
 | **权限模式** | 只读、询问、自动编辑、全权四档，随时切换；只读命令在询问模式下直接放行；工作区外的路径和敏感文件总要确认。 |
-| **团队成员** | 10个内置成员加上自己建的成员，按小组组织，每组一个组长；跟总助手说要什么样的成员，它就设计好建出来；成员默认用你设的默认模型，也能单独指定，可以带skill和MCP服务；成员页能派活、看记忆、设例行任务；在对话、新建对话和总助手里写`@名字`就把消息交给它。 |
+| **团队成员** | 10个内置成员加上自己建的成员，按组织树组织（组织下面能再分子组织，最多三层，每个组织有负责人和自己的提示词）；人才市场列出系统自带的全部人选，能搜、能看提示词、一键聘进组织；跟总助手说要什么样的成员，它就设计好建出来；成员默认用你设的默认模型，也能单独指定，可以带skill和MCP服务；成员页能派活、看记忆、设例行任务；在对话、新建对话和总助手里写`@名字`就把消息交给它。 |
 | **长期记忆** | 成员用`remember`工具记笔记，分通用、每个项目、团队共享三份；`recall`能查别的项目和别的成员记过的事；对话、例行任务、工作流步骤、团队任务和子agent都会带上；不记密钥，超长时去掉最早的笔记。 |
 | **例行任务** | 每天、工作日、每周或任意cron，选项目、写要做的事；无人值守时只用按量计费的模型，不给全权；应用没开时错过的时间补跑一次，有例行任务时关窗口留在托盘。 |
-| **团队任务** | 交给一个小组，组长当主管：澄清目标、拆任务卡（验收命令、文件归属、预算）、计划评审、派工、看阶段成果并纠偏、验收、升档、整合、交付报告；开工前能给每个成员选模型、思考强度和权限；worktree带上项目里没提交的改动；自主级别L0～L3，没人盯的运行卡住时自己收尾出汇报；可以中途给主管或成员发话，结束的运行能接着继续。 |
+| **团队任务** | 交给一个组织，离它最近的负责人当主管、子组织里的人一起干：澄清目标、拆任务卡（验收命令、文件归属、预算）、计划评审、派工、看阶段成果并纠偏、验收、升档、整合、交付报告；开工前能给每个成员选模型、思考强度和权限；worktree带上项目里没提交的改动；自主级别L0～L3，没人盯的运行卡住时自己收尾出汇报；可以中途给主管或成员发话，结束的运行能接着继续；写完交付报告后主管给每张卡打分。 |
 | **工作流** | yaml定义的固定流程：agent步骤、命令、人工关卡、子工作流；看板一键运行，执行流图实时更新；结束后先给结论，可以追问；支持定时、文件变化、git提交和本机webhook触发，可以等模型的低价时段再跑。 |
 | **子agent** | 对话里的agent用`agent`工具把独立的任务交给子agent，最多同时4个；可以指定agent文件定义的agent或团队成员。 |
 | **联网** | `web_fetch`读网页（转成markdown，拒绝内网地址），`web_search`不需要key；按域名询问。 |
@@ -115,15 +117,15 @@ Xora Code是一个三平台（macos、windows、linux）的agent编程桌面。�
 
 ### 下载
 
-从[v1.1.0 release](https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.1.0)下载对应的安装包：
+从[v1.2.0 release](https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.2.0)下载对应的安装包：
 
 | 系统 | 安装包 |
 | --- | --- |
-| macos（apple芯片） | `Xora.Code-1.1.0-mac-arm64.dmg`（或`.zip`） |
-| macos（intel） | `Xora.Code-1.1.0-mac-x64.dmg`（或`.zip`） |
-| windows x64 / arm64 | `Xora.Code-1.1.0-win-x64.exe` / `Xora.Code-1.1.0-win-arm64.exe` |
-| linux x64 | `Xora.Code-1.1.0-linux-amd64.deb`（推荐）或`Xora.Code-1.1.0-linux-x86_64.AppImage` |
-| linux arm64 | `Xora.Code-1.1.0-linux-arm64.deb`（推荐）或`Xora.Code-1.1.0-linux-arm64.AppImage` |
+| macos（apple芯片） | `Xora.Code-1.2.0-mac-arm64.dmg`（或`.zip`） |
+| macos（intel） | `Xora.Code-1.2.0-mac-x64.dmg`（或`.zip`） |
+| windows x64 / arm64 | `Xora.Code-1.2.0-win-x64.exe` / `Xora.Code-1.2.0-win-arm64.exe` |
+| linux x64 | `Xora.Code-1.2.0-linux-amd64.deb`（推荐）或`Xora.Code-1.2.0-linux-x86_64.AppImage` |
+| linux arm64 | `Xora.Code-1.2.0-linux-arm64.deb`（推荐）或`Xora.Code-1.2.0-linux-arm64.AppImage` |
 
 ```bash
 # 核对下载的文件（和SHA256SUMS放在同一个目录）
@@ -211,6 +213,7 @@ node build/readme-shots.ts --app <应用路径>              # 重新生成READM
 
 ## 版本
 
+- [v1.2.0版本说明](docs/releases/v1.2.0.md)
 - [v1.1.0版本说明](docs/releases/v1.1.0.md)
 - [v1.0.0版本说明](docs/releases/v1.0.0.md)
 - 0.2.x（基于theia和grok build）保留在`legacy/theia`分支和`legacy/v0.2.10`标签，最后一个正式版是[v0.2.9](https://github.com/WhiteNightShadow/xora-code/releases/tag/v0.2.9)。

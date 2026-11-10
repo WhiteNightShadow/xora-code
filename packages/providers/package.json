@@ -1,6 +1,6 @@
 {
   "name": "@xora/providers",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Model vendor presets, wire adapters and quirks for the xora engine",
