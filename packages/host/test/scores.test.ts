@@ -195,7 +195,8 @@ describe('a score', () => {
     });
 });
 
-describe('the supervisor scores a run', () => {
+// Each runs a whole team run against the real engine: past the default five seconds on a slow machine (Windows CI).
+describe('the supervisor scores a run', { timeout: 90_000 }, () => {
     it('scores each card once the report is written, and it counts as the supervisor’s work', async () => {
         script(() => say('{"scores":[{"task":"T1","adjust":5,"reason":"a.txt写好了，验收一次过"}]}'));
         const { ui, core, project, done } = await run(newData());
