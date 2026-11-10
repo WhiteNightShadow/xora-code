@@ -196,22 +196,30 @@ export async function openSafeMode(deps: SafeModeDeps): Promise<void> {
     await window.loadURL(SAFE_MODE_URL);
 }
 
-/** Drill hook: reports what the repair page rendered, then quits. Proves the page, its CSP and IPC all work. */
+/** How long the drill's probe waits for the repair page to read the status. */
+const PROBE_WAIT_MS = 30_000;
+
+/**
+ * Drill hook: reports what the repair page rendered, then quits. Proves the page, its CSP and IPC all work. It waits
+ * until the page has read the status ("ready" or "error"), not a fixed time: one and a half seconds was too short
+ * where the app runs translated (x64 under Rosetta, 1.1.0).
+ */
 function probeAfterLoad(window: BrowserWindow, deps: SafeModeDeps): void {
-    window.webContents.once('did-finish-load', () => {
-        setTimeout(async () => {
-            const rendered = await window.webContents
+    window.webContents.once('did-finish-load', async () => {
+        const read = (): Promise<{ state?: string; candidates?: number; reason?: string; error?: string }> =>
+            window.webContents
                 .executeJavaScript(
                     '({ state: document.body.dataset.state, candidates: Number(document.body.dataset.candidates ?? 0), reason: document.getElementById("reason")?.textContent ?? "" })',
                 )
                 .catch((error: unknown) => ({ state: 'probe-failed', error: String(error) }));
-            await writeFile(
-                path.join(deps.paths.root, 'safe-mode-probe.json'),
-                `${JSON.stringify(rendered)}\n`,
-                'utf8',
-            );
-            deps.log.info(`safe mode probe: ${JSON.stringify(rendered)}`);
-            app.quit();
-        }, 1500);
+        const deadline = Date.now() + PROBE_WAIT_MS;
+        let rendered = await read();
+        while ((rendered.state === 'loading' || rendered.state === undefined) && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            rendered = await read();
+        }
+        await writeFile(path.join(deps.paths.root, 'safe-mode-probe.json'), `${JSON.stringify(rendered)}\n`, 'utf8');
+        deps.log.info(`safe mode probe: ${JSON.stringify(rendered)}`);
+        app.quit();
     });
 }
