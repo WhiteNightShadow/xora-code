@@ -70,8 +70,8 @@ Xora Code是一个三平台（macos、windows、linux）的agent编程桌面。�
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/xora-workflow.png" alt="工作流运行页：结论、问题、下一步三段，下面是执行流图和每个环节一行的结论" />
-      <p align="center"><strong>先给结论的工作流</strong><br /><sub>固定流程写成yaml，跑完由旗舰档模型写结论：是什么情况、有什么问题、下一步做什么；过程分层收起，点开看每一步。</sub></p>
+      <img src="docs/images/xora-state.png" alt="任务状态：修复订单精度的那段对话压缩后，留下用户的原话、计划、约束、决定和理由、事实、待你决定的问题、改过的文件、跑过的命令和一段进展" />
+      <p align="center"><strong>任务状态代替摘要</strong><br /><sub>上下文快满时，前面的对话整理成任务状态：你说的每句话原文保留，计划、约束、决定、改过的文件、跑过的命令和没修好的失败由引擎记着，模型只补一段进展和它判断的部分；更早的工具输出带引用号，随时原样取回。</sub></p>
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/xora-team.png" alt="团队运行概览：交付报告写明优惠券改成了按分计算，规划到交付五个阶段都已完成，三张任务卡都已验收" />

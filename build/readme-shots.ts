@@ -18,8 +18,8 @@ import { forgetAppCopy, secretStoreSwitches } from './app-switches.ts';
 /**
  * The README's screenshots (docs/images/), taken in the real app against a scripted model server and a demo
  * project, so they show the product without anyone's paths, accounts or keys: a fix in a conversation with its plan
- * and diff (light and dark), the organization tree, one member's panel, the talent market, a workflow run's
- * conclusion, a team run and a conversation with the chief assistant.
+ * and diff (light and dark), the organization tree, one member's panel, the talent market, the state of the work a
+ * compaction left in that conversation, a team run and a conversation with the chief assistant.
  *
  *   node build/readme-shots.ts                 unpackaged shell with dist/app-bundle (run `pnpm build && pnpm bundle`)
  *   node build/readme-shots.ts --app <exe>     a packaged build
@@ -485,6 +485,32 @@ server.respondWith((request) => {
             ].join('\n'),
         );
     }
+    // A compaction asks for what only the model can judge (20 §4.4): how the work went, and the ledger's entries. A
+    // constraint quotes the user's words exactly.
+    if (JSON.stringify(last ?? '').includes('The context is nearly full')) {
+        return openaiText(
+            [
+                '<narrative>',
+                '`orderTotal`改成先把每件的单价换成分（`Math.round(price × 100)`）再乘数量，加完再换回元，`0.1 × 3`不再算成`0.30000000000000004`；`test/order.test.js`补了小数单价和多件混合的用例，`node --test`三条都通过。下一步等用户决定`applyCoupon`要不要也按分算。',
+                '</narrative>',
+                '<ledger>',
+                JSON.stringify({
+                    add: [
+                        { kind: 'constraint', text: '修好之后要补上测试', quote: '补上测试' },
+                        {
+                            kind: 'decision',
+                            text: '金额一律先换成分（整数）再算，展示时再换回元',
+                            why: '按元相加的浮点数有误差，整数运算没有',
+                        },
+                        { kind: 'fact', text: '测试用`node --test`跑，三条都通过' },
+                        { kind: 'question', text: '`applyCoupon`也在按元相减，要不要一起改成按分算' },
+                    ],
+                    close: [],
+                }),
+                '</ledger>',
+            ].join('\n'),
+        );
+    }
     // The fix in a thread: plan, read, change, test, report.
     if (user.includes('订单总价有精度问题')) {
         const todo = (statuses: string[]) => ({
@@ -843,6 +869,12 @@ try {
     // What the thread fixed is committed, as a user would before the release check and the next change.
     git('commit', '-q', '-am', 'fix: sum order totals in fen');
 
+    phase('compaction');
+    // 20 §4.2: the fix thread's turns become the state of the work, as `/compact` makes them.
+    if (!fix) throw new Error('no fix thread to compact');
+    await hostCall(page, 'turn.compact', { threadId: fix.id });
+    await settled(page, fix.id);
+
     phase('workflow run');
     // A workflow run, to its conclusion.
     const run = await hostCall<{ id: string }>(page, 'workflow.start', {
@@ -911,14 +943,18 @@ try {
         .waitFor();
     await shot(page, 'xora-talent');
 
-    phase('workflow view');
-    // The workflow run: its conclusion first, the process unfolded under it.
-    await page.locator('.sidebar__nav', { hasText: '工作流' }).click();
-    await page.locator('.wf-board__run', { hasText: '发布前检查' }).first().click();
-    await page.locator('.wf-brief__conclusion', { hasText: '可以发布' }).waitFor({ timeout: 90_000 });
-    await page.locator('.wf-process__toggle').click();
-    await page.locator('.flow-node.is-succeeded').nth(2).waitFor();
-    await shot(page, 'xora-workflow');
+    phase('state view');
+    // The state that replaced the fix thread's turns: the user's words as they were, the plan, what was decided and
+    // why, the files and commands, how it went. The environment above it names the demo's temporary folder.
+    await page.locator('.thread-row', { hasText: '修复订单金额的精度问题' }).first().click();
+    const sidePanel = page.locator('.right-panel');
+    if (await sidePanel.isVisible()) await sidePanel.getByRole('button', { name: '关闭' }).first().click();
+    await page.locator('.compaction').getByRole('button', { name: '查看任务状态' }).click();
+    const messages = page.locator('.compaction__summary h2', { hasText: 'Messages to you' });
+    await messages.waitFor();
+    await messages.evaluate((element) => element.scrollIntoView({ block: 'start' }));
+    await page.waitForTimeout(500);
+    await shot(page, 'xora-state');
 
     phase('team view');
     // The team run, delivered: the team page opens on its organization; the runs are the other tab.
