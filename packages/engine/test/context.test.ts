@@ -8,6 +8,7 @@ import {
     applyCompaction,
     compactionCut,
     compactionMessages,
+    compactionShares,
     displayState,
     mergeJudgments,
     parseProposal,
@@ -15,8 +16,10 @@ import {
 } from '../src/context/compaction.ts';
 import { type Judgment, observe, renderState } from '../src/context/ledger.ts';
 import { contextMessages } from '../src/context/messages.ts';
-import { maskToolResults, placeholder, readOutput } from '../src/context/outputs.ts';
-import { EngineSession } from '../src/session.ts';
+import { describeCall, maskToolResults, notableLine, placeholder, readOutput } from '../src/context/outputs.ts';
+import { userWords } from '../src/context/tokens.ts';
+import { contextBudget, MIN_ROOM } from '../src/context/window.ts';
+import { EngineSession, resolveTarget } from '../src/session.ts';
 import { SessionFile } from '../src/store.ts';
 
 function session(): EngineSession {
@@ -73,6 +76,195 @@ function work(target: EngineSession, request: string, steps: number, size = 4000
     }
 }
 
+describe('what the review of 2026-11-11 found', () => {
+    const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+    it('never splits an emoji where it cuts text short', () => {
+        const line = `${'x'.repeat(119)}🚀 deployed`;
+        expect(lone.test(notableLine(line, false))).toBe(false);
+        const call = {
+            type: 'tool_call' as const,
+            id: 'a',
+            name: 'bash',
+            arguments: JSON.stringify({ command: `${'y'.repeat(79)}🚀🚀` }),
+        };
+        expect(lone.test(describeCall(call))).toBe(false);
+        const target = session();
+        target.append(user(`${'字'.repeat(10)}🚀`.repeat(400)));
+        target.append(answer('ok'));
+        applyCompaction(target, target.history.length, { level: 3, jobs: [], requestTokens: 37 });
+        expect(lone.test(target.summary ?? '')).toBe(false);
+    });
+
+    it('keeps what the model has not seen, however large, and lists every other tool that ran', () => {
+        const target = session();
+        target.append(user('file a jira issue and look around'));
+        target.append({
+            role: 'assistant',
+            content: [
+                { type: 'tool_call', id: 'g', name: 'grep', arguments: JSON.stringify({ pattern: 'TODO' }) },
+                {
+                    type: 'tool_call',
+                    id: 'j',
+                    name: 'mcp__jira__create_issue',
+                    arguments: JSON.stringify({ title: 'Broken login' }),
+                },
+            ],
+            provider: 'p',
+            model: 'm',
+        });
+        target.append(result('g', 'grep', 'a.ts:1: TODO'.repeat(4000)));
+        target.append(result('j', 'mcp__jira__create_issue', 'Created ABC-12'));
+        // The latest step alone is over any tail: it stays, as the model has not seen its results.
+        expect(compactionCut(target, 100)).toBeUndefined();
+        target.append(answer('Filed ABC-12.'));
+        target.append(user('now fix it'));
+        const cut = compactionCut(target, 10) ?? 0;
+        expect(target.history[cut]?.role).toBe('user');
+        applyCompaction(target, cut, { level: 3, jobs: [], requestTokens: 20_000 });
+        const state = target.summary ?? '';
+        expect(state).toContain('## Other tool calls, latest last');
+        expect(state).toMatch(/#R3 `mcp__jira__create_issue "Broken login"` → ok · Created ABC-12/);
+        expect(state).toMatch(/#R2 `grep "TODO"` → ok/);
+        expect(state).toContain('Your latest reply before this state is #R4.');
+    });
+
+    it('compacts nothing when everything after the first message of the context fits', () => {
+        const target = session();
+        work(target, 'go', 3, 100);
+        applyCompaction(target, 1, { level: 3, jobs: [], requestTokens: 20_000 });
+        expect(target.history[target.contextStart]?.role).toBe('assistant');
+        expect(compactionCut(target, 1_000_000)).toBeUndefined();
+    });
+
+    it('counts the system prompt and the tool definitions, and leaves the conversation room beside them', () => {
+        const target = session();
+        // A model with a window of a million: the working set is what limits.
+        const model = {
+            ...resolveTarget(target.config.model),
+            model: { ...resolveTarget(target.config.model).model, contextWindow: 1_000_000, maxOutput: 32_000 },
+        };
+        const plain = contextBudget(target, model, 5_000);
+        expect(plain).toBe(160_000 - 32_000);
+        // A thread with many tool definitions still has MIN_ROOM below the compaction line.
+        const heavy = contextBudget(target, model, 120_000);
+        expect(heavy).toBeGreaterThan(plain);
+        expect(heavy * 0.8 - 120_000).toBeGreaterThanOrEqual(MIN_ROOM - 1);
+        // Shares are of the conversation's room, not of the fixed part.
+        const shares = compactionShares({ budget: heavy, fixed: 120_000, used: 150_000, estimated: 150_000 });
+        expect(shares.tail).toBeGreaterThan(0);
+        expect(shares.tail).toBeLessThanOrEqual(30_000 * 0.25);
+    });
+
+    it('starts over from the host’s account: what came before stays out, the account stays whole', () => {
+        const target = session();
+        work(target, 'plan the run', 2, 100);
+        target.append(result('x', 'bash', 'Error: npm test failed', true));
+        const account = `<run_state>${'card '.repeat(1_000)}</run_state>`;
+        // As TurnRunner.run({ fresh }) does it.
+        target.startFrom({
+            contextStart: target.history.length,
+            summary: account,
+            base: account,
+            ledgerFrom: target.history.length,
+            judgments: [],
+            narratives: [],
+            compactions: 0,
+        });
+        target.file.append({
+            t: 'compaction',
+            ts: 0,
+            level: 3,
+            summary: account,
+            keepFrom: target.history.length,
+            tokensBefore: 0,
+            tokensAfter: 0,
+            fresh: true,
+        });
+        work(target, '<team_update>card 3 done</team_update>', 2, 100);
+        applyCompaction(target, target.history.length, { level: 3, jobs: [], requestTokens: 20_000 });
+        const state = target.summary ?? '';
+        expect(state).not.toContain('plan the run');
+        expect(state).not.toContain('npm test failed');
+        expect(state).toContain('card card card');
+        expect(target.compactions).toBe(1);
+        const restored = new EngineSession({ ...target, config: target.config });
+        restored.restore(new SessionFile(target.dir).read());
+        expect(restored.compactions).toBe(1);
+        expect(restored.ledgerFrom).toBe(target.ledgerFrom);
+        expect(restored.base).toBe(account);
+    });
+
+    it('reads the ledger item by item: a bad item is dropped, the rest still count', () => {
+        const history = [user('Never touch the schema.')];
+        const earlier: Judgment[] = [
+            { id: 'Q1', kind: 'question', text: 'Which DB?', status: 'open', at: 1 },
+            { id: 'D2', kind: 'decision', text: 'Use sqlite', status: 'open', at: 1 },
+        ];
+        const proposal = parseProposal(`<ledger>
+\`\`\`json
+{"add": [{"kind": "constraint", "text": "Schema is frozen", "quote": "Never touch the schema."},
+         {"kind": "fact", "text": "<one sentence>"}, {"kind": "deadend", "text": "..."}],
+ "close": [{"id": "Q1", "status": "已解决"}, {"id": "D2", "status": "maybe"}, null, {"id": "Q4", "status": "done"}]}
+\`\`\`
+That is all.
+</ledger>`);
+        const merged = mergeJudgments(earlier, proposal.delta, history, 2);
+        expect(merged.judgments.map((item) => [item.id, item.status])).toEqual([
+            ['Q1', 'done'],
+            ['D2', 'open'],
+            ['C3', 'open'],
+        ]);
+        // Two placeholders, a status nobody knows, a null and an id that is not there.
+        expect(merged.rejected).toBe(5);
+        expect(parseProposal('<ledger>{"add": [], "close": null}</ledger>').delta).toEqual({ add: [], close: [] });
+    });
+
+    it('takes neither host notes nor attached files for the words of a message', () => {
+        const words = userWords([
+            { type: 'text', text: 'Fix the bug' },
+            { type: 'text', text: '<file uri="file:///big.log">\nthousands of lines\n</file>' },
+            { type: 'text', text: '<host_note>\nHow things stand…\n</host_note>' },
+        ]);
+        expect(words).toBe('Fix the bug\n[attached file file:///big.log]');
+        // One long message leaves room for the others.
+        const target = session();
+        target.append(user('first: keep the API'));
+        target.append(answer('ok'));
+        target.append(user(`log: ${'line\n'.repeat(20_000)}`));
+        target.append(answer('ok'));
+        target.append(user('last request'));
+        applyCompaction(target, target.history.length, { level: 3, jobs: [], requestTokens: 20_000 });
+        const state = target.summary ?? '';
+        expect(state).toContain('first: keep the API');
+        expect(state).toContain('tool_output("R2") returns the whole message');
+    });
+
+    it('keeps the latest failure of a call last, reads renames in patches and one path either way', () => {
+        const history: Message[] = [
+            user('go'),
+            call('a', 'bash', { command: 'make' }),
+            result('a', 'bash', 'Error: one', true),
+            call('b', 'bash', { command: 'lint' }),
+            result('b', 'bash', 'Error: lint', true),
+            call('c', 'bash', { command: 'make' }),
+            result('c', 'bash', 'Error: two', true),
+            call('d', 'apply_patch', {
+                patch: '*** Begin Patch\n*** Update File: src/a.ts\n*** Move to:src/b.ts\n*** End Patch',
+            }),
+            result('d', 'apply_patch', 'done'),
+            call('e', 'read', { path: '/work/src/b.ts' }),
+            result('e', 'read', 'x'),
+        ];
+        const observed = observe(history, 0, '/work');
+        expect(observed.failures.map((failure) => failure.line)).toEqual(['Error: lint', 'Error: two']);
+        expect(observed.files.map((file) => [file.path, file.reads, file.edits])).toEqual([
+            ['src/b.ts', 1, 1],
+            ['src/a.ts', 0, 1],
+        ]);
+    });
+});
+
 describe('the ledger', () => {
     it('records what the history shows: requests, files, commands and failures until fixed', () => {
         const history: Message[] = [
@@ -96,7 +288,7 @@ describe('the ledger', () => {
             ['src/new.ts', 0, 1],
             ['src/login.ts', 1, 1],
         ]);
-        expect(observed.commands.map((command) => [command.command, command.ok])).toEqual([
+        expect(observed.commands.map((command) => [command.what, command.ok])).toEqual([
             ['npm test', false],
             ['npm run lint', false],
             ['npm test', true],
@@ -131,8 +323,8 @@ describe('the ledger', () => {
         expect(state).toContain('- #R2 second 字');
         expect(state).toContain('[cut for room; tool_output("R2") returns the whole message]');
         expect(state).toContain('1 older message(s) left out for room: #R0');
-        expect(state).toContain('- [x] Read the code\n- [~] Fix it');
-        expect(state).toContain('- C1 Keep the schema — the user: "schema"');
+        expect(state).toContain('## Plan (the todo list)\n[x] Read the code\n[~] Fix it');
+        expect(state).toContain('- C1 Keep the schema — quoted: "schema"');
         expect(state).not.toContain('Old question');
         expect(state).toContain('job-1');
         expect(state).toContain('Tried X first.');
@@ -158,7 +350,10 @@ describe('masking', () => {
         const text = first?.content[0]?.type === 'text' ? first.content[0].text : '';
         expect(text).toMatch(/^\[#R2 bash "npm test -- part 0" · ok · 4\.\dk chars · ok part 0 — masked/);
         expect(readOutput(target, '#R2')?.text).toContain('x'.repeat(4000));
-        expect(readOutput(target, 'R0')).toEqual({ tool: 'user message', text: 'run the parts' });
+        expect(readOutput(target, 'R0')).toMatchObject({
+            tool: 'message',
+            text: expect.stringContaining('run the parts'),
+        });
         expect(readOutput(target, 'R1')).toBeUndefined();
         // Frozen: more results do not mask again until the next compaction.
         work(target, 'more', 8);
@@ -184,8 +379,10 @@ describe('compaction', () => {
         const cut = compactionCut(target, 300);
         expect(cut).toBeDefined();
         expect(target.history[cut ?? 0]?.role).toBe('assistant');
-        // Nothing fits: the state alone continues; nothing at all older: nothing to compact.
-        expect(compactionCut(target, 1)).toBe(target.history.length);
+        // Nothing fits: what the model has not seen yet still stays, its latest call with the results.
+        expect(compactionCut(target, 1)).toBe(target.history.length - 2);
+        // Everything fits: nothing to compact.
+        expect(compactionCut(target, 1_000_000)).toBeUndefined();
         const empty = session();
         empty.append(user('hi'));
         empty.append(user(`a long paste ${'x'.repeat(8000)}`));
@@ -252,8 +449,14 @@ Switched to pnpm after npm broke the lockfile.
         target.contextStart = 2;
         work(target, 'new work', 3, 100);
         applyCompaction(target, target.history.length, { level: 4, jobs: [], requestTokens: 20_000 });
-        expect(target.narratives).toEqual(['Goal: port the parser. Done: the lexer.']);
-        expect(target.summary).toContain('## How the work went\nGoal: port the parser. Done: the lexer.');
+        expect(target.base).toBe('Goal: port the parser. Done: the lexer.');
+        expect(target.summary).toContain(
+            '## Where the work stood when this conversation last started over\nGoal: port the parser. Done: the lexer.',
+        );
+        // It stays the account the next states start from, whatever comes after.
+        work(target, 'more work', 2, 100);
+        applyCompaction(target, target.history.length, { level: 3, jobs: [], requestTokens: 20_000 });
+        expect(target.summary).toContain('Goal: port the parser. Done: the lexer.');
     });
 
     it('starts the context from the state, survives a restart, and goes back with a rewind', () => {
@@ -273,8 +476,8 @@ Switched to pnpm after npm broke the lockfile.
         const first = contextMessages(target)[0];
         const state = first?.content[0]?.type === 'text' ? first.content[0].text : '';
         expect(state).toContain('- #R0 Port the parser to rust. Keep the public API.');
-        expect(state).toContain('- [~] Port the lexer');
-        expect(state).toContain('- C1 Keep the public API — the user: "Keep the public API."');
+        expect(state).toContain('[~] Port the lexer');
+        expect(state).toContain('- C1 Keep the public API — quoted: "Keep the public API."');
         expect(state).toContain('Lexer half done.');
         expect(state).toMatch(/#R\d+ `npm test -- part \d` → ok/);
         expect(target.maskFrozen).toBe(false);

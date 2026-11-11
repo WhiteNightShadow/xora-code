@@ -1,6 +1,7 @@
 import type { AssistantPart, Message } from '@xora/providers';
+import { clipText } from '../deps.ts';
 import type { EngineSession } from '../session.ts';
-import { estimateMessageTokens, estimateTokens, messageText, userWords } from './tokens.ts';
+import { estimateMessageTokens, estimateTokens, fullText, messageText } from './tokens.ts';
 
 /**
  * Tool output out of the context but never lost (20 §4.3): an older result is masked to one line that says what it
@@ -39,7 +40,7 @@ export function callsOf(history: readonly Message[]): Map<number, ToolCall> {
     return calls;
 }
 
-/** The reference of the tool result at `index` of the history: stable, as the history only grows. */
+/** The reference of the message at `index` of the history: stable, as the history only grows. */
 export const refOf = (index: number): string => `R${index}`;
 
 /** A call's arguments, or nothing when they are not an object of JSON. */
@@ -53,7 +54,7 @@ export function argsOf(call: ToolCall | undefined): Record<string, unknown> {
     }
 }
 
-/** What a call worked on, in a few words: its command, path, pattern or address. */
+/** What a call worked on, in a few words: its command, path, pattern, address or query. */
 export function describeCall(call: ToolCall | undefined): string {
     const args = argsOf(call);
     const pick = (key: string) => (typeof args[key] === 'string' ? (args[key] as string) : undefined);
@@ -64,11 +65,13 @@ export function describeCall(call: ToolCall | undefined): string {
         pick('url') ??
         pick('query') ??
         pick('ref') ??
+        pick('title') ??
+        pick('name') ??
         ''
     )
         .replace(/\s+/g, ' ')
         .trim();
-    return shown ? JSON.stringify(shown.length > 80 ? `${shown.slice(0, 80)}…` : shown) : '';
+    return shown ? JSON.stringify(clipText(shown, 80)) : '';
 }
 
 const NOTABLE = /error|fail|exception|traceback|denied|not found|cannot|panic|fatal|错误|失败/i;
@@ -78,9 +81,9 @@ export function notableLine(text: string, failed: boolean): string {
     const lines = text
         .split('\n')
         .map((line) => line.trim())
-        .filter((line) => line.length > 0);
+        .filter((line) => line.length > 0 && !line.startsWith('<system-reminder>'));
     const line = (failed ? lines.find((item) => NOTABLE.test(item)) : undefined) ?? lines[0] ?? '';
-    return line.length > 120 ? `${line.slice(0, 120)}…` : line;
+    return clipText(line, 120);
 }
 
 function sizeOf(chars: number): string {
@@ -102,14 +105,21 @@ export function placeholder(index: number, message: ToolResult, call: ToolCall |
     return `[${parts.join(' · ')} — masked to save context; tool_output("${refOf(index)}") returns it]`;
 }
 
-/** The tool result or user message a reference names, as it was. */
+/** The message a reference names, as it was: a tool's output, a message to the model, or one of its replies. */
 export function readOutput(session: EngineSession, ref: string): { tool: string; text: string } | undefined {
     const match = /^R(\d+)$/.exec(ref.trim().replace(/^#/, '').toUpperCase());
     if (!match) return undefined;
     const message = session.history[Number(match[1])];
-    if (message?.role === 'tool') return { tool: message.toolName, text: messageText(message) };
-    if (message?.role === 'user') return { tool: 'user message', text: userWords(message.content) };
-    return undefined;
+    if (!message) return undefined;
+    const text = fullText(message);
+    switch (message.role) {
+        case 'tool':
+            return { tool: message.toolName, text };
+        case 'user':
+            return { tool: 'message', text };
+        case 'assistant':
+            return text ? { tool: 'your reply', text } : undefined;
+    }
 }
 
 /**

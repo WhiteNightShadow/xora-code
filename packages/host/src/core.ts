@@ -269,7 +269,7 @@ export class HostCore {
             log: this.log,
             memberNames: async (projectId) =>
                 new Map((await this.members.list(projectId).catch(() => [])).map((member) => [member.id, member.name])),
-            conversations: (query) => this.threads.search(query, 48),
+            conversations: (query) => this.threads.excerpts(query),
             thread: (threadId) => this.threads.find(threadId),
             onChanged: (memberId) => this.bus.broadcast('member.changed', { memberId }),
         });

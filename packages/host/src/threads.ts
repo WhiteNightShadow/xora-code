@@ -358,8 +358,7 @@ export class ThreadStore {
         ]);
     }
 
-    /** `around`: tokens of the snippet around the match; the sidebar shows a few, `recall` more (20 §4.6). */
-    search(query: string, around = 12): Array<{ threadId: string; title: string; snippet: string }> {
+    search(query: string): Array<{ threadId: string; title: string; snippet: string }> {
         // Trigram tokens: a quoted phrase matches substrings of three or more characters, CJK included.
         const escaped = `"${query.replaceAll('"', '""')}"`;
         try {
@@ -367,15 +366,14 @@ export class ThreadStore {
             const rows =
                 [...query].length >= 3
                     ? this.#db.all<{ thread_id: string; title: string; snippet: string }>(
-                          `select thread_id, title, snippet(thread_text, 3, '[', ']', '…', ?) as snippet
+                          `select thread_id, title, snippet(thread_text, 3, '[', ']', '…', 12) as snippet
                            from thread_text where thread_text match ? order by rank limit 200`,
-                          [Math.min(64, Math.max(1, Math.round(around))), escaped],
+                          [escaped],
                       )
                     : this.#db.all<{ thread_id: string; title: string; snippet: string }>(
-                          `select thread_id, title, substr(body, 1, ?) as snippet from thread_text
+                          `select thread_id, title, substr(body, 1, 80) as snippet from thread_text
                            where body like ? escape '\\' or title like ? escape '\\' limit 200`,
                           [
-                              Math.max(80, Math.round(around) * 6),
                               `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`,
                               `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`,
                           ],
@@ -387,6 +385,38 @@ export class ThreadStore {
                 seen.add(row.thread_id);
                 hits.push({ threadId: row.thread_id, title: row.title, snippet: row.snippet });
                 if (hits.length >= 50) break;
+            }
+            return hits;
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * Messages of conversations that mention `query`, whole as indexed (up to 20 000 characters each), the best match
+     * of each conversation: for `recall` (20 §4.6), which takes keys out and cuts its own piece.
+     */
+    excerpts(query: string, limit = 20): Array<{ threadId: string; projectId: string; title: string; body: string }> {
+        const like = `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+        try {
+            const rows =
+                [...query].length >= 3
+                    ? this.#db.all<{ thread_id: string; title: string; body: string }>(
+                          'select thread_id, title, body from thread_text where thread_text match ? order by rank limit 200',
+                          [`"${query.replaceAll('"', '""')}"`],
+                      )
+                    : this.#db.all<{ thread_id: string; title: string; body: string }>(
+                          "select thread_id, title, body from thread_text where body like ? escape '\\' limit 200",
+                          [like],
+                      );
+            const seen = new Set<string>();
+            const hits: Array<{ threadId: string; projectId: string; title: string; body: string }> = [];
+            for (const row of rows) {
+                const thread = seen.has(row.thread_id) ? undefined : this.find(row.thread_id);
+                if (!thread) continue;
+                seen.add(row.thread_id);
+                hits.push({ threadId: row.thread_id, projectId: thread.projectId, title: row.title, body: row.body });
+                if (hits.length >= limit) break;
             }
             return hits;
         } catch {

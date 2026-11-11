@@ -13,10 +13,18 @@ import {
 import { contextMessages } from './context/messages.ts';
 import { maskToolResults, readOutput } from './context/outputs.ts';
 import { estimateMessageTokens, estimateTokens } from './context/tokens.ts';
-import { COMPACT_AT, contextBudget, currentContextTokens, estimatedContextTokens, MASK_AT } from './context/window.ts';
+import {
+    COMPACT_AT,
+    contextBudget,
+    currentContextTokens,
+    estimatedContextTokens,
+    fixedTokens,
+    MASK_AT,
+} from './context/window.ts';
 import {
     type AnyTool,
     checkPathAccess,
+    clipText,
     completeModel,
     isReadOnlyCommand,
     isSensitivePath,
@@ -437,17 +445,23 @@ ${renderTodos(todos)}
 If steps are done, started or no longer needed, update it with the todo tool now, then carry on; if it is right as it is, just carry on. Do not mention this reminder.</system-reminder>`;
     }
 
-    /** The context starts from `summary`: everything before this point is represented by it, as after a compaction. */
+    /**
+     * The context starts over from `summary`, the host's account of the work: everything before is represented by it,
+     * and the ledger of what came before no longer holds (20 §4.4).
+     */
     #restart(summary: string): void {
         const session = this.#session;
         const keepFrom = session.history.length;
         const before = contextMessages(session).reduce((sum, message) => sum + estimateMessageTokens(message), 0);
-        session.contextStart = keepFrom;
-        session.summary = summary;
-        session.prunedUpTo = Math.max(session.prunedUpTo, keepFrom);
-        session.maskFrozen = false;
-        session.lastPromptTokens = 0;
-        session.lastPromptEstimate = 0;
+        session.startFrom({
+            contextStart: keepFrom,
+            summary,
+            base: summary,
+            ledgerFrom: keepFrom,
+            judgments: [],
+            narratives: [],
+            compactions: 0,
+        });
         session.file.append({
             t: 'compaction',
             ts: Date.now(),
@@ -456,48 +470,61 @@ If steps are done, started or no longer needed, update it with the todo tool now
             keepFrom,
             tokensBefore: before,
             tokensAfter: estimateTokens(summary),
+            fresh: true,
         });
     }
 
+    /** What every request to `target` carries besides the conversation: the system prompt and the tool definitions. */
+    #fixed(target: ResolvedTarget): number {
+        return fixedTokens(
+            systemSegments(this.#session.config.layers),
+            target.model.tools ? toolSpecs([...this.#tools.values()]) : [],
+        );
+    }
+
     /**
-     * Keeps the context within the budget (20 §4.4): at MASK_AT older tool output is masked to references, all at
-     * once; at COMPACT_AT older turns give way to the state of the work, unless masking alone brings it back.
+     * Keeps the context within the budget of `target` (20 §4.4): at MASK_AT older tool output is masked to
+     * references, all at once; at COMPACT_AT older turns give way to the state of the work, unless masking alone
+     * brings it back. Before a request to a fallback model it runs for that model's budget (level 4).
      */
-    async #manageContext(): Promise<void> {
+    async #manageContext(target = resolveTarget(this.#session.config.model), level: 3 | 4 = 3): Promise<void> {
         const session = this.#session;
-        const target = resolveTarget(session.config.model);
-        const budget = contextBudget(session, target);
-        const system = systemSegments(session.config.layers);
-        const used = currentContextTokens(session, system);
+        const fixed = this.#fixed(target);
+        const budget = contextBudget(session, target, fixed);
+        const used = currentContextTokens(session, fixed);
         if (used < budget * MASK_AT) {
             return;
         }
         const masked = maskToolResults(session, budget);
-        if (masked && currentContextTokens(session, system) < budget * COMPACT_AT) {
+        if (masked && currentContextTokens(session, fixed) < budget * COMPACT_AT) {
             return;
         }
         if (used >= budget * COMPACT_AT) {
-            await this.compact(3);
+            await this.compact(level, undefined, 'auto', target);
         }
     }
 
     /**
-     * Replaces older turns with the state of the work. Level 3 asks the model for its part of the state in the
-     * request it would have made next; level 4 (before a fallback to another vendor, whose model is failing or about
-     * to change) uses the engine's part alone. Before a compaction of its own (`auto`) the engine runs the host's
-     * PreCompact hooks; for `/compact` the host has run them already.
+     * Replaces older turns with the state of the work, asking `target` (the thread's model, or the fallback about to
+     * be used: level 4) for its part in the request it would have made next; when it cannot answer, the state is the
+     * engine's part alone. Before a compaction of its own (`auto`) the engine runs the host's PreCompact hooks; for
+     * `/compact` the host has run them already.
      */
-    async compact(level: 3 | 4, focus?: string, trigger: 'auto' | 'manual' = 'auto'): Promise<boolean> {
+    async compact(
+        level: 3 | 4,
+        focus?: string,
+        trigger: 'auto' | 'manual' = 'auto',
+        target = resolveTarget(this.#session.config.model),
+    ): Promise<boolean> {
         const session = this.#session;
-        const target = resolveTarget(session.config.model);
-        const budget = contextBudget(session, target);
-        const system = systemSegments(session.config.layers);
-        const shares = compactionShares(
+        const fixed = this.#fixed(target);
+        const budget = contextBudget(session, target, fixed);
+        const shares = compactionShares({
             budget,
-            currentContextTokens(session, system),
-            estimatedContextTokens(session, system),
-            level,
-        );
+            fixed,
+            used: currentContextTokens(session, fixed),
+            estimated: estimatedContextTokens(session, fixed),
+        });
         // `/compact` is the user asking for it: the state alone continues, however little there is to compact.
         const cut = compactionCut(session, trigger === 'manual' ? 0 : shares.tail);
         if (cut === undefined) {
@@ -514,12 +541,10 @@ If steps are done, started or no longer needed, update it with the todo tool now
             status: 'started',
         } as acp.SessionUpdate);
         let asked: { text: string; done: Extract<ModelEvent, { type: 'done' }> } | undefined;
-        if (level === 3) {
-            try {
-                asked = await this.#askState(target, focus);
-            } catch {
-                // The model could not answer: the state is the engine's records alone, which never fail.
-            }
+        try {
+            asked = await this.#askState(target, focus);
+        } catch {
+            // The model could not answer: the state is the engine's records alone, which never fail.
         }
         if (this.#signal.aborted) {
             this.#io.update({
@@ -530,11 +555,15 @@ If steps are done, started or no longer needed, update it with the todo tool now
             } as acp.SessionUpdate);
             return false;
         }
+        const environment = environmentBlock(session.cwd, session.roots)
+            .replace(/^<environment>\n/, '')
+            .replace(/\n<\/environment>$/, '');
         const result = applyCompaction(session, cut, {
             level,
             ...(asked?.text ? { answer: asked.text } : {}),
             jobs: this.#runningJobs(),
             requestTokens: shares.requests,
+            environment,
         });
         this.#io.update({
             sessionUpdate: 'compaction_update',
@@ -575,7 +604,7 @@ If steps are done, started or no longer needed, update it with the todo tool now
         return this.#session.jobs
             .list()
             .filter((job) => job.running)
-            .map((job) => `${job.id}: \`${job.command.length > 120 ? `${job.command.slice(0, 120)}…` : job.command}\``);
+            .map((job) => `${job.id}: \`${clipText(job.command, 120)}\``);
     }
 
     /**
@@ -584,16 +613,17 @@ If steps are done, started or no longer needed, update it with the todo tool now
      */
     #reportContext(summary?: { target: ResolvedTarget; done: Extract<ModelEvent, { type: 'done' }> }): void {
         const session = this.#session;
-        let size: number;
+        let target: ResolvedTarget;
         try {
-            size = contextBudget(session, resolveTarget(session.config.model));
+            target = resolveTarget(session.config.model);
         } catch {
             return;
         }
+        const fixed = this.#fixed(target);
         this.#io.update({
             sessionUpdate: 'usage_update',
-            used: currentContextTokens(session, systemSegments(session.config.layers)),
-            size,
+            used: currentContextTokens(session, fixed),
+            size: contextBudget(session, target, fixed),
             ...(summary ? { _meta: { xora: { request: requestRecord(summary.target, summary.done) } } } : {}),
         });
     }
@@ -630,10 +660,10 @@ If steps are done, started or no longer needed, update it with the todo tool now
                     this.#text.fallback(target.model.name),
                     lastError instanceof Error ? lastError.message : undefined,
                 );
-                if (this.#crossesProvider(target)) {
-                    // Reasoning from another vendor cannot be replayed (07 §5 rule 2): summarise first.
-                    await this.compact(4);
-                }
+                // The fallback's window may be smaller: the context is kept within its budget, not the main model's.
+                // Reasoning the main model wrote is not replayed to another vendor (07 §5 rule 2, done by the
+                // providers), so nothing else needs to change.
+                await this.#manageContext(target, 4);
             }
             for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
                 const result = await this.#streamOnce(target);
@@ -663,12 +693,6 @@ If steps are done, started or no longer needed, update it with the todo tool now
         throw lastError instanceof ProviderError
             ? new ModelError(lastError)
             : (lastError ?? new Error('model request failed'));
-    }
-
-    #crossesProvider(target: ResolvedTarget): boolean {
-        return this.#session.history.some(
-            (message) => message.role === 'assistant' && `${message.provider}/${message.model}` !== target.key,
-        );
     }
 
     async #streamOnce(
@@ -732,13 +756,15 @@ If steps are done, started or no longer needed, update it with the todo tool now
 
     #reportUsage(target: ResolvedTarget, request: ModelRequest, done: Extract<ModelEvent, { type: 'done' }>): void {
         const session = this.#session;
-        const promptTokens = done.usage?.inputTokens ?? currentContextTokens(session, request.system);
+        const fixed = fixedTokens(request.system, request.tools ?? []);
+        const promptTokens = done.usage?.inputTokens ?? currentContextTokens(session, fixed);
         session.lastPromptTokens = promptTokens;
-        session.lastPromptEstimate = estimatedContextTokens(session, request.system);
+        // Estimated as the next request will be, tool definitions included, so the two compare like for like.
+        session.lastPromptEstimate = estimatedContextTokens(session, fixed);
         this.#io.update({
             sessionUpdate: 'usage_update',
             used: promptTokens,
-            size: contextBudget(session, target),
+            size: contextBudget(session, target, fixed),
             _meta: { xora: { request: requestRecord(target, done) } },
         });
     }
@@ -747,7 +773,7 @@ If steps are done, started or no longer needed, update it with the todo tool now
         this.#io.update({
             sessionUpdate: 'usage_update',
             used: this.#session.lastPromptTokens,
-            size: contextBudget(this.#session, target),
+            size: contextBudget(this.#session, target, this.#fixed(target)),
             _meta: {
                 xora: {
                     request: {

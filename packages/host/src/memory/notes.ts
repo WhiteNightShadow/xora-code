@@ -70,8 +70,9 @@ export type Placed =
     | { readonly outcome: 'noMatch' };
 
 /**
- * A note put into a file: in place of the note that contains `replaces`, or added; a repeat is not written twice;
- * past MEMORY_FILE_CHARS the oldest notes make room.
+ * A note put into a file: instead of the note that contains `replaces`, or added; either way it is the newest, at
+ * the end, so the oldest notes that make room past MEMORY_FILE_CHARS are never the one just written. A repeat is not
+ * written twice.
  */
 export function placeNote(saved: string, line: string, note: string, replaces: string): Placed {
     const lines = saved
@@ -82,7 +83,8 @@ export function placeNote(saved: string, line: string, note: string, replaces: s
     if (replaces) {
         const index = lines.findIndex((item) => noteText(item).toLowerCase().includes(replaces.toLowerCase()));
         if (index < 0) return { outcome: 'noMatch' };
-        lines[index] = line;
+        lines.splice(index, 1);
+        lines.push(line);
         outcome = 'replaced';
     } else if (lines.some((item) => noteText(item).toLowerCase() === note.toLowerCase())) {
         return { outcome: 'already' };

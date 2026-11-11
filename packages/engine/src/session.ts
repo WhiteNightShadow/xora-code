@@ -70,16 +70,26 @@ export function resolveTarget(target: ModelTarget): ResolvedTarget {
     };
 }
 
-interface TurnMark {
-    readonly length: number;
+/** Where the context starts and what stands for the history before it (20 §4.2, §4.4). */
+export interface ContextStart {
+    /** Index of the first message of the history the context shows. */
     readonly contextStart: number;
+    /** What stands for the messages before it: the state of the work, or an older summary. */
     readonly summary: string | undefined;
-    readonly prunedUpTo: number;
-    readonly maskFrozen: boolean;
-    readonly todos: readonly TodoItem[];
+    /** Where the work stood when the context last started over: the host's account, or a summary from before 1.3. */
+    readonly base: string | undefined;
+    /** Where the ledger starts observing the history. */
+    readonly ledgerFrom: number;
     readonly judgments: readonly Judgment[];
     readonly narratives: readonly string[];
     readonly compactions: number;
+}
+
+interface TurnMark extends ContextStart {
+    readonly length: number;
+    readonly prunedUpTo: number;
+    readonly maskFrozen: boolean;
+    readonly todos: readonly TodoItem[];
 }
 
 /**
@@ -110,8 +120,12 @@ export class EngineSession {
     judgments: readonly Judgment[] = [];
     /** The model's accounts of how the work went, the latest few. */
     narratives: readonly string[] = [];
-    /** Compactions of this session so far. */
+    /** Compactions of this session since the context last started over. */
     compactions = 0;
+    /** Where the work stood when the context last started over (see {@link ContextStart.base}). */
+    base: string | undefined;
+    /** Where the ledger starts observing the history. */
+    ledgerFrom = 0;
     /** Prompt tokens reported for the latest request, for the context meter and compaction triggers. */
     lastPromptTokens = 0;
     /** What `estimatedContextTokens` made of that request, to calibrate later estimates against the vendor's count. */
@@ -155,13 +169,30 @@ export class EngineSession {
                     this.title = entry.title;
                     break;
                 case 'compaction':
-                    this.contextStart = entry.keepFrom;
-                    this.summary = entry.summary;
-                    this.prunedUpTo = Math.max(this.prunedUpTo, entry.keepFrom);
-                    this.judgments = entry.judgments ?? this.judgments;
-                    this.narratives = entry.narratives ?? this.narratives;
-                    this.compactions++;
-                    this.maskFrozen = false;
+                    if (entry.fresh) {
+                        this.startFrom({
+                            contextStart: entry.keepFrom,
+                            summary: entry.summary,
+                            base: entry.summary,
+                            ledgerFrom: entry.keepFrom,
+                            judgments: [],
+                            narratives: [],
+                            compactions: 0,
+                        });
+                    } else {
+                        // Before 1.3 a compaction left a summary in prose, without judgments: it is the account the
+                        // next state starts from.
+                        const legacy = entry.judgments === undefined;
+                        this.startFrom({
+                            contextStart: entry.keepFrom,
+                            summary: entry.summary,
+                            base: legacy ? entry.summary : this.base,
+                            ledgerFrom: this.ledgerFrom,
+                            judgments: entry.judgments ?? this.judgments,
+                            narratives: entry.narratives ?? this.narratives,
+                            compactions: this.compactions + 1,
+                        });
+                    }
                     break;
                 case 'prune':
                     this.prunedUpTo = Math.max(this.prunedUpTo, entry.upTo);
@@ -238,11 +269,31 @@ export class EngineSession {
         return true;
     }
 
+    /**
+     * The context starts at `start.contextStart` from now on, the history before it represented by `start.summary`:
+     * after a compaction, a fresh start, or when either is read back. Every field of it changes together.
+     */
+    startFrom(start: ContextStart): void {
+        this.contextStart = start.contextStart;
+        this.summary = start.summary;
+        this.base = start.base;
+        this.ledgerFrom = start.ledgerFrom;
+        this.judgments = start.judgments;
+        this.narratives = start.narratives;
+        this.compactions = start.compactions;
+        this.prunedUpTo = Math.max(this.prunedUpTo, start.contextStart);
+        this.maskFrozen = false;
+        this.lastPromptTokens = 0;
+        this.lastPromptEstimate = 0;
+    }
+
     #mark(turnId: string): void {
         this.#turns.set(turnId, {
             length: this.history.length,
             contextStart: this.contextStart,
             summary: this.summary,
+            base: this.base,
+            ledgerFrom: this.ledgerFrom,
             prunedUpTo: this.prunedUpTo,
             maskFrozen: this.maskFrozen,
             todos: this.todos,
@@ -260,6 +311,8 @@ export class EngineSession {
         this.history.splice(mark.length);
         this.contextStart = mark.contextStart;
         this.summary = mark.summary;
+        this.base = mark.base;
+        this.ledgerFrom = mark.ledgerFrom;
         this.prunedUpTo = mark.prunedUpTo;
         this.maskFrozen = mark.maskFrozen;
         this.todos = mark.todos;

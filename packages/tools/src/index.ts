@@ -139,6 +139,6 @@ export {
     webSearchTool,
 } from './tools/web.ts';
 export { type WriteInput, writeTool } from './tools/write.ts';
-export { truncateLine, truncateMiddle } from './truncate.ts';
+export { clipText, sliceText, truncateLine, truncateMiddle } from './truncate.ts';
 export type * from './types.ts';
 export { ALWAYS_SKIPPED, type WalkEntry, type WalkOptions, walk } from './walk.ts';

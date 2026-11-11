@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { type Member, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
+import { clipText } from '@xora/tools';
 import type { HostToolResult } from '../engines/manager.ts';
 import { XORA_ENGINE } from '../engines/registry.ts';
 import { type Logger, redact } from '../log.ts';
@@ -71,19 +72,34 @@ export interface MemoryDeps {
     readonly now?: () => number;
     /** The members' names by id, to say whose notes recall found. */
     readonly memberNames?: (projectId: string | undefined) => Promise<ReadonlyMap<string, string>>;
-    /** Earlier conversations that mention a query, from the threads' full-text index, for recall. */
-    readonly conversations?: (
-        query: string,
-    ) => ReadonlyArray<{ readonly threadId: string; readonly title: string; readonly snippet: string }>;
+    /** Messages of earlier conversations that mention a query, whole, from the threads' full-text index. */
+    readonly conversations?: (query: string) => ReadonlyArray<{
+        readonly threadId: string;
+        readonly projectId: string;
+        readonly title: string;
+        readonly body: string;
+    }>;
     /** The threads, to know whose a shared tool call is. */
     readonly thread?: (threadId: string) => ThreadMeta | undefined;
     /** A member's notes changed: its panel shows them again. */
     readonly onChanged?: (memberId: string) => void;
 }
 
-/** Threads with memory of the user's own: those of the Xora engine outside team and workflow runs. */
+/**
+ * Threads with memory of the user's own: the user's conversations and the chief's, of the Xora engine. Not team or
+ * workflow runs (their members have their own) and not subagents: a subagent reads what it is handed, often from
+ * the web or a repository, and must not write what every thread then reads as the user's preferences.
+ */
 export function sharesMemory(thread: ThreadMeta): boolean {
-    return thread.engine === XORA_ENGINE.id && !thread.teamRunId && !thread.workflowRunId;
+    return thread.engine === XORA_ENGINE.id && !thread.parent && !thread.teamRunId && !thread.workflowRunId;
+}
+
+/** About `width` characters of `text` around `at`, never starting or ending inside a surrogate pair. */
+function around(text: string, at: number, width: number): string {
+    let start = Math.max(0, at - Math.floor(width / 3));
+    if (start > 0 && /[\udc00-\udfff]/.test(text.charAt(start))) start += 1;
+    const part = clipText(text.slice(start).replace(/\s+/g, ' ').trim(), width);
+    return start > 0 ? `…${part}` : part;
 }
 
 function subjectOf(thread: ThreadMeta): Extract<MemorySubject, { kind: 'user' }> {
@@ -126,14 +142,13 @@ export class MemoryService implements SharedTools {
     /** Its memory as it was when the conversation began; none when its run gives it a memory of its own. */
     layers(thread: ThreadMeta, provider: HostToolProvider | undefined): Layer[] {
         if (!sharesMemory(thread) || provider?.tools.some((tool) => tool.name === REMEMBER_TOOL)) return [];
-        let layer = this.#snapshots.get(thread.id);
-        if (!layer) {
-            layer = this.layerFor(subjectOf(thread));
-            this.#snapshots.set(thread.id, layer);
-            if (this.#snapshots.size > SNAPSHOTS) {
-                const oldest = this.#snapshots.keys().next().value;
-                if (oldest !== undefined) this.#snapshots.delete(oldest);
-            }
+        const layer = this.#snapshots.get(thread.id) ?? this.layerFor(subjectOf(thread));
+        // The least recently used goes first when there are too many.
+        this.#snapshots.delete(thread.id);
+        this.#snapshots.set(thread.id, layer);
+        if (this.#snapshots.size > SNAPSHOTS) {
+            const oldest = this.#snapshots.keys().next().value;
+            if (oldest !== undefined) this.#snapshots.delete(oldest);
         }
         return [layer];
     }
@@ -452,7 +467,11 @@ export class MemoryService implements SharedTools {
         return { content: lines.join('\n') };
     }
 
-    /** Earlier conversations that mention the query, the subject's own excluded: the whole query, else its words. */
+    /**
+     * Earlier conversations that mention the query — the whole query, else its words — in the subject's project (any
+     * project for the chief's, which belongs to none), the asking one left out. Keys, tokens and passwords are taken
+     * out of a message before a piece of it is shown: another thread may send it to another vendor.
+     */
     #conversations(subject: MemorySubject, query: string, terms: readonly string[]): string[] {
         const search = this.#deps.conversations;
         if (!search) return [];
@@ -462,11 +481,16 @@ export class MemoryService implements SharedTools {
         const words = [query, ...terms.filter((term) => term !== query.toLowerCase() && [...term].length >= 3)];
         for (const word of words) {
             for (const hit of search(word)) {
-                if (seen.has(hit.threadId)) continue;
+                if (
+                    seen.has(hit.threadId) ||
+                    (subject.projectId !== undefined && hit.projectId !== subject.projectId)
+                ) {
+                    continue;
+                }
                 seen.add(hit.threadId);
-                out.push(
-                    `- (${textOf(MEMORY_TEXT).conversation(shorten(hit.title, 60))}) ${shorten(hit.snippet, 300)}`,
-                );
+                const clean = redact(hit.body);
+                const at = Math.max(0, clean.toLowerCase().indexOf(word.toLowerCase()));
+                out.push(`- (${textOf(MEMORY_TEXT).conversation(shorten(hit.title, 60))}) ${around(clean, at, 300)}`);
                 if (out.length >= RECALL_CONVERSATIONS) return out;
             }
             if (out.length > 0) break;
@@ -522,9 +546,12 @@ export class MemoryService implements SharedTools {
         await this.#migrate(memberId);
         const file = this.#memberFile(memberId, scope, projectId, groupId);
         const tidy = text.replace(/\r\n?/g, '\n').trim();
-        await this.#serial.run(`memory:${file}`, () =>
-            tidy ? writeAtomic(file, `${tidy}\n`) : rm(file, { force: true }),
-        );
+        await this.#serial.run(`memory:${file}`, async () => {
+            // What the user replaces or clears stays one step back, next to it (recall reads only `.md` files).
+            const before = await readFile(file, 'utf8').catch(() => '');
+            if (before.trim() && before.trim() !== tidy) await writeAtomic(`${file}.bak`, before);
+            await (tidy ? writeAtomic(file, `${tidy}\n`) : rm(file, { force: true }));
+        });
         this.#deps.onChanged?.(memberId);
     }
 

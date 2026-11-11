@@ -39,6 +39,23 @@ export function truncateMiddle(text: string, maxChars: number): string {
     return text.slice(0, headEnd) + middleMarker(tailStart - headEnd) + text.slice(tailStart);
 }
 
+/** The first `end` characters of `text`, one fewer where the cut would split a surrogate pair (an emoji, say). */
+export function sliceText(text: string, end: number): string {
+    if (end >= text.length) {
+        return text;
+    }
+    let at = Math.max(0, Math.floor(end));
+    if (at > 0 && isHighSurrogate(text.charCodeAt(at - 1))) {
+        at -= 1;
+    }
+    return text.slice(0, at);
+}
+
+/** `text` cut to `max` characters with `mark` after it when it was longer; never splits a surrogate pair. */
+export function clipText(text: string, max: number, mark = '…'): string {
+    return text.length > max ? `${sliceText(text, max)}${mark}` : text;
+}
+
 /**
  * Cuts a single line after `maxChars` characters and says how many were dropped. `fullLength` is the length of the
  * original line when the caller only kept a prefix of it.

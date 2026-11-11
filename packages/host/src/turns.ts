@@ -753,8 +753,10 @@ export class TurnService {
             ...baseLayers.slice(globalIndex + 1),
             ...(extras?.layers ?? []),
         ];
+        // A shared tool its run offers itself, or that its agent may not use (a subagent's whitelist), stays out.
         const shared = ((await this.#deps.sharedTools?.()?.tools(thread, extras)) ?? []).filter(
-            (tool) => !provider?.tools.some((own) => own.name === tool.name),
+            (tool) =>
+                !provider?.tools.some((own) => own.name === tool.name) && !provider?.disabledTools?.includes(tool.name),
         );
         running.shared = new Set(shared.map((tool) => tool.name));
         const ownTools = [...(provider?.tools ?? []), ...shared];
@@ -968,7 +970,12 @@ export class TurnService {
                 });
                 if (started?.additionalContext) note('SessionStart', started.additionalContext);
             }
-            const prompt = blocks.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+            // The user's prompt as they wrote it: what the host adds after it is not theirs to check.
+            const prompt = blocks
+                .flatMap((block) =>
+                    block.type === 'text' && !block.text.startsWith('<host_note>') ? [block.text] : [],
+                )
+                .join('\n');
             const submitted = await extensions.runHook(extras, 'UserPromptSubmit', { ...base, payload: { prompt } });
             if (submitted?.blocked) {
                 this.#notice(

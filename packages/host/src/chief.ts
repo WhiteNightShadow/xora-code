@@ -18,6 +18,7 @@ import {
     type ThreadMeta,
     type WorkflowRun,
 } from '@xora/protocol';
+import { clipText } from '@xora/tools';
 import { pickTierModel } from './agent-models.ts';
 import type { ApprovalService } from './approvals.ts';
 import type { Bus } from './bus.ts';
@@ -56,8 +57,9 @@ const TEAM_ENDED: ReadonlySet<string> = new Set(['done', 'failed', 'cancelled'])
 const WORKFLOW_ENDED: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
 /** What a card shows of an outcome; the run's own page has the rest. */
 const CARD_SUMMARY = 400;
-/** What the prompt carries of a finished run's report. */
-const PROMPT_REPORT = 1_200;
+/** What the status carries of a finished run's report, and of how many: work_status has them whole. */
+const PROMPT_REPORT = 800;
+const PROMPT_REPORTS = 3;
 const STATUS_RUNS = 10;
 const RECENT_MS = 24 * 3600_000;
 
@@ -503,8 +505,7 @@ export function briefOutcome(text: string): string {
 }
 
 function clip(text: string, length: number): string {
-    const trimmed = text.trim();
-    return trimmed.length > length ? `${trimmed.slice(0, length)}…` : trimmed;
+    return clipText(text.trim(), length);
 }
 
 export class ChiefService {
@@ -516,8 +517,6 @@ export class ChiefService {
     readonly #workflows = new Map<string, WorkflowRun>();
     /** Skills a search of each conversation returned: only those can be installed (06 §21). */
     readonly #found = new Map<string, Map<string, SkillCandidate>>();
-    /** The status each conversation was last given, and the cards whose reports it carried (20 §4.5). */
-    readonly #given = new Map<string, { text: string; reported: Set<string> }>();
     #loaded: Promise<void> | undefined;
     readonly #unlisten: () => void;
 
@@ -953,19 +952,13 @@ export class ChiefService {
     }
 
     /**
-     * How things stand, for the turn about to start: in full the first time and whenever it changed, a report only
-     * the first time it is given; else a line that nothing changed. What it gave before is in the conversation.
+     * How things stand, for the turn about to start, in full every time: what an earlier message carried may be gone
+     * from the context (the message edited, the turn rewound or cancelled, the conversation compacted). It stays
+     * short: a line a card, the reports of the latest few ended ones.
      */
     async #statusNote(threadId: string): Promise<string> {
         await this.#load().catch(() => undefined);
-        const given = this.#given.get(threadId) ?? { text: '', reported: new Set<string>() };
-        const reported = new Set<string>();
-        const text = this.#statusText(threadId, given.reported, reported);
-        if (text === given.text) return 'How things stand: as in the status with the previous message.';
-        for (const id of reported) given.reported.add(id);
-        given.text = text;
-        this.#given.set(threadId, given);
-        return `How things stand now (the host's status, not the user's words):\n${text}`;
+        return `How things stand now (the host's status, not the user's words):\n${this.#statusText(threadId)}`;
     }
 
     async #handle(
@@ -1598,11 +1591,8 @@ export class ChiefService {
         return `- ${kind} ${item.refId} in ${this.#projectName(item.projectId)}: "${item.title}" — ${item.status}${item.summary ? `: ${clip(item.summary, 300)}` : ''}${item.cost ? ` (${moneyText(item.cost)})` : ''}`;
     }
 
-    /**
-     * How things stand for a conversation of the chief. `skip`: cards whose reports it was given already, which are
-     * left out; `reported`: the cards whose reports this text carries.
-     */
-    #statusText(threadId: string, skip?: ReadonlySet<string>, reported?: Set<string>): string {
+    /** How things stand for a conversation of the chief. */
+    #statusText(threadId: string): string {
         const own = this.#deps.threads.find(threadId)?.projectId;
         const lines: string[] = [];
         const projects = [...this.#projects.values()];
@@ -1621,14 +1611,21 @@ export class ChiefService {
         const mine = [...this.#cards.values()].filter((card) => card.threadId === threadId);
         lines.push('', 'Work handed on in this conversation:');
         if (mine.length === 0) lines.push('- none yet');
-        for (const card of mine.slice(-STATUS_RUNS)) {
+        const shown = mine.slice(-STATUS_RUNS);
+        // The reports of the latest few ended cards; the others are a work_status away.
+        const reports = new Set(
+            shown
+                .filter((card) => this.#reportOf(card) !== undefined)
+                .slice(-PROMPT_REPORTS)
+                .map((card) => card.item.id),
+        );
+        for (const card of shown) {
             lines.push(this.#cardLine(card));
             const report = this.#reportOf(card);
-            if (report && skip?.has(card.item.id)) {
-                lines.push('  Its report: given with an earlier message (work_status has it again)');
-            } else if (report) {
+            if (report && reports.has(card.item.id)) {
                 lines.push(`  Its report:\n${clip(report, PROMPT_REPORT).replace(/^/gm, '    ')}`);
-                reported?.add(card.item.id);
+            } else if (report) {
+                lines.push(`  Its report: work_status ${card.item.refId} has it`);
             }
         }
         const followed = new Set(mine.map((card) => card.item.refId));

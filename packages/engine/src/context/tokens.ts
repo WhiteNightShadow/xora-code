@@ -1,4 +1,5 @@
 import type { AssistantPart, Message, UserPart } from '@xora/providers';
+import { sliceText } from '../deps.ts';
 
 /** Rough token count: about four ASCII characters per token, one per CJK or other wide character. */
 export function estimateTokens(text: string): number {
@@ -31,19 +32,37 @@ export function messageText(message: Message): string {
     return message.content.map(partText).join('\n');
 }
 
+/** Text parts the engine and the host add to a message: never the words of whoever wrote it. */
+const ADDED = /^\s*<(environment|system-reminder|hook_context|hook_feedback|host_note)[\s>]/;
+const REMINDER = /^\s*<system-reminder>/;
+/** An attached file, which the message names without repeating its content. */
+const ATTACHED = /^\s*<file uri="([^"]*)">/;
+
 /**
- * What the user wrote in a message: their text, without the environment block, reminders or hook output the engine
- * and host add to it.
+ * What a message to the model says: its text without what the engine and the host add to it (the environment,
+ * reminders, hook output, host notes), attached files by name only. In work the host hands a thread (a task card, a
+ * workflow step) the host's words are the request.
  */
 export function userWords(content: readonly (UserPart | AssistantPart)[]): string {
     return content
-        .flatMap((part) => (part.type === 'text' ? [part.text] : []))
-        .filter((text) => !/^\s*<(environment|system-reminder|hook_context|hook_feedback|host_note)[\s>]/.test(text))
+        .flatMap((part) => {
+            if (part.type !== 'text' || ADDED.test(part.text)) return [];
+            const file = ATTACHED.exec(part.text);
+            return [file ? `[attached file ${file[1]}]` : part.text];
+        })
         .join('\n')
         .trim();
 }
 
-/** The longest start of `text` that stays within `tokens`. */
+/** A message as it was, for `tool_output`: every text of it, without the reminders the engine added at its end. */
+export function fullText(message: Message): string {
+    return message.content
+        .flatMap((part) => (part.type === 'text' && !REMINDER.test(part.text) ? [part.text] : []))
+        .join('\n')
+        .trim();
+}
+
+/** The longest start of `text` that stays within `tokens`, never splitting a surrogate pair. */
 export function clipTokens(text: string, tokens: number): string {
     if (estimateTokens(text) <= tokens) return text;
     let low = 0;
@@ -56,7 +75,7 @@ export function clipTokens(text: string, tokens: number): string {
             high = mid - 1;
         }
     }
-    return text.slice(0, low);
+    return sliceText(text, low);
 }
 
 export function estimateMessageTokens(message: Message): number {

@@ -39,8 +39,12 @@ const bodies = () =>
 const systemOf = (body: ChatBody | undefined) =>
     textOf(body?.messages.find((message) => message.role === 'system')?.content);
 const isChief = (body: ChatBody) => systemOf(body).includes('You are the chief assistant of Xora Code');
-/** How things stand, as the host sent it with the user's messages (20 §4.5), not in the system prompt. */
-const statusOf = (body: ChatBody | undefined) => (body ? userText(body) : '');
+/**
+ * How things stand, as the host sent it with the user's latest message (20 §4.5), not in the system prompt; the
+ * latest only, as every message carries the whole status.
+ */
+const statusOf = (body: ChatBody | undefined) =>
+    textOf(body?.messages.filter((message) => message.role === 'user').at(-1)?.content);
 
 async function setUp(dataDir = mkdtempSync(path.join(tmpdir(), 'xora-chief-data-'))) {
     const harness = await host.start(dataDir);

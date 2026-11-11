@@ -140,7 +140,11 @@ export function MemorySection({ member }: { member: Member }) {
                         type="button"
                         className="button button--small"
                         onClick={async () => {
-                            if (await confirmDialog(format(s.members.memoryConfirmClear, { name: member.name }))) {
+                            const question =
+                                part === 'user'
+                                    ? s.members.memoryConfirmClearUser
+                                    : format(s.members.memoryConfirmClear, { name: member.name });
+                            if (await confirmDialog(question)) {
                                 void save('');
                             }
                         }}

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sliceText } from '../truncate.ts';
 import type { ToolContext, ToolDefinition, ToolResult } from '../types.ts';
 
 const ToolOutputInput = z.object({
@@ -37,7 +38,7 @@ async function runToolOutput(input: ToolOutputInput, ctx: ToolContext): Promise<
         if (hits.length === 0) {
             return { content: `No line of ${ref} (${found.tool}, ${lines.length} lines) contains "${input.grep}".` };
         }
-        return { content: clip(`${ref} (${found.tool}), ${hits.length} matching lines:\n${hits.join('\n')}`) };
+        return { content: `${ref} (${found.tool}), ${hits.length} matching lines:\n${clip(hits.join('\n'))}` };
     }
     const start = (input.offset ?? 1) - 1;
     const end = Math.min(lines.length, start + (input.limit ?? DEFAULT_LINES));
@@ -45,12 +46,13 @@ async function runToolOutput(input: ToolOutputInput, ctx: ToolContext): Promise<
         return errorResult(`${ref} has only ${lines.length} lines.`);
     }
     const more = end < lines.length ? `\n[lines ${start + 1}–${end} of ${lines.length}; ask for more with offset]` : '';
-    return { content: clip(`${lines.slice(start, end).join('\n')}${more}`) };
+    // The note on what is left comes after the cut, so it is never cut off itself.
+    return { content: `${clip(lines.slice(start, end).join('\n'))}${more}` };
 }
 
 function clip(text: string): string {
     return text.length > MAX_CHARS
-        ? `${text.slice(0, MAX_CHARS)}\n[cut at ${MAX_CHARS} characters; narrow it with offset/limit or grep]`
+        ? `${sliceText(text, MAX_CHARS)}\n[cut at ${MAX_CHARS} characters; narrow it with offset/limit or grep]`
         : text;
 }
 

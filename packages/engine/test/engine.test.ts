@@ -515,6 +515,42 @@ describe('xora engine over ACP', () => {
         h.close();
     }, 30_000);
 
+    it('works on with a fallback model, its context managed for it and not compacted at every request', async () => {
+        server.reset();
+        let steps = 0;
+        server.respondWith((request) => {
+            const body = request.body as { model?: string };
+            // The thread's model is down the whole time; retry-after 0 keeps the retries quick.
+            if (body.model === 'mock-model') {
+                return errorTurn(529, { error: { message: 'overloaded' } }, { 'retry-after-ms': '0' });
+            }
+            steps++;
+            return steps <= 3
+                ? openaiToolCalls([{ name: 'read', arguments: JSON.stringify({ path: 'a.txt' }) }])
+                : openaiText('read it three times');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace(), {
+            fallbacks: [
+                { connection: { presetId: 'custom-openai', apiKey: 'k', baseUrl: server.url }, model: 'backup-model' },
+            ],
+        });
+        const done = await h.client.request('session/prompt', {
+            sessionId,
+            prompt: [{ type: 'text', text: 'read a.txt three times' }],
+        });
+        expect(done.stopReason).toBe('end_turn');
+        expect(h.updates.filter((update) => update.sessionUpdate === 'compaction_update')).toHaveLength(0);
+        // Each step the fallback saw the result of the one before.
+        const backup = server.requests.filter(
+            (request) => (request.body as { model?: string }).model === 'backup-model',
+        );
+        expect(backup).toHaveLength(4);
+        const last = JSON.stringify((backup.at(-1)?.body as { messages?: unknown[] } | undefined)?.messages);
+        expect(last.match(/alpha/g)?.length).toBe(3);
+        h.close();
+    }, 60_000);
+
     it('gives back an earlier tool output by its reference', async () => {
         server.reset();
         let step = 0;

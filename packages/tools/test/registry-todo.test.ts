@@ -57,6 +57,15 @@ describe('tool_output', () => {
         const unknown = await runTool(toolOutputTool, { ref: 'R99' }, ctx);
         expect(unknown.isError).toBe(true);
     });
+
+    it('keeps the note on the lines left when a page is cut, and never splits an emoji', async () => {
+        const wide = Array.from({ length: 900 }, () => `${'x'.repeat(99)}🚀`).join('\n');
+        const ctx = await makeContext('/tmp', { outputs: { read: () => ({ tool: 'read', text: wide }) } });
+        const page = await runTool(toolOutputTool, { ref: 'R1' }, ctx);
+        expect(page.content).toContain('[cut at 30000 characters');
+        expect(page.content.endsWith('[lines 1–400 of 900; ask for more with offset]')).toBe(true);
+        expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(page.content)).toBe(false);
+    });
 });
 
 describe('createDefaultTools', () => {

@@ -34,6 +34,11 @@ export type SessionEntry =
           readonly judgments?: readonly Judgment[];
           /** The model's accounts of how the work went, the latest few. */
           readonly narratives?: readonly string[];
+          /**
+           * The context started over from the host's account of the work (a supervisor woken with the state of its
+           * run, 06 §29): the ledger looks at the history from here on and earlier judgments no longer hold.
+           */
+          readonly fresh?: true;
       }
     /** Tool results before `upTo` are shown as one-line references from now on (20 §4.3). */
     | { readonly t: 'prune'; readonly ts: number; readonly upTo: number }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ThreadMeta } from '@xora/protocol';
 import { type MockModelServer, startMockModelServer } from '@xora/test-kit';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { MEMORY_FILE_CHARS, placeNote } from '../src/memory/notes.ts';
 import { sharesMemory } from '../src/memory/service.ts';
 import {
     buildEngine,
@@ -64,6 +65,23 @@ afterEach(async () => {
 
 afterAll(async () => {
     await server.close();
+});
+
+describe('notes in a file', () => {
+    it('puts a corrected note last, so the room made past the limit never takes it', () => {
+        const filler = Array.from(
+            { length: 400 },
+            (_, index) => `- [2026-11-02] 第${index}条${'很长的笔记'.repeat(8)}`,
+        );
+        const saved = ['- [2026-11-01] 构建用 pnpm', ...filler].join('\n');
+        const note = `构建改用 bun：${'因为'.repeat(100)}`;
+        const placed = placeNote(saved, `- [2026-11-11] ${note}`, note, 'pnpm');
+        expect(placed.outcome).toBe('replaced');
+        if (placed.outcome !== 'replaced') return;
+        expect(placed.lines.at(-1)).toBe(`- [2026-11-11] ${note}`);
+        expect(placed.lines.join('\n').length).toBeLessThanOrEqual(MEMORY_FILE_CHARS);
+        expect(placed.lines.some((line) => line.includes('构建用 pnpm'))).toBe(false);
+    });
 });
 
 describe('memory of the user’s own threads', () => {
@@ -134,12 +152,16 @@ describe('memory of the user’s own threads', () => {
     });
 
     it('leaves memory to the runs that bring their own, and to members theirs, the user’s preferences included', async () => {
-        const { core, project } = await setUp();
+        const { core, ui, dataDir, project } = await setUp();
         const base = { id: 't1', engine: 'xora', projectId: project.id } as unknown as ThreadMeta;
         expect(sharesMemory(base)).toBe(true);
         expect(sharesMemory({ ...base, teamRunId: 'r1' } as ThreadMeta)).toBe(false);
         expect(sharesMemory({ ...base, workflowRunId: 'w1' } as ThreadMeta)).toBe(false);
         expect(sharesMemory({ ...base, engine: 'codex' } as ThreadMeta)).toBe(false);
+        // A subagent reads what it is handed, from the web as well: it writes nothing every thread then reads.
+        expect(sharesMemory({ ...base, parent: { threadId: 't0', turnId: 'u1' } } as unknown as ThreadMeta)).toBe(
+            false,
+        );
         const member = core.members.withMemory(
             { tools: [], handle: async () => ({ content: '' }) },
             { id: 'scout', name: 'Scout' },
@@ -157,14 +179,26 @@ describe('memory of the user’s own threads', () => {
         );
         expect(other.layers?.at(-1)?.text).toContain('用户要中文回答');
         expect(core.memory.layerFor({ kind: 'user', projectId: project.id }).text).toContain('用户要中文回答');
+        // What the user clears in the panel stays one step back.
+        await ui.request('member.setMemory', { memberId: 'scout', scope: 'user', text: '' });
+        const user = path.join(dataDir, 'orgs', 'default', 'user.md');
+        expect(existsSync(user)).toBe(false);
+        expect(readFileSync(`${user}.bak`, 'utf8')).toContain('用户要中文回答');
     });
 
-    it('recalls notes and earlier conversations, the asking one left out', async () => {
+    it('recalls notes and earlier conversations of the project, the asking one left out and keys taken out', async () => {
         const { ui, core, project } = await setUp();
         server.respondWith(() => say('知道了'));
         const earlier = await ui.request('thread.create', { projectId: project.id });
-        await ui.request('turn.start', { threadId: earlier.id, text: '部署脚本在 scripts/deploy.sh，记得先跑 lint' });
+        await ui.request('turn.start', {
+            threadId: earlier.id,
+            text: '部署脚本在 scripts/deploy.sh，记得先跑 lint；staging 的 key 是 sk-proj-abcdefghijklmnopqrstuvwx',
+        });
         await settled(ui, earlier.id, 1);
+        const other = await ui.request('project.add', { path: gitRepo() });
+        const elsewhere = await ui.request('thread.create', { projectId: other.id });
+        await ui.request('turn.start', { threadId: elsewhere.id, text: '另一个项目的部署脚本在 ops/ship.sh' });
+        await settled(ui, elsewhere.id, 1);
         await core.memory.handleFor({ kind: 'user', projectId: project.id }, 'remember', {
             note: '部署前要先打 tag',
         });
@@ -175,6 +209,9 @@ describe('memory of the user’s own threads', () => {
         expect(found.content).toContain('部署前要先打 tag');
         expect(found.content).toContain('以前的对话里提到过：');
         expect(found.content).toContain('scripts/deploy.sh');
+        // Another project's conversations stay there; a key never comes out.
+        expect(found.content).not.toContain('ops/ship.sh');
+        expect(found.content).not.toContain('sk-proj-abcdefghijklmnopqrstuvwx');
         // Its own conversation is in its context already.
         const own = await core.memory.handleFor(
             { kind: 'user', projectId: project.id, threadId: earlier.id },

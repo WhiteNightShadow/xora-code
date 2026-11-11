@@ -6,6 +6,7 @@ export { completeModel, ProviderError, streamModel } from '@xora/providers';
 export {
     type AnyTool,
     checkPathAccess,
+    clipText,
     createDefaultTools,
     isReadOnlyCommand,
     isSensitivePath,
@@ -13,6 +14,8 @@ export {
     LspManager,
     renderTodos,
     sanitizeEnv,
+    sliceText,
+    type TodoItem,
     type ToolContext,
     type ToolResult,
 } from '@xora/tools';

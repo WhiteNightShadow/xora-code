@@ -1201,7 +1201,9 @@ const zh = {
         memoryEditTitle: '{name}的记忆',
         memoryEditHint: '每行一条；记错的、过时的直接删掉',
         memoryClear: '清空',
-        memoryConfirmClear: '清空{name}的全部记忆？',
+        memoryConfirmClear: '清空{name}的这部分记忆？',
+        memoryConfirmClearUser:
+            '清空用户的偏好？所有成员、对话和总助手都读这份笔记；清空前的内容留在同目录的user.md.bak里。',
         memoryUpdated: '{time}更新',
         routines: '例行任务',
         routinesHint: '到点它会在指定项目里自己做一遍，按结论、问题、下一步汇报；只用按量计费的api模型',
@@ -2503,7 +2505,9 @@ const en: Widen<Strings> = {
         memoryEditTitle: "{name}'s memory",
         memoryEditHint: 'One note per line; delete what is wrong or out of date',
         memoryClear: 'Clear',
-        memoryConfirmClear: "Clear all of {name}'s memory?",
+        memoryConfirmClear: "Clear this part of {name}'s memory?",
+        memoryConfirmClearUser:
+            "Clear the user's preferences? Every member, conversation and the chief reads these notes; what they held stays in user.md.bak next to them.",
         memoryUpdated: 'updated {time}',
         routines: 'Routines',
         routinesHint:

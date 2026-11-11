@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { bilingual } from '@xora/protocol';
+import { clipText } from '@xora/tools';
 import {
     type AgentSpec,
     agentsWithRole,
@@ -332,9 +333,9 @@ export type TeamMode = (typeof TEAM_MODES)[number];
 // ---------------------------------------------------------------------------------------------------------
 // Agents
 
+/** One line of at most `length` characters, never cut inside a surrogate pair (it goes into prompts as JSON). */
 export function shorten(text: string, length: number): string {
-    const line = text.replace(/\s+/g, ' ').trim();
-    return line.length > length ? `${line.slice(0, length)}…` : line;
+    return clipText(text.replace(/\s+/g, ' ').trim(), length);
 }
 
 /** Strips the tag `buildAgentLayers` wraps a layer in; the engine wraps layers itself. */
