@@ -11,7 +11,6 @@ import { TeamBoard, TeamStartDialog, TeamView } from './components/TeamView.tsx'
 import { ThreadView } from './components/ThreadView.tsx';
 import { Welcome } from './components/Welcome.tsx';
 import { WorkflowRunView } from './components/WorkflowRunView.tsx';
-import { WorkflowBoard, WorkflowDraftDialog } from './components/WorkflowView.tsx';
 import { RightPanel } from './panels/RightPanel.tsx';
 import { UsageModal } from './panels/UsageModal.tsx';
 import { SettingsModal } from './settings/SettingsModal.tsx';
@@ -43,9 +42,7 @@ export function App() {
     const teamRunId = useApp((state) => state.teamRunId);
     const teamStartFor = useApp((state) => state.teamStartFor);
     const workflowRunId = useApp((state) => state.workflowRunId);
-    const workflowsFor = useApp((state) => state.workflowsFor);
     const teamsFor = useApp((state) => state.teamsFor);
-    const workflowDraftFor = useApp((state) => state.workflowDraftFor);
     const membersOpen = useApp((state) => state.membersOpen);
     const marketOpen = useApp((state) => state.marketOpen);
     const dispatchTo = useApp((state) => state.dispatchTo);
@@ -56,7 +53,7 @@ export function App() {
             state.projects.length > 0 &&
             state.connections.some((connection) => connection.hasKey || connection.presetId.startsWith('local')),
     );
-    const runShown = Boolean(teamRunId || workflowRunId || workflowsFor || teamsFor || membersOpen || chiefOpen);
+    const runShown = Boolean(teamRunId || workflowRunId || teamsFor || membersOpen || chiefOpen);
     const splitIds = useApp((state) => state.split);
     const threads = useApp((state) => state.threads);
     const split = splitIds.map((id) => threads[id]).filter((item) => item !== undefined);
@@ -88,8 +85,6 @@ export function App() {
                     <TeamView runId={teamRunId} />
                 ) : workflowRunId ? (
                     <WorkflowRunView key={workflowRunId} runId={workflowRunId} />
-                ) : workflowsFor ? (
-                    <WorkflowBoard key={workflowsFor} projectId={workflowsFor} />
                 ) : teamsFor ? (
                     <TeamBoard key={teamsFor} projectId={teamsFor} />
                 ) : membersOpen ? (
@@ -119,7 +114,6 @@ export function App() {
             {settingsOpen && <SettingsModal section={settingsOpen} />}
             {usageOpen && <UsageModal />}
             {teamStartFor && <TeamStartDialog projectId={teamStartFor} />}
-            {workflowDraftFor && <WorkflowDraftDialog projectId={workflowDraftFor} />}
             {dispatchTo && <DispatchDialog key={dispatchTo} memberId={dispatchTo} />}
             {!connected && <div className="banner">{s.app.disconnected}</div>}
             <Toasts />

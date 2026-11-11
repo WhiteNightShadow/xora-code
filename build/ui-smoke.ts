@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants, existsSync } from 'node:fs';
+import { constants } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -137,16 +137,23 @@ server.respondWith((request) => {
     ) {
         return openaiText('{"decision":"allow","reason":"冒烟：改文件是任务要的"}');
     }
-    // The chief assistant (06 §23) hands the job to the scout, then says so.
+    // The chief assistant (06 §23) starts the workflow it is asked to run, or hands the job to the scout; then says so.
     if (body?.tools?.some((tool) => tool.function?.name === 'member_dispatch')) {
-        return messages.at(-1)?.role === 'tool'
-            ? openaiText('交给侦察了，它看完我告诉你。')
-            : openaiToolCalls([
-                  {
+        const request = JSON.stringify(messages[messages.map((message) => message.role).lastIndexOf('user')] ?? '');
+        const workflow = request.includes('跑一下冒烟工作流');
+        if (messages.at(-1)?.role === 'tool') {
+            return openaiText(
+                workflow ? '冒烟工作流开始跑了，到了要你确认的那步我告诉你。' : '交给侦察了，它看完我告诉你。',
+            );
+        }
+        return openaiToolCalls([
+            workflow
+                ? { name: 'workflow_start', arguments: JSON.stringify({ workflow: 'smoke' }) }
+                : {
                       name: 'member_dispatch',
                       arguments: JSON.stringify({ member: 'scout', brief: '看看hello.txt里写了什么' }),
                   },
-              ]);
+        ]);
     }
     // 03: waiting messages and editing a sent one, in plain words; the first answer takes a while.
     const asked = messages.at(-1)?.role === 'user' ? JSON.stringify(messages.at(-1)) : '';
@@ -691,45 +698,19 @@ try {
     await archivedRun.waitFor({ state: 'detached' });
     await step(page, '结束的团队运行能删除');
 
-    // M5: the project's workflow board; "new workflow" asks for a description (not sent here).
-    await mkdir(path.join(repo, '.xora', 'workflows'), { recursive: true });
-    await writeFile(
-        path.join(repo, '.xora', 'workflows', 'tidy.yaml'),
-        'name: tidy\ntitle: 整理文件\nsteps:\n  - id: done\n    gate: human\n    message: 整理好了吗\n',
-    );
-    await page.locator('.sidebar__nav', { hasText: '工作流' }).click();
-    await page.locator('.wf-board').getByRole('button', { name: '新建工作流', exact: true }).click();
-    await page.locator('.modal textarea').pressSequentially('每天跑一遍测试');
-    if ((await page.locator('.modal textarea').inputValue()) !== '每天跑一遍测试') {
-        throw new Error('the new workflow dialog lost what was typed');
+    // Workflows have no entry of their own (06 §23): the chief starts one the project or the user has, and the card in
+    // its conversation opens the run. Its command and its human gate are answered in the run view, whose flow draws
+    // the steps as they go.
+    if ((await page.locator('.sidebar__nav', { hasText: '工作流' }).count()) !== 0) {
+        throw new Error('the sidebar still has an entry for workflows');
     }
-    await page.locator('.modal').getByRole('button', { name: '取消', exact: true }).click();
-    await step(page, '工作流看板能新建工作流');
-    // A workflow of the project waits for the project to be trusted, right on the board; it can be deleted.
-    const tidy = page.locator('.workflow-card', { hasText: '整理文件' });
-    const trustBanner = page.locator('.wf-board__trust');
-    await trustBanner.waitFor();
-    if (await tidy.getByRole('button', { name: '运行', exact: true }).isEnabled()) {
-        throw new Error('a workflow of an untrusted project can be run');
-    }
-    await trustBanner.getByRole('button', { name: '信任这个项目', exact: true }).click();
-    await trustBanner.waitFor({ state: 'detached' });
-    if (!(await tidy.getByRole('button', { name: '运行', exact: true }).isEnabled())) {
-        throw new Error('the workflow cannot run once the project is trusted');
-    }
-    await tidy.getByRole('button', { name: '删除', exact: true }).click();
-    // Confirmations are the app's own dialog, not the system's (which could hide behind the window).
-    await page.locator('.confirm').getByRole('button', { name: '确定', exact: true }).click();
-    await tidy.waitFor({ state: 'detached' });
-    if (existsSync(path.join(repo, '.xora', 'workflows', 'tidy.yaml'))) {
-        throw new Error('the deleted workflow file is still there');
-    }
-    await step(page, '看板上能信任项目、删除工作流');
-    // Run a workflow from the board; its command and its human gate are answered in the run view, whose flow
-    // draws the steps as they go.
-    const card = page.locator('.workflow-card', { hasText: '冒烟工作流' });
-    await card.getByRole('button', { name: '运行', exact: true }).click();
-    await card.getByRole('button', { name: '开始运行', exact: true }).click();
+    await page.locator('.sidebar__nav', { hasText: '总助手' }).click();
+    await page.locator('.chief-home textarea').pressSequentially('跑一下冒烟工作流');
+    await page.locator('.chief-home').getByRole('button', { name: '发送', exact: true }).click();
+    const workflowCard = page.locator('.delegation', { hasText: '冒烟工作流' }).first();
+    await workflowCard.waitFor();
+    await step(page, '总助手能跑工作流，对话里有跟进卡片');
+    await workflowCard.locator('.delegation__open').click();
     await page.locator('.flow-node').nth(2).waitFor();
     const command = page.locator('.team__approvals .approval', { hasText: 'git branch xora-smoke' });
     await command.getByRole('button', { name: '允许', exact: true }).click();
@@ -882,7 +863,8 @@ try {
     await page.keyboard.press('Escape');
     // The chief assistant (06 §23): one place to say what is needed. It hands the job to a member, and a card in its
     // conversation follows the work to its answer and opens it.
-    await page.locator('.sidebar__nav', { hasText: '总助手' }).click();
+    // The workflow's conversation is the chief's latest: "+" starts another one from its home.
+    await page.locator('.sidebar__nav-row').getByRole('button', { name: '新对话', exact: true }).click();
     await page.locator('.chief-home textarea').pressSequentially('让侦察看看hello.txt');
     await page.locator('.chief-home').getByRole('button', { name: '发送', exact: true }).click();
     await page.locator('.thread-header h1', { hasText: '总助手：' }).waitFor();
@@ -897,7 +879,7 @@ try {
     if ((await page.getByRole('menuitemcheckbox', { name: /终端/ }).count()) !== 0)
         throw new Error("the chief's menu offers a project's panels");
     await page.keyboard.press('Escape');
-    const chiefRow = page.locator('.sidebar__chief-threads .thread-row', { hasText: '总助手：' });
+    const chiefRow = page.locator('.sidebar__chief-threads .thread-row', { hasText: '总助手：让侦察' });
     await chiefRow.waitFor();
     const delegation = page.locator('.delegation', { hasText: '侦察' }).first();
     await delegation.waitFor();
@@ -916,7 +898,7 @@ try {
     await chiefRow.getByRole('button', { name: '删除', exact: true }).click({ trial: true });
     await chiefRow.getByRole('button', { name: '归档', exact: true }).click();
     await chiefRow.waitFor({ state: 'detached' });
-    await page.locator('.sidebar__nav', { hasText: '总助手' }).click();
+    await page.locator('.sidebar__nav-row').getByRole('button', { name: '新对话', exact: true }).click();
     await page.locator('.chief-home__archived', { hasText: '已归档 (1)' }).click();
     await page.locator('.chief-home__row.is-archived', { hasText: '总助手：' }).click();
     await page.locator('.thread-header__chief').waitFor();

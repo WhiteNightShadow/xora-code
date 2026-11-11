@@ -11,7 +11,6 @@ import {
     openProject,
     openRun,
     openSettings,
-    openWorkflowBoard,
     selectThread,
     useApp,
     useStrings,
@@ -146,12 +145,7 @@ function ProjectGroup({
     const s = useStrings();
     // A thread is selected only while it is what the main area shows, not under a run, a board or a page.
     const selectedThreadId = useApp((state) =>
-        state.teamRunId ||
-        state.workflowRunId ||
-        state.teamsFor ||
-        state.workflowsFor ||
-        state.membersOpen ||
-        state.chiefOpen
+        state.teamRunId || state.workflowRunId || state.teamsFor || state.membersOpen || state.chiefOpen
             ? undefined
             : state.selectedThreadId,
     );
@@ -203,22 +197,11 @@ function ProjectGroup({
                                     hint: s.sidebar.createTeamHint,
                                     icon: 'users',
                                 },
-                                {
-                                    value: 'workflow',
-                                    label: s.sidebar.createWorkflow,
-                                    hint: s.sidebar.createWorkflowHint,
-                                    icon: 'bolt',
-                                },
                             ]}
                             onPick={(kind) => {
                                 close();
                                 if (kind === 'thread') openNewThread(project.id);
-                                else
-                                    useApp.setState(
-                                        kind === 'team'
-                                            ? { teamStartFor: project.id }
-                                            : { workflowDraftFor: project.id },
-                                    );
+                                else useApp.setState({ teamStartFor: project.id });
                             }}
                         />
                     )}
@@ -250,7 +233,6 @@ function ProjectGroup({
 }
 
 const TEAM_ENDED = ['done', 'failed', 'cancelled'];
-const WORKFLOW_ENDED = ['completed', 'failed', 'cancelled'];
 /** Runs under way listed under their entry; the board has the rest. */
 const NAV_RUNS = 5;
 
@@ -263,7 +245,6 @@ function ChiefNav() {
             (!state.teamRunId &&
                 !state.workflowRunId &&
                 !state.teamsFor &&
-                !state.workflowsFor &&
                 !state.membersOpen &&
                 isChief(state.selectedThreadId ? state.threads[state.selectedThreadId] : undefined)),
     );
@@ -304,51 +285,27 @@ function ChiefNav() {
 }
 
 /**
- * Teams and workflows of every project: one entry each (the board picks the project), with the runs under way
- * listed beneath it.
+ * The team (06 §24): the organization chart and the team's work in every project, with the runs under way listed
+ * beneath it.
  */
-function RunsNav({ kind }: { kind: 'team' | 'workflow' }) {
+function TeamNav() {
     const s = useStrings();
     const projects = useApp((state) => state.projects);
-    // 06 §24: the team's entry holds the organization chart and the team's work.
-    const boardOpen = useApp((state) =>
-        kind === 'team' ? Boolean(state.teamsFor) || state.membersOpen : Boolean(state.workflowsFor),
-    );
-    const openRunId = useApp((state) => (kind === 'team' ? state.teamRunId : state.workflowRunId));
+    const boardOpen = useApp((state) => Boolean(state.teamsFor) || state.membersOpen);
+    const openRunId = useApp((state) => state.teamRunId);
     const teamRuns = useApp((state) => state.teamRuns);
-    const workflowRuns = useApp((state) => state.workflowRuns);
-    const runs =
-        kind === 'team'
-            ? Object.values(teamRuns)
-                  .filter((run) => !TEAM_ENDED.includes(run.status))
-                  .map((run) => ({
-                      id: run.id,
-                      title: run.title ?? run.goal,
-                      projectId: run.projectId,
-                      status: s.team.statuses[run.status],
-                      updatedAt: run.updatedAt,
-                  }))
-            : Object.values(workflowRuns)
-                  // Sub-workflows are reached through their parent run.
-                  .filter((run) => !WORKFLOW_ENDED.includes(run.status) && !run.parentRunId)
-                  .map((run) => ({
-                      id: run.id,
-                      title: run.title,
-                      projectId: run.projectId,
-                      status: s.workflow.statuses[run.status],
-                      updatedAt: run.updatedAt,
-                  }));
-    runs.sort((a, b) => b.updatedAt - a.updatedAt);
+    const runs = Object.values(teamRuns)
+        .filter((run) => !TEAM_ENDED.includes(run.status))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
     const several = projects.length > 1;
     return (
         <>
             <button
                 type="button"
                 className={`sidebar__nav${boardOpen ? ' is-selected' : ''}`}
-                onClick={() => (kind === 'team' ? openMembers() : openWorkflowBoard())}
+                onClick={() => openMembers()}
             >
-                <Icon name={kind === 'team' ? 'users' : 'bolt'} size={14} />{' '}
-                {kind === 'team' ? s.sidebar.teams : s.sidebar.workflows}
+                <Icon name="users" size={14} /> {s.sidebar.teams}
                 {runs.length > 0 && <span className="sidebar__count">{runs.length}</span>}
             </button>
             {runs.slice(0, NAV_RUNS).map((run) => (
@@ -356,12 +313,12 @@ function RunsNav({ kind }: { kind: 'team' | 'workflow' }) {
                     key={run.id}
                     type="button"
                     className={`run-row sidebar__run${openRunId === run.id ? ' is-selected' : ''}`}
-                    onClick={() => openRun(kind, run.id)}
+                    onClick={() => openRun('team', run.id)}
                 >
-                    <span className="thread-row__title">{run.title}</span>
+                    <span className="thread-row__title">{run.title ?? run.goal}</span>
                     <span className="thread-row__meta">
                         {several ? `${projects.find((project) => project.id === run.projectId)?.name ?? ''} · ` : ''}
-                        {run.status}
+                        {s.team.statuses[run.status]}
                     </span>
                 </button>
             ))}
@@ -442,8 +399,7 @@ export function Sidebar() {
             )}
             <div className="sidebar__main">
                 <ChiefNav />
-                <RunsNav kind="team" />
-                <RunsNav kind="workflow" />
+                <TeamNav />
             </div>
             {inbox.length > 0 && (
                 <div className="inbox">

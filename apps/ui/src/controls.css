@@ -22,7 +22,6 @@
    reaches the page, so anything that opens over them (dialogs, menus) is not draggable either. */
 .thread-header,
 .team__header,
-.wf-board__header,
 .team-page__header,
 .right-panel__header {
     -webkit-app-region: drag;
@@ -31,7 +30,6 @@
 .sidebar__top :is(button, input, a),
 .thread-header :is(h1, button, input, select, a, .popover),
 .team__header :is(h1, button, input, select, a, .popover),
-.wf-board__header :is(button, input, select, a, .popover),
 .team-page__header :is(button, input, select, a, .popover),
 .right-panel__header :is(button, input, select, a),
 .members :is(button, input, select, textarea, a, .popover),
@@ -555,34 +553,6 @@
     flex: none;
 }
 
-/* A thread that writes a workflow says what comes next */
-
-.draft-banner {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px 8px 20px;
-    border-bottom: 1px solid var(--xk-border-subtle);
-    background: var(--xk-accent-subtle);
-    font-size: var(--xk-text-sm);
-    animation: xk-fade-in var(--xk-duration-base) var(--xk-ease-out) backwards;
-}
-
-.draft-banner > svg {
-    flex: none;
-    color: var(--xk-accent-text);
-}
-
-.draft-banner > span {
-    flex: 1;
-    min-width: 0;
-}
-
-.draft-banner > .button {
-    flex: none;
-}
-
 /* Compaction in the conversation: a divider */
 
 .compaction {
@@ -675,110 +645,34 @@
     min-width: 0;
 }
 
-/* Workflow board --------------------------------------------------------------------------------------- */
+/* The team board -------------------------------------------------------------------------------------- */
 
-.wf-board {
+.team-board {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
 }
 
-.wf-board__header {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--xk-space-3);
-    min-height: 52px;
-    padding: 8px 12px 8px 24px;
-    border-bottom: 1px solid var(--xk-border-subtle);
-}
-
-.wf-board__title {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    min-width: 0;
-}
-
-.wf-board__title h1 {
-    margin: 0;
-    font-size: var(--xk-text-lg);
-    font-weight: var(--xk-weight-semibold);
-}
-
-.wf-board__project {
-    color: var(--xk-text-muted);
-    font-size: var(--xk-text-sm);
-}
-
-.wf-board__body {
+.team-board__body {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     padding: 20px 24px 40px;
 }
 
-.wf-board__body > * {
+.team-board__body > * {
     max-width: 920px;
     margin-inline: auto;
 }
 
-.wf-board .workflow-list {
-    padding: 0;
-}
-
-.wf-board__intro {
+.team-board__intro {
     margin-top: 0;
     margin-bottom: 16px;
     color: var(--xk-text-muted);
 }
 
-.wf-board__trust {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 16px;
-    padding: 12px 14px;
-    border: 1px solid var(--xk-border);
-    border-radius: 12px;
-    background: var(--xk-accent-subtle);
-    animation: xk-fade-in var(--xk-duration-base) var(--xk-ease-out) backwards;
-}
-
-.wf-board__trust-icon {
-    flex: none;
-    color: var(--xk-accent-text);
-}
-
-.wf-board__trust-text {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-}
-
-.wf-board__trust-text span {
-    color: var(--xk-text-muted);
-    font-size: var(--xk-text-sm);
-}
-
-.wf-board__trust > .button {
-    flex: none;
-}
-
-/* A workflow's title takes the row; delete and run sit together at its end */
-.workflow-card__title {
-    margin-right: auto;
-}
-
-.workflow-card__head > .icon-button {
-    color: var(--xk-text-muted);
-}
-
-.wf-board__empty {
+.team-board__empty {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -791,68 +685,20 @@
     animation: xk-fade-up var(--xk-duration-slow) var(--xk-ease-out) backwards;
 }
 
-.wf-board__empty > svg {
+.team-board__empty > svg {
     color: var(--xk-accent-text);
 }
 
-.wf-board__empty p {
+.team-board__empty p {
     max-width: 540px;
     margin: 0;
     line-height: var(--xk-leading-relaxed);
 }
 
-.wf-board__heading {
+.team-board__heading {
     margin-top: 28px;
     margin-bottom: 10px;
     font-size: var(--xk-text-md);
-}
-
-.wf-board__runs {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.wf-board__run {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--xk-border-subtle);
-    border-radius: 10px;
-    background: var(--xk-bg-elevated);
-    color: var(--xk-text);
-    text-align: left;
-    cursor: pointer;
-    transition:
-        border-color var(--xk-duration-fast) var(--xk-ease-out),
-        box-shadow var(--xk-duration-fast) var(--xk-ease-out);
-}
-
-.wf-board__run:hover {
-    border-color: var(--xk-border-strong);
-    box-shadow: var(--xk-shadow-xs);
-}
-
-.wf-board__run:focus-visible {
-    outline: 2px solid var(--xk-accent);
-    outline-offset: 2px;
-}
-
-.wf-board__run-title {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: var(--xk-weight-medium);
-}
-
-.wf-board__run-meta {
-    flex: none;
-    color: var(--xk-text-muted);
-    font-size: var(--xk-text-xs);
 }
 
 /* The thread menu (later than the rules above: its svg rules are more specific). */
@@ -923,7 +769,6 @@
 /* Whatever sits at the top right moves clear of the Windows and Linux window buttons. */
 .app:not(.has-panel) .main:not(.main--split) > .thread > .thread-header,
 .app:not(.has-panel) .main--split > .split-pane:last-child .thread-header,
-.app:not(.has-panel) .wf-board__header,
 .app:not(.has-panel) .team-page__header,
 .app.has-panel .right-panel__header {
     padding-right: calc(12px + var(--titlebar-end));
@@ -935,10 +780,8 @@
 
 @media (prefers-reduced-motion: reduce) {
     .popover__panel,
-    .draft-banner,
     .compaction__summary,
-    .wf-board__empty,
-    .wf-board__trust {
+    .team-board__empty {
         animation: none;
     }
 

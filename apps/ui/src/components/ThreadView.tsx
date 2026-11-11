@@ -9,7 +9,6 @@ import {
     isChief,
     openChief,
     openReview,
-    openWorkflowBoard,
     type RightPanel,
     selectThread,
     takeComposerInbox,
@@ -93,8 +92,8 @@ function Header({ thread }: { thread: ThreadMeta }) {
         { panel: 'preview' as const, icon: 'globe' as const, label: s.panel.preview },
         { panel: 'file' as const, icon: 'file' as const, label: s.panel.file },
     ].filter((item) => !chief || CHIEF_PANELS.includes(item.panel));
-    const distill = (kind: 'workflow' | 'skill') =>
-        void attempt(() => host.call('thread.distill', { threadId: thread.id, kind })).then((created) => {
+    const distillSkill = () =>
+        void attempt(() => host.call('thread.distill', { threadId: thread.id, kind: 'skill' })).then((created) => {
             if (!created) return;
             useApp.setState((state) => ({ threads: { ...state.threads, [created.id]: created } }));
             void selectThread(created.id);
@@ -250,17 +249,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
                                         disabled={thread.turns === 0}
                                         onClick={() => {
                                             close();
-                                            distill('workflow');
-                                        }}
-                                    >
-                                        <Icon name="bolt" size={14} /> {s.thread.distillWorkflow}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        disabled={thread.turns === 0}
-                                        onClick={() => {
-                                            close();
-                                            distill('skill');
+                                            distillSkill();
                                         }}
                                     >
                                         <Icon name="sparkle" size={14} /> {s.thread.distillSkill}
@@ -321,25 +310,6 @@ function Header({ thread }: { thread: ThreadMeta }) {
             </div>
             {goalOpen && <GoalDialog thread={thread} onClose={() => setGoalOpen(false)} />}
         </header>
-    );
-}
-
-/** A thread that writes a workflow says what comes next: running it from the workflow board. */
-function DraftBanner({ thread }: { thread: ThreadMeta }) {
-    const s = useStrings();
-    if (thread.role !== 'distill') return null;
-    return (
-        <div className="draft-banner">
-            <Icon name="bolt" size={14} />
-            <span>{s.thread.draftBanner}</span>
-            <button
-                type="button"
-                className="button button--small button--primary"
-                onClick={() => openWorkflowBoard(thread.projectId)}
-            >
-                {s.thread.openBoard}
-            </button>
-        </div>
     );
 }
 
@@ -1164,7 +1134,6 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
     return (
         <div className="thread">
             <Header thread={thread} />
-            <DraftBanner thread={thread} />
             <GoalBanner thread={thread} />
             <div
                 className="timeline"

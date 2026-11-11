@@ -86,10 +86,6 @@ interface AppState {
     workflowRuns: Record<string, WorkflowRun>;
     /** Workflow run shown in the main area instead of a thread. */
     workflowRunId: string | undefined;
-    /** Project whose workflow board is shown in the main area. */
-    workflowsFor: string | undefined;
-    /** Project whose "new workflow" dialog is open. */
-    workflowDraftFor: string | undefined;
     /** The members of the selected project's organization (06 §19), for the members page, chips and mentions. */
     members: Member[];
     /** The members page is in the main area; `memberId` shows one member. */
@@ -139,8 +135,6 @@ export const useApp = create<AppState>(() => ({
     teamsFor: undefined,
     workflowRuns: {},
     workflowRunId: undefined,
-    workflowsFor: undefined,
-    workflowDraftFor: undefined,
     members: [],
     membersOpen: false,
     marketOpen: false,
@@ -374,7 +368,6 @@ export function openMembers(memberId?: string): void {
         memberId,
         teamRunId: undefined,
         workflowRunId: undefined,
-        workflowsFor: undefined,
         teamsFor: undefined,
         chiefOpen: false,
         newThreadFor: undefined,
@@ -390,7 +383,6 @@ export function openMarket(): void {
         memberId: undefined,
         teamRunId: undefined,
         workflowRunId: undefined,
-        workflowsFor: undefined,
         teamsFor: undefined,
         chiefOpen: false,
         newThreadFor: undefined,
@@ -424,31 +416,10 @@ export async function startApp(): Promise<void> {
 /** `teamsFor` when the team board shows the runs of every project. */
 export const ALL_PROJECTS = '*';
 
-/**
- * The workflow board in the main area: a project's workflows, how to make one, and its runs; without a project,
- * the current one's.
- */
-export function openWorkflowBoard(projectId?: string): void {
-    const state = get();
-    const target = projectId ?? state.selectedProjectId ?? state.projects[0]?.id;
-    if (!target) return;
-    set({
-        workflowsFor: target,
-        teamsFor: undefined,
-        teamRunId: undefined,
-        workflowRunId: undefined,
-        selectedProjectId: target,
-        membersOpen: false,
-        chiefOpen: false,
-        newThreadFor: undefined,
-    });
-}
-
 /** The team board in the main area: the team runs of one project, or of every project, and a new run. */
 export function openTeamBoard(projectId: string = ALL_PROJECTS): void {
     set({
         teamsFor: projectId,
-        workflowsFor: undefined,
         teamRunId: undefined,
         workflowRunId: undefined,
         membersOpen: false,
@@ -464,7 +435,6 @@ export function openRun(kind: 'team' | 'workflow', runId: string): void {
         teamRunId: kind === 'team' ? runId : undefined,
         workflowRunId: kind === 'workflow' ? runId : undefined,
         teamsFor: undefined,
-        workflowsFor: undefined,
         membersOpen: false,
         chiefOpen: false,
         newThreadFor: undefined,
@@ -478,7 +448,6 @@ export function openNewThread(projectId: string): void {
         selectedProjectId: projectId,
         teamRunId: undefined,
         workflowRunId: undefined,
-        workflowsFor: undefined,
         teamsFor: undefined,
         membersOpen: false,
         chiefOpen: false,
@@ -508,7 +477,6 @@ export function openChief(fresh = false): void {
         selectedThreadId: undefined,
         teamRunId: undefined,
         workflowRunId: undefined,
-        workflowsFor: undefined,
         teamsFor: undefined,
         membersOpen: false,
         rightPanel: undefined,
@@ -522,7 +490,6 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         current.selectedThreadId === threadId &&
         !current.teamRunId &&
         !current.workflowRunId &&
-        !current.workflowsFor &&
         !current.teamsFor &&
         !current.membersOpen &&
         !current.chiefOpen &&
@@ -538,7 +505,6 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         selectedThreadId: threadId,
         teamRunId: undefined,
         workflowRunId: undefined,
-        workflowsFor: undefined,
         teamsFor: undefined,
         membersOpen: false,
         chiefOpen: false,

@@ -1,4 +1,4 @@
-import type { Approval, WorkflowRun, WorkflowStepRun } from '@xora/protocol';
+import type { Approval, WorkflowRun, WorkflowRunMode, WorkflowStepRun } from '@xora/protocol';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { errorMessage, host } from '../host.ts';
 import { PendingApproval } from '../items/ItemView.tsx';
@@ -11,11 +11,32 @@ import { Icon, type IconName } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import { Badge, Empty, formatMoney, Modal, Spinner } from './primitives.tsx';
 import { RunActions } from './RunActions.tsx';
-import { RUN_MODE_ICONS, runModeChoices, runTone } from './WorkflowView.tsx';
 import '../task.css';
 import '../workflow-run.css';
 
 type Preview = Awaited<ReturnType<typeof host.call<'fs.read'>>>;
+
+const RUN_MODES: WorkflowRunMode[] = ['default', 'auto_edit', 'full'];
+/** What a run's steps may do without asking, as a team run shows it too. */
+export const RUN_MODE_ICONS: Record<WorkflowRunMode, IconName> = {
+    default: 'shield',
+    auto_edit: 'pencil',
+    full: 'bolt',
+};
+
+function runModeChoices(s: Strings) {
+    return RUN_MODES.map((mode) => ({
+        value: mode,
+        label: s.workflow.modes[mode],
+        hint: s.workflow.modeHints[mode],
+        icon: RUN_MODE_ICONS[mode],
+        ...(mode === 'full' ? { tone: 'warn' as const } : {}),
+    }));
+}
+
+function runTone(status: WorkflowRun['status']): 'ok' | 'error' | 'accent' {
+    return status === 'completed' ? 'ok' : status === 'failed' ? 'error' : 'accent';
+}
 type StepStatus = WorkflowStepRun['status'];
 
 const OVER: ReadonlySet<WorkflowRun['status']> = new Set(['completed', 'failed', 'cancelled']);

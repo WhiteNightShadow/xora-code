@@ -23,7 +23,7 @@ import { BriefBody } from './BriefBody.tsx';
 import { TeamTabs } from './OrgView.tsx';
 import { Badge, Empty, Field, formatMoney, IconButton, Modal, relativeTime, Select, Spinner } from './primitives.tsx';
 import { RunActions } from './RunActions.tsx';
-import { RUN_MODE_ICONS } from './WorkflowView.tsx';
+import { RUN_MODE_ICONS } from './WorkflowRunView.tsx';
 
 const COLUMNS: Array<{ key: string; statuses: string[] }> = [
     { key: 'pending', statuses: ['pending', 'ready'] },
@@ -407,7 +407,7 @@ export function TeamBoard({ projectId }: { projectId: string }) {
         );
     };
     return (
-        <div className="wf-board team-board">
+        <div className="team-board">
             <TeamTabs
                 active="runs"
                 actions={
@@ -431,10 +431,10 @@ export function TeamBoard({ projectId }: { projectId: string }) {
                     </>
                 }
             />
-            <div className="wf-board__body">
-                <p className="wf-board__intro">{s.team.boardHint}</p>
+            <div className="team-board__body">
+                <p className="team-board__intro">{s.team.boardHint}</p>
                 {runs.length === 0 ? (
-                    <div className="wf-board__empty">
+                    <div className="team-board__empty">
                         <Icon name="users" size={22} />
                         <p>{s.team.noRuns}</p>
                         <button type="button" className="button button--primary" onClick={start}>
@@ -445,13 +445,13 @@ export function TeamBoard({ projectId }: { projectId: string }) {
                     <>
                         {running.length > 0 && (
                             <>
-                                <h3 className="wf-board__heading">{s.team.running}</h3>
+                                <h3 className="team-board__heading">{s.team.running}</h3>
                                 <div className="team-board__runs">{running.map(row)}</div>
                             </>
                         )}
                         {finished.length > 0 && (
                             <>
-                                <h3 className="wf-board__heading">{s.team.finished}</h3>
+                                <h3 className="team-board__heading">{s.team.finished}</h3>
                                 <div className="team-board__runs">{finished.map(row)}</div>
                             </>
                         )}
