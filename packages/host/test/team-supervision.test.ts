@@ -757,8 +757,26 @@ describe('a faster team (06 §29)', () => {
             },
         });
         expect(done.status).toBe('done');
-        // Neither card is blamed for the other's file: both pass at their first attempt.
-        expect(done.tasks.map((task) => [task.id, task.status, task.attempts])).toEqual([
+        // Neither card is blamed for the other's file: both pass at their first attempt. When one is tried again (it
+        // happens now and then on Windows CI only), what the coder was told says why.
+        const attempts = done.tasks.map((task) => [task.id, task.status, task.attempts]);
+        const told = [
+            ...new Set(
+                server.requests.flatMap((request) => {
+                    const body = request.body as ChatBody | undefined;
+                    if (!body?.messages || agentOf(body) !== 'Coder') return [];
+                    // Everything after the card: the feedback of each acceptance it did not pass.
+                    return body.messages
+                        .filter((message) => message.role === 'user')
+                        .slice(1)
+                        .map((message) => textOf(message.content).slice(0, 1_500));
+                }),
+            ),
+        ];
+        expect(
+            attempts,
+            `the coders were told:\n${told.join('\n---\n')}\nthe deliverables: ${JSON.stringify(done.tasks.map((task) => task.deliverable))}`,
+        ).toEqual([
             ['T1', 'done', 1],
             ['T2', 'done', 1],
         ]);
