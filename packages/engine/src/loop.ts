@@ -498,7 +498,8 @@ If steps are done, started or no longer needed, update it with the todo tool now
             estimatedContextTokens(session, system),
             level,
         );
-        const cut = compactionCut(session, shares.tail);
+        // `/compact` is the user asking for it: the state alone continues, however little there is to compact.
+        const cut = compactionCut(session, trigger === 'manual' ? 0 : shares.tail);
         if (cut === undefined) {
             // Nothing older than the latest steps: masking what tool output there is is all that can be done.
             return maskToolResults(session, budget, { keep: 2, force: true });

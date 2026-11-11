@@ -61,7 +61,11 @@ const TEXT = bilingual(
     },
 );
 
-/** The engine's built-in tools; a role's whitelist hides the others (06 §4: enforced by the host, not prompts). */
+/**
+ * The engine's built-in tools; a role's whitelist hides the others (06 §4: enforced by the host, not prompts).
+ * `tool_output` is not among them on purpose: output masked to save context must stay reachable whatever the role
+ * (20 §4.3), and it only reads what the thread already saw.
+ */
 const BUILTIN_TOOLS = [
     'read',
     'list',
