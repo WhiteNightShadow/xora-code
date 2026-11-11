@@ -96,6 +96,11 @@ export class ProjectService {
         return this.#row(projectId).path;
     }
 
+    /** The project's name, for text built where only its id is at hand. */
+    nameOf(projectId: string): string {
+        return this.#row(projectId).name;
+    }
+
     async add(dir: string): Promise<Project> {
         let real: string;
         try {

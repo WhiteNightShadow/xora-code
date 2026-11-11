@@ -5,7 +5,8 @@ import type { Item, ItemOf, ThreadMeta } from '@xora/protocol';
 import { type MockModelServer, startMockModelServer } from '@xora/test-kit';
 import { SCOUT_PROMPT } from '@xora/workflows';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { MEMORY_FILE_CHARS, routineKey } from '../src/members.ts';
+import { routineKey } from '../src/members.ts';
+import { MEMORY_FILE_CHARS } from '../src/memory/notes.ts';
 import { fakeGitHub, SHA } from './github-fake.ts';
 import {
     approveAll,
@@ -525,12 +526,18 @@ describe('members', () => {
 
         const work = await ui.request('member.threads', { memberId: 'scout' });
         expect(work.map((item) => item.id)).toEqual([second.id, thread.id]);
-        expect(core.turns.hostLayers(thread.id).map((layer) => layer.id)).toContain('member_memory');
+        const ids = async (target: typeof core, threadId: string) => {
+            const meta = target.threads.find(threadId);
+            return meta ? (await target.turns.hostLayers(meta)).map((layer) => layer.id) : [];
+        };
+        expect(await ids(core, thread.id)).toContain('member_memory');
+        // A member's thread has its memory once: the shared memory of the user's threads stays out.
+        expect(await ids(core, thread.id)).not.toContain('memory');
 
         // After a restart its conversations work as it again.
         await host.closeLast();
         const again = await host.start(dataDir);
-        expect(again.core.turns.hostLayers(thread.id).map((layer) => layer.id)).toEqual(
+        expect(await ids(again.core, thread.id)).toEqual(
             expect.arrayContaining(['agent_instructions', 'member_context', 'member_memory']),
         );
     }, 120_000);

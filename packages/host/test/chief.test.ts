@@ -39,6 +39,8 @@ const bodies = () =>
 const systemOf = (body: ChatBody | undefined) =>
     textOf(body?.messages.find((message) => message.role === 'system')?.content);
 const isChief = (body: ChatBody) => systemOf(body).includes('You are the chief assistant of Xora Code');
+/** How things stand, as the host sent it with the user's messages (20 §4.5), not in the system prompt. */
+const statusOf = (body: ChatBody | undefined) => (body ? userText(body) : '');
 
 async function setUp(dataDir = mkdtempSync(path.join(tmpdir(), 'xora-chief-data-'))) {
     const harness = await host.start(dataDir);
@@ -130,10 +132,11 @@ describe('the chief assistant', () => {
 
         // It saw every project and the members to pick from.
         const first = bodies().find(isChief) as ChatBody;
-        expect(systemOf(first)).toContain(
+        expect(statusOf(first)).toContain(
             `Projects (your own tools read files in "${project.name}" only; the user may mean any of them):`,
         );
-        expect(systemOf(first)).toContain('Work handed on in this conversation:\n- none yet');
+        expect(statusOf(first)).toContain('Work handed on in this conversation:\n- none yet');
+        expect(systemOf(first)).not.toContain('Work handed on');
         const listed = bodies().find((body) => isChief(body) && lastCall(body) === 'member_list');
         expect(textOf(listed?.messages.at(-1)?.content)).toContain('- coder (编码): executor');
 
@@ -162,10 +165,12 @@ describe('the chief assistant', () => {
         const next = bodies()
             .filter((body) => isChief(body) && userText(body).includes('结果呢'))
             .at(-1);
-        expect(systemOf(next)).toContain(
+        expect(statusOf(next)).toContain(
             `- member 编码 conversation ${card?.refId} in ${project.name}: "把hello.txt里的hello改成hello world，改完说一声" — done: 改好了`,
         );
-        expect(systemOf(next)).toContain('Its report:\n    改好了：hello.txt现在是hello world。');
+        expect(statusOf(next)).toContain('Its report:\n    改好了：hello.txt现在是hello world。');
+        // The system prompt is the one the conversation began with, so the provider's cache holds.
+        expect(systemOf(next)).toBe(systemOf(first));
     }, 90_000);
 
     it('starts a team run, reports its end at the bottom of the conversation, and follows it after a restart', async () => {
@@ -219,8 +224,8 @@ describe('the chief assistant', () => {
         const restored = bodies()
             .filter((body) => isChief(body) && userText(body).includes('刚才那个团队呢'))
             .at(-1);
-        expect(systemOf(restored)).toContain(`- team run ${run?.id} in ${project.name}:`);
-        expect(systemOf(restored)).toContain('— cancelled');
+        expect(statusOf(restored)).toContain(`- team run ${run?.id} in ${project.name}:`);
+        expect(statusOf(restored)).toContain('— cancelled');
     }, 120_000);
 
     it('belongs to no project: runs where the user worked last, takes the model and level picked, and asks which project when several could be meant', async () => {
@@ -257,7 +262,7 @@ describe('the chief assistant', () => {
         // Two projects and none named: no work goes anywhere, the model is told to name one or ask.
         const refused = bodies().find((body) => isChief(body) && body.messages.at(-1)?.role === 'tool');
         expect(textOf(refused?.messages.at(-1)?.content)).toContain('Name the project');
-        expect(systemOf(refused)).toContain(`your own tools read files in "${second.name}" only`);
+        expect(statusOf(refused)).toContain(`your own tools read files in "${second.name}" only`);
         expect(await cards(ui, thread.id)).toHaveLength(0);
 
         // Named, the work goes to that project; more work with none named goes to the same one, not where it runs.

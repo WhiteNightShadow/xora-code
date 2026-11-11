@@ -100,10 +100,10 @@ const TEXT = bilingual(
     },
 );
 
-const CHIEF_PROMPT = `You are the chief assistant of Xora Code: the one place the user talks to. The user is the boss. You get their work done through the organization: members (specialists, each good at one job), teams (a supervisor plans the work and checks it, members do the cards) and workflows (processes a project keeps as files). You do not change files or run commands yourself: you hand work on. A conversation with you belongs to no project: the user may mean any of the projects listed below, or none (a question, advice, a sum). Work out which project they mean from what they say and from the work this conversation already handed on. The user's attention is the scarcest thing there is: ask only what you cannot decide yourself, and report results and the decisions they must make, not process.
+const CHIEF_PROMPT = `You are the chief assistant of Xora Code: the one place the user talks to. The user is the boss. You get their work done through the organization: members (specialists, each good at one job), teams (a supervisor plans the work and checks it, members do the cards) and workflows (processes a project keeps as files). You do not change files or run commands yourself: you hand work on. A conversation with you belongs to no project: the user may mean any of the projects the status lists, or none (a question, advice, a sum). Work out which project they mean from what they say and from the work this conversation already handed on. The user's attention is the scarcest thing there is: ask only what you cannot decide yourself, and report results and the decisions they must make, not process.
 
 How to route a request
-1. Answer yourself when no work in a project is needed: a question, an explanation, advice, or how things stand (the status below; work_status for details).
+1. Answer yourself when no work in a project is needed: a question, an explanation, advice, or how things stand (the status that comes with each of the user's messages; work_status for details).
 2. One person's job (a fix, a script, a review, a research question, a document) goes to one member with member_dispatch. Pick the member whose job fits (member_list) and write a complete brief: the goal, the context you know, what done looks like.
 3. Work with several parts or people, or that takes hours, goes to a team with team_start. Write the goal as an outcome with how to check it. The group's lead plans it and picks among its members unless the user named people (members). Autonomy: L2 by default, which is hands-off (the supervisor handles the plan, the delivery and approvals; only mass deletion and dropping a database reach the user); L1 when the user wants to see the plan first; L3 only for unattended work on a schedule or overnight, with a budget the user gave.
 4. When the project already has a workflow for it (workflow_list), start it with workflow_start and its inputs.
@@ -516,6 +516,8 @@ export class ChiefService {
     readonly #workflows = new Map<string, WorkflowRun>();
     /** Skills a search of each conversation returned: only those can be installed (06 §21). */
     readonly #found = new Map<string, Map<string, SkillCandidate>>();
+    /** The status each conversation was last given, and the cards whose reports it carried (20 §4.5). */
+    readonly #given = new Map<string, { text: string; reported: Set<string> }>();
     #loaded: Promise<void> | undefined;
     readonly #unlisten: () => void;
 
@@ -939,18 +941,31 @@ export class ChiefService {
     // Tools ------------------------------------------------------------------------------------------------------
 
     #provider(threadId: string): HostToolProvider {
-        const status = () => this.#statusText(threadId);
         return {
             tools: CHIEF_TOOLS,
             noProject: true,
-            get layers() {
-                return [
-                    { id: 'chief', title: 'Chief assistant', text: CHIEF_PROMPT },
-                    { id: 'chief_status', title: 'How things stand', text: status() },
-                ];
-            },
+            // The system prompt stays the same for the whole conversation, so the provider's cache holds; how things
+            // stand comes with each message of the user instead (20 §4.5).
+            layers: [{ id: 'chief', title: 'Chief assistant', text: CHIEF_PROMPT }],
+            turnNote: () => this.#statusNote(threadId),
             handle: (name, input, _signal, call) => this.#handle(threadId, name, input, call),
         };
+    }
+
+    /**
+     * How things stand, for the turn about to start: in full the first time and whenever it changed, a report only
+     * the first time it is given; else a line that nothing changed. What it gave before is in the conversation.
+     */
+    async #statusNote(threadId: string): Promise<string> {
+        await this.#load().catch(() => undefined);
+        const given = this.#given.get(threadId) ?? { text: '', reported: new Set<string>() };
+        const reported = new Set<string>();
+        const text = this.#statusText(threadId, given.reported, reported);
+        if (text === given.text) return 'How things stand: as in the status with the previous message.';
+        for (const id of reported) given.reported.add(id);
+        given.text = text;
+        this.#given.set(threadId, given);
+        return `How things stand now (the host's status, not the user's words):\n${text}`;
     }
 
     async #handle(
@@ -1583,8 +1598,11 @@ export class ChiefService {
         return `- ${kind} ${item.refId} in ${this.#projectName(item.projectId)}: "${item.title}" — ${item.status}${item.summary ? `: ${clip(item.summary, 300)}` : ''}${item.cost ? ` (${moneyText(item.cost)})` : ''}`;
     }
 
-    /** What the chief's prompt says of how things stand, at the start of each of its turns. */
-    #statusText(threadId: string): string {
+    /**
+     * How things stand for a conversation of the chief. `skip`: cards whose reports it was given already, which are
+     * left out; `reported`: the cards whose reports this text carries.
+     */
+    #statusText(threadId: string, skip?: ReadonlySet<string>, reported?: Set<string>): string {
         const own = this.#deps.threads.find(threadId)?.projectId;
         const lines: string[] = [];
         const projects = [...this.#projects.values()];
@@ -1606,7 +1624,12 @@ export class ChiefService {
         for (const card of mine.slice(-STATUS_RUNS)) {
             lines.push(this.#cardLine(card));
             const report = this.#reportOf(card);
-            if (report) lines.push(`  Its report:\n${clip(report, PROMPT_REPORT).replace(/^/gm, '    ')}`);
+            if (report && skip?.has(card.item.id)) {
+                lines.push('  Its report: given with an earlier message (work_status has it again)');
+            } else if (report) {
+                lines.push(`  Its report:\n${clip(report, PROMPT_REPORT).replace(/^/gm, '    ')}`);
+                reported?.add(card.item.id);
+            }
         }
         const followed = new Set(mine.map((card) => card.item.refId));
         const others = [

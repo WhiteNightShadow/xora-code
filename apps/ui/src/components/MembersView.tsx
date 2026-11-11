@@ -55,11 +55,15 @@ function scheduleText(schedule: string, s: Strings): string {
 }
 
 /** The user's memory text of a member, with an editor and a way to clear it. */
-/** Which part of a member's memory is shown (06 §21): `member`, `project:<id>` or `team:<id>`. */
+/**
+ * Which part of a member's memory is shown (06 §21, 20 §4.6): `member`, `user` (the user's preferences, which every
+ * member and conversation reads), `project:<id>` or `team:<id>`.
+ */
 type MemoryPart = string;
 
-function partRequest(part: MemoryPart): { scope: 'member' | 'project' | 'team'; projectId?: string } {
+function partRequest(part: MemoryPart): { scope: 'member' | 'project' | 'team' | 'user'; projectId?: string } {
     const [scope, projectId] = part.split(':', 2) as ['member' | 'project' | 'team', string | undefined];
+    if (part === 'user') return { scope: 'user' };
     return projectId ? { scope, projectId } : { scope: 'member' };
 }
 
@@ -87,6 +91,7 @@ export function MemorySection({ member }: { member: Member }) {
             ? [{ value: `project:${current.id}`, label: format(s.members.memoryProject, { project: current.name }) }]
             : []),
         { value: 'member', label: s.members.memoryGeneral },
+        { value: 'user', label: s.members.memoryUser },
         ...(current
             ? [{ value: `team:${current.id}`, label: format(s.members.memoryTeam, { project: current.name }) }]
             : []),

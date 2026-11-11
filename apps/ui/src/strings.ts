@@ -1193,6 +1193,7 @@ const zh = {
         memoryHint:
             '分三部分：通用、它在每个项目里记的、团队在项目里共享的；干活时只带当前项目的这三部分，别的用recall按需查',
         memoryGeneral: '通用（各项目都适用）',
+        memoryUser: '用户的偏好（所有成员和对话都读）',
         memoryProject: '项目：{project}',
         memoryTeam: '团队共享：{project}',
         memoryEmpty: '还没有记忆。它干活时学到值得记住的事，会自己记在这里。',
@@ -2494,6 +2495,7 @@ const en: Widen<Strings> = {
         memoryHint:
             'Three parts: general, its notes in each project, and the team’s in a project; a job brings the three of its project, the rest it looks up with recall',
         memoryGeneral: 'General (every project)',
+        memoryUser: "The user's preferences (every member and conversation reads them)",
         memoryProject: 'Project: {project}',
         memoryTeam: 'Team: {project}',
         memoryEmpty: 'No memory yet. What it learns that is worth keeping, it writes down here itself.',

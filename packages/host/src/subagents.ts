@@ -394,6 +394,7 @@ export interface SubagentDeps {
 }
 
 export class SubagentService implements SharedTools {
+    readonly names = [AGENT_TOOL];
     readonly #deps: SubagentDeps;
     /** Resolves when a subagent's turn ends, by its thread. */
     readonly #waiters = new Map<string, (event: TurnEnded) => void>();

@@ -662,7 +662,7 @@ export const methods = {
         params: z
             .object({
                 memberId: z.string(),
-                scope: z.enum(['member', 'project', 'team']).optional(),
+                scope: z.enum(['member', 'project', 'team', 'user']).optional(),
                 projectId: IdSchema.optional(),
             })
             .strict(),
@@ -677,7 +677,7 @@ export const methods = {
             .object({
                 memberId: z.string(),
                 text: z.string().max(50_000),
-                scope: z.enum(['member', 'project', 'team']).optional(),
+                scope: z.enum(['member', 'project', 'team', 'user']).optional(),
                 projectId: IdSchema.optional(),
             })
             .strict(),

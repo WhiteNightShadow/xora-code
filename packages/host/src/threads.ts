@@ -358,7 +358,8 @@ export class ThreadStore {
         ]);
     }
 
-    search(query: string): Array<{ threadId: string; title: string; snippet: string }> {
+    /** `around`: tokens of the snippet around the match; the sidebar shows a few, `recall` more (20 §4.6). */
+    search(query: string, around = 12): Array<{ threadId: string; title: string; snippet: string }> {
         // Trigram tokens: a quoted phrase matches substrings of three or more characters, CJK included.
         const escaped = `"${query.replaceAll('"', '""')}"`;
         try {
@@ -366,14 +367,15 @@ export class ThreadStore {
             const rows =
                 [...query].length >= 3
                     ? this.#db.all<{ thread_id: string; title: string; snippet: string }>(
-                          `select thread_id, title, snippet(thread_text, 3, '[', ']', '…', 12) as snippet
+                          `select thread_id, title, snippet(thread_text, 3, '[', ']', '…', ?) as snippet
                            from thread_text where thread_text match ? order by rank limit 200`,
-                          [escaped],
+                          [Math.min(64, Math.max(1, Math.round(around))), escaped],
                       )
                     : this.#db.all<{ thread_id: string; title: string; snippet: string }>(
-                          `select thread_id, title, substr(body, 1, 80) as snippet from thread_text
+                          `select thread_id, title, substr(body, 1, ?) as snippet from thread_text
                            where body like ? escape '\\' or title like ? escape '\\' limit 200`,
                           [
+                              Math.max(80, Math.round(around) * 6),
                               `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`,
                               `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`,
                           ],

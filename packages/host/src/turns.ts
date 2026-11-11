@@ -194,6 +194,8 @@ export interface SharedToolCall {
  * instructions a user's message may add for them.
  */
 export interface SharedTools {
+    /** The tools it handles, so several sources can be offered as one (shared-tools.ts). */
+    readonly names?: readonly string[];
     /** The tools the thread gets for a turn of the xora engine; read when the turn configures the session. */
     tools(
         thread: ThreadMeta,
@@ -205,6 +207,16 @@ export interface SharedTools {
         extras: SessionExtras | undefined,
         text: string,
     ): string | undefined | Promise<string | undefined>;
+    /**
+     * Prompt layers the thread gets with them, after its run's (`provider`): the memory of a conversation, taken
+     * when it starts so its system prompt stays the same.
+     */
+    layers?(
+        thread: ThreadMeta,
+        provider: HostToolProvider | undefined,
+    ):
+        | ReadonlyArray<{ id: string; title: string; text: string }>
+        | Promise<ReadonlyArray<{ id: string; title: string; text: string }>>;
     handle(name: string, input: unknown, call: SharedToolCall): Promise<HostToolResult>;
 }
 
@@ -226,6 +238,11 @@ export interface HostToolProvider {
     readonly noProject?: boolean;
     /** Extra prompt layers for the thread (organisation and agent, 06 §4). */
     readonly layers?: ReadonlyArray<{ id: string; title: string; text: string }>;
+    /**
+     * Data that changes from turn to turn, sent after each message of the user instead of in the system prompt, which
+     * then stays the same and keeps the provider's cache (the chief's status, 20 §4.5).
+     */
+    turnNote?(): string | undefined | Promise<string | undefined>;
     /**
      * A person approves every high-risk action of the thread (06 §8: push, publish, delete, external messages,
      * payments), whatever its mode, rules or hooks say. Threads of a team run always get this.
@@ -433,9 +450,13 @@ export class TurnService {
         this.#deps = deps;
     }
 
-    /** Extra prompt layers a thread gets from its host tools (organisation, roster and agent of a team run). */
-    hostLayers(threadId: string): ReadonlyArray<{ id: string; title: string; text: string }> {
-        return this.#hostTools.get(threadId)?.layers ?? [];
+    /**
+     * Extra prompt layers a thread gets from its host tools (organisation, roster and agent of a team run) and with
+     * the shared ones (the memory of a thread of the user's own), in the order the engine gets them.
+     */
+    async hostLayers(thread: ThreadMeta): Promise<ReadonlyArray<{ id: string; title: string; text: string }>> {
+        const provider = this.#hostTools.get(thread.id);
+        return [...(provider?.layers ?? []), ...((await this.#deps.sharedTools?.()?.layers?.(thread, provider)) ?? [])];
     }
 
     /** Gives a thread host-implemented tools and extra prompt layers (used by team runs). */
@@ -640,12 +661,19 @@ export class TurnService {
                 attachments,
                 cwd,
             );
-            // Only xora sessions get shared tools; `/compact` is a command, not a message.
-            const note =
-                engine.kind === 'builtin' && !/^\/compact(?:\s|$)/.test(text.trim())
-                    ? await this.#deps.sharedTools?.()?.instructions(thread, extras, text)
-                    : undefined;
-            return note ? [...blocks, { type: 'text', text: note }] : blocks;
+            // Only xora sessions get shared tools; `/compact` is a command, not a message. What the host adds is marked
+            // as such, so it is never taken for the user's own words (the engine's state of the work leaves it out).
+            const xora = engine.kind === 'builtin' && !/^\/compact(?:\s|$)/.test(text.trim());
+            const notes = xora
+                ? [
+                      await this.#hostTools.get(threadId)?.turnNote?.(),
+                      await this.#deps.sharedTools?.()?.instructions(thread, extras, text),
+                  ].filter((note): note is string => typeof note === 'string' && note.length > 0)
+                : [];
+            return [
+                ...blocks,
+                ...notes.map((note) => ({ type: 'text' as const, text: `<host_note>\n${note}\n</host_note>` })),
+            ];
         });
         this.#runs.add(run);
         void run.then(
@@ -715,8 +743,9 @@ export class TurnService {
                     !provider?.noProject ||
                     (layer.id !== 'project_instructions' && layer.id !== 'project_private_instructions'),
             );
-        // Organisation and agent layers go after the user's global layer and before the project layers (08 §1.2).
-        const extra = provider?.layers ?? [];
+        // Organisation and agent layers go after the user's global layer and before the project layers (08 §1.2),
+        // and the memory of a thread of the user's own with them.
+        const extra = await this.hostLayers(thread);
         const globalIndex = baseLayers.findIndex((layer) => layer.id === 'user_global_instructions');
         const layers = [
             ...baseLayers.slice(0, globalIndex + 1),

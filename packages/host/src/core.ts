@@ -40,6 +40,7 @@ import { HistoryService } from './history.ts';
 import { detectLocalServers } from './local-models.ts';
 import { HostLog, type Logger } from './log.ts';
 import { MemberService, parseRoutineKey, registerMemberHandlers } from './members.ts';
+import { MemoryService } from './memory/service.ts';
 import { offPeakStartFor } from './off-peak.ts';
 import { type HostPaths, hostPaths } from './paths.ts';
 import { ProjectService } from './projects.ts';
@@ -48,6 +49,7 @@ import { ReviewService } from './review.ts';
 import { ApprovalReviewer } from './reviewer.ts';
 import { ScoreService } from './scores.ts';
 import { SettingsService } from './settings.ts';
+import { combineShared } from './shared-tools.ts';
 import type { ShellApi } from './shell.ts';
 import { mergePath, resolveLoginPath } from './shell-env.ts';
 import { SubagentService } from './subagents.ts';
@@ -57,7 +59,7 @@ import { setLanguageSource, textOf } from './text.ts';
 import { ThreadStore } from './threads.ts';
 import { TitleService } from './titles.ts';
 import { type TriggerFire, TriggerService } from './triggers.ts';
-import { defaultThreadTitle, TurnService } from './turns.ts';
+import { defaultThreadTitle, type SharedTools, TurnService } from './turns.ts';
 import { UpdateService } from './updates.ts';
 import { UsageService } from './usage.ts';
 import { which } from './which.ts';
@@ -69,6 +71,7 @@ const TEXT = bilingual(
         interrupted: '应用在这一轮运行时退出了，这一轮没有完成',
         systemLayer: '系统（xora统一）',
         builtIn: '内置',
+        memory: '记忆',
         team: '团队',
         subagent: '子agent',
         member: '成员',
@@ -95,6 +98,7 @@ const TEXT = bilingual(
         interrupted: 'The app quit while this turn was running, so the turn did not finish',
         systemLayer: 'System (unified by Xora)',
         builtIn: 'Built-in',
+        memory: 'Memory',
         team: 'Team',
         subagent: 'Subagent',
         member: 'Member',
@@ -159,6 +163,8 @@ export class HostCore {
     readonly engines: EngineManager;
     readonly turns: TurnService;
     readonly subagents: SubagentService;
+    /** Long-term memory of members, organizations and the user (20 §4.6). */
+    readonly memory: MemoryService;
     readonly updates: UpdateService;
     readonly terminals: TerminalService;
     readonly worktrees: WorktreeService;
@@ -178,6 +184,8 @@ export class HostCore {
     #triggerSync: ReturnType<typeof setInterval> | undefined;
     readonly #options: HostOptions;
     readonly #startedAt = Date.now();
+    /** The tools every thread of the Xora engine may get beside its run's: the `agent` tool and memory. */
+    #shared: SharedTools | undefined;
 
     private constructor(options: HostOptions, bundleDir: string, systemLanguages: readonly string[]) {
         this.#options = options;
@@ -254,6 +262,17 @@ export class HostCore {
                       log: this.log,
                       userAgent,
                   });
+        this.memory = new MemoryService({
+            membersDir: this.paths.membersDir,
+            orgsDir: this.paths.orgsDir,
+            projects: this.projects,
+            log: this.log,
+            memberNames: async (projectId) =>
+                new Map((await this.members.list(projectId).catch(() => [])).map((member) => [member.id, member.name])),
+            conversations: (query) => this.threads.search(query, 48),
+            thread: (threadId) => this.threads.find(threadId),
+            onChanged: (memberId) => this.bus.broadcast('member.changed', { memberId }),
+        });
         this.turns = new TurnService({
             threads: this.threads,
             ...(this.titles ? { titles: this.titles } : {}),
@@ -271,7 +290,7 @@ export class HostCore {
             userAgent,
             portFor: (threadId) => this.worktrees.port(threadId),
             extensions: this.extensions,
-            sharedTools: () => this.subagents,
+            sharedTools: () => this.#shared,
             onTurnEnded: (event) => {
                 this.subagents.onTurnEnded(event);
                 void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`));
@@ -291,6 +310,7 @@ export class HostCore {
             log: this.log,
             orgsDir: this.paths.orgsDir,
             membersDir: this.paths.membersDir,
+            memory: this.memory,
             usage: this.usage,
             scores: this.scores,
             skillLibraryDir: this.paths.skillLibraryDir,
@@ -309,6 +329,7 @@ export class HostCore {
             orgsDir: this.paths.orgsDir,
             members: this.members,
         });
+        this.#shared = combineShared([this.subagents, this.memory]);
         this.goals = new GoalService({
             threads: this.threads,
             projects: this.projects,
@@ -596,18 +617,18 @@ export class HostCore {
             editable: false,
         });
         // The same order the engine gets (see TurnService): team layers after the user's global layer, skills last.
-        const team = this.turns
-            .hostLayers(thread.id)
-            .map((layer) =>
-                extra(
-                    layer,
-                    thread.parent
-                        ? text.subagent
-                        : thread.agentId && !thread.teamRunId && !thread.workflowRunId
-                          ? text.member
-                          : text.team,
-                ),
-            );
+        const team = (await this.turns.hostLayers(thread)).map((layer) =>
+            extra(
+                layer,
+                layer.id === 'memory'
+                    ? text.memory
+                    : thread.parent
+                      ? text.subagent
+                      : thread.agentId && !thread.teamRunId && !thread.workflowRunId
+                        ? text.member
+                        : text.team,
+            ),
+        );
         const globalIndex = layers.findIndex((layer) => layer.id === 'user_global_instructions');
         let skills: PromptLayer[] = [];
         try {

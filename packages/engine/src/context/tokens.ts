@@ -38,7 +38,7 @@ export function messageText(message: Message): string {
 export function userWords(content: readonly (UserPart | AssistantPart)[]): string {
     return content
         .flatMap((part) => (part.type === 'text' ? [part.text] : []))
-        .filter((text) => !/^\s*<(environment|system-reminder|hook_context|hook_feedback)[\s>]/.test(text))
+        .filter((text) => !/^\s*<(environment|system-reminder|hook_context|hook_feedback|host_note)[\s>]/.test(text))
         .join('\n')
         .trim();
 }
