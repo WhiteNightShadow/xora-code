@@ -5,6 +5,7 @@ import type { Message, ModelInfo, ProviderConnection } from '@xora/providers';
 import { findModel, getPreset } from '@xora/providers';
 import type { BackgroundJob, JobRegistry, TodoItem } from '@xora/tools';
 import { type ConnectionConfig, type ModelTarget, publicConfig, type SessionConfig } from './config.ts';
+import type { Judgment } from './context/ledger.ts';
 import { type SessionEntry, SessionFile } from './store.ts';
 
 export class SessionBusyError extends Error {
@@ -74,7 +75,11 @@ interface TurnMark {
     readonly contextStart: number;
     readonly summary: string | undefined;
     readonly prunedUpTo: number;
+    readonly maskFrozen: boolean;
     readonly todos: readonly TodoItem[];
+    readonly judgments: readonly Judgment[];
+    readonly narratives: readonly string[];
+    readonly compactions: number;
 }
 
 /**
@@ -94,11 +99,19 @@ export class EngineSession {
     readonly history: Message[] = [];
     todos: readonly TodoItem[] = [];
     title: string | undefined;
-    /** Effective context starts here; earlier messages are represented by `summary`. */
+    /** Effective context starts here; earlier messages are represented by `summary`, the state of the work. */
     contextStart = 0;
     summary: string | undefined;
-    /** Tool results with an index below this are replaced by placeholders (compaction level 2). */
+    /** Tool results with an index below this are masked to one-line references (20 §4.3). */
     prunedUpTo = 0;
+    /** Older tool output was masked since the last compaction: no more masking until the next one (20 §4.4). */
+    maskFrozen = false;
+    /** What the model judged worth keeping at compactions: the ledger's constraints, decisions, facts… (20 §4.2). */
+    judgments: readonly Judgment[] = [];
+    /** The model's accounts of how the work went, the latest few. */
+    narratives: readonly string[] = [];
+    /** Compactions of this session so far. */
+    compactions = 0;
     /** Prompt tokens reported for the latest request, for the context meter and compaction triggers. */
     lastPromptTokens = 0;
     /** What `estimatedContextTokens` made of that request, to calibrate later estimates against the vendor's count. */
@@ -145,9 +158,14 @@ export class EngineSession {
                     this.contextStart = entry.keepFrom;
                     this.summary = entry.summary;
                     this.prunedUpTo = Math.max(this.prunedUpTo, entry.keepFrom);
+                    this.judgments = entry.judgments ?? this.judgments;
+                    this.narratives = entry.narratives ?? this.narratives;
+                    this.compactions++;
+                    this.maskFrozen = false;
                     break;
                 case 'prune':
                     this.prunedUpTo = Math.max(this.prunedUpTo, entry.upTo);
+                    this.maskFrozen = true;
                     break;
                 case 'turn':
                     this.#mark(entry.turnId);
@@ -226,7 +244,11 @@ export class EngineSession {
             contextStart: this.contextStart,
             summary: this.summary,
             prunedUpTo: this.prunedUpTo,
+            maskFrozen: this.maskFrozen,
             todos: this.todos,
+            judgments: this.judgments,
+            narratives: this.narratives,
+            compactions: this.compactions,
         });
     }
 
@@ -239,7 +261,11 @@ export class EngineSession {
         this.contextStart = mark.contextStart;
         this.summary = mark.summary;
         this.prunedUpTo = mark.prunedUpTo;
+        this.maskFrozen = mark.maskFrozen;
         this.todos = mark.todos;
+        this.judgments = mark.judgments;
+        this.narratives = mark.narratives;
+        this.compactions = mark.compactions;
         let later = false;
         for (const key of [...this.#turns.keys()]) {
             later ||= key === turnId;

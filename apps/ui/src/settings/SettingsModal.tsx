@@ -540,6 +540,19 @@ function Models() {
                     }}
                 />
             </Field>
+            <Field label={s.settings.workingSet} hint={s.settings.workingSetHint}>
+                <input
+                    className="input"
+                    type="number"
+                    min={16000}
+                    step={1000}
+                    defaultValue={settings.workingSet}
+                    onBlur={(event) => {
+                        const value = Number(event.target.value);
+                        if (Number.isFinite(value) && value >= 16000) update({ workingSet: Math.round(value) });
+                    }}
+                />
+            </Field>
             <Field label="" hint={s.settings.lspDiagnosticsHint}>
                 <Toggle
                     checked={settings.lspDiagnostics}

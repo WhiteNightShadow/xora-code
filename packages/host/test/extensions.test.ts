@@ -809,8 +809,8 @@ describe('lifecycle hooks', () => {
         server.respondWith((request) => {
             if (request.method !== 'POST') return undefined;
             const body = request.body as { messages?: Array<{ role: string; content: unknown }> };
-            return text(body.messages?.[0]?.content).includes('compress the earlier part')
-                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.')
+            return text(body.messages?.at(-1)?.content).includes('The context is nearly full')
+                ? openaiText('<narrative>Filler turns.</narrative>')
                 : openaiText('x'.repeat(4000));
         });
         const project = await ui.request('project.add', { path: repo });

@@ -127,6 +127,15 @@ function lastRole(body: unknown): string | undefined {
     return ((body as { messages?: Array<{ role: string }> }).messages ?? []).at(-1)?.role;
 }
 
+/** Whether a request is the engine asking for the model's part of the state of the work (20 §4.4). */
+function asksForState(body: unknown): boolean {
+    const last = ((body as { messages?: unknown[] }).messages ?? []).at(-1);
+    return JSON.stringify(last ?? '').includes('The context is nearly full');
+}
+
+const STATE_ANSWER =
+    '<narrative>Filled the context with filler turns.</narrative><ledger>{"add":[{"kind":"fact","text":"The filler is harmless"}]}</ledger>';
+
 function workspace(): string {
     const dir = mkdtempSync(path.join(tmpdir(), 'xora-engine-ws-'));
     writeFileSync(path.join(dir, 'a.txt'), 'alpha\n');
@@ -407,10 +416,9 @@ describe('xora engine over ACP', () => {
         server.reset();
         let summaries = 0;
         server.respondWith((request) => {
-            const body = request.body as { messages: Array<{ role: string; content: unknown }> };
-            if (JSON.stringify(body.messages[0]?.content ?? '').includes('compress the earlier part')) {
+            if (asksForState(request.body)) {
                 summaries++;
-                return openaiText('Goal: test. Decisions: none. Files: none. Open items: none.');
+                return openaiText(STATE_ANSWER);
             }
             return openaiText('x'.repeat(4000));
         });
@@ -425,7 +433,10 @@ describe('xora engine over ACP', () => {
         expect(summaries).toBeGreaterThan(0);
         expect(h.updates.some((update) => update.sessionUpdate === 'compaction_update')).toBe(true);
         const last = server.requests.at(-1)?.body as { messages: Array<{ role: string; content: unknown }> };
-        expect(JSON.stringify(last.messages)).toContain('conversation_summary');
+        const sent = JSON.stringify(last.messages);
+        expect(sent).toContain('<task_state>');
+        expect(sent).toContain('F1 The filler is harmless');
+        expect(sent).toContain('Filled the context with filler turns.');
         h.close();
     }, 30_000);
 
@@ -439,12 +450,9 @@ describe('xora engine over ACP', () => {
         let summaries = 0;
         let steps = 0;
         server.respondWith((request) => {
-            const body = request.body as { messages: Array<{ role: string; content: unknown }> };
-            if (JSON.stringify(body.messages[0]?.content ?? '').includes('compress the earlier part')) {
+            if (asksForState(request.body)) {
                 summaries++;
-                return openaiText(
-                    'Goal: read the big files. Files: big-1.txt to big-4.txt read. Open items: the rest.',
-                );
+                return openaiText('<narrative>Reading the big files one by one.</narrative>');
             }
             steps++;
             return steps <= 12
@@ -460,15 +468,75 @@ describe('xora engine over ACP', () => {
         expect(done.stopReason).toBe('end_turn');
         expect(summaries).toBeGreaterThan(0);
         const last = JSON.stringify((server.requests.at(-1)?.body as { messages?: unknown[] } | undefined)?.messages);
-        expect(last).toContain('conversation_summary');
-        const kept = last.slice(last.indexOf('<request_in_progress>'));
-        expect(kept).toContain('Read big-1.txt to big-12.txt one by one, then say so.');
+        const state = last.slice(last.indexOf('<task_state>'));
+        expect(state).toContain('Read big-1.txt to big-12.txt one by one, then say so.');
+        // Files read before the latest compaction are in the state, with where to get them back.
+        expect(state).toMatch(/big-1\.txt — read 1× \(latest #R\d+\)/);
+        // The model is asked in the request it would have made next: same tools, same messages, then the instruction.
+        const asked = server.requests.findIndex((request) => asksForState(request.body));
+        type Body = { messages: unknown[]; tools?: unknown };
+        const before = server.requests[asked - 1]?.body as Body;
+        const ask = server.requests[asked]?.body as Body;
+        expect(ask.tools).toEqual(before.tools);
+        expect(ask.messages.slice(0, before.messages.length)).toEqual(before.messages);
         const levels = h.updates
             .filter((update) => update.sessionUpdate === 'compaction_update' && update.status === 'completed')
             .map((update) => (update._meta as { xora?: { level?: number } } | undefined)?.xora?.level);
         expect(levels).toContain(3);
         h.close();
     }, 30_000);
+
+    it('compacts with the records alone when the model cannot give its part', async () => {
+        server.reset();
+        server.respondWith((request) =>
+            asksForState(request.body)
+                ? errorTurn(400, { error: { message: 'context too long' } })
+                : openaiText('x'.repeat(4000)),
+        );
+        const h = harness();
+        const sessionId = await newSession(h, workspace(), { softContextWindow: 12_000, maxOutputTokens: 1000 });
+        for (let turn = 0; turn < 6; turn++) {
+            const done = await h.client.request('session/prompt', {
+                sessionId,
+                prompt: [{ type: 'text', text: `turn ${turn} ${'y'.repeat(4000)}` }],
+            });
+            expect(done.stopReason).toBe('end_turn');
+        }
+        const completed = h.updates.filter(
+            (update) => update.sessionUpdate === 'compaction_update' && update.status === 'completed',
+        );
+        expect(completed.length).toBeGreaterThan(0);
+        expect((completed[0]?._meta as { xora?: { judged?: boolean } } | undefined)?.xora?.judged).toBe(false);
+        const last = JSON.stringify((server.requests.at(-1)?.body as { messages?: unknown[] } | undefined)?.messages);
+        expect(last).toContain('<task_state>');
+        // The user's older messages left out for room are a reference away; there is no account from the model.
+        expect(last).toMatch(/left out for room: (#R\d+, )*#R0/);
+        expect(last).not.toContain('How the work went');
+        h.close();
+    }, 30_000);
+
+    it('gives back an earlier tool output by its reference', async () => {
+        server.reset();
+        let step = 0;
+        server.respondWith(() => {
+            step++;
+            if (step === 1) return openaiToolCalls([{ name: 'read', arguments: JSON.stringify({ path: 'a.txt' }) }]);
+            if (step === 2)
+                return openaiToolCalls([{ name: 'tool_output', arguments: JSON.stringify({ ref: '#R2' }) }]);
+            return openaiText('done');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace());
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'read it twice' }] });
+        const body = server.requests.at(-1)?.body as
+            | { messages: Array<{ role: string; content: unknown }> }
+            | undefined;
+        const output = body?.messages.at(-1);
+        expect(output?.role).toBe('tool');
+        expect(JSON.stringify(output?.content)).toContain('alpha');
+        expect(h.permissions).toHaveLength(0);
+        h.close();
+    });
 
     it('resumes a stored session in a new working directory', async () => {
         server.reset();
@@ -629,12 +697,9 @@ describe('tool hooks', () => {
 
     it('runs PreCompact before compacting on its own, but leaves /compact to the host', async () => {
         server.reset();
-        server.respondWith((request) => {
-            const body = request.body as { messages: Array<{ role: string; content: unknown }> };
-            return JSON.stringify(body.messages[0]?.content ?? '').includes('compress the earlier part')
-                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.')
-                : openaiText('x'.repeat(4000));
-        });
+        server.respondWith((request) =>
+            asksForState(request.body) ? openaiText(STATE_ANSWER) : openaiText('x'.repeat(4000)),
+        );
         const h = harness();
         const sessionId = await newSession(h, workspace(), {
             softContextWindow: 12_000,
@@ -662,14 +727,11 @@ describe('tool hooks', () => {
 
     it('reports the smaller context and counts the summary request right after /compact', async () => {
         server.reset();
-        server.respondWith((request) => {
-            const body = request.body as { messages: Array<{ role: string; content: unknown }> };
-            return JSON.stringify(body.messages[0]?.content ?? '').includes('compress the earlier part')
-                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.', {
-                      usage: { prompt_tokens: 3000, completion_tokens: 40 },
-                  })
-                : openaiText('x'.repeat(2000));
-        });
+        server.respondWith((request) =>
+            asksForState(request.body)
+                ? openaiText(STATE_ANSWER, { usage: { prompt_tokens: 3000, completion_tokens: 40 } })
+                : openaiText('x'.repeat(2000)),
+        );
         const h = harness();
         const sessionId = await newSession(h, workspace());
         for (let turn = 0; turn < 4; turn++) {

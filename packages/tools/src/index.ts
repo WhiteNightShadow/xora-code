@@ -123,6 +123,7 @@ export {
 } from './tools/grep.ts';
 export { LIST_MAX_ENTRIES, type ListInput, listTool } from './tools/list.ts';
 export { LSP_MAX_FILES, type LspInput, lspTool } from './tools/lsp.ts';
+export { type ToolOutputInput, toolOutputTool } from './tools/output.ts';
 export { READ_DEFAULT_LIMIT, READ_MAX_LINE_CHARS, type ReadInput, readTool } from './tools/read.ts';
 export { renderTodos, type TodoInput, todoTool } from './tools/todo.ts';
 export {

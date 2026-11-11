@@ -8,6 +8,6 @@ export {
     type SessionConfig,
     SessionConfigSchema,
 } from './config.ts';
-export { estimateTokens } from './context.ts';
+export { estimateTokens } from './context/tokens.ts';
 export { type AcpPort, portStream } from './port.ts';
 export { SYSTEM_PROMPT, systemSegments } from './prompt.ts';

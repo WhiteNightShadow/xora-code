@@ -161,7 +161,7 @@ const zh = {
         title: '上下文',
         empty: '还没有发过请求',
         used: '已用{used}/{size} token',
-        rules: '用到60%时清掉较早的工具输出，用到80%时把较早的对话总结成摘要，然后接着做。',
+        rules: '用到60%时把较早的工具输出换成可取回的引用，用到80%时把较早的对话整理成任务状态，然后接着做。',
         compacted: '已压缩{count}次，最近一次{before}→{after} token',
         compactedTimes: '已压缩{count}次',
         notCompacted: '还没有压缩过',
@@ -173,10 +173,10 @@ const zh = {
         compactedItem: '上下文已压缩',
         levels: {
             2: '清掉了较早的工具输出',
-            3: '较早的对话已总结成摘要',
-            4: '上下文超限，较早的对话已总结成摘要',
+            3: '较早的对话已整理成任务状态',
+            4: '换用备用模型前，较早的对话已整理成任务状态',
         },
-        showSummary: '查看摘要',
+        showSummary: '查看任务状态',
         focus: '关注点：{focus}',
     },
     tool: {
@@ -335,6 +335,9 @@ const zh = {
         defaultEffort: '默认思考强度',
         softWindow: '上下文上限（token）',
         softWindowHint: '超过模型窗口的部分会先压缩，避免长上下文费用失控',
+        workingSet: '工作上下文（token）',
+        workingSetHint:
+            'Xora引擎实际带着干活的上下文：用到60%时把较早的工具输出换成可取回的引用，用到80%时把较早的对话整理成任务状态。上下文太长模型会变笨，窗口再大也建议不超过20万',
         lspDiagnostics: '改完文件后附上语言服务器报的新错误',
         lspDiagnosticsHint:
             '只对xora engine生效；需要本机装有对应的语言服务器，比如typescript-language-server、pyright、gopls、rust-analyzer、clangd',
@@ -1401,7 +1404,7 @@ const en: Widen<Strings> = {
         title: 'Context',
         empty: 'No requests yet',
         used: '{used} of {size} tokens used',
-        rules: 'At 60% older tool output is cleared; at 80% earlier turns are summarised, and the work goes on.',
+        rules: 'At 60% older tool output becomes references the agent can fetch back; at 80% earlier turns become the state of the work, and the work goes on.',
         compacted: 'Compacted {count} times; last {before} → {after} tokens',
         compactedTimes: 'Compacted {count} times',
         notCompacted: 'Not compacted yet',
@@ -1413,10 +1416,10 @@ const en: Widen<Strings> = {
         compactedItem: 'Context compacted',
         levels: {
             2: 'Older tool output cleared',
-            3: 'Earlier turns summarised',
-            4: 'Context overflowed; earlier turns summarised',
+            3: 'Earlier turns turned into the state of the work',
+            4: 'Before switching to a fallback model, earlier turns turned into the state of the work',
         },
-        showSummary: 'Show the summary',
+        showSummary: 'Show the state of the work',
         focus: 'Focus: {focus}',
     },
     tool: {
@@ -1580,6 +1583,9 @@ const en: Widen<Strings> = {
         defaultEffort: 'Default thinking effort',
         softWindow: 'Context cap (tokens)',
         softWindowHint: 'Context beyond this is compacted first, to keep long-context costs in check',
+        workingSet: 'Working context (tokens)',
+        workingSetHint:
+            'The context the Xora engine works in: at 60% older tool output becomes references it can fetch back, at 80% older turns become the state of the work. Models get worse with long contexts, so even with a larger window keep it under about 200k',
         lspDiagnostics: 'Add new language server errors to the results of edits',
         lspDiagnosticsHint:
             'Xora engine only. Needs the language server installed, e.g. typescript-language-server, pyright, gopls, rust-analyzer or clangd',

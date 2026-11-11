@@ -4,19 +4,20 @@ import type { AssistantMessage, AssistantPart, Message, ModelEvent, ModelRequest
 import { z } from 'zod';
 import type { HostTool } from './config.ts';
 import {
-    contextBudget,
-    contextMessages,
-    currentContextTokens,
-    estimatedContextTokens,
-    estimateMessageTokens,
-    estimateTokens,
-    pruneToolResults,
-    summarise,
-    summaryCut,
-} from './context.ts';
+    applyCompaction,
+    compactionCut,
+    compactionMessages,
+    compactionShares,
+    displayState,
+} from './context/compaction.ts';
+import { contextMessages } from './context/messages.ts';
+import { maskToolResults, readOutput } from './context/outputs.ts';
+import { estimateMessageTokens, estimateTokens } from './context/tokens.ts';
+import { COMPACT_AT, contextBudget, currentContextTokens, estimatedContextTokens, MASK_AT } from './context/window.ts';
 import {
     type AnyTool,
     checkPathAccess,
+    completeModel,
     isReadOnlyCommand,
     isSensitivePath,
     LSP_EDIT_NOTE,
@@ -444,6 +445,7 @@ If steps are done, started or no longer needed, update it with the todo tool now
         session.contextStart = keepFrom;
         session.summary = summary;
         session.prunedUpTo = Math.max(session.prunedUpTo, keepFrom);
+        session.maskFrozen = false;
         session.lastPromptTokens = 0;
         session.lastPromptEstimate = 0;
         session.file.append({
@@ -457,33 +459,51 @@ If steps are done, started or no longer needed, update it with the todo tool now
         });
     }
 
-    /** Compaction levels 2 and 3 when the context crosses 60% and 80% of the budget. */
+    /**
+     * Keeps the context within the budget (20 §4.4): at MASK_AT older tool output is masked to references, all at
+     * once; at COMPACT_AT older turns give way to the state of the work, unless masking alone brings it back.
+     */
     async #manageContext(): Promise<void> {
         const session = this.#session;
         const target = resolveTarget(session.config.model);
         const budget = contextBudget(session, target);
-        const used = currentContextTokens(session, systemSegments(session.config.layers));
-        if (used < budget * 0.6) {
+        const system = systemSegments(session.config.layers);
+        const used = currentContextTokens(session, system);
+        if (used < budget * MASK_AT) {
             return;
         }
-        if (used < budget * 0.8) {
-            pruneToolResults(session);
+        const masked = maskToolResults(session, budget);
+        if (masked && currentContextTokens(session, system) < budget * COMPACT_AT) {
             return;
         }
-        await this.compact(3);
+        if (used >= budget * COMPACT_AT) {
+            await this.compact(3);
+        }
     }
 
     /**
-     * Summarises older turns. Before a compaction of its own (`auto`) the engine runs the host's PreCompact hooks;
-     * for `/compact` the host has run them already.
+     * Replaces older turns with the state of the work. Level 3 asks the model for its part of the state in the
+     * request it would have made next; level 4 (before a fallback to another vendor, whose model is failing or about
+     * to change) uses the engine's part alone. Before a compaction of its own (`auto`) the engine runs the host's
+     * PreCompact hooks; for `/compact` the host has run them already.
      */
     async compact(level: 3 | 4, focus?: string, trigger: 'auto' | 'manual' = 'auto'): Promise<boolean> {
         const session = this.#session;
-        if (
-            trigger === 'auto' &&
-            this.#hookEnabled('PreCompact') &&
-            summaryCut(session, level === 4 ? 1 : 2) !== undefined
-        ) {
+        const target = resolveTarget(session.config.model);
+        const budget = contextBudget(session, target);
+        const system = systemSegments(session.config.layers);
+        const shares = compactionShares(
+            budget,
+            currentContextTokens(session, system),
+            estimatedContextTokens(session, system),
+            level,
+        );
+        const cut = compactionCut(session, shares.tail);
+        if (cut === undefined) {
+            // Nothing older than the latest steps: masking what tool output there is is all that can be done.
+            return maskToolResults(session, budget, { keep: 2, force: true });
+        }
+        if (trigger === 'auto' && this.#hookEnabled('PreCompact')) {
             await this.#runHook('PreCompact', { trigger: 'auto', custom_instructions: '' });
         }
         const id = `compaction-${Date.now()}`;
@@ -492,38 +512,69 @@ If steps are done, started or no longer needed, update it with the todo tool now
             compactionId: id,
             status: 'started',
         } as acp.SessionUpdate);
-        try {
-            const target = resolveTarget(session.config.fastModel ?? session.config.model);
-            const result = await summarise(session, target, {
-                keepTurns: level === 4 ? 1 : 2,
-                ...(focus ? { focus } : {}),
-                signal: this.#signal,
-                userAgent: session.config.userAgent,
-            });
-            if (!result) {
-                pruneToolResults(session, 2);
+        let asked: { text: string; done: Extract<ModelEvent, { type: 'done' }> } | undefined;
+        if (level === 3) {
+            try {
+                asked = await this.#askState(target, focus);
+            } catch {
+                // The model could not answer: the state is the engine's records alone, which never fail.
             }
-            this.#io.update({
-                sessionUpdate: 'compaction_update',
-                compactionId: id,
-                status: 'completed',
-                ...(result?.summary ? { summary: [text(result.summary)] } : {}),
-                // Nothing to summarise yet: only older tool output was replaced, which is level 2.
-                _meta: { xora: { level: result ? level : 2, before: result?.before, after: result?.after } },
-            } as acp.SessionUpdate);
-            this.#reportContext(result?.done ? { target, done: result.done } : undefined);
-            return result !== undefined;
-        } catch (error) {
+        }
+        if (this.#signal.aborted) {
             this.#io.update({
                 sessionUpdate: 'compaction_update',
                 compactionId: id,
                 status: 'failed',
-                error: error instanceof Error ? error.message : String(error),
+                error: 'cancelled',
             } as acp.SessionUpdate);
-            pruneToolResults(session, 2);
-            this.#reportContext();
             return false;
         }
+        const result = applyCompaction(session, cut, {
+            level,
+            ...(asked?.text ? { answer: asked.text } : {}),
+            jobs: this.#runningJobs(),
+            requestTokens: shares.requests,
+        });
+        this.#io.update({
+            sessionUpdate: 'compaction_update',
+            compactionId: id,
+            status: 'completed',
+            summary: [text(displayState(result.state))],
+            _meta: {
+                xora: { level, before: result.before, after: result.after, judged: result.judged },
+            },
+        } as acp.SessionUpdate);
+        this.#reportContext(asked ? { target, done: asked.done } : undefined);
+        return true;
+    }
+
+    /**
+     * The model's part of the state: the request it would have made next — same model, system prompt, tools and
+     * messages, so the provider's cache covers all of it — with the compaction instruction at the end.
+     */
+    async #askState(
+        target: ResolvedTarget,
+        focus: string | undefined,
+    ): Promise<{ text: string; done: Extract<ModelEvent, { type: 'done' }> }> {
+        const session = this.#session;
+        const request: ModelRequest = { ...this.#buildRequest(target), messages: compactionMessages(session, focus) };
+        const done = await completeModel(target.connection, request, {
+            signal: this.#signal,
+            userAgent: session.config.userAgent,
+        });
+        const answer = done.message.content
+            .flatMap((part) => (part.type === 'text' ? [part.text] : []))
+            .join('\n')
+            .trim();
+        return { text: answer, done };
+    }
+
+    /** Background jobs still running, one line each, for the state of the work. */
+    #runningJobs(): string[] {
+        return this.#session.jobs
+            .list()
+            .filter((job) => job.running)
+            .map((job) => `${job.id}: \`${job.command.length > 120 ? `${job.command.slice(0, 120)}…` : job.command}\``);
     }
 
     /**
@@ -770,6 +821,7 @@ If steps are done, started or no longer needed, update it with the todo tool now
             env: { ...sanitizeEnv(process.env), ...session.config.env },
             artifacts: { save: async (name, content) => session.saveArtifact(name, content) },
             jobs: session.jobs,
+            outputs: { read: (ref) => readOutput(session, ref) },
             todos: {
                 get: () => session.todos,
                 set: (items) => {

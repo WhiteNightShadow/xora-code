@@ -62,6 +62,11 @@ export interface ToolContext {
     readonly jobs: JobRegistry;
     /** Session todo list read and written by the `todo` tool. */
     readonly todos: { get(): readonly TodoItem[]; set(items: readonly TodoItem[]): void };
+    /**
+     * Earlier tool output kept in the session though the context only shows a reference to it (`#R12`), for the
+     * `tool_output` tool (20 §4.3).
+     */
+    readonly outputs?: { read(ref: string): { readonly tool: string; readonly text: string } | undefined };
     /** Streams live output of long-running tools such as `bash`. */
     readonly onOutput?: (chunk: string) => void;
     /** Shell used by `bash`. Defaults to `$SHELL` or `/bin/bash` on unix and `powershell.exe` on windows. */

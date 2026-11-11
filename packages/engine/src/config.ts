@@ -70,6 +70,11 @@ export const SessionConfigSchema = z.object({
     /** Prompt layers 2–5 and the session layer (08 §1), already in order. */
     layers: z.array(PromptLayerInputSchema).default([]),
     softContextWindow: z.number().int().positive().optional(),
+    /**
+     * The context the engine keeps the work in (20 §4.4): older tool output is masked and older turns compacted
+     * within it, however large the window; a long context dulls a model well before it is full.
+     */
+    workingSet: z.number().int().positive().optional(),
     maxOutputTokens: z.number().int().positive().optional(),
     /** Language of the notices and permission options the user sees. */
     language: z.enum(['zh-CN', 'en']).default('zh-CN'),

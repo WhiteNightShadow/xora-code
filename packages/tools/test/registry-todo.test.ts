@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { type AnyTool, createDefaultTools, todoTool, toolSpec } from '../src/index.ts';
+import { type AnyTool, createDefaultTools, todoTool, toolOutputTool, toolSpec } from '../src/index.ts';
 import { makeContext, runTool, temporaryDir } from './helpers.ts';
 
 describe('todo', () => {
@@ -28,6 +28,37 @@ describe('todo', () => {
     });
 });
 
+describe('tool_output', () => {
+    const output = Array.from(
+        { length: 900 },
+        (_, index) => `line ${index + 1}${index === 499 ? ' Error: boom' : ''}`,
+    ).join('\n');
+    const context = () =>
+        makeContext('/tmp', {
+            outputs: { read: (ref) => (ref === 'R12' ? { tool: 'bash', text: output } : undefined) },
+        });
+
+    it('gives back an earlier output by its reference, a page at a time', async () => {
+        const ctx = await context();
+        const first = await runTool(toolOutputTool, { ref: '#r12' }, ctx);
+        expect(first.isError).toBeFalsy();
+        expect(first.content.startsWith('line 1\n')).toBe(true);
+        expect(first.content).toContain('[lines 1–400 of 900; ask for more with offset]');
+        const page = await runTool(toolOutputTool, { ref: 'R12', offset: 899, limit: 5 }, ctx);
+        expect(page.content).toBe('line 899\nline 900');
+    });
+
+    it('finds lines in it, numbered, and says when nothing matches or the reference is unknown', async () => {
+        const ctx = await context();
+        const found = await runTool(toolOutputTool, { ref: 'R12', grep: 'error' }, ctx);
+        expect(found.content).toBe('R12 (bash), 1 matching lines:\n500: line 500 Error: boom');
+        const none = await runTool(toolOutputTool, { ref: 'R12', grep: 'nothing here' }, ctx);
+        expect(none.content).toContain('No line of R12');
+        const unknown = await runTool(toolOutputTool, { ref: 'R99' }, ctx);
+        expect(unknown.isError).toBe(true);
+    });
+});
+
 describe('createDefaultTools', () => {
     const tools = createDefaultTools({ ripgrep: false });
     const byName = new Map<string, AnyTool>(tools.map((tool) => [tool.name, tool]));
@@ -49,12 +80,13 @@ describe('createDefaultTools', () => {
             'web_fetch',
             'web_search',
             'todo',
+            'tool_output',
         ]);
     });
 
     it('marks exactly the tools that change nothing as read-only', () => {
         const readOnly = tools.filter((tool) => tool.readOnly).map((tool) => tool.name);
-        expect(readOnly).toEqual(['read', 'list', 'glob', 'grep', 'lsp', 'bash_output', 'todo']);
+        expect(readOnly).toEqual(['read', 'list', 'glob', 'grep', 'lsp', 'bash_output', 'todo', 'tool_output']);
         expect(byName.get('apply_patch')?.kind).toBe('edit');
         expect(byName.get('bash')?.kind).toBe('execute');
         expect(byName.get('grep')?.kind).toBe('search');

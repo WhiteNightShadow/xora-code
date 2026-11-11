@@ -570,8 +570,9 @@ describe('manual compaction', () => {
         server.respondWith((request) => {
             if (request.method !== 'POST') return undefined;
             const body = request.body as { messages?: Array<{ content: unknown }> };
-            return JSON.stringify(body.messages?.[0]?.content ?? '').includes('compress the earlier part')
-                ? openaiText('Goal: test. Decisions: none. Files: none. Open items: none.', {
+            // The engine asks for its part of the state at the end of the request it would have made next.
+            return JSON.stringify(body.messages?.at(-1) ?? '').includes('The context is nearly full')
+                ? openaiText('<narrative>Four filler turns.</narrative>', {
                       usage: { prompt_tokens: 3000, completion_tokens: 40 },
                   })
                 : openaiText('x'.repeat(2000), { usage: { prompt_tokens: 30_000, completion_tokens: 500 } });

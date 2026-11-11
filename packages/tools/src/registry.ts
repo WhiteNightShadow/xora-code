@@ -6,6 +6,7 @@ import { globTool } from './tools/glob.ts';
 import { createGrepTool, type GrepToolOptions } from './tools/grep.ts';
 import { listTool } from './tools/list.ts';
 import { lspTool } from './tools/lsp.ts';
+import { toolOutputTool } from './tools/output.ts';
 import { readTool } from './tools/read.ts';
 import { todoTool } from './tools/todo.ts';
 import { webFetchTool, webSearchTool } from './tools/web.ts';
@@ -35,6 +36,7 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): AnyTool[]
         webFetchTool,
         webSearchTool,
         todoTool,
+        toolOutputTool,
     ];
 }
 

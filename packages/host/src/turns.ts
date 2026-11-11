@@ -758,6 +758,7 @@ export class TurnService {
                 current.softContextWindow,
                 provider?.softContextWindow ?? current.softContextWindow,
             ),
+            workingSet: current.workingSet,
             language: hostLanguage(),
             maxTurnRequests: Math.max(
                 1,

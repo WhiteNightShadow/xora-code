@@ -538,6 +538,11 @@ export const SettingsSchema = z.object({
     defaultEffort: EffortSchema,
     /** Cap on the context the engine keeps, regardless of the model window (08 §2). */
     softContextWindow: z.number().int().positive(),
+    /**
+     * The context the Xora engine keeps the work in (20 §4.4): older tool output is masked and older turns compacted
+     * within it however large the window, as models get worse long before the window is full.
+     */
+    workingSet: z.number().int().min(16_000),
     /** Xora engine: add language server errors to the results of edits when a server is installed (04 §3). */
     lspDiagnostics: z.boolean(),
     notifications: z.object({ onComplete: z.boolean(), onApproval: z.boolean(), onFailure: z.boolean() }),

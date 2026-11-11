@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import path from 'node:path';
 import type { Message } from '@xora/providers';
 import type { TodoItem } from '@xora/tools';
+import type { Judgment } from './context/ledger.ts';
 
 /**
  * The engine's own session log: the source of the model context (02 §5). Append-only JSONL; a compaction
@@ -29,8 +30,12 @@ export type SessionEntry =
           readonly keepFrom: number;
           readonly tokensBefore: number;
           readonly tokensAfter: number;
+          /** The ledger's judgments after this compaction, all of them (20 §4.2); absent before 1.3. */
+          readonly judgments?: readonly Judgment[];
+          /** The model's accounts of how the work went, the latest few. */
+          readonly narratives?: readonly string[];
       }
-    /** Tool results before `upTo` are shown as one-line placeholders from now on (level 2). */
+    /** Tool results before `upTo` are shown as one-line references from now on (20 §4.3). */
     | { readonly t: 'prune'; readonly ts: number; readonly upTo: number }
     /** A host turn starts here, so the host can go back to before it or fork from it (M3-3). */
     | { readonly t: 'turn'; readonly ts: number; readonly turnId: string }
