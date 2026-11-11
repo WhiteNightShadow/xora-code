@@ -8,14 +8,18 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { FuseV1Options, FuseVersion, flipFuses, getCurrentFuseWire } from '@electron/fuses';
 import { type ElectronApplication, _electron as electron, type Page } from 'playwright-core';
-import { openaiText, openaiToolCalls, startMockModelServer } from '../packages/test-kit/src/index.ts';
+import {
+    startMockModelServer,
+    openaiText as textTurn,
+    openaiToolCalls as toolTurn,
+} from '../packages/test-kit/src/index.ts';
 import { forgetAppCopy, secretStoreSwitches } from './app-switches.ts';
 
 /**
  * The README's screenshots (docs/images/), taken in the real app against a scripted model server and a demo
- * project, so they show the product without anyone's paths, accounts or keys: a fix in a thread with its diff
- * (light and dark), the members, one member's memory and routines, a workflow run's conclusion, a team run and the
- * chief assistant's home.
+ * project, so they show the product without anyone's paths, accounts or keys: a fix in a conversation with its plan
+ * and diff (light and dark), the organization tree, one member's panel, the talent market, a workflow run's
+ * conclusion, a team run and a conversation with the chief assistant.
  *
  *   node build/readme-shots.ts                 unpackaged shell with dist/app-bundle (run `pnpm build && pnpm bundle`)
  *   node build/readme-shots.ts --app <exe>     a packaged build
@@ -123,6 +127,27 @@ test('takes coupons off in fen', () => {
     assert.equal(applyCoupon(0.3, { amount: 0.1 }), 0.2);
 });
 `;
+
+/**
+ * Every answer reports its usage as DeepSeek does, so tokens and costs read as they would: most of a prompt read
+ * from the cache, a few hundred tokens out. Made up, but the same on every run.
+ */
+let served = 0;
+function usage(): Record<string, number> {
+    served++;
+    const prompt = 6_000 + ((served * 2_741) % 9_000);
+    const hit = Math.round(prompt * (0.72 + ((served * 37) % 20) / 100));
+    return {
+        prompt_tokens: prompt,
+        completion_tokens: 180 + ((served * 113) % 700),
+        prompt_cache_hit_tokens: hit,
+        prompt_cache_miss_tokens: prompt - hit,
+    };
+}
+const openaiText = (text: string, options: Parameters<typeof textTurn>[1] = {}) =>
+    textTurn(text, { usage: usage(), ...options });
+const openaiToolCalls = (items: Parameters<typeof toolTurn>[0], options: Parameters<typeof toolTurn>[1] = {}) =>
+    toolTurn(items, { usage: usage(), ...options });
 
 function git(...args: string[]): void {
     execFileSync('git', args, { cwd: repo, stdio: 'ignore' });
@@ -359,6 +384,39 @@ server.respondWith((request) => {
             ].join('\n'),
         );
     }
+    // The supervisor scores each card once the report is written (19 §9): a small move on a base from the facts.
+    if (systemOf(body).includes('scoring how your members did')) {
+        return openaiText(
+            JSON.stringify({
+                scores: [
+                    { task: 'T1', adjust: 4, reason: '按分相减改得干净，验收一次通过' },
+                    { task: 'T2', adjust: 3, reason: '用例覆盖了小数金额和减到0' },
+                    { task: 'T3', adjust: 0, reason: 'CHANGELOG写清了这次修正' },
+                ],
+            }),
+        );
+    }
+    // The team run's report: what it set out to do and did.
+    if (
+        !body.tools?.length &&
+        JSON.stringify(messages).includes('## 目标达成') &&
+        user.includes('优惠券也改成按分计算')
+    ) {
+        return openaiText(
+            [
+                '## 目标达成',
+                '优惠券也按分计算了：0.3元减0.1元得0.2元，不再有小数误差；`node --test`四条全过，CHANGELOG记好了。',
+                '',
+                '## 已完成',
+                '- `applyCoupon`改成按分相减（`src/order.js`）',
+                '- 补了小数金额优惠券的用例，4条测试全过（`test/order.test.js`）',
+                '- CHANGELOG记下0.4.1修正了订单和优惠券金额的精度（`CHANGELOG.md`）',
+                '',
+                '## 下一步',
+                '- 打`v0.4.1`标签并发布',
+            ].join('\n'),
+        );
+    }
     // The brief of the finished workflow run.
     if (!body.tools?.length && JSON.stringify(messages).includes('## 目标达成')) {
         return openaiText(
@@ -406,6 +464,7 @@ server.respondWith((request) => {
                 '计划和代码对得上。\n\n```json\n{"verdict": "pass", "summary": "顺序合理，验收命令能跑", "issues": []}\n```',
             );
         case 'Coder':
+        case '编码':
         case 'Tester':
         case 'Writer':
             return member(body);
@@ -453,7 +512,8 @@ server.respondWith((request) => {
                     },
                 });
             case 2:
-                return calls({
+                // The plan moves on as it goes (03 §4): a line where it changed, the latest above the composer.
+                return calls(todo(['completed', 'completed', 'in_progress']), {
                     name: 'edit',
                     arguments: {
                         path: 'test/order.test.js',
@@ -630,8 +690,9 @@ try {
     );
     await page.locator('.welcome').waitFor();
 
+    // The DeepSeek preset, pointed at the scripted server: its models come with their prices.
     const connection = await hostCall<{ id: string }>(page, 'provider.save', {
-        presetId: 'custom-openai',
+        presetId: 'deepseek',
         name: 'DeepSeek',
         apiKey: 'demo-key',
         baseUrl: server.url,
@@ -703,6 +764,27 @@ try {
             projectId: project.id,
             instruction: '汇总今天的提交和线程，写进docs/daily/',
             enabled: true,
+        },
+    });
+    // The coder with instructions in the user's words, as people write their own (its panel shows them).
+    const roster = await hostCall<Array<{ id: string; tier: string; mode: string }>>(page, 'member.list', {});
+    const coder = roster.find((member) => member.id === 'coder');
+    await hostCall(page, 'member.save', {
+        scope: 'user',
+        member: {
+            id: 'coder',
+            name: '编码',
+            role: 'executor',
+            category: 'coding',
+            tier: coder?.tier ?? 'economy',
+            mode: coder?.mode ?? 'auto_edit',
+            description: '按任务卡写代码，在自己的worktree里改',
+            prompt: [
+                '你负责按任务卡写代码：',
+                '- 先读卡片的目标、文件归属和验收命令，只改归属里的文件；要动别的文件就停下来说明原因。',
+                '- 金额一律按分计算，不用浮点数相加。',
+                '- 改完自己跑一遍验收命令，交付时写清改了什么、怎么验证的、还有什么没做。',
+            ].join('\n'),
         },
     });
     const memories: Record<string, string[]> = {
@@ -792,13 +874,42 @@ try {
     );
 
     phase('members');
-    // The organization tree (19 §11), and the panel of one member.
+    // The organization tree (19 §11): the back end and the reverse engineering get organizations of their own under
+    // the R&D team, each with a prompt its members carry. Made after the runs, which take the whole organization.
+    const chart = await hostCall<{ groups: Array<{ id: string; name: string }> }>(page, 'org.get', {});
+    const rd = chart.groups.find((group) => group.name === '研发团队') ?? chart.groups[0];
+    await hostCall(page, 'org.saveGroup', {
+        name: '后端组',
+        parentId: rd?.id ?? null,
+        memberIds: ['coder', 'tester', 'debugger'],
+        prompt: '金额一律按分计算；改了接口先更新docs/api.md。',
+    });
+    await hostCall(page, 'org.saveGroup', {
+        name: '逆向组',
+        parentId: rd?.id ?? null,
+        memberIds: [packet.id, 'scout'],
+        prompt: '抓包结论写清请求链路和签名方式，每条附上抓到的请求。',
+    });
     await page.locator('.sidebar__nav', { hasText: '团队' }).click();
-    await page.locator('.omember', { hasText: '抓包侦察' }).waitFor();
+    await page.locator('.onode', { hasText: '逆向组' }).locator('.omember', { hasText: '抓包侦察' }).waitFor();
     await shot(page, 'xora-members');
-    await page.locator('.omember', { hasText: '抓包侦察' }).click();
+    // The panel of a member that worked on the team run: its project, the supervisor's score, its tokens.
+    await page.locator('.omember', { hasText: '编码' }).click();
     await page.locator('.org-panel [data-block=tokens]').waitFor();
     await shot(page, 'xora-member');
+
+    phase('talent market');
+    // 19 §14: every built-in persona, to read and hire into an organization.
+    await page.keyboard.press('Escape');
+    await page.getByRole('tab', { name: '人才市场' }).click();
+    await page.locator('.talent').nth(8).waitFor();
+    // The hands-on ones: in an organization already, or free to hire.
+    await page.locator('.talent-page__roles .chip', { hasText: '执行' }).click();
+    await page
+        .locator('.talent', { hasText: '前端工程师' })
+        .getByRole('button', { name: '聘用', exact: true })
+        .waitFor();
+    await shot(page, 'xora-talent');
 
     phase('workflow view');
     // The workflow run: its conclusion first, the process unfolded under it.
@@ -821,8 +932,8 @@ try {
     phase('chief');
     // The chief assistant (06 §23), the one place to ask: it answers from what the team, the workflows and the
     // threads did, and hands work on.
+    // It belongs to no project: nothing to pick, it works out which one is meant.
     const chief = await hostCall<{ id: string }>(page, 'chief.start', {
-        projectId: project.id,
         text: '这周shop-api做到哪了？有什么要我决定的？',
     });
     await settled(page, chief.id);
