@@ -258,9 +258,10 @@ That is all.
         ];
         const observed = observe(history, 0, '/work');
         expect(observed.failures.map((failure) => failure.line)).toEqual(['Error: lint', 'Error: two']);
+        // Relative to the working directory in the platform's own form: `src\b.ts` on Windows, one entry either way.
         expect(observed.files.map((file) => [file.path, file.reads, file.edits])).toEqual([
-            ['src/b.ts', 1, 1],
-            ['src/a.ts', 0, 1],
+            [path.join('src', 'b.ts'), 1, 1],
+            [path.join('src', 'a.ts'), 0, 1],
         ]);
     });
 });
