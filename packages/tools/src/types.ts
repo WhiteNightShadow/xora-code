@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { LenientRules } from './lenient.ts';
 import type { LspManager } from './lsp/manager.ts';
 
 /**
@@ -43,6 +44,21 @@ export interface LspAccess {
     readonly trusted: boolean;
 }
 
+/** A file as a session last saw it. */
+export interface FileStamp {
+    readonly mtimeMs: number;
+    readonly size: number;
+}
+
+/**
+ * The files a session has read or written, by real path, each as it was then: how `write` knows that it is about to
+ * replace a file the model never saw, or one that changed since (21 §4.4).
+ */
+export interface FileLedger {
+    seen(path: string): FileStamp | undefined;
+    note(path: string, stamp: FileStamp): void;
+}
+
 /** Background shell jobs started by `bash` with `background: true`, scoped to one session. */
 export interface JobRegistry {
     add(job: BackgroundJob): void;
@@ -60,6 +76,8 @@ export interface ToolContext {
     readonly env: Readonly<Record<string, string | undefined>>;
     readonly artifacts: ArtifactSink;
     readonly jobs: JobRegistry;
+    /** What the session has seen of the files it works on; without it nothing is checked. */
+    readonly files?: FileLedger;
     /** Session todo list read and written by the `todo` tool. */
     readonly todos: { get(): readonly TodoItem[]; set(items: readonly TodoItem[]): void };
     /**
@@ -97,7 +115,8 @@ export type ToolDisplay =
           readonly truncated: boolean;
           readonly artifactPath?: string;
           readonly durationMs: number;
-          readonly background?: { readonly jobId: string };
+          /** The job the command runs as, or ran as; `running`: it had not ended when this was written. */
+          readonly background?: { readonly jobId: string; readonly running?: boolean };
       }
     | { readonly kind: 'files'; readonly paths: readonly string[]; readonly truncated: boolean }
     | { readonly kind: 'matches'; readonly count: number; readonly files: number; readonly truncated: boolean }
@@ -119,6 +138,8 @@ export interface ToolLocation {
 export interface ToolResult {
     /** Text returned to the model. */
     readonly content: string;
+    /** Un-cut text when `content` trimmed a long output, so the engine can keep all of it under `#R<n>`. */
+    readonly fullContent?: string;
     readonly isError?: boolean;
     readonly display?: ToolDisplay;
     readonly locations?: readonly ToolLocation[];
@@ -131,6 +152,16 @@ export interface ToolDefinition<Input = unknown> {
     readonly schema: z.ZodType<Input>;
     /** Read-only calls may run in parallel and are allowed without asking in every permission mode. */
     readonly readOnly: boolean;
+    /**
+     * A call that changes something, but only what the session was already allowed (stopping a job it started): it
+     * runs without asking, yet in its turn among the calls of a reply, and never with a parameter it does not have.
+     */
+    readonly unasked?: boolean;
+    /**
+     * How models write this tool's input besides the way the schema says: other names for its parameters, other
+     * spellings of their values (21 §4.1). Accepted before the input is validated.
+     */
+    readonly lenient?: LenientRules;
     /** Absolute paths the call will read or write, resolved against `ctx.cwd`, for path checks before `run`. */
     targets(input: Input, ctx: Pick<ToolContext, 'cwd'>): readonly string[];
     /** Short title for the UI, e.g. `Read src/index.ts`. */

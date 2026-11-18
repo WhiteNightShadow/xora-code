@@ -63,7 +63,7 @@ describe('titles', () => {
         const chief = await ui.request('chief.start', { projectId: project.id, text: '让团队把hello.txt整理一下' });
         await waitFor(async () => {
             const read = await ui.request('thread.read', { threadId: chief.id });
-            return read.thread.title === '总助手：整理hello文件' ? read : undefined;
+            return read.thread.title === '整理hello文件' ? read : undefined;
         }, "the chief's title");
 
         const run = await ui.request('team.start', {

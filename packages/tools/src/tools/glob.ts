@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { resolveToolPath } from '../path.ts';
 import type { ToolContext, ToolDefinition, ToolResult } from '../types.ts';
 import { walk } from '../walk.ts';
-import { describeError, displayPath, errorCode, errorResult, placeName } from './shared.ts';
+import { DIRECTORY_ALIASES, describeError, displayPath, errorCode, errorResult, placeName } from './shared.ts';
 
 export const GLOB_MAX_RESULTS = 1000;
 
@@ -120,6 +120,12 @@ export const globTool: ToolDefinition<GlobInput> = {
     kind: 'search',
     schema: GlobInput,
     readOnly: true,
+    lenient: {
+        aliases: {
+            pattern: ['glob', 'glob_pattern', 'file_pattern', 'query'],
+            path: [...DIRECTORY_ALIASES, 'cwd', 'root', 'search_path'],
+        },
+    },
     targets: (input, ctx) => [globScope(ctx.cwd, input).root],
     title: (input) => (input.path === undefined ? `Find ${input.pattern}` : `Find ${input.pattern} in ${input.path}`),
     run: runGlob,

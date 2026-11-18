@@ -167,4 +167,18 @@ describe('EventLog', () => {
         expect(reopened.read().events.map((event) => event.kind)).toEqual(['a', 'b']);
         reopened.close();
     });
+
+    it('opens large multi-chunk logs with multi-byte UTF-8 and finds lastSeq from the tail', () => {
+        const dir = tempDir();
+        const log = EventLog.open(dir);
+        for (let i = 0; i < 40; i++) {
+            log.append({ ts: i, kind: 'chunk', payload: { text: `中文🚀-${i}-${'x'.repeat(4000)}` } });
+        }
+        log.close();
+        appendFileSync(path.join(dir, EVENT_LOG_FILE), '{"crc":"deadbeef","e":{"broken');
+        const reopened = EventLog.open(dir);
+        expect(reopened.lastSeq).toBe(40);
+        expect(reopened.append({ ts: 41, kind: 'done', payload: {} }).seq).toBe(41);
+        reopened.close();
+    });
 });

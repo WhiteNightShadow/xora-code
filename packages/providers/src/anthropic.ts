@@ -112,8 +112,11 @@ function assistantBlocks(message: AssistantMessage, replay: boolean): JsonObject
             case 'text':
                 return part.text ? [{ type: 'text', text: part.text }] : [];
             case 'reasoning':
-                // Thinking blocks go back unchanged and in order, but only to the model that wrote them.
-                return replay ? [reasoningBlock(part)] : [];
+                // Thinking blocks go back unchanged and in order, but only to the model that wrote them and only when
+                // complete (redacted or signed); a turn cancelled mid-thinking lacks a signature and would 400.
+                return replay && (part.redacted !== undefined || part.signature !== undefined)
+                    ? [reasoningBlock(part)]
+                    : [];
             default:
                 return [{ type: 'tool_use', id: part.id, name: part.name, input: parseArguments(part.arguments) }];
         }

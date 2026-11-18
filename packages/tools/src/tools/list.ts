@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { resolveToolPath } from '../path.ts';
 import type { ToolContext, ToolDefinition, ToolResult } from '../types.ts';
 import { IgnoreRules, readDirectory, type WalkEntry } from '../walk.ts';
-import { describeError, displayPath, errorCode, errorResult } from './shared.ts';
+import { DIRECTORY_ALIASES, describeError, displayPath, errorCode, errorResult } from './shared.ts';
 
 export const LIST_MAX_ENTRIES = 1000;
 
@@ -125,6 +125,7 @@ export const listTool: ToolDefinition<ListInput> = {
     kind: 'search',
     schema: ListInput,
     readOnly: true,
+    lenient: { aliases: { path: DIRECTORY_ALIASES, ignore: ['exclude', 'excludes', 'ignore_globs'] } },
     targets: (input, ctx) => [resolveToolPath(ctx.cwd, input.path ?? '.')],
     title: (input) => `List ${input.path ?? '.'}`,
     run: runList,

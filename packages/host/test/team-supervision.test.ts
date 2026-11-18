@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { type MockModelServer, type MockTurn, openaiToolCalls, startMockModelServer } from '@xora/test-kit';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { watchSignature } from '../src/team.ts';
 import { PLAN_REQUESTS } from '../src/team-agents.ts';
 import {
     agentOf,
@@ -781,4 +782,32 @@ describe('a faster team (06 §29)', () => {
             ['T2', 'done', 1],
         ]);
     }, 120_000);
+});
+
+describe('the watch on a running member', () => {
+    type Step = Parameters<typeof watchSignature>[0];
+    const check = (running: boolean): Step =>
+        ({
+            name: 'bash_output',
+            title: 'Check job-1',
+            input: { jobId: 'job-1', waitMs: 600_000 },
+            display: {
+                kind: 'command',
+                command: 'pnpm build',
+                exitCode: running ? null : 0,
+                output: '',
+                truncated: false,
+                durationMs: 600_000,
+                background: { jobId: 'job-1', running },
+            },
+        }) as unknown as Step;
+
+    it('does not take waiting for a job that still runs for the same call made again', () => {
+        // A build of half an hour is three waits of ten minutes: the same call by design (21 §4.3).
+        expect(watchSignature(check(true))).toBeUndefined();
+        // Asking again and again about a job that has ended is going round in a circle like any other call.
+        expect(watchSignature(check(false))).toBe('bash_output\u0000{"jobId":"job-1","waitMs":600000}');
+        const read = { name: 'read', title: 'Read a.txt', input: { path: 'a.txt' } } as unknown as Step;
+        expect(watchSignature(read)).toBe('read\u0000{"path":"a.txt"}');
+    });
 });

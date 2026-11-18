@@ -43,6 +43,13 @@ describe('verifyBundleFiles', () => {
         });
     });
 
+    it('ignores harmless OS folder metadata (.DS_Store, Thumbs.db, desktop.ini)', async () => {
+        const { dir, manifest } = await writeBundle(await temporaryDir(), testKey());
+        await writeFile(path.join(dir, 'ui', '.DS_Store'), '');
+        await writeFile(path.join(dir, 'Thumbs.db'), '');
+        await expect(verifyBundleFiles(dir, manifest)).resolves.toEqual({ ok: true });
+    });
+
     it.skipIf(process.platform === 'win32')('rejects symbolic links', async () => {
         const { dir, manifest } = await writeBundle(await temporaryDir(), testKey());
         await symlink('/etc/hosts', path.join(dir, 'ui', 'link'));

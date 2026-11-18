@@ -174,6 +174,78 @@ function modelKey(option: { connectionId: string; model: string }): string {
     return `${option.connectionId}::${option.model}`;
 }
 
+const MAX_PICKER_MODELS = 100;
+
+function ModelPopoverBody({
+    value,
+    onChange,
+    close,
+}: {
+    value: ModelRef | undefined;
+    onChange: (model: ModelRef) => void;
+    close: () => void;
+}) {
+    const s = useStrings();
+    const models = useApp((state) => state.models);
+    const [query, setQuery] = useState('');
+    const needle = query.trim().toLowerCase();
+    const filtered = needle
+        ? models.filter(
+              (option) =>
+                  option.model.name.toLowerCase().includes(needle) ||
+                  option.model.id.toLowerCase().includes(needle) ||
+                  option.connectionName.toLowerCase().includes(needle),
+          )
+        : models;
+    const shown = filtered.slice(0, MAX_PICKER_MODELS);
+    return (
+        <>
+            <div className="popover__title">{s.composer.modelTitle}</div>
+            {models.length > 10 && (
+                <div className="picker__search-wrap">
+                    <input
+                        className="input picker__search"
+                        value={query}
+                        placeholder={s.composer.searchModels}
+                        onChange={(event) => setQuery(event.target.value)}
+                    />
+                </div>
+            )}
+            <div className="popover__scroll">
+                <Choices
+                    value={value ? modelKey(value) : undefined}
+                    options={shown.map((option) => ({
+                        value: modelKey({ connectionId: option.connectionId, model: option.model.id }),
+                        label: option.model.name,
+                        hint: option.connectionName,
+                        icon: 'sparkle' as const,
+                    }))}
+                    onPick={(picked) => {
+                        close();
+                        const [connectionId, model] = picked.split('::');
+                        if (connectionId && model) onChange({ connectionId, model });
+                    }}
+                />
+            </div>
+            {filtered.length > MAX_PICKER_MODELS && (
+                <div className="popover__note">
+                    {format(s.composer.moreModels, { shown: MAX_PICKER_MODELS, total: filtered.length })}
+                </div>
+            )}
+            <button
+                type="button"
+                className="popover__footer"
+                onClick={() => {
+                    close();
+                    openSettings('models');
+                }}
+            >
+                <Icon name="gear" size={13} /> {s.composer.manageModels}
+            </button>
+        </>
+    );
+}
+
 /**
  * The model to work with: shown as it is and changed with `onChange`, so the same control serves a conversation and
  * a page that starts one.
@@ -219,37 +291,7 @@ export function ModelChooser({
                 </>
             }
         >
-            {(close) => (
-                <>
-                    <div className="popover__title">{s.composer.modelTitle}</div>
-                    <div className="popover__scroll">
-                        <Choices
-                            value={value ? modelKey(value) : undefined}
-                            options={models.map((option) => ({
-                                value: modelKey({ connectionId: option.connectionId, model: option.model.id }),
-                                label: option.model.name,
-                                hint: option.connectionName,
-                                icon: 'sparkle' as const,
-                            }))}
-                            onPick={(picked) => {
-                                close();
-                                const [connectionId, model] = picked.split('::');
-                                if (connectionId && model) onChange({ connectionId, model });
-                            }}
-                        />
-                    </div>
-                    <button
-                        type="button"
-                        className="popover__footer"
-                        onClick={() => {
-                            close();
-                            openSettings('models');
-                        }}
-                    >
-                        <Icon name="gear" size={13} /> {s.composer.manageModels}
-                    </button>
-                </>
-            )}
+            {(close) => <ModelPopoverBody value={value} onChange={onChange} close={close} />}
         </Popover>
     );
 }
@@ -369,7 +411,18 @@ export function ContextMeter({ thread, turns }: { thread: ThreadMeta; turns: rea
     );
     const last = compactions.at(-1);
     const running = thread.status === 'running' || thread.status === 'awaiting_approval';
-    const level = ratio >= 0.8 ? 'is-high' : ratio >= 0.6 ? 'is-mid' : '';
+    const level = ratio >= 0.85 ? 'is-high' : ratio >= 0.7 ? 'is-mid' : '';
+    const turnInput = turns.reduce((sum, turn) => sum + (turn.usage?.inputTokens ?? 0), 0);
+    const turnCached = turns.reduce((sum, turn) => sum + (turn.usage?.cachedTokens ?? 0), 0);
+    const totalInput = thread.tokens?.input ?? turnInput;
+    const totalCached = thread.tokens?.cached ?? turnCached;
+    const cacheRate = totalInput > 0 ? Math.min(100, Math.round((totalCached / totalInput) * 100)) : undefined;
+    const lastUsageTurn = [...turns].reverse().find((turn) => (turn.usage?.inputTokens ?? 0) > 0);
+    const lastCacheRate =
+        lastUsageTurn?.usage && lastUsageTurn.usage.inputTokens > 0
+            ? Math.min(100, Math.round((lastUsageTurn.usage.cachedTokens / lastUsageTurn.usage.inputTokens) * 100))
+            : undefined;
+    const showCache = totalInput > 0 && (totalCached > 0 || (lastUsageTurn?.usage?.cachedTokens ?? 0) > 0);
     const compact = async () => {
         setBusy(true);
         const result = await attempt(() => host.call('turn.compact', { threadId: thread.id }, { timeoutMs: 300_000 }));
@@ -386,10 +439,13 @@ export function ContextMeter({ thread, turns }: { thread: ThreadMeta; turns: rea
                 <>
                     <Ring ratio={ratio} />
                     <span>{context ? `${percent}%` : '—'}</span>
+                    {showCache && (lastCacheRate ?? cacheRate ?? 0) > 0 && (
+                        <span className="context-meter__cache">⚡{lastCacheRate ?? cacheRate}%</span>
+                    )}
                 </>
             }
         >
-            {() => (
+            {(close) => (
                 <div className="context-card">
                     <div className="popover__title">{s.context.title}</div>
                     <div className="context-card__value">
@@ -403,10 +459,33 @@ export function ContextMeter({ thread, turns }: { thread: ThreadMeta; turns: rea
                     </div>
                     <div className="context-card__bar">
                         <span className={level} style={{ width: `${Math.min(100, percent)}%` }} />
-                        <i style={{ left: '60%' }} />
-                        <i style={{ left: '80%' }} />
+                        <i style={{ left: '70%' }} />
+                        <i style={{ left: '85%' }} />
                     </div>
                     <p className="context-card__hint">{s.context.rules}</p>
+                    {showCache && (
+                        <div className="context-card__cache">
+                            <div className="context-card__row">
+                                <Icon name="bolt" size={13} />
+                                <span>
+                                    {format(s.context.cacheHit, {
+                                        rate: cacheRate ?? 0,
+                                        cached: formatTokens(totalCached),
+                                        input: formatTokens(totalInput),
+                                    })}
+                                    {lastCacheRate !== undefined && turns.length > 1
+                                        ? ` · ${format(s.context.cacheHitLast, { rate: lastCacheRate })}`
+                                        : ''}
+                                </span>
+                            </div>
+                            <div className="context-card__cache-bar" aria-hidden="true">
+                                <div
+                                    className="context-card__cache-fill"
+                                    style={{ width: `${Math.min(100, cacheRate ?? 0)}%` }}
+                                />
+                            </div>
+                        </div>
+                    )}
                     <div className="context-card__row">
                         <Icon name="compress" size={13} />
                         {!last
@@ -429,15 +508,27 @@ export function ContextMeter({ thread, turns }: { thread: ThreadMeta; turns: rea
                             {thread.cost && thread.cost.amount > 0 ? ` · ${formatMoney(thread.cost)}` : ''}
                         </div>
                     )}
-                    <button
-                        type="button"
-                        className="button button--small"
-                        disabled={busy || running || thread.turns === 0}
-                        title={running ? s.context.compactBusy : undefined}
-                        onClick={() => void compact()}
-                    >
-                        <Icon name="compress" size={13} /> {busy ? s.context.compacting : s.context.compactNow}
-                    </button>
+                    <div className="row">
+                        <button
+                            type="button"
+                            className="button button--small"
+                            disabled={busy || running || thread.turns === 0}
+                            title={running ? s.context.compactBusy : undefined}
+                            onClick={() => void compact()}
+                        >
+                            <Icon name="compress" size={13} /> {busy ? s.context.compacting : s.context.compactNow}
+                        </button>
+                        <button
+                            type="button"
+                            className="button button--small button--ghost"
+                            onClick={() => {
+                                close();
+                                openSettings('models');
+                            }}
+                        >
+                            <Icon name="gear" size={13} /> {s.context.adjustLimit}
+                        </button>
+                    </div>
                 </div>
             )}
         </Popover>

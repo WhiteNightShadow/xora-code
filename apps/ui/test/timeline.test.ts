@@ -1,10 +1,11 @@
-import type { EventEnvelope } from '@xora/protocol';
+import type { EventEnvelope, Item } from '@xora/protocol';
 import { describe, expect, it } from 'vitest';
 import {
     applyDelta,
     applyEvent,
     latestPlan,
     latestPlanOf,
+    partitionTurnItems,
     planProgress,
     type TurnView,
     viewFromSnapshot,
@@ -284,5 +285,47 @@ describe('the plan (03 §4)', () => {
         const waiting = plan('u1', ['completed', 'pending']).entries;
         expect(planProgress(waiting, true)).toEqual({ done: 1, total: 2, step: '第2步', state: 'next' });
         expect(planProgress(plan('u1', ['completed']).entries, true)).toEqual({ done: 1, total: 1, state: 'done' });
+    });
+});
+
+describe('partitionTurnItems', () => {
+    const tool = (id: string, status: 'completed' | 'failed' = 'completed', name = 'read'): Item => ({
+        id,
+        turnId: 'u1',
+        ts: 1,
+        type: 'tool_call',
+        toolCallId: id,
+        name,
+        title: name,
+        kind: 'read',
+        status,
+    });
+    const thought = (id: string): Item => ({ id, turnId: 'u1', ts: 1, type: 'reasoning', text: 'thinking' });
+    const answer = (id: string): Item => ({ id, turnId: 'u1', ts: 1, type: 'agent_message', text: 'done' });
+
+    it('folds dense completed tool & reasoning runs in historical turns while keeping failures, todos and answers visible', () => {
+        const items: Item[] = [
+            thought('r1'),
+            tool('t1'),
+            tool('t2'),
+            tool('t3'),
+            tool('t4'),
+            tool('t5'),
+            tool('fail', 'failed'),
+            tool('todo1', 'completed', 'todo'),
+            answer('ans'),
+        ];
+        expect(partitionTurnItems(items, false).every((seg) => seg.kind === 'item')).toBe(true);
+        const folded = partitionTurnItems(items, true);
+        expect(folded).toHaveLength(4);
+        expect(folded[0]).toMatchObject({ kind: 'folded', id: 'r1' });
+        if (folded[0]?.kind === 'folded') {
+            expect(folded[0].items.map((item) => item.id)).toEqual(['r1', 't1', 't2', 't3', 't4', 't5']);
+        }
+        expect(folded.slice(1).map((seg) => (seg.kind === 'item' ? seg.item.id : seg.id))).toEqual([
+            'fail',
+            'todo1',
+            'ans',
+        ]);
     });
 });

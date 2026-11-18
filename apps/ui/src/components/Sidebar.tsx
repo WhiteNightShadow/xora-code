@@ -4,7 +4,7 @@ import { host } from '../host.ts';
 import { memberOf } from '../members.ts';
 import {
     attempt,
-    isChief,
+    isStandaloneChat,
     openChief,
     openMembers,
     openNewThread,
@@ -19,7 +19,7 @@ import { confirmDialog } from './Confirm.tsx';
 import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { MemberAvatar } from './MembersView.tsx';
-import { AutoFocusInput, formatMoney, IconButton, relativeTime, Spinner } from './primitives.tsx';
+import { AutoFocusInput, IconButton, relativeTime, Spinner } from './primitives.tsx';
 
 function StatusMark({ thread }: { thread: ThreadMeta }) {
     const s = useStrings();
@@ -75,11 +75,9 @@ function ThreadRow({ thread, selected }: { thread: ThreadMeta; selected: boolean
                     )}
                     {thread.pinned && <Icon name="pin" size={11} className="thread-row__pin" />}
                     {thread.location.kind === 'worktree' && <Icon name="route" size={11} className="thread-row__pin" />}
-                    {thread.title}
+                    {thread.title.replace(/^(?:总助手：|Chief:\s*)/, '')}
                 </span>
-                <span className="thread-row__meta">
-                    {thread.cost && thread.cost.amount > 0 ? formatMoney(thread.cost) : relativeTime(thread.updatedAt)}
-                </span>
+                <span className="thread-row__meta">{relativeTime(thread.updatedAt)}</span>
             </button>
             <div className="thread-row__menu">
                 <IconButton icon="more" label={s.common.more} size={14} onClick={() => setMenu(!menu)} />
@@ -160,10 +158,10 @@ function ProjectGroup({
             !thread.archived &&
             !thread.teamRunId &&
             !thread.workflowRunId &&
-            !isChief(thread) &&
+            !isStandaloneChat(thread) &&
             !(thread.parent && threadMap[thread.parent.threadId]),
     );
-    const archived = threads.filter((thread) => thread.archived && !isChief(thread));
+    const archived = threads.filter((thread) => thread.archived && !isStandaloneChat(thread));
     return (
         <div className={`project${selectedProjectId === project.id ? ' is-current' : ''}`}>
             <div className="project__header">
@@ -235,52 +233,98 @@ function ProjectGroup({
 const TEAM_ENDED = ['done', 'failed', 'cancelled'];
 /** Runs under way listed under their entry; the board has the rest. */
 const NAV_RUNS = 5;
+const COLLAPSED_KEY = 'xora.sidebar.collapsed';
+const DEFAULT_CHAT_GROUP_KEY = '_default';
 
-/** The chief assistant (06 §23): the one place to say what you need. A dot: news from work it handed on. */
-function ChiefNav() {
+function loadCollapsed(): Record<string, boolean> {
+    try {
+        const saved: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '{}');
+        if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+            return saved as Record<string, boolean>;
+        }
+    } catch {
+        // Ignore malformed local storage state.
+    }
+    return {};
+}
+
+/** Standalone default conversations (Codex style): collapsible group at the top of the sidebar, bound to no project. */
+function ChiefNav({ open, onToggle }: { open: boolean; onToggle: () => void }) {
     const s = useStrings();
-    const selected = useApp(
+    const chiefOpen = useApp((state) => state.chiefOpen);
+    const standaloneSelected = useApp(
         (state) =>
-            state.chiefOpen ||
-            (!state.teamRunId &&
-                !state.workflowRunId &&
-                !state.teamsFor &&
-                !state.membersOpen &&
-                isChief(state.selectedThreadId ? state.threads[state.selectedThreadId] : undefined)),
+            !state.chiefOpen &&
+            !state.teamRunId &&
+            !state.workflowRunId &&
+            !state.teamsFor &&
+            !state.membersOpen &&
+            isStandaloneChat(state.selectedThreadId ? state.threads[state.selectedThreadId] : undefined),
     );
     const news = useApp((state) =>
-        Object.values(state.threads).some((thread) => isChief(thread) && !thread.archived && thread.unread),
+        Object.values(state.threads).some((thread) => isStandaloneChat(thread) && !thread.archived && thread.unread),
     );
-    // Its conversations live here, not in the projects' lists (06 §23): the latest few, and a way to start one.
     const threads = useApp((state) => state.threads);
     const selectedThreadId = useApp((state) => (state.chiefOpen ? undefined : state.selectedThreadId));
-    const recent = Object.values(threads)
-        .filter((thread) => isChief(thread) && !thread.archived)
-        .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
-        .slice(0, NAV_RUNS);
+    const [showArchived, setShowArchived] = useState(false);
+
+    const standalone = Object.values(threads).filter(
+        (thread) => isStandaloneChat(thread) && !thread.parent && !thread.teamRunId && !thread.workflowRunId,
+    );
+    const active = standalone
+        .filter((thread) => !thread.archived)
+        .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
+    const archived = standalone.filter((thread) => thread.archived).sort((a, b) => b.updatedAt - a.updatedAt);
+    const headerSelected = !open && (chiefOpen || standaloneSelected);
+
     return (
-        <>
+        <div className="sidebar__chief-group">
             <div className="sidebar__nav-row">
                 <button
                     type="button"
-                    className={`sidebar__nav sidebar__nav--chief${selected ? ' is-selected' : ''}`}
-                    onClick={() => openChief()}
+                    aria-expanded={open}
+                    className={`sidebar__nav sidebar__nav--chief${headerSelected ? ' is-selected' : ''}`}
+                    onClick={onToggle}
                 >
-                    <Icon name="sparkle" size={14} /> {s.sidebar.chief}
+                    <Icon name="chevronRight" size={12} className={`sidebar__chevron${open ? ' is-open' : ''}`} />
+                    <Icon name="message" size={14} className="sidebar__chief-icon" />
+                    <span className="sidebar__nav-label">{s.sidebar.chief}</span>
                     {news && <span className="dot-badge" />}
+                    {!open && active.length > 0 && <span className="sidebar__count">{active.length}</span>}
                 </button>
                 <IconButton icon="plus" label={s.chief.newChat} onClick={() => openChief(true)} />
             </div>
-            {recent.length > 0 && (
+            {open && (
                 <div className="sidebar__chief-threads">
-                    {/* The same rows as a project's, so they can be renamed, pinned, archived and deleted alike; no
-                        project to name, as they belong to none. */}
-                    {recent.map((thread) => (
+                    {(chiefOpen || active.length === 0) && (
+                        <div className={`thread-row${chiefOpen ? ' is-selected' : ''}`}>
+                            <button type="button" className="thread-row__main" onClick={() => openChief(true)}>
+                                <span className="mark" />
+                                <span className="thread-row__title">
+                                    {chiefOpen ? s.chief.newChat : s.sidebar.noThreads}
+                                </span>
+                            </button>
+                        </div>
+                    )}
+                    {active.map((thread) => (
                         <ThreadRow key={thread.id} thread={thread} selected={selectedThreadId === thread.id} />
                     ))}
+                    {archived.length > 0 && (
+                        <button
+                            type="button"
+                            className="project__archived"
+                            onClick={() => setShowArchived(!showArchived)}
+                        >
+                            {s.sidebar.archived} ({archived.length})
+                        </button>
+                    )}
+                    {showArchived &&
+                        archived.map((thread) => (
+                            <ThreadRow key={thread.id} thread={thread} selected={selectedThreadId === thread.id} />
+                        ))}
                 </div>
             )}
-        </>
+        </div>
     );
 }
 
@@ -331,9 +375,21 @@ export function Sidebar() {
     const projects = useApp((state) => state.projects);
     const threadMap = useApp((state) => state.threads);
     const update = useApp((state) => state.update);
-    const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+    const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<Array<{ threadId: string; title: string; snippet: string }> | undefined>();
+
+    const toggleCollapsed = (id: string) => {
+        setCollapsed((current) => {
+            const next = { ...current, [id]: !current[id] };
+            try {
+                localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+            } catch {
+                // Ignore storage quota errors.
+            }
+            return next;
+        });
+    };
 
     const byProject = useMemo(() => {
         const groups = new Map<string, ThreadMeta[]>();
@@ -398,7 +454,10 @@ export function Sidebar() {
                 </div>
             )}
             <div className="sidebar__main">
-                <ChiefNav />
+                <ChiefNav
+                    open={!collapsed[DEFAULT_CHAT_GROUP_KEY]}
+                    onToggle={() => toggleCollapsed(DEFAULT_CHAT_GROUP_KEY)}
+                />
                 <TeamNav />
             </div>
             {inbox.length > 0 && (
@@ -427,7 +486,7 @@ export function Sidebar() {
                         project={project}
                         threads={byProject.get(project.id) ?? []}
                         open={!collapsed[project.id]}
-                        onToggle={() => setCollapsed({ ...collapsed, [project.id]: !collapsed[project.id] })}
+                        onToggle={() => toggleCollapsed(project.id)}
                     />
                 ))}
             </div>
@@ -435,9 +494,6 @@ export function Sidebar() {
                 <button type="button" className="sidebar__link" onClick={() => openSettings('general')}>
                     <Icon name="gear" size={14} /> {s.sidebar.settings}
                     {update?.state === 'ready' && <span className="dot-badge" />}
-                </button>
-                <button type="button" className="sidebar__link" onClick={() => useApp.setState({ usageOpen: true })}>
-                    <Icon name="chart" size={14} /> {s.sidebar.usage}
                 </button>
             </div>
         </nav>

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { resolveToolPath } from '../path.ts';
 import { detectEol, encodeText, readTextFile, type TextEncoding, writeFileAtomic } from '../text.ts';
 import type { FileDiff, ToolContext, ToolDefinition, ToolResult } from '../types.ts';
+import { lossyMessage, noteChanged, seenState } from './files.ts';
 import { describeError, displayPath, errorCode, errorResult } from './shared.ts';
 
 /**
@@ -413,7 +414,10 @@ async function planPatch(operations: readonly PatchOperation[], cwd: string): Pr
             if (text === null) {
                 throw new PatchError(`${shown} is a binary file; it cannot be patched.`);
             }
-            state = { ...text, mode: stats.mode & 0o7777 };
+            if (text.lossy) {
+                throw new PatchError(lossyMessage(shown));
+            }
+            state = { text: text.text, encoding: text.encoding, mode: stats.mode & 0o7777 };
         } catch (error) {
             if (error instanceof PatchError) {
                 throw error;
@@ -436,7 +440,8 @@ async function planPatch(operations: readonly PatchOperation[], cwd: string): Pr
                     `Cannot add ${shown}: it already exists. Use "${UPDATE_FILE}${operation.path}" to change it.`,
                 );
             }
-            current.set(file, { text: operation.content, encoding: 'utf8' });
+            // In place of a file the patch deleted further up: what replaces it keeps its encoding, as `write` does.
+            current.set(file, { text: operation.content, encoding: original.get(file)?.encoding ?? 'utf8' });
         } else if (operation.type === 'delete') {
             if ((await load(file)) === null) {
                 throw new PatchError(`Cannot delete ${shown}: no such file.`);
@@ -536,11 +541,22 @@ async function runApplyPatch(input: ApplyPatchInput, ctx: ToolContext): Promise<
     if (changes.length === 0) {
         return { content: 'The patch makes no changes; no files were written.' };
     }
+    // What the session knew of each file it writes, or of the file it moves there, before it is written.
+    const written = changes.filter((change) => change.after !== null);
+    const known = await Promise.all(
+        written.map((change) =>
+            change.before === null && change.movedFrom === undefined
+                ? ('created' as const)
+                : seenState(ctx, change.movedFrom ?? change.path),
+        ),
+    );
     try {
         await commit(changes);
     } catch (error) {
         return errorResult(`Writing the patch failed: ${describeError(error)}. Files already written were restored.`);
     }
+
+    await Promise.all(written.map((change, index) => noteChanged(ctx, change.path, known[index])));
 
     const movedAway = new Set(changes.flatMap((change) => (change.movedFrom === undefined ? [] : [change.movedFrom])));
     const summary: string[] = [];
@@ -599,6 +615,7 @@ export const applyPatchTool: ToolDefinition<ApplyPatchInput> = {
     kind: 'edit',
     schema: ApplyPatchInput,
     readOnly: false,
+    lenient: { aliases: { patch: ['input', 'diff', 'patch_text', 'content', 'text'] } },
     targets: (input, ctx) => {
         const parsed = parsePatch(input.patch);
         return parsed.ok ? patchTargets(parsed.operations, ctx.cwd) : [];

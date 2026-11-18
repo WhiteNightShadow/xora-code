@@ -308,4 +308,43 @@ describe('the organization chart', () => {
         const chart = await ui.request('org.get', {});
         expect(chart.groups.map((group) => group.name)).toEqual(['开发组']);
     }, 60_000);
+
+    it('applies OPC templates and exposes OPC personas in the catalog', async () => {
+        const { ui, project } = await setUp();
+        const catalog = await ui.request('member.catalog', { projectId: project.id });
+        const personaIds = catalog.personas.map((persona) => persona.id);
+        expect(personaIds).toEqual(
+            expect.arrayContaining([
+                'opc-pm',
+                'opc-fullstack',
+                'opc-designer',
+                'opc-growth',
+                'opc-researcher',
+                'opc-automation',
+                'content-writer',
+            ]),
+        );
+
+        const chart = await ui.request('org.applyTemplate', { template: 'opc-studio', replace: true });
+        expect(chart.groups).toEqual([
+            expect.objectContaining({
+                id: 'opc-studio',
+                name: 'OPC 一人公司班底',
+                leaderId: 'opc-lead',
+                memberIds: [
+                    'opc-pm',
+                    'opc-fullstack',
+                    'opc-designer',
+                    'opc-growth',
+                    'opc-researcher',
+                    'opc-automation',
+                    'opc-qa',
+                ],
+            }),
+        ]);
+        const members = await ui.request('member.list', { projectId: project.id });
+        expect(members.map((member) => member.name)).toEqual(
+            expect.arrayContaining(['业务统筹合伙人', '独立产品经理', '全栈独立开发', '增长与内容运营']),
+        );
+    });
 });

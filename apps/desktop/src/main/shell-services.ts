@@ -18,6 +18,7 @@ import {
 import { stageBundle } from './install.ts';
 import type { BootLog } from './log.ts';
 import type { DataPaths } from './paths.ts';
+import { prepareChildProxyEnv } from './proxy.ts';
 import { SecretStore } from './secrets.ts';
 import { setLanguageSetting, shellStrings } from './strings.ts';
 import type { AppTray } from './tray.ts';
@@ -159,14 +160,18 @@ export function attachShellServices(host: UtilityProcess, deps: ShellServiceDeps
     // The xora engine runs as a utility process so that the Electron binary never has to run as plain Node
     // (10 §6). Its ACP port goes straight to the host: turns do not pass through the main process.
     const engines = new Map<string, UtilityProcess>();
-    peer.handle('shell.engine.start', ({ id, entry, env }) => {
+    peer.handle('shell.engine.start', async ({ id, entry, env }) => {
         const file = bundleFile(deps.bundleDir, entry);
         if (engines.has(id)) {
             throw new Error(`engine ${id} is already running`);
         }
-        const childEnv = { ...env };
+        const childEnv = await prepareChildProxyEnv({ ...env });
         delete childEnv.ELECTRON_RUN_AS_NODE;
-        const child = utilityProcess.fork(file, [], { env: childEnv, stdio: 'pipe', serviceName: 'Xora Engine' });
+        const child = utilityProcess.fork(file, [], {
+            env: childEnv as NodeJS.ProcessEnv,
+            stdio: 'pipe',
+            serviceName: 'Xora Engine',
+        });
         engines.set(id, child);
         const { port1, port2 } = new MessageChannelMain();
         child.postMessage({ type: 'xora:acp' }, [port1]);

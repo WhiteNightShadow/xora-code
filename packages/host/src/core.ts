@@ -40,6 +40,7 @@ import { HistoryService } from './history.ts';
 import { detectLocalServers } from './local-models.ts';
 import { HostLog, type Logger } from './log.ts';
 import { MemberService, parseRoutineKey, registerMemberHandlers } from './members.ts';
+import { MemoryExtractor } from './memory/extractor.ts';
 import { MemoryService } from './memory/service.ts';
 import { offPeakStartFor } from './off-peak.ts';
 import { type HostPaths, hostPaths } from './paths.ts';
@@ -136,6 +137,8 @@ export interface HostOptions {
     readonly fetch?: typeof fetch;
     /** Titles written by a model (06 §28); `false` keeps the start of the request (scripted tests). */
     readonly modelTitles?: boolean;
+    /** Post-turn memory candidate extraction by a model; defaults to `modelTitles !== false`. */
+    readonly modelMemory?: boolean;
     /** Home directory for user skills and MCP config imports; tests point it at a temporary folder. */
     readonly home?: string;
 }
@@ -180,6 +183,8 @@ export class HostCore {
     readonly reviewer: ApprovalReviewer;
     /** Titles from the gist of a conversation's opening request (06 §28). */
     readonly titles: TitleService | undefined;
+    /** Distills reusable project notes when a turn recovers from a tool failure. */
+    readonly memoryExtractor: MemoryExtractor | undefined;
     readonly triggers: TriggerService;
     #triggerSync: ReturnType<typeof setInterval> | undefined;
     readonly #options: HostOptions;
@@ -197,7 +202,7 @@ export class HostCore {
         this.settings = new SettingsService(this.db);
         // Before the services below: some write notes as soon as they recover, e.g. a run paused by the restart.
         setLanguageSource(() => resolveLanguage(this.settings.get().language, systemLanguages));
-        this.projects = new ProjectService(this.db, this.bus);
+        this.projects = new ProjectService(this.db, this.bus, path.join(this.paths.root, 'workspace'));
         this.threads = new ThreadStore(this.db, this.bus, this.paths.threadsDir);
         this.connections = new ConnectionService(this.db, options.shell, this.bus, this.log, userAgent);
         this.prompts = new PromptService(
@@ -267,12 +272,26 @@ export class HostCore {
             orgsDir: this.paths.orgsDir,
             projects: this.projects,
             log: this.log,
+            db: this.db,
             memberNames: async (projectId) =>
                 new Map((await this.members.list(projectId).catch(() => [])).map((member) => [member.id, member.name])),
             conversations: (query) => this.threads.excerpts(query),
             thread: (threadId) => this.threads.find(threadId),
             onChanged: (memberId) => this.bus.broadcast('member.changed', { memberId }),
         });
+        this.memoryExtractor =
+            (options.modelMemory ?? options.modelTitles !== false)
+                ? new MemoryExtractor({
+                      threads: this.threads,
+                      memory: this.memory,
+                      connections: this.connections,
+                      settings: this.settings,
+                      usage: this.usage,
+                      bus: this.bus,
+                      log: this.log,
+                      userAgent,
+                  })
+                : undefined;
         this.turns = new TurnService({
             threads: this.threads,
             ...(this.titles ? { titles: this.titles } : {}),
@@ -291,12 +310,14 @@ export class HostCore {
             portFor: (threadId) => this.worktrees.port(threadId),
             extensions: this.extensions,
             sharedTools: () => this.#shared,
+            memory: this.memory,
             onTurnEnded: (event) => {
                 this.subagents.onTurnEnded(event);
                 void this.goals.onTurnEnded(event).catch((error) => this.log.warn(`goal: ${String(error)}`));
                 this.team.onTurnEnded(event);
                 this.workflows.onTurnEnded(event);
                 this.chief.onTurnEnded(event);
+                this.memoryExtractor?.onTurnEnded(event);
             },
         });
         this.members = new MemberService({
@@ -757,6 +778,9 @@ export class HostCore {
         peer.handle('thread.distill', ({ threadId, kind, scope }) =>
             this.distill.start({ threadId, kind, scope: scope ?? 'project' }),
         );
+        peer.handle('memory.remember', ({ threadId, note, scope }) =>
+            this.memory.rememberCandidate(threads.get(threadId), note, scope),
+        );
         peer.handle('workflow.draft', ({ projectId, description, scope }) =>
             this.distill.draft({ projectId, description, scope: scope ?? 'project' }),
         );
@@ -1121,19 +1145,23 @@ export class HostCore {
             const turn = threads.turn(threadId, turnId);
             return { thread, cwd: turns.cwdOf(thread, project), turn };
         };
-        peer.handle('review.turn', async ({ threadId, turnId }) => {
+        const resolveAfterTree = async (cwd: string, after: string, compare?: 'turn' | 'since') =>
+            compare === 'since' ? ((await review.snapshot(cwd, 'compare')) ?? after) : after;
+        peer.handle('review.turn', async ({ threadId, turnId, compare }) => {
             const { cwd, turn } = await turnContext(threadId, turnId);
             if (!turn?.before || !turn.after) {
                 return { files: [], available: false };
             }
-            return { files: await review.changes(cwd, turn.before, turn.after), available: true };
+            const after = await resolveAfterTree(cwd, turn.after, compare);
+            return { files: await review.changes(cwd, turn.before, after), available: true };
         });
-        peer.handle('review.file', async ({ threadId, turnId, path: file }) => {
+        peer.handle('review.file', async ({ threadId, turnId, path: file, compare }) => {
             const { cwd, turn } = await turnContext(threadId, turnId);
             if (!turn?.before || !turn.after) {
                 throw new RpcError(RpcErrorCode.NotFound, textOf(TEXT).noCheckpoint);
             }
-            const versions = await review.file(cwd, turn.before, turn.after, file);
+            const after = await resolveAfterTree(cwd, turn.after, compare);
+            const versions = await review.file(cwd, turn.before, after, file);
             return { oldText: versions.oldText, newText: versions.newText, binary: versions.binary };
         });
         peer.handle('review.revert', async ({ threadId, turnId, paths, force }) => {
@@ -1181,7 +1209,14 @@ export class HostCore {
             return ok;
         });
         peer.handle('provider.test', ({ connectionId, model }) => connections.test(connectionId, model));
-        peer.handle('provider.refreshModels', ({ connectionId }) => connections.refreshModels(connectionId));
+        peer.handle('provider.refreshModels', async ({ connectionId }) => {
+            const connection = await connections.refreshModels(connectionId);
+            const current = settings.get();
+            if (!current.defaultModel && connection.models[0]) {
+                this.#applySettings({ defaultModel: { connectionId: connection.id, model: connection.models[0].id } });
+            }
+            return connection;
+        });
         peer.handle('provider.selectModels', ({ connectionId, models }) =>
             connections.selectModels(connectionId, models),
         );
@@ -1369,6 +1404,7 @@ export class HostCore {
         this.subagents.dispose();
         this.approvals.dispose();
         await this.turns.dispose();
+        await this.memoryExtractor?.flush();
         await this.engines.dispose();
         this.threads.close();
         this.db.close();

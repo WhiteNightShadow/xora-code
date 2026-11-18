@@ -66,6 +66,26 @@ describe('tool_output', () => {
         expect(page.content.endsWith('[lines 1–400 of 900; ask for more with offset]')).toBe(true);
         expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(page.content)).toBe(false);
     });
+
+    it('supports tail paging and surrounding context around grep matches', async () => {
+        const ctx = await context();
+        const tail = await runTool(toolOutputTool, { ref: 'R12', tail: 3 }, ctx);
+        expect(tail.content).toBe(
+            'line 898\nline 899\nline 900\n[lines 898–900 of 900; ask for earlier lines with offset]',
+        );
+
+        const withContext = await runTool(toolOutputTool, { ref: 'R12', grep: 'error', context: 2 }, ctx);
+        expect(withContext.content).toBe(
+            [
+                'R12 (bash), 1 matching lines:',
+                '498- line 498',
+                '499- line 499',
+                '500: line 500 Error: boom',
+                '501- line 501',
+                '502- line 502',
+            ].join('\n'),
+        );
+    });
 });
 
 describe('createDefaultTools', () => {
@@ -93,9 +113,11 @@ describe('createDefaultTools', () => {
         ]);
     });
 
-    it('marks exactly the tools that change nothing as read-only', () => {
+    it('marks exactly the tools that run without asking: those that change nothing, and stopping a job', () => {
         const readOnly = tools.filter((tool) => tool.readOnly).map((tool) => tool.name);
         expect(readOnly).toEqual(['read', 'list', 'glob', 'grep', 'lsp', 'bash_output', 'todo', 'tool_output']);
+        // It only ends what an allowed command of the session started (21 §4.3).
+        expect(tools.filter((tool) => tool.unasked).map((tool) => tool.name)).toEqual(['bash_kill']);
         expect(byName.get('apply_patch')?.kind).toBe('edit');
         expect(byName.get('bash')?.kind).toBe('execute');
         expect(byName.get('grep')?.kind).toBe('search');

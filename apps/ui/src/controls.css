@@ -82,11 +82,11 @@
 
 /* Pages without a top bar of their own (the welcome page, the chief's home, the team's pages): their empty top
    drags the window, right across to the window buttons. */
-.main:has(> :is(.welcome, .chief-home, .members)) {
+.main:has(> :is(.welcome, .chief-home, .members, .talent)) {
     position: relative;
 }
 
-.main:has(> :is(.welcome, .chief-home, .members))::before {
+.main:has(> :is(.welcome, .chief-home, .members, .talent))::before {
     content: "";
     position: absolute;
     inset: 0 0 auto;
@@ -168,6 +168,17 @@
 .popover__scroll {
     max-height: 300px;
     overflow-y: auto;
+}
+
+.picker__search-wrap {
+    padding: 4px 6px 6px;
+}
+
+.picker__search {
+    width: 100%;
+    height: 28px;
+    font-size: var(--xk-text-xs);
+    padding: 0 8px;
 }
 
 .popover__footer {
@@ -531,6 +542,36 @@
 
 .context-card__row svg {
     flex: none;
+}
+
+.context-meter__cache {
+    color: var(--xk-ok);
+    font-size: var(--xk-text-2xs);
+    font-weight: var(--xk-weight-medium);
+}
+
+.context-card__cache {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px 8px;
+    border-radius: var(--xk-radius-md);
+    background: var(--xk-bg-subtle);
+    border: 1px solid var(--xk-border-subtle);
+}
+
+.context-card__cache-bar {
+    height: 4px;
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-bg-sunken);
+    overflow: hidden;
+}
+
+.context-card__cache-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: var(--xk-ok);
+    transition: width var(--xk-duration-slow) var(--xk-ease-out);
 }
 
 .context-card .button {

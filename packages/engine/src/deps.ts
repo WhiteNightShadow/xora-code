@@ -5,19 +5,28 @@ import { type AnyTool, toolSpec } from '@xora/tools';
 export { completeModel, ProviderError, streamModel } from '@xora/providers';
 export {
     type AnyTool,
+    backgroundJobOf,
     checkPathAccess,
     clipText,
     createDefaultTools,
     isReadOnlyCommand,
     isSensitivePath,
+    jobStateIn,
     LSP_EDIT_NOTE,
     LspManager,
+    lenientInput,
+    lenientToolInput,
+    nonInteractiveEnv,
+    parseToolArguments,
+    renderTerminalText,
     renderTodos,
+    resolveToolName,
     sanitizeEnv,
     sliceText,
     type TodoItem,
     type ToolContext,
     type ToolResult,
+    toolParameters,
 } from '@xora/tools';
 
 /** Host tools carry their own JSON Schema (`jsonSchema`); built-in tools derive it from zod. */

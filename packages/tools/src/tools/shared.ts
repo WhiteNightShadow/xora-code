@@ -23,6 +23,11 @@ export function errorResult(content: string): ToolResult {
     return { content, isError: true };
 }
 
+/** What other harnesses call the `path` of a tool that takes a file (see `ToolDefinition.lenient`). */
+export const FILE_ALIASES: readonly string[] = ['file_path', 'file', 'filename', 'target_file', 'absolute_path'];
+/** What other harnesses call the `path` of a tool that takes a directory. */
+export const DIRECTORY_ALIASES: readonly string[] = ['dir', 'directory', 'dir_path', 'folder', 'target_directory'];
+
 const ERROR_TEXT: Readonly<Record<string, string>> = {
     ENOENT: 'no such file or directory',
     EACCES: 'permission denied',

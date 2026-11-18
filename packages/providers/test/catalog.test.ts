@@ -142,7 +142,7 @@ describe('catalog lookups', () => {
             id: 'something-new',
             name: 'something-new',
             family: 'unknown',
-            contextWindow: 128_000,
+            contextWindow: 1_000_000,
             maxOutput: 8_192,
             input: ['text'],
             reasoning: { mode: 'none', efforts: [], defaultEffort: 'off' },

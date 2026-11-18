@@ -13,8 +13,8 @@ export const DEFAULT_SETTINGS: Settings = {
     fallbackModels: [],
     defaultMode: 'ask',
     defaultEffort: 'high',
-    softContextWindow: 256_000,
-    workingSet: 160_000,
+    softContextWindow: 1_048_576,
+    workingSet: 1_048_576,
     lspDiagnostics: true,
     notifications: { onComplete: true, onApproval: true, onFailure: true },
     preventSleep: true,
@@ -51,6 +51,11 @@ export class SettingsService {
             if (field?.safeParse(value).success) {
                 merged[key] = value;
             }
+        }
+        // Profiles saved before `workingSet` existed only had `softContextWindow`; carry an explicitly set window up
+        // to a matching working set without clamping below the user's configured window.
+        if (stored.workingSet === undefined && typeof stored.softContextWindow === 'number') {
+            merged.workingSet = Math.max(16_000, Math.round(stored.softContextWindow));
         }
         this.#cache = SettingsSchema.parse(merged);
         return this.#cache;

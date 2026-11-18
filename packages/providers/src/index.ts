@@ -5,12 +5,17 @@ export {
     toAnthropicMessages,
 } from './anthropic.ts';
 export {
+    alternateOperationUrl,
+    DEFAULT_MODEL_CONTEXT_WINDOW,
     type Endpoint,
     endpointFor,
     findModel,
     genericModel,
     getPreset,
+    hasVersionSegment,
+    inferModelInfo,
     listPresets,
+    normalizeBaseUrl,
     operationUrl,
     resolveQuirks,
 } from './catalog.ts';
@@ -32,7 +37,15 @@ export {
     readErrorBody,
     requestIdFrom,
 } from './errors.ts';
-export { ANTHROPIC_VERSION, buildHeaders, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_USER_AGENT } from './http.ts';
+export {
+    ANTHROPIC_VERSION,
+    buildHeaders,
+    DEFAULT_FIRST_BYTE_TIMEOUT_MS,
+    DEFAULT_IDLE_TIMEOUT_MS,
+    DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    DEFAULT_USER_AGENT,
+    sanitizeApiKey,
+} from './http.ts';
 export {
     type ConnectionTest,
     compareModels,

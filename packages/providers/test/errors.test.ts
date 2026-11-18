@@ -154,6 +154,22 @@ describe('classifyError with vendor codes', () => {
         expect(event('request_too_large').errorClass).toBe('context_length');
         expect(event('something_else').errorClass).toBe('unknown');
     });
+
+    it('maps minimax business codes and Chinese quota/load messages', () => {
+        const quirks = preset('minimax-cn').quirks;
+        const plan = classify(
+            429,
+            { type: 'error', error: { type: '2056', message: '已达到 Token Plan 用量上限 (2056)' } },
+            { quirks },
+        );
+        expect(plan).toMatchObject({ errorClass: 'quota', retryable: false, code: '2056' });
+        const overloaded = classify(
+            500,
+            { type: 'error', error: { type: '2064', message: '当前服务集群负载较高，请稍后重试 (2064)' } },
+            { quirks },
+        );
+        expect(overloaded).toMatchObject({ errorClass: 'overloaded', retryable: true, code: '2064' });
+    });
 });
 
 describe('classifyError for thrown errors', () => {

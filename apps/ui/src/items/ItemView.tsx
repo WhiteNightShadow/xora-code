@@ -3,10 +3,11 @@ import {
     type ApprovalDecision,
     type Item,
     type ItemOf,
+    type MemoryCandidate,
     TodoEntrySchema,
     type ToolDisplay,
 } from '@xora/protocol';
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { DelegationCard } from '../components/ChiefView.tsx';
 import { DiffView } from '../components/DiffView.tsx';
 import { Icon, type IconName } from '../components/Icon.tsx';
@@ -50,6 +51,9 @@ function ToolDisplayView({ display }: { display: ToolDisplay }) {
                     <pre className="tool__output">{display.output || ' '}</pre>
                     <div className="tool__footnote">
                         {display.exitCode !== null && format(s.tool.exitCode, { code: display.exitCode })}
+                        {display.exitCode === null &&
+                            display.background?.running &&
+                            format(s.tool.background, { job: display.background.jobId })}
                         {display.truncated &&
                             display.artifactPath &&
                             ` · ${format(s.tool.truncated, { path: display.artifactPath })}`}
@@ -386,9 +390,134 @@ function ReasoningView({ item, live }: { item: ItemOf<'reasoning'>; live: boolea
     );
 }
 
+type CandidateState = 'saved' | 'dismissed';
+
+function readCandidateStates(itemId: string): Record<string, CandidateState> {
+    try {
+        const raw = localStorage.getItem(`xora.memCand.${itemId}`);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw) as unknown;
+        return parsed && typeof parsed === 'object' ? (parsed as Record<string, CandidateState>) : {};
+    } catch {
+        return {};
+    }
+}
+
+function writeCandidateStates(itemId: string, states: Record<string, CandidateState>): void {
+    try {
+        localStorage.setItem(`xora.memCand.${itemId}`, JSON.stringify(states));
+    } catch {
+        // Ignore storage quota errors.
+    }
+}
+
+function MemoryCandidatesCard({
+    threadId,
+    itemId,
+    candidates,
+    heading,
+}: {
+    threadId?: string | undefined;
+    itemId: string;
+    candidates: readonly MemoryCandidate[];
+    heading?: string;
+}) {
+    const s = useStrings();
+    const mc = s.context.memoryCandidates;
+    const selectedThreadId = useApp((state) => state.selectedThreadId);
+    const targetThreadId = threadId ?? selectedThreadId;
+    const [states, setStates] = useState<Record<string, CandidateState>>(() => readCandidateStates(itemId));
+    const [savingId, setSavingId] = useState<string | null>(null);
+
+    const updateState = (id: string, nextState: CandidateState) => {
+        setStates((prev) => {
+            const next = { ...prev, [id]: nextState };
+            writeCandidateStates(itemId, next);
+            return next;
+        });
+    };
+
+    const visible = candidates.filter((candidate) => states[candidate.id] !== 'dismissed');
+    if (visible.length === 0) return null;
+
+    const saveCandidate = async (candidate: MemoryCandidate) => {
+        if (!targetThreadId || savingId) return;
+        setSavingId(candidate.id);
+        const res = await attempt(() =>
+            host.call('memory.remember', {
+                threadId: targetThreadId,
+                note: candidate.note,
+                scope: candidate.scope,
+            }),
+        );
+        setSavingId(null);
+        if (res) updateState(candidate.id, 'saved');
+    };
+
+    return (
+        <div className="memory-candidates">
+            <div className="memory-candidates__head">
+                <Icon name="brain" size={13} />
+                <span>{heading ?? mc.title}</span>
+            </div>
+            <ul className="memory-candidates__list">
+                {visible.map((candidate) => {
+                    const saved = states[candidate.id] === 'saved';
+                    const saving = savingId === candidate.id;
+                    const kindLabel =
+                        candidate.kind === 'deadend'
+                            ? mc.kindDeadend
+                            : candidate.kind === 'constraint'
+                              ? mc.kindConstraint
+                              : candidate.kind === 'fact'
+                                ? mc.kindFact
+                                : undefined;
+                    return (
+                        <li key={candidate.id} className="memory-candidates__row">
+                            <span className="memory-candidates__tags">
+                                <Badge tone="muted">
+                                    {candidate.scope === 'user' ? mc.scopeUser : mc.scopeProject}
+                                </Badge>
+                                {kindLabel && (
+                                    <Badge tone={candidate.kind === 'deadend' ? 'warn' : 'muted'}>{kindLabel}</Badge>
+                                )}
+                            </span>
+                            <span className="memory-candidates__note">{candidate.note}</span>
+                            <span className="memory-candidates__actions">
+                                {saved ? (
+                                    <Badge tone="ok">{mc.saved}</Badge>
+                                ) : (
+                                    <>
+                                        <button
+                                            type="button"
+                                            className="memory-candidates__btn memory-candidates__btn--primary"
+                                            disabled={!targetThreadId || saving}
+                                            onClick={() => void saveCandidate(candidate)}
+                                        >
+                                            {saving ? mc.saving : mc.save}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="memory-candidates__btn"
+                                            disabled={saving}
+                                            onClick={() => updateState(candidate.id, 'dismissed')}
+                                        >
+                                            {mc.dismiss}
+                                        </button>
+                                    </>
+                                )}
+                            </span>
+                        </li>
+                    );
+                })}
+            </ul>
+        </div>
+    );
+}
+
 /** Work handed to a subagent: its child thread's progress, until the answer is back in this turn. */
 /** Where the context was compacted: a divider in the conversation, the summary a click away. */
-function CompactionView({ item }: { item: ItemOf<'compaction'> }) {
+function CompactionView({ item, threadId }: { item: ItemOf<'compaction'>; threadId?: string | undefined }) {
     const s = useStrings();
     const [open, setOpen] = useState(false);
     const level = (s.context.levels as Record<number, string>)[item.level];
@@ -417,6 +546,9 @@ function CompactionView({ item }: { item: ItemOf<'compaction'> }) {
                 <div className="compaction__summary">
                     <Markdown text={item.summary} />
                 </div>
+            )}
+            {item.candidates && item.candidates.length > 0 && (
+                <MemoryCandidatesCard threadId={threadId} itemId={item.id} candidates={item.candidates} />
             )}
         </div>
     );
@@ -464,13 +596,50 @@ function SubagentView({ item, turnRunning }: { item: ItemOf<'subagent'>; turnRun
     );
 }
 
-export function ItemView({ item, live, turnRunning = true }: { item: Item; live: boolean; turnRunning?: boolean }) {
+/** Throttles Markdown AST re-parsing while a long message is actively streaming so burst SSE chunks never jank UI. */
+function AgentMessageView({ text, live }: { text: string; live: boolean }) {
+    const [shown, setShown] = useState(text);
+    const latest = useRef(text);
+    const lastRenderAt = useRef(0);
+    latest.current = text;
+    useEffect(() => {
+        if (!live || text.length < 1200) {
+            setShown(text);
+            lastRenderAt.current = Date.now();
+            return;
+        }
+        const elapsed = Date.now() - lastRenderAt.current;
+        if (elapsed >= 65) {
+            setShown(text);
+            lastRenderAt.current = Date.now();
+            return;
+        }
+        const timer = setTimeout(() => {
+            lastRenderAt.current = Date.now();
+            setShown(latest.current);
+        }, 65 - elapsed);
+        return () => clearTimeout(timer);
+    }, [text, live]);
+    return <Markdown text={!live || text.length < 1200 ? text : shown} />;
+}
+
+export function ItemView({
+    item,
+    live,
+    turnRunning = true,
+    threadId,
+}: {
+    item: Item;
+    live: boolean;
+    turnRunning?: boolean;
+    threadId?: string | undefined;
+}) {
     const s = useStrings();
     switch (item.type) {
         case 'user_message':
             return null;
         case 'agent_message':
-            return <Markdown text={item.text} />;
+            return <AgentMessageView text={item.text} live={live} />;
         case 'reasoning':
             return <ReasoningView item={item} live={live} />;
         case 'tool_call':
@@ -497,6 +666,16 @@ export function ItemView({ item, live, turnRunning = true }: { item: Item; live:
                 </button>
             );
         case 'notice':
+            if (item.candidates && item.candidates.length > 0) {
+                return (
+                    <MemoryCandidatesCard
+                        threadId={threadId}
+                        itemId={item.id}
+                        candidates={item.candidates}
+                        heading={item.title}
+                    />
+                );
+            }
             return (
                 <div className={`notice notice--${item.severity}`}>
                     <Icon name="alert" size={13} /> <span>{item.title}</span>
@@ -516,7 +695,7 @@ export function ItemView({ item, live, turnRunning = true }: { item: Item; live:
             );
         }
         case 'compaction':
-            return <CompactionView item={item} />;
+            return <CompactionView item={item} threadId={threadId} />;
         case 'subagent':
             return <SubagentView item={item} turnRunning={turnRunning} />;
         case 'delegation':

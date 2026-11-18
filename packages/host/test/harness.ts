@@ -68,6 +68,8 @@ export function hosts(engineEntry: () => string) {
                 readonly models?: 'default' | 'tiers';
                 /** Titles by a model (06 §28): off unless a test is about them. */
                 readonly modelTitles?: boolean;
+                /** Post-turn memory candidate extraction by a model: off unless a test is about it. */
+                readonly modelMemory?: boolean;
             } = {},
         ): Promise<Harness> {
             const shell = shells.get(dataDir) ?? new MemoryShell({ dataDir });
@@ -82,6 +84,7 @@ export function hosts(engineEntry: () => string) {
                 log: quiet,
                 ...(extra.fetch ? { fetch: extra.fetch } : {}),
                 modelTitles: extra.modelTitles ?? false,
+                ...(extra.modelMemory !== undefined ? { modelMemory: extra.modelMemory } : {}),
             });
             core.settings.update({
                 approvals: { reviewer: extra.reviewer ?? 'user' },

@@ -7,7 +7,7 @@ export {
     type SplitOptions,
     splitShellCommand,
 } from './command.ts';
-export { isSecretEnvName, KEPT_ENV_NAMES, sanitizeEnv } from './env.ts';
+export { isSecretEnvName, KEPT_ENV_NAMES, nonInteractiveEnv, sanitizeEnv } from './env.ts';
 export {
     type Grave,
     type GraveAction,
@@ -33,7 +33,15 @@ export {
     type PageText,
     parseHtml,
 } from './html.ts';
-export { createJobRegistry, type ManagedJobRegistry, ShellJob } from './jobs.ts';
+export { createJobRegistry, type JobWait, type ManagedJobRegistry, ShellJob, type ShellJobOptions } from './jobs.ts';
+export {
+    type LenientInput,
+    type LenientOptions,
+    type LenientRules,
+    lenientInput,
+    parseToolArguments,
+    resolveToolName,
+} from './lenient.ts';
 export { type DiagnosticsReport, LspClient } from './lsp/client.ts';
 export { type EditReport, formatEditNote, LSP_EDIT_NOTE, newDiagnostics } from './lsp/format.ts';
 export {
@@ -80,9 +88,17 @@ export {
     realpathLoose,
     resolveToolPath,
 } from './path.ts';
-export { createDefaultTools, type DefaultToolsOptions, type ToolSpec, toolSpec } from './registry.ts';
+export {
+    createDefaultTools,
+    type DefaultToolsOptions,
+    lenientToolInput,
+    type ToolSpec,
+    toolParameters,
+    toolSpec,
+} from './registry.ts';
 export { findRipgrep } from './ripgrep.ts';
 export { isSensitivePath } from './sensitive.ts';
+export { renderTerminalText } from './terminal.ts';
 export {
     type ApplyPatchInput,
     applyPatchTool,
@@ -97,10 +113,15 @@ export {
     BASH_MAX_OUTPUT_CHARS,
     BASH_MAX_TIMEOUT_MS,
     type BashInput,
+    type BashToolOptions,
+    backgroundJobOf,
     bashKillTool,
     bashOutputTool,
     bashTool,
+    createBashTool,
     type JobInput,
+    type JobOutputInput,
+    jobStateIn,
 } from './tools/bash.ts';
 export {
     applyEdit,

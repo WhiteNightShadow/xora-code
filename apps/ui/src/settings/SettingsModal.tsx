@@ -126,6 +126,42 @@ function General() {
     );
 }
 
+/** Curated connection types (`firefox-reverse` style): core protocol gateways + mainstream direct providers. */
+const CURATED_PRESET_IDS = [
+    'custom-openai',
+    'custom-anthropic',
+    'gemini',
+    'ollama',
+    'deepseek',
+    'minimax-cn',
+    'minimax-global',
+    'kimi-cn',
+    'glm-cn',
+    'qwen-cn',
+    'anthropic',
+    'openai',
+] as const;
+
+const QUICK_MODELS_BY_PRESET: Readonly<Record<string, readonly string[]>> = {
+    'custom-openai': ['MiniMax-M3', 'MiniMax-M2.7', 'deepseek-chat', 'claude-sonnet-4-5', 'gpt-4.1'],
+    'custom-anthropic': ['claude-sonnet-4-5', 'claude-opus-4-7', 'MiniMax-M3', 'MiniMax-M2.7'],
+    gemini: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+};
+
+const MAX_PICKER_DOM_ITEMS = 120;
+const MAX_SELECT_MODEL_OPTIONS = 200;
+
+function parseModelList(raw: string): string[] {
+    return [
+        ...new Set(
+            raw
+                .split(/[,，\n;；]+/)
+                .map((item) => item.trim())
+                .filter((item) => item.length > 0),
+        ),
+    ];
+}
+
 function channelLabel(preset: PresetSummary, s: ReturnType<typeof useStrings>): string {
     if (preset.channel === 'local') return s.settings.local;
     if (preset.channel === 'custom') return s.settings.custom;
@@ -133,30 +169,73 @@ function channelLabel(preset: PresetSummary, s: ReturnType<typeof useStrings>): 
     return s.settings.api;
 }
 
+function presetDisplayLabel(preset: PresetSummary, s: ReturnType<typeof useStrings>): string {
+    const customLabel = (s.settings.presetLabels as Record<string, string>)[preset.id];
+    if (customLabel) return customLabel;
+    return `${preset.name}（${channelLabel(preset, s)}${preset.region === 'cn' ? '·国内' : preset.region === 'global' ? '·海外' : ''}）`;
+}
+
 function ConnectionEditor({ connection, onDone }: { connection?: Connection; onDone: () => void }) {
     const s = useStrings();
     const presets = useApp((state) => state.presets);
-    const [presetId, setPresetId] = useState(connection?.presetId ?? presets[0]?.id ?? '');
+    const defaultPresetId =
+        connection?.presetId ??
+        (presets.some((item) => item.id === 'custom-openai') ? 'custom-openai' : (presets[0]?.id ?? ''));
+    const [presetId, setPresetId] = useState(defaultPresetId);
     const [name, setName] = useState(connection?.name ?? '');
     const [apiKey, setApiKey] = useState('');
     const [baseUrl, setBaseUrl] = useState(connection?.baseUrl ?? '');
+    const [customModels, setCustomModels] = useState('');
     const [busy, setBusy] = useState(false);
     const preset = presets.find((item) => item.id === presetId);
-    const options: Option<string>[] = presets.map((item) => ({
+    const isCustomEndpoint = preset?.channel === 'custom' || (preset?.models.length ?? 0) === 0;
+    const quickModels = QUICK_MODELS_BY_PRESET[presetId] ?? [];
+
+    const curatedSet = new Set<string>(CURATED_PRESET_IDS);
+    const orderedPresets: PresetSummary[] = [
+        ...CURATED_PRESET_IDS.map((id) => presets.find((item) => item.id === id)).filter(
+            (item): item is PresetSummary => item !== undefined,
+        ),
+        ...(connection && !curatedSet.has(connection.presetId)
+            ? presets.filter((item) => item.id === connection.presetId)
+            : []),
+    ];
+    const options: Option<string>[] = (orderedPresets.length > 0 ? orderedPresets : presets).map((item) => ({
         value: item.id,
-        label: `${item.name}（${channelLabel(item, s)}${item.region === 'cn' ? '·国内' : item.region === 'global' ? '·海外' : ''}）`,
+        label: presetDisplayLabel(item, s),
     }));
+
+    const appendQuickModel = (modelId: string) => {
+        const current = parseModelList(customModels);
+        if (current.includes(modelId)) return;
+        setCustomModels([...current, modelId].join(', '));
+    };
+
+    const endpointPlaceholder =
+        presetId === 'custom-anthropic'
+            ? 'https://api.minimaxi.com/anthropic'
+            : presetId === 'custom-openai'
+              ? 'https://api.minimaxi.com/v1'
+              : preset?.baseUrl;
+
     const save = async () => {
         setBusy(true);
+        const parsedModels = parseModelList(customModels);
         const saved = await attempt(() =>
             host.call('provider.save', {
                 ...(connection ? { connectionId: connection.id } : {}),
                 presetId,
                 ...(name.trim() ? { name: name.trim() } : {}),
                 ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-                ...(baseUrl.trim() || connection?.baseUrl ? { baseUrl: baseUrl.trim() } : {}),
+                ...(baseUrl.trim() || connection?.baseUrl !== undefined ? { baseUrl: baseUrl.trim() } : {}),
+                ...(parsedModels.length > 0 ? { models: parsedModels } : {}),
             }),
         );
+        if (saved && !connection && saved.models.length === 0 && (saved.baseUrl || preset?.baseUrl)) {
+            await host
+                .call('provider.refreshModels', { connectionId: saved.id }, { timeoutMs: 15_000 })
+                .catch(() => undefined);
+        }
         setBusy(false);
         if (saved) {
             await refreshConnections();
@@ -185,7 +264,7 @@ function ConnectionEditor({ connection, onDone }: { connection?: Connection; onD
                 <input
                     className="input"
                     value={name}
-                    placeholder={preset?.name}
+                    placeholder={preset ? presetDisplayLabel(preset, s).split('（')[0]?.trim() : ''}
                     onChange={(event) => setName(event.target.value)}
                 />
             </Field>
@@ -212,11 +291,46 @@ function ConnectionEditor({ connection, onDone }: { connection?: Connection; onD
                     )}
                 </Field>
             )}
-            <Field label={s.settings.baseUrl}>
+            <Field
+                label={s.settings.customModels}
+                hint={isCustomEndpoint ? s.settings.customModelsHintCustom : s.settings.customModelsHintPreset}
+            >
+                <input
+                    className="input"
+                    value={customModels}
+                    placeholder={
+                        connection && connection.models.length > 0
+                            ? connection.models
+                                  .slice(0, 3)
+                                  .map((item) => item.id)
+                                  .join(', ')
+                            : s.settings.customModelsPlaceholder
+                    }
+                    onChange={(event) => setCustomModels(event.target.value)}
+                />
+                {quickModels.length > 0 && (
+                    <div className="connection__quick-models">
+                        {quickModels.map((modelId) => (
+                            <button
+                                key={modelId}
+                                type="button"
+                                className="connection__chip"
+                                onClick={() => appendQuickModel(modelId)}
+                            >
+                                + {modelId}
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </Field>
+            <Field
+                label={preset?.channel === 'custom' ? s.settings.baseUrlRequired : s.settings.baseUrl}
+                hint={preset?.channel === 'custom' ? s.settings.baseUrlHintCustom : undefined}
+            >
                 <input
                     className="input"
                     value={baseUrl}
-                    placeholder={preset?.baseUrl}
+                    placeholder={endpointPlaceholder}
                     onChange={(event) => setBaseUrl(event.target.value)}
                 />
             </Field>
@@ -224,7 +338,11 @@ function ConnectionEditor({ connection, onDone }: { connection?: Connection; onD
                 <button
                     type="button"
                     className="button button--primary"
-                    disabled={busy || preset?.compliance?.allowed === false}
+                    disabled={
+                        busy ||
+                        preset?.compliance?.allowed === false ||
+                        (preset?.channel === 'custom' && !baseUrl.trim() && !connection?.baseUrl)
+                    }
                     onClick={() => void save()}
                 >
                     {busy ? <Spinner /> : null} {s.settings.save}
@@ -239,12 +357,22 @@ function ConnectionEditor({ connection, onDone }: { connection?: Connection; onD
 
 /**
  * Every model of the connection with a switch: the ones switched on are what model pickers, defaults and team tiers
- * offer. The list comes from the last "refresh models"; nothing refreshes it on its own.
+ * offer. Supports instant search, manual model ID entry, and DOM virtualization cap for huge third-party relays.
  */
 function ModelPicker({ connection, onClose }: { connection: Connection; onClose: () => void }) {
     const s = useStrings();
+    const [query, setQuery] = useState('');
+    const [manualModel, setManualModel] = useState('');
     const available = connection.available ?? connection.models;
     const selected = new Set(connection.models.map((model) => model.id));
+    const needle = query.trim().toLowerCase();
+    const filtered = needle
+        ? available.filter(
+              (model) => model.id.toLowerCase().includes(needle) || model.name.toLowerCase().includes(needle),
+          )
+        : available;
+    const shown = filtered.slice(0, MAX_PICKER_DOM_ITEMS);
+
     const toggle = (id: string, on: boolean) =>
         void attempt(async () => {
             const next = available
@@ -253,21 +381,82 @@ function ModelPicker({ connection, onClose }: { connection: Connection; onClose:
             await host.call('provider.selectModels', { connectionId: connection.id, models: next });
             await refreshConnections();
         });
+
+    const addManual = () => {
+        const ids = parseModelList(manualModel);
+        if (ids.length === 0) return;
+        void attempt(async () => {
+            await host.call('provider.save', {
+                connectionId: connection.id,
+                presetId: connection.presetId,
+                models: ids,
+            });
+            setManualModel('');
+            await refreshConnections();
+        });
+    };
+
+    const clearAll = () =>
+        void attempt(async () => {
+            await host.call('provider.selectModels', { connectionId: connection.id, models: [] });
+            await refreshConnections();
+        });
+
     return (
         <div className="connection__picker">
             <div className="field__hint">{s.settings.pickModelsHint}</div>
-            {available.map((model) => (
-                <Toggle
-                    key={model.id}
-                    checked={selected.has(model.id)}
-                    label={model.name}
-                    text={`${model.name}${model.name === model.id ? '' : ` · ${model.id}`}${
-                        model.verified ? '' : `（${s.settings.unverified}）`
-                    }`}
-                    onChange={(on) => toggle(model.id, on)}
+            <div className="connection__picker-bar">
+                {available.length > 6 && (
+                    <input
+                        className="input connection__picker-input"
+                        value={query}
+                        placeholder={s.settings.searchModels}
+                        onChange={(event) => setQuery(event.target.value)}
+                    />
+                )}
+                <input
+                    className="input connection__picker-input"
+                    value={manualModel}
+                    placeholder={s.settings.addCustomModelPlaceholder}
+                    onChange={(event) => setManualModel(event.target.value)}
+                    onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+                            event.preventDefault();
+                            addManual();
+                        }
+                    }}
                 />
-            ))}
+                <button
+                    type="button"
+                    className="button button--small"
+                    disabled={!manualModel.trim()}
+                    onClick={addManual}
+                >
+                    + {s.settings.addCustomModel}
+                </button>
+            </div>
+            <div className="connection__picker-list">
+                {shown.map((model) => (
+                    <Toggle
+                        key={model.id}
+                        checked={selected.has(model.id)}
+                        label={model.name}
+                        text={`${model.name}${model.name === model.id ? '' : ` · ${model.id}`}`}
+                        onChange={(on) => toggle(model.id, on)}
+                    />
+                ))}
+            </div>
+            {filtered.length > MAX_PICKER_DOM_ITEMS && (
+                <div className="field__hint">
+                    {format(s.settings.pickerTruncated, { shown: MAX_PICKER_DOM_ITEMS, total: filtered.length })}
+                </div>
+            )}
             <div className="row">
+                {selected.size > 0 && available.length > 5 && (
+                    <button type="button" className="button button--small" onClick={clearAll}>
+                        {s.settings.clearPickedModels}
+                    </button>
+                )}
                 <button type="button" className="button button--small" onClick={onClose}>
                     {s.common.close}
                 </button>
@@ -284,12 +473,14 @@ function ConnectionCard({ connection }: { connection: Connection }) {
     const [testing, setTesting] = useState(false);
     const [picking, setPicking] = useState(false);
     const [model, setModel] = useState(connection.models[0]?.id ?? '');
+    const activeModel =
+        model && connection.models.some((item) => item.id === model) ? model : (connection.models[0]?.id ?? '');
     const test = async () => {
         setTesting(true);
         try {
             const result = await host.call(
                 'provider.test',
-                { connectionId: connection.id, ...(model ? { model } : {}) },
+                { connectionId: connection.id, ...(activeModel ? { model: activeModel } : {}) },
                 { timeoutMs: 120_000 },
             );
             toast(
@@ -308,7 +499,9 @@ function ConnectionCard({ connection }: { connection: Connection }) {
         <div className="connection">
             <div className="connection__header">
                 <strong>{connection.name}</strong>
-                <span className="connection__preset">{preset?.name ?? connection.presetId}</span>
+                <span className="connection__preset">
+                    {preset ? presetDisplayLabel(preset, s) : connection.presetId}
+                </span>
                 {connection.status && (
                     <Badge tone={connection.status.ok ? 'ok' : 'error'}>
                         {connection.status.ok
@@ -324,10 +517,10 @@ function ConnectionCard({ connection }: { connection: Connection }) {
                     <Select
                         compact
                         label={s.thread.model}
-                        value={model}
-                        options={connection.models.map((item) => ({
+                        value={activeModel}
+                        options={connection.models.slice(0, MAX_SELECT_MODEL_OPTIONS).map((item) => ({
                             value: item.id,
-                            label: `${item.name}${item.verified ? '' : `（${s.settings.unverified}）`}`,
+                            label: item.name,
                         }))}
                         onChange={setModel}
                     />
@@ -362,7 +555,7 @@ function ConnectionCard({ connection }: { connection: Connection }) {
                     })}
                 </button>
                 <button type="button" className="button button--small" onClick={() => setEditing(true)}>
-                    {s.sidebar.rename}/key
+                    {s.settings.promptEdit}
                 </button>
                 <button
                     type="button"
@@ -400,7 +593,21 @@ function Models() {
         setDetecting(false);
     };
     if (!settings) return <Spinner />;
-    const modelOptions: Option<string>[] = models.map((option) => ({
+    const pinnedKeys = new Set(
+        [settings.defaultModel, settings.fastModel, ...settings.fallbackModels]
+            .filter((ref): ref is NonNullable<typeof ref> => ref !== null && ref !== undefined)
+            .map((ref) => `${ref.connectionId}::${ref.model}`),
+    );
+    const cappedModels =
+        models.length <= MAX_SELECT_MODEL_OPTIONS
+            ? models
+            : [
+                  ...models.filter((option) => pinnedKeys.has(`${option.connectionId}::${option.model.id}`)),
+                  ...models
+                      .filter((option) => !pinnedKeys.has(`${option.connectionId}::${option.model.id}`))
+                      .slice(0, MAX_SELECT_MODEL_OPTIONS),
+              ];
+    const modelOptions: Option<string>[] = cappedModels.map((option) => ({
         value: `${option.connectionId}::${option.model.id}`,
         label: `${option.model.name} · ${option.connectionName}`,
     }));
@@ -859,64 +1066,6 @@ function Permissions() {
     );
 }
 
-function Budgets() {
-    const s = useStrings();
-    const [settings, update] = useSettings();
-    if (!settings) return <Spinner />;
-    const limitInput = (value: number | null, onChange: (value: number | null) => void) => (
-        <input
-            className="input"
-            type="number"
-            min={0}
-            step={1}
-            placeholder={s.settings.noLimit}
-            defaultValue={value ?? ''}
-            onBlur={(event) => {
-                const text = event.target.value.trim();
-                onChange(text === '' ? null : Math.max(0, Number(text)));
-            }}
-        />
-    );
-    return (
-        <div className="settings-section">
-            <Field label={s.settings.currency}>
-                <Select
-                    label={s.settings.currency}
-                    value={settings.currency}
-                    options={[
-                        { value: 'CNY', label: '人民币 ¥' },
-                        { value: 'USD', label: '美元 $' },
-                    ]}
-                    onChange={(currency) => update({ currency })}
-                />
-            </Field>
-            <Field label={s.settings.usdToCny}>
-                <input
-                    className="input"
-                    type="number"
-                    min={0.1}
-                    step={0.01}
-                    defaultValue={settings.usdToCny}
-                    onBlur={(event) => {
-                        const value = Number(event.target.value);
-                        if (value > 0) update({ usdToCny: value });
-                    }}
-                />
-            </Field>
-            <Field label={s.settings.dailyLimit}>
-                {limitInput(settings.budgets.dailyLimit, (dailyLimit) =>
-                    update({ budgets: { ...settings.budgets, dailyLimit } }),
-                )}
-            </Field>
-            <Field label={s.settings.monthlyLimit}>
-                {limitInput(settings.budgets.monthlyLimit, (monthlyLimit) =>
-                    update({ budgets: { ...settings.budgets, monthlyLimit } }),
-                )}
-            </Field>
-        </div>
-    );
-}
-
 function Updates() {
     const s = useStrings();
     const [settings, update] = useSettings();
@@ -1034,7 +1183,6 @@ export function SettingsModal({ section }: { section: SettingsSection }) {
         ['prompts', s.settings.prompts],
         ['permissions', s.settings.permissions],
         ['extensions', s.settings.extensions],
-        ['usage', s.settings.usage],
         ['updates', s.settings.updates],
         ['about', s.settings.about],
     ];
@@ -1059,7 +1207,6 @@ export function SettingsModal({ section }: { section: SettingsSection }) {
                     {section === 'prompts' && <Prompts />}
                     {section === 'permissions' && <Permissions />}
                     {section === 'extensions' && <ExtensionsSection />}
-                    {section === 'usage' && <Budgets />}
                     {section === 'updates' && <Updates />}
                     {section === 'about' && <About />}
                 </div>

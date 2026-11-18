@@ -3,6 +3,7 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createGrepTool, findRipgrep, GREP_MAX_FILE_BYTES } from '../src/index.ts';
 import { isRipgrep } from '../src/ripgrep.ts';
+import { encodeText } from '../src/text.ts';
 import { makeContext, runTool, temporaryDir, writeFiles } from './helpers.ts';
 
 const jsGrep = createGrepTool({ ripgrep: false });
@@ -28,6 +29,48 @@ const PROJECT: Readonly<Record<string, string | Uint8Array>> = {
 async function project() {
     const root = await temporaryDir();
     await writeFiles(root, PROJECT);
+    return { root, ctx: await makeContext(root) };
+}
+
+/** Chinese text in GB18030 (GBK) next to the same in UTF-8, and UTF-8 with a byte that is neither. */
+const ENCODINGS: Readonly<Record<string, string | Uint8Array>> = {
+    'gbk/order.c': encodeText('// 订单号不能为空\r\nint order = 1;\r\n// 金额\r\n', 'gb18030'),
+    'gbk/user.c': encodeText('// 用户名\nint user = 2;\n', 'gb18030'),
+    'utf/order.c': '// 订单号可以为空\nint order = 3;\n',
+    'utf/stray.txt': Buffer.concat([
+        Buffer.from('Größe für Übersicht 订单号 r'),
+        Buffer.from([0xe9]),
+        Buffer.from('sume\n'),
+    ]),
+};
+
+/** What a search finds in files of several encodings; the same whichever engine looks. */
+const ENCODING_QUERIES: ReadonlyArray<readonly [query: Record<string, unknown>, content: string]> = [
+    [
+        { pattern: '订单号', outputMode: 'content' },
+        'gbk/order.c:1:// 订单号不能为空\nutf/order.c:1:// 订单号可以为空\nutf/stray.txt:1:Größe für Übersicht 订单号 r\ufffdsume',
+    ],
+    [
+        { pattern: '订单号', outputMode: 'count' },
+        'gbk/order.c:1\nutf/order.c:1\nutf/stray.txt:1\n\n3 matching lines in 3 files.',
+    ],
+    // A pattern of ASCII finds the line, and the Chinese around it reads as Chinese.
+    [
+        { pattern: 'int order', outputMode: 'content', context: 1, path: 'gbk' },
+        'gbk/order.c-1-// 订单号不能为空\ngbk/order.c:2:int order = 1;\ngbk/order.c-3-// 金额',
+    ],
+    // Either alternative, in either encoding.
+    [
+        { pattern: '用户名|order =', outputMode: 'content' },
+        'gbk/order.c:2:int order = 1;\ngbk/user.c:1:// 用户名\nutf/order.c:2:int order = 3;',
+    ],
+    [{ pattern: '金额', glob: '*.c', outputMode: 'count' }, 'gbk/order.c:1\n\n1 matching lines in 1 files.'],
+    [{ pattern: '没有这个词' }, 'No matches for 没有这个词 in the working directory.'],
+];
+
+async function encodings() {
+    const root = await temporaryDir();
+    await writeFiles(root, ENCODINGS);
     return { root, ctx: await makeContext(root) };
 }
 
@@ -111,6 +154,15 @@ describe('grep (JavaScript engine)', () => {
         expect(anchored.content).toBe('No matches for foo text$ in a.txt.');
     });
 
+    it('searches a file as the text it is, whatever its encoding', async () => {
+        const { ctx } = await encodings();
+        for (const [query, content] of ENCODING_QUERIES) {
+            expect((await runTool(jsGrep, query, ctx)).content, JSON.stringify(query)).toBe(content);
+        }
+        const files = await runTool(jsGrep, { pattern: '订单号' }, ctx);
+        expect(files.content.split('\n').sort()).toEqual(['gbk/order.c', 'utf/order.c', 'utf/stray.txt']);
+    });
+
     it('supports JavaScript-only syntax such as look-ahead', async () => {
         const { ctx } = await project();
         const result = await runTool(jsGrep, { pattern: 'foo(?= again)', path: 'sub', outputMode: 'content' }, ctx);
@@ -191,5 +243,19 @@ describe('grep with ripgrep', () => {
             expect(extended.content, outputMode).toBe(plain.content);
         }
         expect((await runTool(jsGrep, { pattern: '(?x) f o o' }, ctx)).isError).toBe(true);
+    });
+
+    it('finds Chinese in files that are GB18030, which ripgrep reads as UTF-8', async (context) => {
+        if (rg === null) {
+            context.skip();
+            return;
+        }
+        const { ctx } = await encodings();
+        const rgGrep = createGrepTool({ ripgrep: rg });
+        for (const [query, content] of ENCODING_QUERIES) {
+            expect((await runTool(rgGrep, query, ctx)).content, JSON.stringify(query)).toBe(content);
+        }
+        const files = await runTool(rgGrep, { pattern: '订单号' }, ctx);
+        expect(files.content.split('\n').sort()).toEqual(['gbk/order.c', 'utf/order.c', 'utf/stray.txt']);
     });
 });

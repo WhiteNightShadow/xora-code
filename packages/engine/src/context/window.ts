@@ -8,12 +8,12 @@ import { estimateMessageTokens, estimateTokens } from './tokens.ts';
  * the working set whatever the window.
  */
 
-/** The working set when the host sets none. */
-export const DEFAULT_WORKING_SET = 160_000;
+/** The working set when the host sets none: 1M tokens so models use their full supported window by default. */
+export const DEFAULT_WORKING_SET = 1_048_576;
 /** Share of the budget at which older tool output is masked, all at once. */
-export const MASK_AT = 0.6;
+export const MASK_AT = 0.7;
 /** Share of the budget at which older turns are compacted. */
-export const COMPACT_AT = 0.8;
+export const COMPACT_AT = 0.85;
 /**
  * Room the conversation keeps below the compaction line however large the system prompt and the tool definitions:
  * no compaction shrinks those, and a working set they fill would compact at every step.
@@ -27,20 +27,21 @@ export function fixedTokens(system: readonly string[], tools: readonly unknown[]
 
 /**
  * The budget: the working set, made larger when the fixed part leaves the conversation less than MIN_ROOM, never more
- * than the window and the cost cap; minus room for the reply. `fixed`: see {@link fixedTokens}.
+ * than the window and the cost cap minus room for the reply. `fixed`: see {@link fixedTokens}.
  */
 export function contextBudget(session: EngineSession, target: ResolvedTarget, fixed = 0): number {
     const hard = Math.min(target.model.contextWindow, session.config.softContextWindow ?? Number.POSITIVE_INFINITY);
-    const soft = session.config.workingSet ?? DEFAULT_WORKING_SET;
-    // Room for the reply, but never most of a small window: a 32k cap with a 32k reserve left nothing and the
-    // context was compacted before every request.
+    const soft = session.config.workingSet ?? Math.max(DEFAULT_WORKING_SET, target.model.contextWindow);
+    // Room for the reply comes out of the hard window, never out of the working set itself; on a small window it is
+    // capped at a quarter so a 32k cap with a 32k max output never compacts at every step.
     const reserve = Math.min(
         target.model.maxOutput,
         session.config.maxOutputTokens ?? 32_000,
         Math.floor(Math.min(hard, soft) / 4),
     );
-    const wanted = Math.max(soft, Math.ceil((fixed + MIN_ROOM) / COMPACT_AT) + reserve);
-    return Math.max(8_000, Math.min(hard, wanted) - reserve);
+    const ceiling = Math.max(8_000, hard - reserve);
+    const wanted = Math.max(soft, Math.ceil((fixed + MIN_ROOM) / COMPACT_AT));
+    return Math.max(8_000, Math.min(ceiling, wanted));
 }
 
 /** The context messages, estimated from their characters. */

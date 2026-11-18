@@ -1,4 +1,4 @@
-import { openNewThread, openProject, openSettings, useApp, useStrings } from '../store.ts';
+import { openChief, openNewThread, openProject, openSettings, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { WelcomeArt } from './Art.tsx';
 import { Icon } from './Icon.tsx';
@@ -8,7 +8,10 @@ export function Welcome() {
     const connections = useApp((state) => state.connections);
     const projects = useApp((state) => state.projects);
     const selectedProjectId = useApp((state) => state.selectedProjectId);
-    const hasModel = connections.some((connection) => connection.hasKey || connection.presetId.startsWith('local'));
+    const hasModel = connections.some(
+        (connection) =>
+            connection.hasKey || connection.presetId.startsWith('local') || connection.presetId === 'ollama',
+    );
     const project = projects.find((item) => item.id === selectedProjectId) ?? projects[0];
     return (
         <div className="welcome">
@@ -37,8 +40,8 @@ export function Welcome() {
                 <button
                     type="button"
                     className="step"
-                    disabled={!project}
-                    onClick={() => project && openNewThread(project.id)}
+                    disabled={!hasModel}
+                    onClick={() => (project ? openNewThread(project.id) : openChief(true))}
                 >
                     <span className="step__icon">3</span>
                     <span className="step__title">{s.welcome.startThread}</span>

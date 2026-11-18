@@ -239,4 +239,44 @@
     margin-bottom: var(--xk-space-2);
 }
 
+/* OPC & specialist quick-preset chips in MemberEditor and active Agent picker highlight. */
+.role-preset-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: var(--xk-space-2);
+}
+
+.role-preset-chip {
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--xk-border);
+    border-radius: var(--xk-radius-full);
+    background: var(--xk-bg-subtle);
+    color: var(--xk-text-muted);
+    font: inherit;
+    font-size: var(--xk-text-xs);
+    cursor: pointer;
+    transition:
+        background var(--xk-duration-fast) var(--xk-ease-out),
+        border-color var(--xk-duration-fast) var(--xk-ease-out),
+        color var(--xk-duration-fast) var(--xk-ease-out);
+}
+
+.role-preset-chip:hover {
+    border-color: var(--xk-border-strong);
+    color: var(--xk-text);
+}
+
+.role-preset-chip.is-active {
+    border-color: var(--xk-accent);
+    background: var(--xk-accent-subtle);
+    color: var(--xk-accent-text);
+    font-weight: var(--xk-weight-medium);
+}
+
+.is-agent-picked {
+    color: var(--xk-accent-text);
+}
+
 /* A member's skills from the skill library (06 §21). */

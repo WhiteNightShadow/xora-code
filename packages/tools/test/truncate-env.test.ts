@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isSecretEnvName, sanitizeEnv, truncateLine, truncateMiddle } from '../src/index.ts';
+import { isSecretEnvName, nonInteractiveEnv, sanitizeEnv, truncateLine, truncateMiddle } from '../src/index.ts';
 
 describe('truncateMiddle', () => {
     it('leaves short text alone', () => {
@@ -97,5 +97,24 @@ describe('sanitizeEnv', () => {
         expect(isSecretEnvName('github_token')).toBe(true);
         expect(isSecretEnvName('Path')).toBe(false);
         expect(isSecretEnvName('lc_ctype')).toBe(false);
+    });
+});
+
+describe('nonInteractiveEnv', () => {
+    it("keeps git and pagers from waiting for a person, with only git's own settings on Windows", () => {
+        expect(nonInteractiveEnv('darwin')).toMatchObject({
+            TERM: 'dumb',
+            GIT_EDITOR: 'true',
+            GIT_TERMINAL_PROMPT: '0',
+            PAGER: 'cat',
+            EDITOR: 'true',
+        });
+        expect(Object.keys(nonInteractiveEnv('win32')).sort()).toEqual([
+            'GIT_EDITOR',
+            'GIT_PAGER',
+            'GIT_SEQUENCE_EDITOR',
+            'GIT_TERMINAL_PROMPT',
+            'TERM',
+        ]);
     });
 });

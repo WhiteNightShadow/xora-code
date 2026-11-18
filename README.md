@@ -5,14 +5,14 @@
   <p><strong>An agent-first coding desktop: a team of agents with their own memory, long tasks that keep their context, and every change reviewable.</strong></p>
 
   <p>
-    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.3.0"><img src="https://img.shields.io/badge/release-v1.3.0-5856de?style=flat-square" alt="v1.3.0" /></a>
+    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.4.0"><img src="https://img.shields.io/badge/release-v1.4.0-5856de?style=flat-square" alt="v1.4.0" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0" /></a>
     <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-2f81f7?style=flat-square" alt="macOS, Windows, Linux" />
     <a href="https://github.com/agentclientprotocol/agent-client-protocol"><img src="https://img.shields.io/badge/protocol-ACP-7c3aed?style=flat-square" alt="ACP" /></a>
   </p>
 
   <p>
-    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.3.0"><strong>下载 v1.3.0</strong></a> ·
+    <a href="https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.4.0"><strong>下载 v1.4.0</strong></a> ·
     <a href="#产品界面">产品界面</a> ·
     <a href="#主要功能">主要功能</a> ·
     <a href="#快速开始">快速开始</a> ·
@@ -20,7 +20,7 @@
     <a href="#技术架构">技术架构</a> ·
     <a href="#安全与权限">安全与权限</a> ·
     <a href="#从源码构建">从源码构建</a> ·
-    <a href="docs/releases/v1.3.0.md">v1.3.0版本说明</a>
+    <a href="docs/releases/v1.4.0.md">v1.4.0版本说明</a>
   </p>
 </div>
 
@@ -35,6 +35,8 @@ Xora Code是一个三平台（macos、windows、linux）的agent编程桌面。�
 1.2把团队做成一棵**组织树**：组织下面还能分子组织，每个组织有负责人、自己的提示词和笔记，交给一个组织的活由它最近的负责人带、子组织里的人一起干；团队任务做完，主管给每张卡打分。系统自带的人选都在**人才市场**里，能搜、能看提示词，聘进组织就能干活。总助手的对话不再属于某个项目，首页直接选模型和思考等级。干活的过程也看得见：agent的**计划**在输入框上方跟着进度走，**思考**时实时显示最新的内容。
 
 1.3重做了**上下文和记忆**：长对话不再写成一段段摘要，而是整理成**任务状态**——发给agent的每句话原文保留，计划、约束、决定、读改过的文件、最近的命令和没修好的失败由引擎记着，模型只补它判断的部分；更早的工具输出遮成一行，带引用号，需要时原样取回。记忆从成员扩展到每段对话和总助手，多了一份所有成员和对话都读的“用户的偏好”，`recall`还能查同一个项目以前的对话。侧栏不再有工作流入口，工作流交给总助手按需运行。
+
+1.4把默认入口精简为Codex风格的**底部默认对话**（无需绑定项目即可直接开聊，侧边栏支持折叠收起），面向**OPC（一人公司）**新增预设专家角色库与一键团队模板，支持在输入框内直接选择或创建Agent角色；默认上下文拉满至模型最高窗口（主流约100万token），并修复了Windows端停止后重发失败、MiniMax自定义连接异常与三方中转站流式卡顿等问题。
 
 > [!IMPORTANT]
 > 安装包还没有apple developer id签名和公证，也没有windows authenticode签名。mac第一次打开被拦下时，到“系统设置→隐私与安全性”里点“仍要打开”；windows的smartscreen提示选“仍要运行”。下载后请用release里的`SHA256SUMS`核对文件。1.0的数据目录和0.2.x分开，装新版不会动旧版的数据。
@@ -125,15 +127,15 @@ Xora Code是一个三平台（macos、windows、linux）的agent编程桌面。�
 
 ### 下载
 
-从[v1.3.0 release](https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.3.0)下载对应的安装包：
+从[v1.4.0 release](https://github.com/WhiteNightShadow/xora-code/releases/tag/v1.4.0)下载对应的安装包：
 
 | 系统 | 安装包 |
 | --- | --- |
-| macos（apple芯片） | `Xora.Code-1.3.0-mac-arm64.dmg`（或`.zip`） |
-| macos（intel） | `Xora.Code-1.3.0-mac-x64.dmg`（或`.zip`） |
-| windows x64 / arm64 | `Xora.Code-1.3.0-win-x64.exe` / `Xora.Code-1.3.0-win-arm64.exe` |
-| linux x64 | `Xora.Code-1.3.0-linux-amd64.deb`（推荐）或`Xora.Code-1.3.0-linux-x86_64.AppImage` |
-| linux arm64 | `Xora.Code-1.3.0-linux-arm64.deb`（推荐）或`Xora.Code-1.3.0-linux-arm64.AppImage` |
+| macos（apple芯片） | `Xora.Code-1.4.0-mac-arm64.dmg`（或`.zip`） |
+| macos（intel） | `Xora.Code-1.4.0-mac-x64.dmg`（或`.zip`） |
+| windows x64 / arm64 | `Xora.Code-1.4.0-win-x64.exe` / `Xora.Code-1.4.0-win-arm64.exe` |
+| linux x64 | `Xora.Code-1.4.0-linux-amd64.deb`（推荐）或`Xora.Code-1.4.0-linux-x86_64.AppImage` |
+| linux arm64 | `Xora.Code-1.4.0-linux-arm64.deb`（推荐）或`Xora.Code-1.4.0-linux-arm64.AppImage` |
 
 ```bash
 # 核对下载的文件（和SHA256SUMS放在同一个目录）
@@ -221,6 +223,7 @@ node build/readme-shots.ts --app <应用路径>              # 重新生成READM
 
 ## 版本
 
+- [v1.4.0版本说明](docs/releases/v1.4.0.md)
 - [v1.3.0版本说明](docs/releases/v1.3.0.md)
 - [v1.2.0版本说明](docs/releases/v1.2.0.md)
 - [v1.1.0版本说明](docs/releases/v1.1.0.md)

@@ -20,6 +20,7 @@ function ChangesPanel({ thread }: { thread: ThreadMeta }) {
     const selectedTurn = useApp((state) => state.reviewTurnId);
     const turnId = selectedTurn ?? [...(view?.turns ?? [])].reverse().find((turn) => turn.changes)?.turnId;
     const turn = view?.turns.find((candidate) => candidate.turnId === turnId);
+    const [compare, setCompare] = useState<'turn' | 'since'>('turn');
     const [files, setFiles] = useState<FileChange[] | undefined>();
     const [available, setAvailable] = useState(true);
     const [selected, setSelected] = useState<string | undefined>();
@@ -36,7 +37,7 @@ function ChangesPanel({ thread }: { thread: ThreadMeta }) {
         setContent(undefined);
         if (!turnId) return;
         let cancelled = false;
-        host.call('review.turn', { threadId: thread.id, turnId })
+        host.call('review.turn', { threadId: thread.id, turnId, compare })
             .then((result) => {
                 if (cancelled) return;
                 setFiles(result.files);
@@ -47,29 +48,22 @@ function ChangesPanel({ thread }: { thread: ThreadMeta }) {
         return () => {
             cancelled = true;
         };
-    }, [thread.id, turnId, reverted]);
+    }, [thread.id, turnId, compare, reverted]);
 
     useEffect(() => {
         setContent(undefined);
         if (!turnId || !selected) return;
         let cancelled = false;
-        host.call('review.file', { threadId: thread.id, turnId, path: selected })
+        host.call('review.file', { threadId: thread.id, turnId, path: selected, compare })
             .then((result) => !cancelled && setContent(result))
             .catch((error) => !cancelled && toast(errorMessage(error), 'error'));
         return () => {
             cancelled = true;
         };
-    }, [thread.id, turnId, selected]);
+    }, [thread.id, turnId, selected, compare]);
 
     if (!turnId) return <Empty>{s.review.selectTurn}</Empty>;
-    if (!files)
-        return (
-            <Empty>
-                <Spinner />
-            </Empty>
-        );
-    if (!available) return <Empty>{s.review.unavailable}</Empty>;
-    if (files.length === 0) return <Empty>{s.review.empty}</Empty>;
+    if (!available && files !== undefined) return <Empty>{s.review.unavailable}</Empty>;
 
     const revert = async (paths?: string[]) => {
         if (!(await confirmDialog(s.review.confirmRevert))) return;
@@ -96,63 +90,98 @@ function ChangesPanel({ thread }: { thread: ThreadMeta }) {
               : file.status === 'renamed'
                 ? s.review.renamed
                 : s.review.modified;
+    const canRevert = !busy && thread.status !== 'running' && compare === 'turn';
     return (
         <div className="changes">
-            <div className="changes__actions">
-                <span>{format(s.thread.changes, { files: files.length })}</span>
-                {reverted && <Badge tone="muted">{s.thread.reverted}</Badge>}
-                <button
-                    type="button"
-                    className="button button--small"
-                    disabled={busy || thread.status === 'running'}
-                    onClick={() => void revert()}
-                >
-                    {s.review.revertTurn}
-                </button>
+            <div className="changes__scope">
+                <div className="segmented" role="tablist">
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={compare === 'turn'}
+                        className={compare === 'turn' ? 'is-active' : ''}
+                        onClick={() => setCompare('turn')}
+                    >
+                        {s.review.scopeTurn}
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={compare === 'since'}
+                        className={compare === 'since' ? 'is-active' : ''}
+                        onClick={() => setCompare('since')}
+                    >
+                        {s.review.scopeSince}
+                    </button>
+                </div>
             </div>
-            <ul className="changes__files">
-                {files.map((file) => (
-                    <li key={file.path}>
+            {!files ? (
+                <Empty>
+                    <Spinner />
+                </Empty>
+            ) : files.length === 0 ? (
+                <Empty>{compare === 'since' ? s.review.emptySince : s.review.empty}</Empty>
+            ) : (
+                <>
+                    <div className="changes__actions">
+                        <span>{format(s.thread.changes, { files: files.length })}</span>
+                        {reverted && <Badge tone="muted">{s.thread.reverted}</Badge>}
                         <button
                             type="button"
-                            className={`changes__file${selected === file.path ? ' is-selected' : ''}`}
-                            onClick={() => setSelected(file.path)}
+                            className="button button--small"
+                            disabled={!canRevert}
+                            title={compare === 'since' ? s.review.revertScopeHint : undefined}
+                            onClick={() => void revert()}
                         >
-                            <span className={`changes__status changes__status--${file.status}`}>
-                                {statusLabel(file)}
-                            </span>
-                            <span className="changes__path">{file.path}</span>
-                            <span className="changes__stat">
-                                <span className="add">+{file.additions}</span>{' '}
-                                <span className="del">−{file.deletions}</span>
-                            </span>
-                        </button>
-                    </li>
-                ))}
-            </ul>
-            {selected && (
-                <div className="changes__diff">
-                    <div className="changes__diff-header">
-                        <button type="button" className="link" onClick={() => openFile(selected)}>
-                            <code>{selected}</code>
-                        </button>
-                        <button
-                            type="button"
-                            className="link"
-                            disabled={busy || thread.status === 'running'}
-                            onClick={() => void revert([selected])}
-                        >
-                            {s.review.revertFile}
+                            {s.review.revertTurn}
                         </button>
                     </div>
-                    {!content ? (
-                        <Spinner />
-                    ) : content.binary ? (
-                        <Empty>{s.review.binary}</Empty>
-                    ) : (
-                        <DiffView oldText={content.oldText} newText={content.newText} />
+                    <ul className="changes__files">
+                        {files.map((file) => (
+                            <li key={file.path}>
+                                <button
+                                    type="button"
+                                    className={`changes__file${selected === file.path ? ' is-selected' : ''}`}
+                                    onClick={() => setSelected(file.path)}
+                                >
+                                    <span className={`changes__status changes__status--${file.status}`}>
+                                        {statusLabel(file)}
+                                    </span>
+                                    <span className="changes__path">{file.path}</span>
+                                    <span className="changes__stat">
+                                        <span className="add">+{file.additions}</span>{' '}
+                                        <span className="del">−{file.deletions}</span>
+                                    </span>
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                    {selected && (
+                        <div className="changes__diff">
+                            <div className="changes__diff-header">
+                                <button type="button" className="link" onClick={() => openFile(selected)}>
+                                    <code>{selected}</code>
+                                </button>
+                                <button
+                                    type="button"
+                                    className="link"
+                                    disabled={!canRevert}
+                                    title={compare === 'since' ? s.review.revertScopeHint : undefined}
+                                    onClick={() => void revert([selected])}
+                                >
+                                    {s.review.revertFile}
+                                </button>
+                            </div>
+                            {!content ? (
+                                <Spinner />
+                            ) : content.binary ? (
+                                <Empty>{s.review.binary}</Empty>
+                            ) : (
+                                <DiffView oldText={content.oldText} newText={content.newText} />
+                            )}
+                        </div>
                     )}
-                </div>
+                </>
             )}
         </div>
     );
@@ -287,9 +316,75 @@ function PromptPanel({ thread }: { thread: ThreadMeta }) {
     );
 }
 
+const PANEL_WIDTH_KEY = 'xora.rightPanelWidth';
+
+function clampPanelWidth(width: number): number {
+    const max = Math.max(280, Math.min(920, window.innerWidth - 460));
+    return Math.round(Math.max(280, Math.min(width, max)));
+}
+
+function applyPanelWidth(width: number | undefined): void {
+    const root = document.documentElement;
+    if (width === undefined) {
+        root.style.removeProperty('--xk-right-panel-width');
+    } else {
+        root.style.setProperty('--xk-right-panel-width', `${clampPanelWidth(width)}px`);
+    }
+}
+
 export function RightPanel({ thread, panel }: { thread: ThreadMeta; panel: Panel }) {
     const s = useStrings();
     const view = useApp((state) => state.views[thread.id]);
+    const [dragging, setDragging] = useState(false);
+    useEffect(() => {
+        const stored = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+        if (Number.isFinite(stored) && stored >= 280) {
+            applyPanelWidth(stored);
+        }
+        const onResize = () => {
+            const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+            if (Number.isFinite(saved) && saved >= 280) {
+                applyPanelWidth(saved);
+            }
+        };
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, []);
+    const startResize = (downEvent: React.PointerEvent<HTMLDivElement>) => {
+        if (downEvent.button !== 0) return;
+        downEvent.preventDefault();
+        setDragging(true);
+        document.body.classList.add('is-resizing');
+        let latest = clampPanelWidth(window.innerWidth - downEvent.clientX);
+        applyPanelWidth(latest);
+        const onMove = (moveEvent: PointerEvent) => {
+            latest = clampPanelWidth(window.innerWidth - moveEvent.clientX);
+            applyPanelWidth(latest);
+        };
+        const onUp = () => {
+            setDragging(false);
+            document.body.classList.remove('is-resizing');
+            try {
+                localStorage.setItem(PANEL_WIDTH_KEY, String(latest));
+            } catch {
+                // Storage may be unavailable in restricted contexts.
+            }
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            window.removeEventListener('pointercancel', onUp);
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+    };
+    const resetWidth = () => {
+        applyPanelWidth(undefined);
+        try {
+            localStorage.removeItem(PANEL_WIDTH_KEY);
+        } catch {
+            // Ignore storage errors.
+        }
+    };
     const titles: Record<Panel, string> = {
         changes: s.panel.changes,
         plan: s.panel.plan,
@@ -304,6 +399,13 @@ export function RightPanel({ thread, panel }: { thread: ThreadMeta; panel: Panel
     const plan = view ? latestPlanOf(view.turns) : undefined;
     return (
         <aside className="right-panel" aria-label={titles[panel]}>
+            <div
+                className={`right-panel__resizer${dragging ? ' is-dragging' : ''}`}
+                aria-hidden="true"
+                title={s.panel.resize}
+                onPointerDown={startResize}
+                onDoubleClick={resetWidth}
+            />
             <div className="right-panel__header">
                 <h2>{titles[panel]}</h2>
                 <IconButton icon="x" label={s.panel.close} onClick={() => useApp.setState({ rightPanel: undefined })} />

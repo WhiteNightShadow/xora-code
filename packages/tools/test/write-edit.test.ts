@@ -76,6 +76,7 @@ describe('applyEdit', () => {
             text: 'a $&-$1 c',
             replacements: 1,
             index: 2,
+            inserted: '$&-$1',
         });
     });
 
@@ -101,19 +102,206 @@ describe('applyEdit', () => {
         expect(outcome).toMatchObject({ ok: true, text: 'one\r\nnew\r\ntwo\r\nthree\r\n' });
     });
 
-    it('explains a miss', () => {
-        const outcome = applyEdit('function f() {\n    return 1;\n}\n', {
-            oldString: 'function f() {\n  return 1;\n}',
+    it('explains a miss with what the file has there', () => {
+        const file = 'function f() {\n    const a = 1;\n    return a + 1;\n}\n';
+        const outcome = applyEdit(file, {
+            oldString: 'function f() {\n    const a = 1;\n    return a + 2;\n}',
             newString: 'x',
         });
-        expect(outcome.ok).toBe(false);
-        expect(!outcome.ok && outcome.error).toContain('oldString was not found');
-        expect(!outcome.ok && outcome.error).toContain('Its first line appears at line 1');
+        expect(outcome).toEqual({
+            ok: false,
+            error: [
+                'oldString was not found: it must be the text of the file exactly, including whitespace, indentation and line breaks.',
+                'The closest text is at lines 1-4; line 3 is the first that differs:',
+                '  in the file:  "    return a + 1;"',
+                '  in oldString: "    return a + 2;"',
+                'The file there, to copy from (without the line numbers):',
+                '     1\tfunction f() {',
+                '     2\t    const a = 1;',
+                '     3\t    return a + 1;',
+                '     4\t}',
+            ].join('\n'),
+        });
+        // One line: the line most like it.
+        const single = applyEdit('const first = 1;\nconst answer = compute(41);\n', {
+            oldString: 'const answer = compute(42);',
+            newString: 'x',
+        });
+        expect(!single.ok && single.error).toContain('The closest text is at line 2; line 2 is the first that differs');
+        const far = applyEdit('alpha\nbeta\n', { oldString: 'something else entirely', newString: 'x' });
+        expect(!far.ok && far.error).toContain('Nothing in the file comes close to it');
         const applied = applyEdit('const answer = 42;\n', {
             oldString: 'answer = 41',
             newString: 'const answer = 42;',
         });
         expect(!applied.ok && applied.error).toContain('may have been made already');
+    });
+});
+
+describe('applyEdit when oldString is not in the file exactly', () => {
+    it('ignores whitespace at the ends of lines', () => {
+        const outcome = applyEdit('a = 1  \nb = 2\nc = 3\n', { oldString: 'a = 1\nb = 2 ', newString: 'a = 1\nb = 5' });
+        expect(outcome).toMatchObject({
+            ok: true,
+            text: 'a = 1\nb = 5\nc = 3\n',
+            loose: 'ignoring whitespace at the ends of lines',
+        });
+    });
+
+    it('finds a block at another indentation and shifts the new text to it', () => {
+        const file = 'class A:\n    def f(self):\n        if x:\n            return 1\n        return 2\n';
+        const outcome = applyEdit(file, {
+            oldString: 'if x:\n    return 1\nreturn 2',
+            newString: 'if x:\n    y = 1\n    return y\nreturn 2',
+        });
+        expect(outcome).toMatchObject({
+            ok: true,
+            text: 'class A:\n    def f(self):\n        if x:\n            y = 1\n            return y\n        return 2\n',
+            loose: 'at a different indentation, and newString was shifted to the indentation of the file',
+        });
+    });
+
+    it('converts spaces to the tabs of the file, and two spaces to four', () => {
+        const tabs = applyEdit('def f():\n\tif x:\n\t\treturn 1\n\treturn 2\n', {
+            oldString: '    if x:\n        return 1',
+            newString: '    if x:\n        if y:\n            return 3',
+        });
+        expect(tabs).toMatchObject({
+            ok: true,
+            text: 'def f():\n\tif x:\n\t\tif y:\n\t\t\treturn 3\n\treturn 2\n',
+        });
+        expect(tabs.ok && tabs.loose).toContain('with a different unit of indentation');
+        const spaces = applyEdit('function f() {\n    if (x) {\n        return 1;\n    }\n}\n', {
+            oldString: 'function f() {\n  if (x) {\n    return 1;\n  }\n}',
+            newString: 'function f() {\n  if (x) {\n    return 2;\n  }\n}',
+        });
+        expect(spaces).toMatchObject({ ok: true, text: 'function f() {\n    if (x) {\n        return 2;\n    }\n}\n' });
+        // The other way round: the file has spaces, the model wrote tabs.
+        const reverse = applyEdit('a:\n  b:\n    c: 1\n', {
+            oldString: 'a:\n\tb:\n\t\tc: 1',
+            newString: 'a:\n\tb:\n\t\tc: 2',
+        });
+        expect(reverse).toMatchObject({ ok: true, text: 'a:\n  b:\n    c: 2\n' });
+    });
+
+    it('drops the line numbers copied from read output', () => {
+        const outcome = applyEdit('one\ntwo\nthree\n', {
+            oldString: '     1\tone\n     2\ttwo',
+            newString: '     1\tone\n     2\tTWO',
+        });
+        expect(outcome).toMatchObject({
+            ok: true,
+            text: 'one\nTWO\nthree\n',
+            loose: 'after dropping the line numbers copied from read output',
+        });
+        // Only the old text carries them.
+        expect(applyEdit('one\ntwo\n', { oldString: '     2\ttwo', newString: 'TWO' })).toMatchObject({
+            ok: true,
+            text: 'one\nTWO\n',
+        });
+    });
+
+    it('converts rather than shifts when one side has tabs and the other spaces, at one depth too', () => {
+        // Moving the block over would leave `\t    x += 1`: a tab from the file, then the spaces of the new text.
+        const tabs = applyEdit('def f():\n\tx = 1\n\treturn x\n', {
+            oldString: '    x = 1\n    return x',
+            newString: '    x = 1\n    if x:\n        x += 1\n    return x',
+        });
+        expect(tabs).toMatchObject({ ok: true, text: 'def f():\n\tx = 1\n\tif x:\n\t\tx += 1\n\treturn x\n' });
+        expect(tabs.ok && tabs.loose).toContain('with a different unit of indentation');
+        const spaces = applyEdit('def f():\n    x = 1\n    return x\n', {
+            oldString: '\tx = 1\n\treturn x',
+            newString: '\tx = 1\n\tif x:\n\t\tx += 1\n\treturn x',
+        });
+        expect(spaces).toMatchObject({
+            ok: true,
+            text: 'def f():\n    x = 1\n    if x:\n        x += 1\n    return x\n',
+        });
+    });
+
+    it('shifts a block of one depth as a whole, and does not halve its indentation instead', () => {
+        // Eight spaces where the file has four: every line comes four to the left, the shallower one too.
+        const shifted = applyEdit('class A:\n    x = 1\n    y = 2\n', {
+            oldString: '        x = 1\n        y = 2',
+            newString: '        x = 1\n    z = 0\n            w = 3\n        y = 2',
+        });
+        expect(shifted).toMatchObject({
+            ok: true,
+            text: 'class A:\n    x = 1\nz = 0\n        w = 3\n    y = 2\n',
+            loose: 'at a different indentation, and newString was shifted to the indentation of the file',
+        });
+        // A line that cannot come four to the left: the place does not count, at half the indentation either.
+        expect(applyEdit('a:\n    x = 1\n', { oldString: '        x = 1', newString: '  y = 2' })).toMatchObject({
+            ok: false,
+        });
+        // Nor one indented with the other character.
+        expect(applyEdit('a:\n    x = 1\n', { oldString: '        x = 1', newString: '\t\ty = 2' })).toMatchObject({
+            ok: false,
+        });
+    });
+
+    it('takes line numbers off the new text only where the old text had them', () => {
+        // Kept lines carry their numbers, the line put between them has none.
+        expect(
+            applyEdit('a\nfoo\nbar\nb\n', {
+                oldString: '     2\tfoo\n     3\tbar',
+                newString: '     2\tfoo\ninserted\n     3\tbar',
+            }),
+        ).toMatchObject({ ok: true, text: 'a\nfoo\ninserted\nbar\nb\n' });
+        // New text that begins with a number and a tab of its own keeps them.
+        expect(applyEdit('id\tname\n41\tfoo\n', { oldString: '     2\t41\tfoo', newString: '42\tfoo' })).toMatchObject({
+            ok: true,
+            text: 'id\tname\n42\tfoo\n',
+        });
+        expect(applyEdit('1\ta\n', { oldString: '     1\t1\ta', newString: '1\tb' })).toMatchObject({
+            ok: true,
+            text: '1\tb\n',
+        });
+        // A number the old text did not have, in the shape of those it had: the model's own numbering, or text.
+        const renumbered = applyEdit('a\nfoo\nbar\nb\n', {
+            oldString: '     2\tfoo\n     3\tbar',
+            newString: '     2\tfoo\n     3\tinserted\n     4\tbar',
+        });
+        expect(renumbered.ok).toBe(false);
+        expect(!renumbered.ok && renumbered.error).toContain('The closest text is at lines 2-3');
+    });
+
+    it('does not place an old text of numbered blank lines', () => {
+        const file = 'import a\n\n\ndef f():\n    pass\n\nx = 1\n';
+        expect(applyEdit(file, { oldString: '     6\t', newString: '     6\ty = 2' })).toMatchObject({ ok: false });
+    });
+
+    it('keeps the line endings of the file and the line break the old text ended with', () => {
+        const outcome = applyEdit('x\r\n  a\r\n  b\r\nc\r\n', { oldString: 'a\nb\n', newString: 'a\nB\n' });
+        expect(outcome).toMatchObject({ ok: true, text: 'x\r\n  a\r\n  B\r\nc\r\n' });
+        // One line of the block indented differently from the others is not a shift of the block.
+        expect(applyEdit('a\n  b\nc\n', { oldString: 'a\nb\n', newString: 'a\nB\n' })).toMatchObject({ ok: false });
+    });
+
+    it('takes no place when several fit, or when the new text cannot be fitted', () => {
+        const twice = applyEdit('if a:\n    x = 1\nif b:\n    x = 1\n', { oldString: 'x = 1 ', newString: 'x = 2' });
+        expect(twice).toEqual({
+            ok: false,
+            error: 'oldString is not in the file exactly, and at a different indentation it fits 2 places (starting at lines 2, 4). Include more surrounding lines, copied from the file as they are, so that only one place fits.',
+        });
+        // Three spaces for a tab cannot say how deep five spaces are.
+        const unfit = applyEdit('f:\n\ta\n\t\tb\n', { oldString: 'f:\n   a\n      b', newString: 'f:\n     c' });
+        expect(unfit.ok).toBe(false);
+        expect(!unfit.ok && unfit.error).toContain('line 2 is the first that differs');
+        expect(!unfit.ok && unfit.error).toContain('in the file:  "\\ta"');
+    });
+
+    it('replaces every occurrence only where the text is exact', () => {
+        expect(
+            applyEdit('x = 1 \nx = 1\n', { oldString: 'x = 1\n', newString: 'x = 2\n', replaceAll: true }),
+        ).toMatchObject({
+            ok: true,
+            text: 'x = 1 \nx = 2\n',
+            replacements: 1,
+        });
+        expect(applyEdit('  x = 1\n', { oldString: ' x = 1 ', newString: 'y', replaceAll: true })).toMatchObject({
+            ok: false,
+        });
     });
 });
 
@@ -249,7 +437,7 @@ describe('multi_edit', () => {
         );
         expect(result.isError).toBe(true);
         expect(result.content).toMatch(
-            /^Edit 2 of 2 failed: oldString was not found\..* No changes were written to a\.ts\.$/s,
+            /^Edit 2 of 2 failed: oldString was not found: .* No changes were written to a\.ts\.$/s,
         );
         expect(await text('a.ts')).toBe('one\ntwo\n');
     });

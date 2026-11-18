@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sameName } from '../lenient.ts';
 import type { TodoItem, ToolContext, ToolDefinition, ToolResult } from '../types.ts';
 
 const TodoInput = z.object({
@@ -55,6 +56,60 @@ export const todoTool: ToolDefinition<TodoInput> = {
     kind: 'think',
     schema: TodoInput,
     readOnly: true,
+    lenient: {
+        aliases: {
+            items: ['todos', 'todo_list', 'tasks', 'steps', 'plan', 'list'],
+            content: ['text', 'title', 'task', 'step', 'description', 'subject', 'name'],
+            status: ['state'],
+        },
+        values: {
+            status: {
+                done: 'completed',
+                complete: 'completed',
+                finished: 'completed',
+                checked: 'completed',
+                doing: 'in_progress',
+                active: 'in_progress',
+                started: 'in_progress',
+                running: 'in_progress',
+                current: 'in_progress',
+                todo: 'pending',
+                open: 'pending',
+                not_started: 'pending',
+                planned: 'pending',
+                waiting: 'pending',
+            },
+        },
+        // What other harnesses' todo tools carry besides the step and its status.
+        ignore: ['id', 'activeForm'],
+        // Cursor's `merge: true` sends only the items that changed, to be merged into the list. Taken as a whole
+        // list it would throw the others away.
+        refuse: (input) =>
+            Object.entries(input).some(
+                ([name, value]) => sameName(name, 'merge') && (value === true || value === 'true'),
+            )
+                ? 'todo always replaces the whole list and has no merge: send every item of the list, the unchanged ones too.'
+                : undefined,
+        adapt: (input) => {
+            const rest = Object.fromEntries(Object.entries(input).filter(([name]) => !sameName(name, 'merge')));
+            // A step written as plain text, or without a status, is a pending one.
+            const key = Object.keys(rest).find((name) => Array.isArray(rest[name]));
+            if (key === undefined) {
+                return rest;
+            }
+            const stated = (item: object): boolean =>
+                Object.keys(item).some((name) => sameName(name, 'status') || sameName(name, 'state'));
+            const items = (rest[key] as unknown[]).map((item) => {
+                if (typeof item === 'string') {
+                    return { content: item, status: 'pending' };
+                }
+                return item !== null && typeof item === 'object' && !stated(item)
+                    ? { ...item, status: 'pending' }
+                    : item;
+            });
+            return { ...rest, [key]: items };
+        },
+    },
     targets: () => [],
     title: (input) => `Update todos (${input.items.length})`,
     run: runTodo,

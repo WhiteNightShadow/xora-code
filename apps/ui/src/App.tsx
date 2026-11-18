@@ -12,7 +12,6 @@ import { ThreadView } from './components/ThreadView.tsx';
 import { Welcome } from './components/Welcome.tsx';
 import { WorkflowRunView } from './components/WorkflowRunView.tsx';
 import { RightPanel } from './panels/RightPanel.tsx';
-import { UsageModal } from './panels/UsageModal.tsx';
 import { SettingsModal } from './settings/SettingsModal.tsx';
 import { uiLanguage, useApp, useStrings } from './store.ts';
 
@@ -37,7 +36,6 @@ export function App() {
     const thread = useApp((state) => (state.selectedThreadId ? state.threads[state.selectedThreadId] : undefined));
     const rightPanel = useApp((state) => state.rightPanel);
     const settingsOpen = useApp((state) => state.settingsOpen);
-    const usageOpen = useApp((state) => state.usageOpen);
     const newThreadFor = useApp((state) => state.newThreadFor);
     const teamRunId = useApp((state) => state.teamRunId);
     const teamStartFor = useApp((state) => state.teamStartFor);
@@ -47,11 +45,12 @@ export function App() {
     const marketOpen = useApp((state) => state.marketOpen);
     const dispatchTo = useApp((state) => state.dispatchTo);
     const chiefOpen = useApp((state) => state.chiefOpen);
-    // With a project and a model the home is the chief assistant (06 §23); before that, the first steps.
-    const chiefHome = useApp(
-        (state) =>
-            state.projects.length > 0 &&
-            state.connections.some((connection) => connection.hasKey || connection.presetId.startsWith('local')),
+    // As soon as a model is connected, the default view is a Codex-style standalone chat (no project required).
+    const chiefHome = useApp((state) =>
+        state.connections.some(
+            (connection) =>
+                connection.hasKey || connection.presetId.startsWith('local') || connection.presetId === 'ollama',
+        ),
     );
     const runShown = Boolean(teamRunId || workflowRunId || teamsFor || membersOpen || chiefOpen);
     const splitIds = useApp((state) => state.split);
@@ -112,7 +111,6 @@ export function App() {
             </main>
             {rightPanel && thread && !runShown && <RightPanel thread={thread} panel={rightPanel} />}
             {settingsOpen && <SettingsModal section={settingsOpen} />}
-            {usageOpen && <UsageModal />}
             {teamStartFor && <TeamStartDialog projectId={teamStartFor} />}
             {dispatchTo && <DispatchDialog key={dispatchTo} memberId={dispatchTo} />}
             {!connected && <div className="banner">{s.app.disconnected}</div>}

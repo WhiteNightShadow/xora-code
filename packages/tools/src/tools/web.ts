@@ -262,6 +262,11 @@ export const webFetchTool: ToolDefinition<WebFetchInput> = {
     kind: 'fetch',
     schema: WebFetchInput,
     readOnly: false,
+    lenient: {
+        aliases: { url: ['uri', 'link', 'href', 'address'], start: ['offset', 'start_index', 'from'] },
+        // Other harnesses' fetch tools take a question for a model that reads the page; this one returns the page.
+        ignore: ['prompt', 'question', 'format'],
+    },
     targets: () => [],
     title: (input) => `Fetch ${shorten(input.url, 100)}`,
     run: runWebFetch,
@@ -502,6 +507,12 @@ export const webSearchTool: ToolDefinition<WebSearchInput> = {
     kind: 'fetch',
     schema: WebSearchInput,
     readOnly: false,
+    lenient: {
+        aliases: {
+            query: ['q', 'search', 'search_query', 'search_term', 'keywords'],
+            count: ['num_results', 'max_results', 'limit', 'top_k', 'num', 'n'],
+        },
+    },
     targets: () => [],
     title: (input) => `Search the web for ${shorten(input.query, 80)}`,
     run: runWebSearch,

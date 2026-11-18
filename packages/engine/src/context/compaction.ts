@@ -137,6 +137,8 @@ const normalise = (text: string): string => text.replace(/\s+/g, ' ').trim().toL
 
 export interface Merged {
     readonly judgments: readonly Judgment[];
+    /** Newly opened entries added during this merge, in order. */
+    readonly addedEntries: readonly Judgment[];
     /**
      * Items dropped: malformed, a placeholder, over the limit, a constraint whose quote is in no message to the model,
      * or a closing of an entry that is not open.
@@ -154,8 +156,9 @@ export function mergeJudgments(
     history: readonly Message[],
     at: number,
 ): Merged {
-    if (!delta) return { judgments, rejected: 0 };
+    if (!delta) return { judgments, addedEntries: [], rejected: 0 };
     const next = [...judgments];
+    const addedEntries: Judgment[] = [];
     let rejected = 0;
     for (const raw of delta.close) {
         const close = JudgmentClose.safeParse(raw);
@@ -198,7 +201,7 @@ export function mergeJudgments(
         open.add(normalise(text));
         added++;
         const why = addition.why && !PLACEHOLDER.test(addition.why) ? addition.why : undefined;
-        next.push({
+        const entry: Judgment = {
             id: `${ID_PREFIX[addition.kind]}${next.length + 1}`,
             kind: addition.kind,
             text,
@@ -206,9 +209,11 @@ export function mergeJudgments(
             ...(addition.kind === 'constraint' && addition.quote ? { quote: clipText(addition.quote, 300) } : {}),
             ...(addition.kind === 'decision' && why ? { why: clipText(why, 300) } : {}),
             at,
-        });
+        };
+        next.push(entry);
+        addedEntries.push(entry);
     }
-    return { judgments: next, rejected };
+    return { judgments: next, addedEntries, rejected };
 }
 
 /**
@@ -272,6 +277,8 @@ export interface Compacted {
     /** Whether the model's part made it into the state. */
     readonly judged: boolean;
     readonly rejected: number;
+    /** Entries newly added to the ledger at this compaction. */
+    readonly added: readonly Judgment[];
 }
 
 /**
@@ -337,5 +344,5 @@ export function applyCompaction(
         judgments: merged.judgments,
         narratives,
     });
-    return { before, after, state, judged, rejected: merged.rejected };
+    return { before, after, state, judged, rejected: merged.rejected, added: merged.addedEntries };
 }

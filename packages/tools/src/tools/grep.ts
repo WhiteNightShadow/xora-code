@@ -6,10 +6,19 @@ import picomatch from 'picomatch';
 import { z } from 'zod';
 import { resolveToolPath } from '../path.ts';
 import { findRipgrep } from '../ripgrep.ts';
+import { decodeFile, type TextEncoding } from '../text.ts';
 import { truncateLine } from '../truncate.ts';
 import type { ToolContext, ToolDefinition, ToolResult } from '../types.ts';
 import { walk } from '../walk.ts';
-import { describeError, displayPath, errorCode, errorResult, placeName } from './shared.ts';
+import {
+    DIRECTORY_ALIASES,
+    describeError,
+    displayPath,
+    errorCode,
+    errorResult,
+    FILE_ALIASES,
+    placeName,
+} from './shared.ts';
 
 export const GREP_DEFAULT_LIMIT = 1000;
 /** Larger files are skipped, like `rg --max-filesize 2M`. */
@@ -148,7 +157,11 @@ function withContext(lines: readonly string[], matched: readonly number[], conte
     return result;
 }
 
-async function searchFile(file: string, query: Query, regex: RegExp): Promise<FileMatches | null> {
+/**
+ * Searches one file as the text it is: in the encoding `read` shows it in and the edit tools write it in (21 §4.4),
+ * so that what is found here is what they see. `only`: nothing for a file in another encoding.
+ */
+async function searchFile(file: string, query: Query, regex: RegExp, only?: TextEncoding): Promise<FileMatches | null> {
     let bytes: Buffer;
     try {
         const stats = await stat(file);
@@ -163,8 +176,11 @@ async function searchFile(file: string, query: Query, regex: RegExp): Promise<Fi
     if (bytes.includes(0)) {
         return null;
     }
-    const text = bytes.toString('utf8');
-    const lines = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).split('\n');
+    const decoded = decodeFile(bytes);
+    if (decoded === null || (only !== undefined && decoded.encoding !== only)) {
+        return null;
+    }
+    const lines = decoded.text.split('\n');
     if (lines.at(-1) === '') {
         lines.pop();
     }
@@ -237,16 +253,22 @@ interface RipgrepMessage {
     readonly data: { readonly path?: RipgrepText; readonly lines?: RipgrepText; readonly line_number?: number };
 }
 
-const ripgrepText = (value: RipgrepText | undefined): string =>
-    value?.text ?? (value?.bytes === undefined ? '' : Buffer.from(value.bytes, 'base64').toString('utf8'));
+/** Text of ripgrep's; a line that is not UTF-8 comes as bytes, and is read like a file of them would be. */
+function ripgrepText(value: RipgrepText | undefined): string {
+    if (value?.text !== undefined || value?.bytes === undefined) {
+        return value?.text ?? '';
+    }
+    const bytes = Buffer.from(value.bytes, 'base64');
+    return decodeFile(bytes)?.text ?? bytes.toString('utf8');
+}
 
 /**
  * Runs `rg` in the search root. The `glob` filter is applied afterwards rather than passed to `rg`, because ripgrep
  * lets a `--glob` match override `.gitignore` while the JavaScript engine does not. Returns `null` when ripgrep fails
  * without results (for example on look-around, which its regex engine lacks) so the caller can fall back.
  */
-function searchWithRipgrep(rg: string, query: Query): Promise<FileMatches[] | null> {
-    const args = [...RIPGREP_ARGS];
+function searchWithRipgrep(rg: string, query: Query, extra: readonly string[] = []): Promise<FileMatches[] | null> {
+    const args = [...RIPGREP_ARGS, ...extra];
     if (query.ignoreCase) {
         args.push('--ignore-case');
     }
@@ -347,6 +369,52 @@ function searchWithRipgrep(rg: string, query: Query): Promise<FileMatches[] | nu
     });
 }
 
+/** Files looked at again in their own encoding for one search, at most. */
+const RECODED_MAX_FILES = 2000;
+
+/** Orders paths as ripgrep's `--sort=path` does: directory by directory. */
+function comparePaths(a: string, b: string): number {
+    const left = a.split(path.sep);
+    const right = b.split(path.sep);
+    for (let i = 0; i < Math.min(left.length, right.length); i++) {
+        if (left[i] !== right[i]) {
+            return (left[i] as string) < (right[i] as string) ? -1 : 1;
+        }
+    }
+    return left.length - right.length;
+}
+
+/**
+ * ripgrep reads every file as UTF-8, so a pattern with characters outside ASCII (`订单号`) finds nothing in a file
+ * that is GB18030, which `read` shows as the Chinese it is (21 §4.4). For such a pattern the files that match when
+ * read as GB18030 are searched again here, as the text they are; those that really are GB18030 take their place
+ * among the results. Patterns of ASCII alone match the bytes either way.
+ */
+async function withRecodedFiles(rg: string, query: Query, found: FileMatches[]): Promise<FileMatches[]> {
+    const lines = found.reduce((sum, file) => sum + file.lines.length, 0);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the range of ASCII is what this asks about
+    if (query.regex === null || /^[\x00-\x7f]*$/.test(query.pattern) || enough(query, found.length, lines)) {
+        return found;
+    }
+    const candidates = await searchWithRipgrep(rg, { ...query, mode: 'files_with_matches' }, ['--encoding=gb18030']);
+    if (candidates === null || candidates.length === 0) {
+        return found;
+    }
+    const byPath = new Map(found.map((file) => [file.path, file]));
+    let changed = false;
+    for (const candidate of candidates.slice(0, RECODED_MAX_FILES)) {
+        if (query.signal.aborted) {
+            break;
+        }
+        const recoded = await searchFile(candidate.path, query, query.regex, 'gb18030');
+        if (recoded !== null) {
+            byPath.set(recoded.path, recoded);
+            changed = true;
+        }
+    }
+    return changed ? [...byPath.values()].sort((a, b) => comparePaths(a.path, b.path)) : found;
+}
+
 async function modifiedAt(file: string): Promise<number> {
     try {
         return (await stat(file)).mtimeMs;
@@ -417,7 +485,15 @@ async function formatResults(files: FileMatches[], query: Query, cwd: string, sh
         }
         note = `(Showing the first ${query.limit} lines; there are more matches.)`;
     }
+    const allLines = lines;
     const kept = fitLines(lines, MAX_OUTPUT_CHARS);
+    const fullContent =
+        kept < allLines.length
+            ? [
+                  ...allLines,
+                  ...(truncated ? ['', `${note} Narrow the search with path, glob or a more specific pattern.`] : []),
+              ].join('\n')
+            : undefined;
     if (kept < lines.length) {
         lines = lines.slice(0, kept);
         truncated = true;
@@ -428,6 +504,7 @@ async function formatResults(files: FileMatches[], query: Query, cwd: string, sh
     }
     return {
         content: lines.join('\n'),
+        ...(fullContent !== undefined ? { fullContent } : {}),
         display: { kind: 'matches', count: total, files: files.length, truncated },
     };
 }
@@ -478,6 +555,9 @@ export function createGrepTool(options: GrepToolOptions = {}): ToolDefinition<Gr
             const rg = isFile ? null : ripgrep === 'auto' ? await findRipgrep() : ripgrep || null;
             if (rg !== null) {
                 files = await searchWithRipgrep(rg, query);
+                if (files !== null) {
+                    files = await withRecodedFiles(rg, query, files);
+                }
             }
             if (files === null) {
                 if (query.regex === null) {
@@ -506,6 +586,26 @@ export function createGrepTool(options: GrepToolOptions = {}): ToolDefinition<Gr
         kind: 'search',
         schema: GrepInput,
         readOnly: true,
+        lenient: {
+            aliases: {
+                pattern: ['regex', 'regexp', 'query', 'search', 'search_pattern', 'search_term'],
+                path: [...DIRECTORY_ALIASES, ...FILE_ALIASES, 'search_path'],
+                glob: ['include', 'include_pattern', 'file_pattern', 'file_glob', 'files'],
+                ignoreCase: ['case_insensitive', 'insensitive', 'nocase', '-i', 'i'],
+                outputMode: ['mode', 'output'],
+                context: ['context_lines', 'lines_of_context', '-C', 'C'],
+                headLimit: ['limit', 'max_results', 'max_count', 'max_matches'],
+            },
+            values: {
+                outputMode: {
+                    files: 'files_with_matches',
+                    filenames: 'files_with_matches',
+                    lines: 'content',
+                    matches: 'content',
+                    counts: 'count',
+                },
+            },
+        },
         targets: (input, ctx) => [resolveToolPath(ctx.cwd, input.path ?? '.')],
         title: (input) => `Search /${input.pattern}/${input.path === undefined ? '' : ` in ${input.path}`}`,
         run,

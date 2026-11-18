@@ -1,5 +1,5 @@
 import { buildAnthropicBody, parseAnthropicStream } from './anthropic.ts';
-import { endpointFor, findModel, operationUrl, resolveQuirks } from './catalog.ts';
+import { alternateOperationUrl, endpointFor, findModel, operationUrl, resolveQuirks } from './catalog.ts';
 import { classifyError, ProviderError, requestIdFrom } from './errors.ts';
 import { buildHeaders, Exchange } from './http.ts';
 import { isRecord, parseJson } from './json.ts';
@@ -10,11 +10,15 @@ import { Clock, type WireContext } from './wire.ts';
 
 /** Largest error body kept for classification and messages. */
 const MAX_ERROR_BODY = 64 * 1024;
+/** Endpoints that rejected `stream_options` once; remembered so later turns skip it immediately. */
+const streamUsageRejected = new Set<string>();
+/** Endpoints where `/v1` vs bare path was resolved after a 404; remembered for subsequent calls. */
+const alternatePathResolved = new Map<string, string>();
 
 /**
  * Streams one model call. Yields `start` once the vendor accepted the request, then deltas, then `done`; every
- * failure is thrown as a {@link ProviderError}. The caller's `signal` cancels the call (`cancelled`) and the idle
- * timeout (default 300 s, restarted by any received byte including keep-alive comments) ends it (`timeout`).
+ * failure is thrown as a {@link ProviderError}. The caller's `signal` cancels the call (`cancelled`) and the first-byte
+ * / mid-stream idle timeouts (default 180 s until first body chunk, then 45 s between chunks) end stalls (`timeout`).
  */
 export async function* streamModel(
     connection: ProviderConnection,
@@ -23,10 +27,12 @@ export async function* streamModel(
 ): AsyncGenerator<ModelEvent> {
     const endpoint = endpointFor(connection);
     const model = findModel(connection, request.model);
-    const quirks = resolveQuirks(connection.preset, model);
-    const context: WireContext = { preset: connection.preset, model, quirks, request };
+    const baseQuirks = resolveQuirks(connection.preset, model);
     const anthropic = endpoint.wire === 'anthropic_messages';
-    const body = anthropic ? buildAnthropicBody(context) : buildOpenAiChatBody(context);
+    const quirks =
+        !anthropic && streamUsageRejected.has(endpoint.baseUrl) ? { ...baseQuirks, streamUsage: false } : baseQuirks;
+    const context: WireContext = { preset: connection.preset, model, quirks, request };
+    let body = anthropic ? buildAnthropicBody(context) : buildOpenAiChatBody(context);
     const headers = buildHeaders(connection, quirks, endpoint.wire, {
         accept: 'text/event-stream',
         json: true,
@@ -36,14 +42,45 @@ export async function* streamModel(
     const clock = new Clock();
     const exchange = new Exchange(provider, options);
     try {
-        const response = await exchange.fetch(operationUrl(endpoint, 'generate'), {
+        const primaryUrl = alternatePathResolved.get(endpoint.baseUrl) ?? operationUrl(endpoint, 'generate');
+        let response = await exchange.fetch(primaryUrl, {
             method: 'POST',
             headers,
             body: JSON.stringify(body),
         });
+        if (response.status === 404 && (connection.preset.channel === 'custom' || Boolean(connection.baseUrl))) {
+            const altUrl = alternateOperationUrl(endpoint, 'generate');
+            if (altUrl && altUrl !== primaryUrl) {
+                await exchange.text(response).catch(() => '');
+                const retried = await exchange.fetch(altUrl, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(body),
+                });
+                if (retried.status !== 404) {
+                    alternatePathResolved.set(endpoint.baseUrl, altUrl);
+                    response = retried;
+                }
+            }
+        }
+        let errorText: string | undefined;
+        if (!anthropic && response.status === 400 && body.stream_options !== undefined) {
+            errorText = (await exchange.text(response)).slice(0, MAX_ERROR_BODY);
+            if (/stream_options|include_usage/i.test(errorText)) {
+                streamUsageRejected.add(endpoint.baseUrl);
+                const { stream_options: _dropped, ...withoutStreamUsage } = body;
+                body = withoutStreamUsage;
+                errorText = undefined;
+                response = await exchange.fetch(alternatePathResolved.get(endpoint.baseUrl) ?? primaryUrl, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(body),
+                });
+            }
+        }
         const requestId = requestIdFrom(response.headers);
         if (!response.ok) {
-            const text = (await exchange.text(response)).slice(0, MAX_ERROR_BODY);
+            const text = errorText ?? (await exchange.text(response)).slice(0, MAX_ERROR_BODY);
             throw classifyError({
                 provider,
                 status: response.status,

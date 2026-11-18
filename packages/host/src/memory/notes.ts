@@ -50,14 +50,20 @@ export function recentNotes(text: string, limit: number): { text: string; omitte
     return { text: kept.join('\n').trim(), omitted: true };
 }
 
-/** The words of a query, and the two-character pieces of Chinese words, which are written without spaces. */
+/** The words of a query, and the two-character pieces of Chinese runs without cutting mixed Latin tokens apart. */
 export function queryTerms(query: string): string[] {
     const terms = new Set<string>();
     for (const word of query.toLowerCase().split(/[\s,，、。;；:：/]+/)) {
         if (!word) continue;
         terms.add(word);
-        if (/[\u3400-\u9fff]/.test(word) && word.length > 2) {
-            for (let index = 0; index + 2 <= word.length; index++) terms.add(word.slice(index, index + 2));
+        for (const latin of word.match(/[a-z0-9_.-]{2,}/g) ?? []) {
+            terms.add(latin);
+        }
+        for (const cjk of word.match(/[\u3400-\u9fff]+/g) ?? []) {
+            if (cjk.length >= 2) terms.add(cjk);
+            for (let index = 0; index + 2 <= cjk.length; index++) {
+                terms.add(cjk.slice(index, index + 2));
+            }
         }
     }
     return [...terms];

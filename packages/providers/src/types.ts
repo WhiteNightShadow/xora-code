@@ -261,6 +261,12 @@ export interface StreamOptions {
     readonly fetch?: typeof fetch;
     /** Truthful client identifier, e.g. `XoraCode/1.0.0`. Never impersonates another client. */
     readonly userAgent?: string;
-    /** Abort when no byte arrives for this long. */
+    /**
+     * Abort when connection setup, response headers, or waiting for the first body chunk takes longer than this
+     * (default 180 s). Reasoning models behind reverse proxies often flush `200 OK` headers immediately and stay
+     * silent until thinking finishes, so this window stays active until the first body byte arrives.
+     */
+    readonly firstByteTimeoutMs?: number;
+    /** Abort when an active stream stalls between chunks for this long (default 45 s once body bytes flow). */
     readonly idleTimeoutMs?: number;
 }

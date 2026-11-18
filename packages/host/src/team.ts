@@ -209,9 +209,6 @@ const CARRIED = 'the uncommitted changes of the project';
 /** 06 §29: a stage that moved forward goes to the supervisor on the side; the member does not wait for it. */
 const STAGE_REPORT = 'Stage report of';
 
-/** Context window of the run's threads (06 §29): pruned from about 77k tokens on, compacted from about 100k. */
-const TEAM_CONTEXT_WINDOW = 160_000;
-
 /** Times a hands-off run that is stuck gives its supervisor a turn to change the plan before it ends (06 §29). */
 const MAX_WRAP_ASKS = 2;
 
@@ -826,6 +823,19 @@ function forcedEscalation(tier: Tier): EscalationDecision {
     return to
         ? { action: 'escalate', from: tier, to, reason: 'requested' }
         : { action: 'supervisor', reason: 'requested' };
+}
+
+/**
+ * What makes a tool call "the same call" to the watch (06 §20): the tool and its input. Nothing for a call that is
+ * the same each time by design and no circle: waiting for a job that still runs (21 §4.3) — a build of ten minutes
+ * is three waits. Checking on a job that has ended, again and again, is a circle like any other.
+ */
+export function watchSignature(item: ItemOf<'tool_call'>): string | undefined {
+    const waiting = item.display?.kind === 'command' && item.display.background?.running === true;
+    if (waiting && item.name === 'bash_output') {
+        return undefined;
+    }
+    return `${item.name ?? item.title}\u0000${JSON.stringify(item.input ?? null)}`;
 }
 
 /** One executor step for a watch report: the tool, its input in short, how it ended. */
@@ -1954,9 +1964,8 @@ export class TeamService {
             mcpTools: mcpToolsOf(agent),
             layers: systemLayers(staffed(state.host), agent),
             highRiskApproval: true,
-            // 06 §29: planning is the critical path, and the run's threads keep a smaller context.
+            // 06 §29: planning is the critical path; threads use their model's full supported context window.
             maxTurnRequests: () => (state.host.status === 'planning' ? PLAN_REQUESTS : undefined),
-            softContextWindow: TEAM_CONTEXT_WINDOW,
             handle: (name, input) => this.#supervisorTool(runId, name, input),
         });
     }
@@ -1983,7 +1992,6 @@ export class TeamService {
             highRiskApproval: true,
             // The engine stops the turn where the card's turn budget runs out.
             maxTurnRequests: () => this.#turnsLeft(state, taskId),
-            softContextWindow: TEAM_CONTEXT_WINDOW,
             handle: (name, input, signal) => this.#memberTool(runId, taskId, name, input, signal),
         });
     }
@@ -4484,9 +4492,11 @@ export class TeamService {
                 return;
             }
             const { item } = observation;
-            const signature = `${item.name ?? item.title}\u0000${JSON.stringify(item.input ?? null)}`;
-            same = signature === last ? same + 1 : 1;
-            last = signature;
+            const signature = watchSignature(item);
+            if (signature !== undefined) {
+                same = signature === last ? same + 1 : 1;
+                last = signature;
+            }
             steps.push(stepLine(item));
             if (steps.length > WATCH_STEPS) {
                 steps.shift();

@@ -197,6 +197,181 @@ describe('xora engine over ACP', () => {
         h.close();
     });
 
+    it('takes a call as the model meant it, and says what it could not take', async () => {
+        server.reset();
+        const results: string[] = [];
+        const calls = [
+            // Another harness's name for the tool and its parameters, a number as text, null, a trailing comma.
+            { name: 'Read', arguments: '{"file_path":"a.txt","offset":"1","limit":null,}' },
+            // A parameter the tool does not have, on a call that would change a file.
+            { name: 'write', arguments: JSON.stringify({ file_path: 'b.txt', content: 'beta\n', append: true }) },
+            // The same on a call that only reads.
+            { name: 'read', arguments: JSON.stringify({ path: 'a.txt', encoding: 'utf8' }) },
+            { name: 'deploy', arguments: '{}' },
+            { name: 'read', arguments: '{"path":"a.txt","offset":"two"}' },
+            // A list to be merged into the one there is, which the tool would take for the whole list.
+            { name: 'TodoWrite', arguments: '{"merge":true,"todos":[{"id":"2","content":"Fix","status":"done"}]}' },
+            // Stopping a job is not asked about, but it does not run on a guess either.
+            { name: 'bash_kill', arguments: '{"jobId":"job-1","signal":"SIGINT"}' },
+        ];
+        let sent: Array<{ role: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }> = [];
+        server.respondWith((request) => {
+            const messages = (request.body as { messages: Array<{ role: string; content: unknown }> }).messages;
+            sent = messages;
+            const last = messages.at(-1);
+            if (last?.role === 'tool') {
+                results.push(typeof last.content === 'string' ? last.content : JSON.stringify(last.content));
+            }
+            const call = calls[results.length];
+            return call ? openaiToolCalls([call]) : openaiText('done');
+        });
+        const dir = workspace();
+        const h = harness();
+        const sessionId = await newSession(h, dir);
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'go' }] });
+
+        // What ran stands in the history as it ran, for the ledger, the provider and the model's next call; what
+        // was refused stays as it was sent.
+        const made = sent.flatMap((message) => message.tool_calls ?? []).map((call) => call.function);
+        expect(made[0]).toEqual({ name: 'read', arguments: '{"path":"a.txt","offset":1}' });
+        expect(made[1]).toEqual(calls[1]);
+        expect(made[2]).toEqual({ name: 'read', arguments: '{"path":"a.txt"}' });
+        expect(made[3]).toEqual(calls[3]);
+        expect(made[5]).toEqual(calls[5]);
+
+        expect(results[0]).toContain('alpha');
+        expect(results[0]).not.toContain('has no parameter');
+        const started = h.updates.find((update) => update.sessionUpdate === 'tool_call');
+        expect((started?._meta as { xora?: { name?: string } } | undefined)?.xora?.name).toBe('read');
+
+        expect(results[1]).toBe(
+            'write has no parameter "append"; its parameters are: path (required), content (required). Nothing was done: send the call again with these.',
+        );
+        expect(existsSync(path.join(dir, 'b.txt'))).toBe(false);
+        expect(h.permissions).toHaveLength(0);
+
+        expect(results[2]).toContain('alpha');
+        expect(results[2]).toContain(
+            '(read has no parameter "encoding"; its parameters are: path (required), offset, limit. The call ran without it.)',
+        );
+        expect(results[3]).toMatch(/^Unknown tool "deploy"\. The tools are: read, list, glob, grep, /);
+        expect(results[4]).toMatch(/^Invalid arguments for read: offset: .+\. Parameters of read: path \(required\), /);
+        expect(results[5]).toBe(
+            'Invalid arguments for todo: todo always replaces the whole list and has no merge: send every item of the list, the unchanged ones too.',
+        );
+        expect(h.updates.some((update) => update.sessionUpdate === 'plan')).toBe(false);
+        expect(results[6]).toBe(
+            'bash_kill has no parameter "signal"; its parameters are: jobId (required). Nothing was done: send the call again with these.',
+        );
+        h.close();
+    });
+
+    it('stops a job without asking, in its turn among the calls of a reply', async () => {
+        server.reset();
+        const results: string[] = [];
+        const replies = [
+            [{ name: 'bash', arguments: JSON.stringify({ command: 'sleep 30', background: true }) }],
+            // Stop it and look at what it left behind, in one reply: the look comes after the stop.
+            [
+                { name: 'read', arguments: JSON.stringify({ path: 'a.txt' }) },
+                { name: 'bash_kill', arguments: JSON.stringify({ jobId: 'job-1' }) },
+                { name: 'bash_output', arguments: JSON.stringify({ jobId: 'job-1' }) },
+            ],
+        ];
+        let reply = 0;
+        server.respondWith((request) => {
+            const messages = (request.body as { messages: Array<{ role: string; content: unknown }> }).messages;
+            results.length = 0;
+            for (const message of messages) {
+                if (message.role === 'tool') {
+                    results.push(
+                        typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+                    );
+                }
+            }
+            const calls = replies[reply++];
+            return calls ? openaiToolCalls(calls) : openaiText('done');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace());
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'go' }] });
+        // Only the command was asked about.
+        expect(h.permissions.map((request) => (request._meta as { xora: { toolName: string } }).xora.toolName)).toEqual(
+            ['bash'],
+        );
+        expect(results[1]).toContain('alpha');
+        expect(results[2]).toBe('Stopped job job-1.');
+        expect(results[3]).toMatch(/^Job job-1 was stopped with bash_kill after /);
+        h.close();
+    });
+
+    it('does not let a file be replaced that the model has not read, or that changed since', async () => {
+        server.reset();
+        const results: string[] = [];
+        const dir = workspace();
+        const write = { name: 'write', arguments: JSON.stringify({ path: 'a.txt', content: 'mine\n' }) };
+        const read = { name: 'read', arguments: JSON.stringify({ path: 'a.txt' }) };
+        const calls = [write, read, write, write];
+        server.respondWith((request) => {
+            const messages = (request.body as { messages: Array<{ role: string; content: unknown }> }).messages;
+            const last = messages.at(-1);
+            if (last?.role === 'tool') {
+                results.push(typeof last.content === 'string' ? last.content : JSON.stringify(last.content));
+            }
+            // Before the last write someone else changes the file.
+            if (results.length === 3) {
+                writeFileSync(path.join(dir, 'a.txt'), 'theirs, later\n');
+            }
+            const call = calls[results.length];
+            return call ? openaiToolCalls([call]) : openaiText('done');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, dir);
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'go' }] });
+        expect(results[0]).toContain('a.txt exists and you have not read it in this session');
+        expect(results[1]).toContain('alpha');
+        expect(results[2]).toBe('Replaced the content of a.txt (1 line).');
+        expect(results[3]).toContain('a.txt has changed since you last read it');
+        expect(readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('theirs, later\n');
+        h.close();
+    });
+
+    it('tells a model that it is repeating itself, the third time the same call brings the same result', async () => {
+        server.reset();
+        const results: string[] = [];
+        // Six times the same read, a different one in between, and a job polled three times as it goes on.
+        const read = { name: 'read', arguments: JSON.stringify({ path: 'a.txt' }) };
+        const calls = [
+            read,
+            read,
+            read,
+            read,
+            { name: 'read', arguments: '{"path":"a.txt","limit":1}' },
+            read,
+            read,
+            read,
+        ];
+        server.respondWith((request) => {
+            const messages = (request.body as { messages: Array<{ role: string; content: unknown }> }).messages;
+            const last = messages.at(-1);
+            if (last?.role === 'tool') {
+                results.push(typeof last.content === 'string' ? last.content : JSON.stringify(last.content));
+            }
+            const call = calls[results.length];
+            return call ? openaiToolCalls([call]) : openaiText('done');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace());
+        await h.client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'go' }] });
+        const reminded = results.map((result) => result.includes('exactly this read call'));
+        expect(reminded).toEqual([false, false, true, false, false, false, false, true]);
+        expect(results[2]).toContain('3 times in a row');
+        // The user sees the call's result, not the reminder.
+        const shown = h.updates.filter((update) => update.sessionUpdate === 'tool_call_update');
+        expect(JSON.stringify(shown)).not.toContain('times in a row');
+        h.close();
+    });
+
     it('offers the web tools and asks before a fetch, naming its address', async () => {
         server.reset();
         server.respondWith((request) =>
@@ -551,6 +726,31 @@ describe('xora engine over ACP', () => {
         h.close();
     }, 60_000);
 
+    it('switches immediately to a fallback model when the primary model hits quota exhaustion', async () => {
+        server.reset();
+        server.respondWith((request) => {
+            const body = request.body as { model?: string };
+            if (body.model === 'mock-model') {
+                return errorTurn(429, { error: { message: '已达到 Token Plan 用量上限', code: '2056' } });
+            }
+            return openaiText('handled by backup');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, workspace(), {
+            fallbacks: [
+                { connection: { presetId: 'custom-openai', apiKey: 'k', baseUrl: server.url }, model: 'backup-model' },
+            ],
+        });
+        const done = await h.client.request('session/prompt', {
+            sessionId,
+            prompt: [{ type: 'text', text: 'go' }],
+        });
+        expect(done.stopReason).toBe('end_turn');
+        expect(server.requests.filter((r) => (r.body as { model?: string }).model === 'mock-model')).toHaveLength(1);
+        expect(server.requests.filter((r) => (r.body as { model?: string }).model === 'backup-model')).toHaveLength(1);
+        h.close();
+    });
+
     it('gives back an earlier tool output by its reference', async () => {
         server.reset();
         let step = 0;
@@ -868,5 +1068,56 @@ describe('rewind and fork', () => {
         expect(texts).not.toContain('second try');
         expect(texts).not.toContain('after restart');
         again.close();
+    });
+});
+
+describe('cancel then follow-up prompt', () => {
+    it('closes a cancelled turn cleanly so the next message never hits consecutive bare user or dangling tool messages', async () => {
+        const cwd = workspace();
+        server.reset();
+        let callCount = 0;
+        server.respondWith(() => {
+            callCount++;
+            if (callCount === 1) {
+                return openaiToolCalls([{ name: 'bash', arguments: JSON.stringify({ command: 'sleep 10' }) }]);
+            }
+            return openaiText('recovered after stop');
+        });
+        const h = harness();
+        const sessionId = await newSession(h, cwd);
+        const firstTurn = h.client.request('session/prompt', {
+            sessionId,
+            prompt: [{ type: 'text', text: 'run a slow command' }],
+            _meta: { xora: { turnId: 't-stop' } },
+        });
+        // Cancel once the bash tool call has started.
+        await new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+                if (h.updates.some((update) => update.sessionUpdate === 'tool_call')) {
+                    clearInterval(check);
+                    resolve();
+                }
+            }, 15);
+        });
+        await h.client.notify('session/cancel', { sessionId });
+        const stopped = await firstTurn;
+        expect(stopped.stopReason).toBe('cancelled');
+
+        // Send a follow-up right away in the same session.
+        const second = await h.client.request('session/prompt', {
+            sessionId,
+            prompt: [{ type: 'text', text: 'now say hello' }],
+            _meta: { xora: { turnId: 't-next' } },
+        });
+        expect(second.stopReason).toBe('end_turn');
+        const roles = (
+            (server.requests.at(-1)?.body as { messages?: Array<{ role: string }> } | undefined)?.messages ?? []
+        ).map((m) => m.role);
+        // Never ends on two consecutive user messages or a tool message followed directly by user without assistant closure.
+        for (let i = 1; i < roles.length; i++) {
+            expect(`${roles[i - 1]}->${roles[i]}`).not.toBe('user->user');
+            expect(`${roles[i - 1]}->${roles[i]}`).not.toBe('tool->user');
+        }
+        h.close();
     });
 });

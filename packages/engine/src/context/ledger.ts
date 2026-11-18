@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { Message } from '@xora/providers';
-import { clipText, renderTodos, type TodoItem } from '../deps.ts';
+import { backgroundJobOf, clipText, jobStateIn, renderTodos, type TodoItem } from '../deps.ts';
 import { argsOf, callsOf, describeCall, notableLine, refOf } from './outputs.ts';
 import { clipTokens, estimateTokens, messageText, userWords } from './tokens.ts';
 
@@ -46,11 +46,16 @@ export interface FileState {
 }
 
 export interface CallState {
+    /** History index of the result that says how the call went: for a command left running, the latest word of its job. */
     readonly index: number;
     /** The tool and what it worked on, or the command. */
     readonly what: string;
     readonly ok: boolean;
     readonly line: string;
+    /** A command that runs on as this job: its result was its output so far, and how it ends is not known yet. */
+    readonly job?: string;
+    /** A command whose job was stopped on request: it neither succeeded nor failed. */
+    readonly stopped?: boolean;
 }
 
 export interface Observed {
@@ -70,8 +75,8 @@ export interface Observed {
 
 const FILE_READERS = new Set(['read', 'lsp']);
 const FILE_WRITERS = new Set(['edit', 'multi_edit', 'write']);
-/** Tools the ledger shows elsewhere (the plan) or that only read what is already in it. */
-const UNLISTED = new Set(['todo', 'tool_output', 'bash_output']);
+/** Tools the ledger shows elsewhere (the plan, the command a job belongs to) or that only read what is already in it. */
+const UNLISTED = new Set(['todo', 'tool_output', 'bash_output', 'bash_kill']);
 
 /** The paths a patch names, renames included. */
 function patchPaths(patch: unknown): string[] {
@@ -92,6 +97,8 @@ export function observe(history: readonly Message[], from = 0, cwd?: string): Ob
     const commands: CallState[] = [];
     const others: CallState[] = [];
     const failing = new Map<string, CallState>();
+    /** The commands that run on as jobs, by job: where each is in `commands`, and what a failure of it is filed under. */
+    const running = new Map<string, { readonly at: number; readonly what: string }>();
     let lastReply: number | undefined;
     const shown = (file: string): string => {
         if (!cwd) return file;
@@ -132,10 +139,29 @@ export function observe(history: readonly Message[], from = 0, cwd?: string): Ob
         if (!failed && file && FILE_READERS.has(name)) touch(file, index, false);
         if (!failed && file && FILE_WRITERS.has(name)) touch(file, index, true);
         if (!failed && name === 'apply_patch') for (const item of patchPaths(args.patch)) touch(item, index, true);
-        const line = notableLine(messageText(message), failed);
+        const text = messageText(message);
+        const line = notableLine(text, failed);
         const what = `${name} ${describeCall(call)}`.trim();
+        // A command left running has no outcome yet: the call that checks on its job, or stops it, brings it, and
+        // the record of the command follows (a test run that fails after it went to the background has failed).
+        const ofJob = (name === 'bash_output' || name === 'bash_kill') && typeof args.jobId === 'string';
+        const started = ofJob ? running.get(args.jobId as string) : undefined;
+        const state = started ? jobStateIn(text) : undefined;
+        if (started && state) {
+            if (state !== 'running') {
+                const command = commands[started.at];
+                const ended = { index, what: command?.what ?? started.what, ok: !failed, line };
+                commands[started.at] = state === 'stopped' ? { ...ended, stopped: true } : ended;
+                running.delete(args.jobId as string);
+                failing.delete(started.what);
+                if (failed) failing.set(started.what, { index, what: started.what, ok: false, line });
+            }
+            continue;
+        }
         if (name === 'bash' && typeof args.command === 'string') {
-            commands.push({ index, what: args.command, ok: !failed, line });
+            const job = failed ? undefined : backgroundJobOf(text);
+            commands.push({ index, what: args.command, ok: !failed, line, ...(job ? { job } : {}) });
+            if (job) running.set(job, { at: commands.length - 1, what });
         } else if (
             !FILE_READERS.has(name) &&
             !FILE_WRITERS.has(name) &&
@@ -190,7 +216,14 @@ function clip(text: string, limit: number): string {
 }
 
 function callLine(call: CallState): string {
-    return `- #${refOf(call.index)} \`${clip(call.what, 160)}\` → ${call.ok ? 'ok' : 'failed'}${call.line ? ` · ${call.line}` : ''}`;
+    const outcome = call.job
+        ? `running on as ${call.job}, no result yet`
+        : call.stopped
+          ? 'stopped'
+          : call.ok
+            ? 'ok'
+            : 'failed';
+    return `- #${refOf(call.index)} \`${clip(call.what, 160)}\` → ${outcome}${call.line ? ` · ${call.line}` : ''}`;
 }
 
 /**

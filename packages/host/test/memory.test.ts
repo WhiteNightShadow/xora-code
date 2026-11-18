@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ThreadMeta } from '@xora/protocol';
 import { type MockModelServer, startMockModelServer } from '@xora/test-kit';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { MEMORY_FILE_CHARS, placeNote } from '../src/memory/notes.ts';
+import { MEMORY_FILE_CHARS, placeNote, queryTerms } from '../src/memory/notes.ts';
 import { sharesMemory } from '../src/memory/service.ts';
 import {
     buildEngine,
@@ -81,6 +81,14 @@ describe('notes in a file', () => {
         expect(placed.lines.at(-1)).toBe(`- [2026-11-11] ${note}`);
         expect(placed.lines.join('\n').length).toBeLessThanOrEqual(MEMORY_FILE_CHARS);
         expect(placed.lines.some((line) => line.includes('构建用 pnpm'))).toBe(false);
+    });
+
+    it('splits mixed Latin and CJK queries cleanly without 2-char ASCII noise', () => {
+        const terms = queryTerms('iOS证书构建 deploy.sh');
+        expect(terms).toEqual(expect.arrayContaining(['ios', '证书', '构建', 'deploy.sh']));
+        expect(terms).not.toContain('io');
+        expect(terms).not.toContain('os');
+        expect(terms).not.toContain('s证');
     });
 });
 
@@ -219,5 +227,144 @@ describe('memory of the user’s own threads', () => {
             { query: 'deploy.sh' },
         );
         expect(own.content).not.toContain('以前的对话里提到过');
+    }, 60_000);
+
+    it('indexes memory files in SQLite FTS5 with BM25 + recency hybrid ranking and syncs external file edits', async () => {
+        const { core, dataDir, project } = await setUp();
+        const shared = path.join(dataDir, 'orgs', 'default', 'memory', `${project.id}.md`);
+        mkdirSync(path.dirname(shared), { recursive: true });
+        writeFileSync(
+            shared,
+            `${[
+                `- [${project.name} 2025-01-10] 数据库迁移脚本要先备份 wal 文件`,
+                `- [${project.name} 2026-11-12] 数据库迁移脚本在 packages/storage/src/migrations.ts，只增不删`,
+                `- [${project.name} 2026-11-01] WebSocket 重连统一走 useWebSocketReconnect hook`,
+            ].join('\n')}\n`,
+        );
+
+        // Fresh 2026 note ranks ahead of stale 2025 note with identical query term hits.
+        const ranked = await core.memory.handleFor({ kind: 'user', projectId: project.id }, 'recall', {
+            query: '数据库迁移脚本',
+        });
+        const firstIdx = ranked.content.indexOf('2026-11-12');
+        const secondIdx = ranked.content.indexOf('2025-01-10');
+        expect(firstIdx).toBeGreaterThan(-1);
+        expect(secondIdx).toBeGreaterThan(firstIdx);
+
+        // Specific identifier hits via FTS5 trigram BM25.
+        const exact = await core.memory.handleFor({ kind: 'user', projectId: project.id }, 'recall', {
+            query: 'useWebSocketReconnect',
+        });
+        expect(exact.content).toContain('useWebSocketReconnect hook');
+
+        // External edit on disk is picked up automatically by mtime/size check.
+        writeFileSync(shared, `- [${project.name} 2026-11-15] Electron 退出必须先 await before-quit 再关 SQLite\n`);
+        const updated = await core.memory.handleFor({ kind: 'user', projectId: project.id }, 'recall', {
+            query: 'before-quit',
+        });
+        expect(updated.content).toContain('await before-quit');
+
+        const removedOld = await core.memory.handleFor({ kind: 'user', projectId: project.id }, 'recall', {
+            query: 'useWebSocketReconnect',
+        });
+        expect(removedOld.content).not.toContain('useWebSocketReconnect hook');
+
+        // Removing the file clears the FTS rows cleanly.
+        rmSync(shared);
+        const afterDelete = await core.memory.handleFor({ kind: 'user', projectId: project.id }, 'recall', {
+            query: 'before-quit',
+        });
+        expect(afterDelete.content).not.toContain('await before-quit');
+    });
+
+    it('filters memory candidates, saves confirmed candidates via memory.remember, and distills pitfalls on recovery', async () => {
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-memory-extract-'));
+        const harness = await host.start(dataDir, { modelMemory: true });
+        await connectMock(harness.ui, server);
+        const project = await harness.ui.request('project.add', { path: gitRepo() });
+        await harness.ui.request('project.trust', { projectId: project.id, trusted: true });
+
+        const thread = await harness.ui.request('thread.create', {
+            projectId: project.id,
+            mode: 'full',
+        });
+
+        // Candidate filtering drops secrets and duplicates, and memory.remember persists user-confirmed notes.
+        const saved = await harness.ui.request('memory.remember', {
+            threadId: thread.id,
+            note: 'Biome 检查禁止在 controls.css 写降级 specificity 的裸 svg 选择器',
+            scope: 'project',
+        });
+        expect(saved.outcome).toBe('noted');
+        const dup = await harness.ui.request('memory.remember', {
+            threadId: thread.id,
+            note: 'Biome 检查禁止在 controls.css 写降级 specificity 的裸 svg 选择器',
+            scope: 'project',
+        });
+        expect(dup.outcome).toBe('already');
+
+        const filtered = harness.core.memory.filterCandidates(thread, [
+            { id: '1', note: 'Biome 检查禁止在 controls.css 写降级 specificity 的裸 svg 选择器', scope: 'project' },
+            { id: '2', note: '密钥是 sk-proj-abcdefghijklmnopqrstuvwx', scope: 'project' },
+            { id: '3', note: '测试需要加 --pool=forks 避免 sqlite 句柄冲突', scope: 'project', kind: 'deadend' },
+        ]);
+        expect(filtered).toEqual([
+            {
+                id: '3',
+                note: '测试需要加 --pool=forks 避免 sqlite 句柄冲突',
+                scope: 'project',
+                kind: 'deadend',
+            },
+        ]);
+
+        // Turn hits a failed bash command, recovers with a succeeded bash command, and MemoryExtractor distills a candidate!
+        let bashCalls = 0;
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            const sys = systemOf(body);
+            if (sys.includes('踩坑') || sys.includes('reusable project notes')) {
+                return say(
+                    JSON.stringify({
+                        candidates: [
+                            {
+                                kind: 'deadend',
+                                scope: 'project',
+                                note: '运行单测前需先构建 engine 产物 pnpm --filter @xora/engine build',
+                            },
+                        ],
+                    }),
+                );
+            }
+            const last = body.messages.at(-1);
+            if (last?.role === 'user') {
+                bashCalls++;
+                return call({ name: 'bash', arguments: { command: 'exit 1' } });
+            }
+            if (last?.role === 'tool' && bashCalls === 1) {
+                bashCalls++;
+                return call({ name: 'bash', arguments: { command: 'echo fixed' } });
+            }
+            return say('已定位并修复问题。');
+        });
+
+        await harness.ui.request('turn.start', { threadId: thread.id, text: '跑一下测试看看为什么挂' });
+        await waitFor(async () => {
+            const read = await harness.ui.request('thread.read', { threadId: thread.id });
+            const notice = read.events.find(
+                (event) =>
+                    event.kind === 'item.completed' &&
+                    (event.payload as { item?: { type?: string; candidates?: unknown[] } }).item?.type === 'notice' &&
+                    Array.isArray((event.payload as { item?: { candidates?: unknown[] } }).item?.candidates),
+            );
+            return notice ? true : undefined;
+        }, 'distilled memory candidate notice');
+
+        const read = await harness.ui.request('thread.read', { threadId: thread.id });
+        const candidates = read.events
+            .filter((event) => event.kind === 'item.completed')
+            .map((event) => (event.payload as { item: { type: string; candidates?: Array<{ note: string }> } }).item)
+            .find((item) => item.type === 'notice' && item.candidates?.length)?.candidates;
+        expect(candidates?.[0]?.note).toContain('pnpm --filter @xora/engine build');
     }, 60_000);
 });

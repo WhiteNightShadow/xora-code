@@ -11,12 +11,16 @@ import {
     RpcErrorCode,
 } from '@xora/protocol';
 import {
+    DEFAULT_MODEL_CONTEXT_WINDOW,
     getPreset,
+    inferModelInfo,
     listModels,
     listPresets,
     type ModelInfo,
+    normalizeBaseUrl,
     type ProviderConnection,
     type ProviderPreset,
+    sanitizeApiKey,
     testConnection,
 } from '@xora/providers';
 import { fromJson, toJson, type XoraDatabase } from '@xora/storage';
@@ -95,18 +99,14 @@ export function presetSummary(preset: ProviderPreset): PresetSummary {
     };
 }
 
-/** A model discovered through `/models` that the preset does not describe: conservative defaults. */
-function discoveredModel(id: string, family: string, contextWindow?: number, maxOutput?: number): ModelInfo {
-    return {
-        id,
-        name: id,
-        family,
-        contextWindow: contextWindow ?? 128_000,
-        maxOutput: maxOutput ?? 8192,
-        input: ['text'],
-        reasoning: { mode: 'none', efforts: [], defaultEffort: 'off' },
-        tools: true,
-    };
+const DEFAULT_UNPICKED_CUSTOM_LIMIT = 30;
+
+/** A model discovered through `/models` or added manually: infers vendor quirks when recognizable, defaulting to 1M. */
+function discoveredModel(id: string, vendor: string, contextWindow?: number, maxOutput?: number): ModelInfo {
+    const inferred = inferModelInfo(id, contextWindow, maxOutput);
+    const family =
+        vendor !== 'custom' && vendor !== 'openrouter' && inferred.family === 'unknown' ? vendor : inferred.family;
+    return { ...inferred, family };
 }
 
 const secretName = (connectionId: string) => `connection.${connectionId.toLowerCase()}`;
@@ -156,13 +156,30 @@ export class ConnectionService {
      * e.g. MiniMax's thinking) comes from the preset, not from the conservative defaults stored when it was found.
      */
     #extraModels(row: ConnectionRow): ModelInfo[] {
-        const known = new Set((getPreset(row.preset_id)?.models ?? []).map((model) => model.id));
-        return fromJson<ModelInfo[]>(row.models_json, []).filter((model) => !known.has(model.id));
+        const preset = getPreset(row.preset_id);
+        const known = new Set((preset?.models ?? []).map((model) => model.id));
+        return fromJson<ModelInfo[]>(row.models_json, [])
+            .filter((model) => !known.has(model.id))
+            .map((model) => {
+                const contextWindow =
+                    model.contextWindow === 128_000 && model.maxOutput === 8192
+                        ? DEFAULT_MODEL_CONTEXT_WINDOW
+                        : model.contextWindow;
+                if (preset?.channel === 'custom' && !model.quirks) {
+                    const inferred = inferModelInfo(model.id, contextWindow, model.maxOutput);
+                    return {
+                        ...model,
+                        contextWindow,
+                        ...(inferred.quirks ? { quirks: inferred.quirks } : {}),
+                    };
+                }
+                return contextWindow === model.contextWindow ? model : { ...model, contextWindow };
+            });
     }
 
     /**
-     * The models the user picked. Until they pick, a preset's own models, or everything the server listed for a
-     * preset without any (custom endpoints, local servers).
+     * The models the user picked. Until they pick, a preset's own models, or the first 30 models the server listed for
+     * a custom/relay preset (preventing 1,000-model relay catalogs from flooding every picker).
      */
     #selected(row: ConnectionRow, available: readonly ModelInfo[]): ReadonlySet<string> {
         const picked = fromJson<string[] | null>(row.selected_json, null);
@@ -170,7 +187,10 @@ export class ConnectionService {
             return new Set(picked);
         }
         const preset = getPreset(row.preset_id);
-        return new Set((preset?.models.length ? preset.models : available).map((model) => model.id));
+        if (preset?.models.length) {
+            return new Set(preset.models.map((model) => model.id));
+        }
+        return new Set(available.slice(0, DEFAULT_UNPICKED_CUSTOM_LIMIT).map((model) => model.id));
     }
 
     #toConnection(row: ConnectionRow): Connection {
@@ -226,6 +246,7 @@ export class ConnectionService {
         apiKey?: string;
         baseUrl?: string;
         enabled?: boolean;
+        models?: readonly string[];
     }): Promise<Connection> {
         const preset = getPreset(input.presetId);
         if (!preset) {
@@ -234,8 +255,9 @@ export class ConnectionService {
         if (preset.compliance?.allowed === false) {
             throw new RpcError(RpcErrorCode.Rejected, preset.compliance.note ?? textOf(TEXT).notAllowed);
         }
-        const baseUrl = input.baseUrl?.trim() || undefined;
-        if (baseUrl && !/^https?:\/\//.test(baseUrl)) {
+        const normalizedUrl = input.baseUrl !== undefined ? normalizeBaseUrl(input.baseUrl) : undefined;
+        const baseUrl = normalizedUrl || undefined;
+        if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
             throw new RpcError(RpcErrorCode.InvalidParams, 'base url must start with http:// or https://');
         }
         const now = Date.now();
@@ -244,7 +266,7 @@ export class ConnectionService {
             const row = this.#row(id);
             this.#db.run('update connections set name = ?, base_url = ?, enabled = ?, updated_at = ? where id = ?', [
                 input.name ?? row.name,
-                baseUrl === undefined ? row.base_url : baseUrl,
+                input.baseUrl === undefined ? row.base_url : (baseUrl ?? null),
                 input.enabled === undefined ? row.enabled : input.enabled ? 1 : 0,
                 now,
                 id,
@@ -257,7 +279,7 @@ export class ConnectionService {
             );
         }
         if (input.apiKey !== undefined) {
-            const key = input.apiKey.trim();
+            const key = sanitizeApiKey(input.apiKey);
             if (key.length > 0) {
                 await this.#shell.setSecret(secretName(id), key);
                 this.#keys.set(id, key);
@@ -266,6 +288,39 @@ export class ConnectionService {
                 this.#keys.set(id, null);
             }
             this.#db.run('update connections set has_key = ? where id = ?', [key.length > 0 ? 1 : 0, id]);
+        }
+        if (input.models !== undefined) {
+            const cleaned = [
+                ...new Set(
+                    input.models
+                        .map((item) => item.replace(/[\r\n\uFEFF\u200B-\u200D]/g, '').trim())
+                        .filter((item) => item.length > 0),
+                ),
+            ];
+            if (cleaned.length > 0) {
+                const currentRow = this.#row(id);
+                const presetIds = new Set(preset.models.map((model) => model.id));
+                const existingExtra = fromJson<ModelInfo[]>(currentRow.models_json, []);
+                const extraById = new Map(existingExtra.map((model) => [model.id, model]));
+                for (const modelId of cleaned) {
+                    if (!presetIds.has(modelId) && !extraById.has(modelId)) {
+                        extraById.set(modelId, discoveredModel(modelId, preset.vendor));
+                    }
+                }
+                const currentSelected = fromJson<string[] | null>(currentRow.selected_json, null);
+                const baseSelected =
+                    currentSelected ??
+                    (existingExtra.length > 0 || preset.models.length > 0
+                        ? [...this.#selected(currentRow, [...preset.models, ...existingExtra])]
+                        : []);
+                const nextSelected = [...new Set([...baseSelected, ...cleaned])];
+                this.#db.run('update connections set models_json = ?, selected_json = ?, updated_at = ? where id = ?', [
+                    toJson([...extraById.values()]),
+                    toJson(nextSelected),
+                    now,
+                    id,
+                ]);
+            }
         }
         this.#bus.broadcast('connection.changed', {});
         return this.get(id);
@@ -361,15 +416,23 @@ export class ConnectionService {
         };
     }
 
-    /** Fetches `/models` and records models the preset does not already describe. */
+    /** Fetches `/models` and records models the preset does not already describe, keeping manually picked custom IDs. */
     async refreshModels(connectionId: string): Promise<Connection> {
         const row = this.#row(connectionId);
         const preset = this.#preset(row);
         const remote = await listModels(await this.providerConnection(connectionId), { userAgent: this.#userAgent });
         const known = new Set(preset.models.map((model) => model.id));
-        const extra = remote
-            .filter((model) => !known.has(model.id))
-            .map((model) => discoveredModel(model.id, preset.vendor, model.contextWindow, model.maxOutput));
+        const remoteIds = new Set(remote.map((model) => model.id));
+        const selectedIds = new Set(fromJson<string[]>(row.selected_json, []));
+        const keptManual = fromJson<ModelInfo[]>(row.models_json, []).filter(
+            (model) => !known.has(model.id) && !remoteIds.has(model.id) && selectedIds.has(model.id),
+        );
+        const extra = [
+            ...remote
+                .filter((model) => !known.has(model.id))
+                .map((model) => discoveredModel(model.id, preset.vendor, model.contextWindow, model.maxOutput)),
+            ...keptManual,
+        ];
         this.#db.run('update connections set models_json = ?, updated_at = ? where id = ?', [
             toJson(extra),
             Date.now(),

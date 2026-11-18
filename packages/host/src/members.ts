@@ -55,12 +55,13 @@ import {
     leadOf,
     MAX_GROUP_DEPTH,
     ORG_TEMPLATES,
+    type OrgTemplateId,
     readGroups,
     readGroupsSync,
     supervisorOf,
     writeGroups,
 } from './org-groups.ts';
-import type { ProjectService } from './projects.ts';
+import { DEFAULT_WORKSPACE_ID, type ProjectService } from './projects.ts';
 import type { ScoreService } from './scores.ts';
 import type { SettingsService } from './settings.ts';
 import {
@@ -1045,7 +1046,7 @@ export class MemberService {
      * Builds a group from a template (06 §24): built-in members renamed for their jobs, new ones added, the group
      * written. `replace` deletes the user's members and the groups that are not part of it (a project's stay).
      */
-    async applyTemplate(input: { template: 'dev-team'; replace: boolean }): Promise<OrgChart> {
+    async applyTemplate(input: { template: OrgTemplateId; replace: boolean }): Promise<OrgChart> {
         const template = ORG_TEMPLATES[input.template];
         const language = hostLanguage();
         const wanted = new Set(template.members.map((member) => member.id));
@@ -1061,7 +1062,7 @@ export class MemberService {
             await this.#serial('groups', () => writeGroups(this.#deps.orgsDir, []));
             for (const group of gone) await this.#trashGroup(group.id);
             for (const agent of (await this.#roster()).org.roster) {
-                if (!wanted.has(agent.id)) await this.remove(agent.id);
+                if (!wanted.has(agent.id) && agent.role !== 'supervisor') await this.remove(agent.id);
             }
         }
         for (const spec of template.members) {
@@ -1085,6 +1086,11 @@ export class MemberService {
                 allowNewId: true,
                 keepGroups: true,
             });
+        }
+        if (input.replace) {
+            for (const agent of (await this.#roster()).org.roster) {
+                if (!wanted.has(agent.id)) await this.remove(agent.id);
+            }
         }
         const [leader, ...rest] = template.members;
         await this.#serial('groups', async () => {
@@ -1479,9 +1485,9 @@ export class MemberService {
         return this.withMemory(base, agent, projectId);
     }
 
-    /** A conversation with a member: a new thread in the project where it works as itself, started with `text`. */
+    /** A conversation with a member: a new thread in the project (or standalone default workspace) where it works as itself. */
     async chat(input: {
-        projectId: string;
+        projectId?: string | undefined;
         memberId: string;
         text: string;
         /** What the user set for this job (06 §22); the member's own settings otherwise. */
@@ -1491,7 +1497,7 @@ export class MemberService {
     }): Promise<ThreadMeta> {
         const { threads, turns, log } = this.#deps;
         const text = textOf(TEXT);
-        const project = await this.#project(input.projectId);
+        const project = await this.#project(input.projectId || DEFAULT_WORKSPACE_ID);
         const { org } = await this.#roster(project);
         const agent = org.roster.find((item) => item.id === input.memberId);
         if (!agent) {

@@ -165,7 +165,13 @@ describe('M1 core loop', () => {
         const repo = gitRepo();
         server.respondWith((request) => {
             if (lastRole(request.body) === 'tool') {
-                return openaiText('Done: hello.txt now says hello world.');
+                return openaiText('Done: hello.txt now says hello world.', {
+                    usage: {
+                        prompt_tokens: 200,
+                        completion_tokens: 20,
+                        prompt_tokens_details: { cached_tokens: 150 },
+                    },
+                });
             }
             return openaiToolCalls([
                 {
@@ -204,6 +210,7 @@ describe('M1 core loop', () => {
         const meta: ThreadMeta = done.thread;
         expect(meta.status).toBe('idle');
         expect(meta.needsReview).toBe(true);
+        expect(meta.tokens?.cached).toBe(150);
         expect(done.events.map((event) => event.kind)).toEqual(
             expect.arrayContaining(['thread.created', 'turn.started', 'item.completed', 'turn.completed']),
         );
@@ -217,6 +224,24 @@ describe('M1 core loop', () => {
         const reverted = await ui.request('review.revert', { threadId: thread.id, turnId });
         expect(reverted.restored).toEqual(['hello.txt']);
         expect(readFileSync(path.join(repo, 'hello.txt'), 'utf8')).toBe('hello\n');
+
+        // After reverting hello.txt, `compare: 'turn'` still reflects what the turn itself changed, while
+        // `compare: 'since'` compares before-turn against the current working tree (0 net changes, then live edits).
+        const turnOnly = await ui.request('review.turn', { threadId: thread.id, turnId, compare: 'turn' });
+        expect(turnOnly.files.map((item) => item.path)).toEqual(['hello.txt']);
+        const sinceEmpty = await ui.request('review.turn', { threadId: thread.id, turnId, compare: 'since' });
+        expect(sinceEmpty.files).toEqual([]);
+        writeFileSync(path.join(repo, 'hello.txt'), 'hello cumulative\n');
+        const sinceEdited = await ui.request('review.turn', { threadId: thread.id, turnId, compare: 'since' });
+        expect(sinceEdited.files.map((item) => item.path)).toEqual(['hello.txt']);
+        const sinceFile = await ui.request('review.file', {
+            threadId: thread.id,
+            turnId,
+            path: 'hello.txt',
+            compare: 'since',
+        });
+        expect(sinceFile).toMatchObject({ oldText: 'hello\n', newText: 'hello cumulative\n', binary: false });
+        writeFileSync(path.join(repo, 'hello.txt'), 'hello\n');
 
         const usage = await ui.request('usage.thread', { threadId: thread.id });
         expect(usage.requests.length).toBe(2);
@@ -603,4 +628,90 @@ describe('manual compaction', () => {
         expect(threads[0]?.tokens).toEqual({ input: 4 * 30_000 + 3000, output: 4 * 500 + 40 });
         server.reset();
     }, 60_000);
+});
+
+describe('custom models & stop-then-send resilience', () => {
+    it('saves manual custom MiniMax model IDs directly, preserves them on refresh, and caps huge relay model lists', async () => {
+        server.reset();
+        const relayModels = Array.from({ length: 60 }, (_, idx) => ({ id: `relay-model-${idx + 1}` }));
+        server.setModels(relayModels);
+        try {
+            const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-e2e-custom-'));
+            const harness = await startHost(dataDir);
+            harnesses.push(harness);
+
+            // 1. Direct manual model entry on custom-openai (no /models required, strips Windows clipboard noise).
+            const custom = await harness.ui.request('provider.save', {
+                presetId: 'custom-openai',
+                name: 'MiniMax Custom',
+                apiKey: '  Bearer \uFEFFsk-minimax-win\r\n ',
+                baseUrl: `${server.url}/v1/chat/completions`,
+                models: ['MiniMax-M2.7', 'MiniMax-M3'],
+            });
+            expect(custom.baseUrl).toBe(`${server.url}/v1`);
+            expect(custom.models.map((m) => m.id)).toEqual(['MiniMax-M2.7', 'MiniMax-M3']);
+            expect((await harness.ui.request('settings.get', {})).defaultModel).toEqual({
+                connectionId: custom.id,
+                model: 'MiniMax-M2.7',
+            });
+
+            // Refreshing /models keeps manually picked models even when /models returns other relay models.
+            const afterRefresh = await harness.ui.request('provider.refreshModels', { connectionId: custom.id });
+            expect(afterRefresh.models.map((m) => m.id)).toEqual(['MiniMax-M2.7', 'MiniMax-M3']);
+            expect((afterRefresh.available ?? []).length).toBe(62);
+
+            // 2. Unpicked relay connection caps auto-selected models to 30 instead of flooding UI with all 60.
+            const relay = await harness.ui.request('provider.save', {
+                presetId: 'custom-openai',
+                name: 'Huge Relay',
+                apiKey: 'relay-key',
+                baseUrl: server.url,
+            });
+            const refreshedRelay = await harness.ui.request('provider.refreshModels', { connectionId: relay.id });
+            expect(refreshedRelay.available).toHaveLength(60);
+            expect(refreshedRelay.models).toHaveLength(30);
+        } finally {
+            server.reset();
+        }
+    });
+
+    it('lets turn.start wait for an in-flight cancelled turn to finish cleanup instead of failing with busy', async () => {
+        server.reset();
+        let turnNum = 0;
+        server.respondWith((req) => {
+            if (req.method !== 'POST') return undefined;
+            turnNum++;
+            if (turnNum === 1) {
+                return { events: [': keep-alive\n\n'], hang: true };
+            }
+            return openaiText('second turn succeeded');
+        });
+        const { harness } = await setUp();
+        const { ui } = harness;
+        const project = await ui.request('project.add', { path: gitRepo() });
+        const thread = await ui.request('thread.create', { projectId: project.id });
+        await ui.request('turn.start', { threadId: thread.id, text: 'first turn that hangs' });
+        await waitFor(() => (server.requests.length >= 1 ? true : undefined), 'first request to reach server');
+
+        // Stop and IMMEDIATELY send a new message without waiting manually.
+        await ui.request('turn.cancel', { threadId: thread.id });
+        const { turnId: secondTurnId } = await ui.request('turn.start', {
+            threadId: thread.id,
+            text: 'immediate follow-up',
+        });
+        expect(secondTurnId).toMatch(/^turn_/);
+
+        await waitFor(async () => {
+            const read = await ui.request('thread.read', { threadId: thread.id });
+            return read.events.some(
+                (event) =>
+                    event.kind === 'turn.completed' &&
+                    event.turnId === secondTurnId &&
+                    (event.payload as { stopReason?: string }).stopReason === 'end_turn',
+            )
+                ? true
+                : undefined;
+        }, 'second turn to complete');
+        server.reset();
+    }, 30_000);
 });

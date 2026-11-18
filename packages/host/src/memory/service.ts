@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { type Member, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
+import { type Member, type MemoryCandidate, RpcError, RpcErrorCode, type ThreadMeta } from '@xora/protocol';
+import type { XoraDatabase } from '@xora/storage';
 import { clipText } from '@xora/tools';
 import type { HostToolResult } from '../engines/manager.ts';
 import { XORA_ENGINE } from '../engines/registry.ts';
@@ -12,6 +13,7 @@ import { shorten } from '../team-agents.ts';
 import { textOf } from '../text.ts';
 import type { HostToolProvider, SharedToolCall, SharedTools } from '../turns.ts';
 import { folderName, MemoryPaths, projectStem, readNames, Serial, writeAtomic } from './files.ts';
+import { MemoryIndexStore, scoreNoteHit } from './index-store.ts';
 import {
     NOTE_CHARS,
     noteDate,
@@ -83,6 +85,8 @@ export interface MemoryDeps {
     readonly thread?: (threadId: string) => ThreadMeta | undefined;
     /** A member's notes changed: its panel shows them again. */
     readonly onChanged?: (memberId: string) => void;
+    /** SQLite database for FTS5 trigram BM25 hybrid search over Markdown memory files. */
+    readonly db?: XoraDatabase;
 }
 
 /**
@@ -114,6 +118,7 @@ export class MemoryService implements SharedTools {
     readonly names = [REMEMBER_TOOL, RECALL_TOOL];
     readonly #deps: MemoryDeps;
     readonly #paths: MemoryPaths;
+    readonly #index: MemoryIndexStore | undefined;
     readonly #serial = new Serial();
     /** Members whose memory file was looked at for notes to move into project files (06 §21). */
     readonly #migrated = new Set<string>();
@@ -123,6 +128,7 @@ export class MemoryService implements SharedTools {
     constructor(deps: MemoryDeps) {
         this.#deps = deps;
         this.#paths = new MemoryPaths(deps.membersDir, deps.orgsDir);
+        this.#index = deps.db ? new MemoryIndexStore(deps.db) : undefined;
     }
 
     #now(): number {
@@ -348,6 +354,7 @@ export class MemoryService implements SharedTools {
             if (placed.outcome === 'noMatch') return { content: text.noMatch(replaces), isError: true };
             if (placed.outcome === 'already') return { content: text.already };
             await writeAtomic(file, `${placed.lines.join('\n')}\n`);
+            this.#index?.syncFile(file, true);
             const message = placed.outcome === 'replaced' ? text.replaced : text.noted;
             return { content: placed.dropped > 0 ? `${message} ${text.dropped(placed.dropped)}` : message };
         });
@@ -438,25 +445,40 @@ export class MemoryService implements SharedTools {
                 }
             }
         }
-        const found: Array<{ line: string; score: number; date: string }> = [];
-        for (const source of sources) {
-            const saved = await readFile(source.file, 'utf8').catch(() => '');
-            for (const line of saved.split('\n')) {
-                const words = noteText(line).toLowerCase();
-                if (!words) continue;
-                const hits = terms.filter((term) => words.includes(term)).length;
-                if (hits === 0) continue;
-                const where = source.project ? `${source.who} · ${source.project}` : source.who;
-                found.push({
-                    line: `- (${where}) ${line.replace(/^\s*[-*]\s*/, '')}`,
-                    score: hits * 3 + source.boost,
-                    date: noteDate(line),
-                });
+        const nowMs = this.#now();
+        let found: Array<{ line: string; score: number; date: string }>;
+        if (this.#index) {
+            found = this.#index.search(sources, query, terms, nowMs);
+        } else {
+            found = [];
+            const queryLower = query.toLowerCase();
+            for (const source of sources) {
+                const saved = await readFile(source.file, 'utf8').catch(() => '');
+                for (const line of saved.split('\n')) {
+                    const words = noteText(line).toLowerCase();
+                    if (!words) continue;
+                    const date = noteDate(line);
+                    const score = scoreNoteHit({
+                        bodyLower: words,
+                        noteDate: date,
+                        queryLower,
+                        terms,
+                        boost: source.boost,
+                        nowMs,
+                    });
+                    if (score <= 0) continue;
+                    const where = source.project ? `${source.who} · ${source.project}` : source.who;
+                    found.push({
+                        line: `- (${where}) ${line.replace(/^\s*[-*]\s*/, '')}`,
+                        score,
+                        date,
+                    });
+                }
             }
+            found.sort((a, b) => b.score - a.score || b.date.localeCompare(a.date));
         }
         const conversations = who === undefined ? this.#conversations(subject, query, terms) : [];
         if (found.length === 0 && conversations.length === 0) return { content: text.recallNone(query) };
-        found.sort((a, b) => b.score - a.score || b.date.localeCompare(a.date));
         const top = found.slice(0, RECALL_RESULTS);
         const lines =
             top.length > 0 ? [text.recallHeader(top.length), ...top.map((item) => shorten(item.line, 400))] : [];
@@ -551,8 +573,84 @@ export class MemoryService implements SharedTools {
             const before = await readFile(file, 'utf8').catch(() => '');
             if (before.trim() && before.trim() !== tidy) await writeAtomic(`${file}.bak`, before);
             await (tidy ? writeAtomic(file, `${tidy}\n`) : rm(file, { force: true }));
+            if (tidy) this.#index?.syncFile(file, true);
+            else this.#index?.removeFile(file);
         });
         this.#deps.onChanged?.(memberId);
+    }
+
+    /**
+     * Filters candidate notes distilled from compaction or turn recovery: drops secrets, oversize/blank entries,
+     * duplicates already saved on disk, and project-scoped notes on threads without a project.
+     */
+    filterCandidates(thread: ThreadMeta, raw: readonly unknown[]): MemoryCandidate[] {
+        if (!sharesMemory(thread) || raw.length === 0) return [];
+        const subject = subjectOf(thread);
+        const existingCache = new Map<'project' | 'user', Set<string>>();
+        const existingOf = (scope: 'project' | 'user'): Set<string> => {
+            let set = existingCache.get(scope);
+            if (!set) {
+                const file = this.#scopeFile(subject, scope);
+                const saved = file
+                    ? (() => {
+                          try {
+                              return readFileSync(file, 'utf8');
+                          } catch {
+                              return '';
+                          }
+                      })()
+                    : '';
+                set = new Set(
+                    saved
+                        .split('\n')
+                        .map((line) => noteText(line).toLowerCase())
+                        .filter(Boolean),
+                );
+                existingCache.set(scope, set);
+            }
+            return set;
+        };
+        const seen = new Set<string>();
+        const out: MemoryCandidate[] = [];
+        for (const item of raw) {
+            if (!item || typeof item !== 'object') continue;
+            const entry = item as Record<string, unknown>;
+            const note = typeof entry.note === 'string' ? oneLine(entry.note) : '';
+            if (!note || note.length < 4 || note.length > NOTE_CHARS) continue;
+            if (redact(note) !== note) continue;
+            if (!subject.projectId && entry.scope !== 'user') continue;
+            const scope: 'project' | 'user' = entry.scope === 'user' ? 'user' : 'project';
+            const lower = note.toLowerCase();
+            if (seen.has(`${scope}:${lower}`) || existingOf(scope).has(lower)) continue;
+            seen.add(`${scope}:${lower}`);
+            const kind =
+                entry.kind === 'deadend' || entry.kind === 'constraint' || entry.kind === 'fact'
+                    ? entry.kind
+                    : undefined;
+            const id = typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : `mc_${out.length + 1}`;
+            out.push({ id, note, scope, ...(kind ? { kind } : {}) });
+            if (out.length >= 3) break;
+        }
+        return out;
+    }
+
+    /** Saves a user-confirmed candidate note into the thread's project or user memory. */
+    async rememberCandidate(
+        thread: ThreadMeta,
+        note: string,
+        scope?: 'project' | 'user',
+    ): Promise<{ outcome: 'noted' | 'already'; message: string }> {
+        if (!sharesMemory(thread)) {
+            throw new RpcError(RpcErrorCode.InvalidParams, textOf(MEMORY_TEXT).unavailable(REMEMBER_TOOL));
+        }
+        const result = await this.#remember(subjectOf(thread), { note, ...(scope ? { scope } : {}) });
+        if (result.isError) {
+            throw new RpcError(RpcErrorCode.InvalidParams, result.content);
+        }
+        return {
+            outcome: result.content === textOf(MEMORY_TEXT).already ? 'already' : 'noted',
+            message: result.content,
+        };
     }
 
     /** The projects a member has notes in, by size. */
@@ -639,9 +737,12 @@ export class MemoryService implements SharedTools {
                 const existing = before.split('\n').filter((line) => line.trim() !== '');
                 const merged = [...existing, ...entry.lines.filter((line) => !existing.includes(line))];
                 await writeAtomic(target, `${merged.join('\n')}\n`);
+                this.#index?.syncFile(target, true);
                 await this.#nameFile(this.#paths.memberProjectsDir(memberId), projectStem(key), entry.name);
             }
             await (kept.length > 0 ? writeAtomic(file, `${kept.join('\n')}\n`) : rm(file, { force: true }));
+            if (kept.length > 0) this.#index?.syncFile(file, true);
+            else this.#index?.removeFile(file);
             this.#deps.log.info(`member ${memberId}: moved notes of ${moved.size} project(s) out of memory.md`);
         });
     }

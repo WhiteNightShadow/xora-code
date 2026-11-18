@@ -257,4 +257,39 @@ create table member_scores (
 create index member_scores_by_member on member_scores (member_id, ts);
 `,
     },
+    {
+        // FTS5 trigram index over Markdown memory files; the `.md` files remain the source of truth and are
+        // re-synced lazily via `(mtime_ms, size)` and eagerly on writes.
+        version: 8,
+        sql: `
+create table memory_files (
+    file_path text primary key,
+    mtime_ms integer not null,
+    size integer not null
+);
+
+create virtual table memory_notes_fts using fts5 (
+    file_path unindexed,
+    line_no unindexed,
+    raw_line unindexed,
+    note_date unindexed,
+    body,
+    tokenize = 'trigram'
+);
+`,
+    },
+    {
+        // Lift legacy default context caps (200k / 256k / 400k / 512k) up to 1M (1,048,576) once so existing
+        // installations use each model's full supported context window without overwriting later manual edits.
+        version: 9,
+        sql: `
+update settings
+set value_json = json_set(
+    value_json,
+    '$.softContextWindow', max(coalesce(json_extract(value_json, '$.softContextWindow'), 0), 1048576),
+    '$.workingSet', max(coalesce(json_extract(value_json, '$.workingSet'), 0), 1048576)
+)
+where key = 'settings' and json_valid(value_json) = 1;
+`,
+    },
 ];

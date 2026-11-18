@@ -19,6 +19,7 @@ import type { ShellEnv } from './env.ts';
 import type { BootLog } from './log.ts';
 import type { DataPaths } from './paths.ts';
 import { PreviewController } from './preview.ts';
+import { prepareChildProxyEnv } from './proxy.ts';
 import { attachShellServices, releasePowerBlocker, type ShellPeer } from './shell-services.ts';
 import { shellStrings } from './strings.ts';
 import { AppTray, forceQuit, trayIconPath } from './tray.ts';
@@ -89,6 +90,7 @@ export class BundleRuntime {
     #shell: ShellPeer | undefined;
     #window: BrowserWindow | undefined;
     #quitConfirmed = false;
+    #quitting = false;
     readonly #tray = new AppTray({
         iconPath: trayIconPath(),
         show: (threadId) => this.#showWindow(threadId),
@@ -149,6 +151,18 @@ export class BundleRuntime {
     }
 
     async #launch(): Promise<void> {
+        const onBeforeQuit = (event: Electron.Event) => {
+            this.#quitting = true;
+            this.#quitConfirmed = true;
+            if (!this.#settled) {
+                // Hold the quit until `boot.ts` persists `good` or `aborted` and calls `app.quit()` again; otherwise
+                // quitting before `goodAfterMs` races the async state write and leaves `unfinishedLaunches` incremented.
+                event.preventDefault();
+                this.#settle({ kind: this.#uiReady ? 'good-then-closed' : 'closed' });
+            }
+        };
+        app.on('before-quit', onBeforeQuit);
+        this.#cleanups.push(() => app.removeListener('before-quit', onBeforeQuit));
         setBundleRoot(this.#options.bundleDir);
         const started = await this.#startHost();
         if (!started || this.#settled) {
@@ -167,15 +181,16 @@ export class BundleRuntime {
     }
 
     /** Resolves true once the host reported ready, false if it failed first. */
-    #startHost(): Promise<boolean> {
+    async #startHost(): Promise<boolean> {
         const { manifest, bundleDir, paths, log, env, shellVersion, trustedKeys } = this.#options;
+        const hostEnv = await prepareChildProxyEnv(process.env);
         return new Promise((resolve) => {
             let ready = false;
             const child = utilityProcess.fork(path.join(bundleDir, ...manifest.entry.host.split('/')), [], {
                 serviceName: 'Xora Code Host',
                 stdio: 'pipe',
                 env: {
-                    ...process.env,
+                    ...(hostEnv as NodeJS.ProcessEnv),
                     XORA_BUNDLE_VERSION: manifest.version,
                     XORA_SHELL_VERSION: shellVersion,
                     XORA_DATA_DIR: paths.root,
@@ -217,7 +232,7 @@ export class BundleRuntime {
                 if (this.#host === child) {
                     this.#host = undefined;
                 }
-                if (this.#disposed) {
+                if (this.#disposed || this.#quitting) {
                     resolve(false);
                     return;
                 }
@@ -230,7 +245,7 @@ export class BundleRuntime {
     }
 
     #hostFailure(reason: string): void {
-        if (this.#disposed) {
+        if (this.#disposed || this.#quitting) {
             return;
         }
         if (!this.#good) {
@@ -514,7 +529,7 @@ export class BundleRuntime {
     }
 
     #rendererGone(reason: string): void {
-        if (this.#disposed) {
+        if (this.#disposed || this.#quitting) {
             return;
         }
         if (!this.#good) {

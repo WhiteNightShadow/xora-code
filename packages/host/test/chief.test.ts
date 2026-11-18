@@ -130,7 +130,7 @@ describe('the chief assistant', () => {
             role: 'chief',
             mode: 'plan',
             effort: 'max',
-            title: '总助手：让编码把hello改成hello world',
+            title: '让编码把hello改成hello world',
         });
         expect(await settled(ui, thread.id)).toBe('turn.completed');
 
@@ -327,5 +327,29 @@ describe('the chief assistant', () => {
         expect(textOf(answered?.messages.at(-1)?.content)).toContain(
             `No project "nowhere"; the projects are: ${project.name}`,
         );
+    }, 60_000);
+
+    it('starts a standalone default chat and agent role chat without any project open', async () => {
+        server.respondWith((request) => {
+            const body = request.body as ChatBody | undefined;
+            if (!body?.messages) return undefined;
+            return say('可以直接聊，不绑定项目。');
+        });
+        const dataDir = mkdtempSync(path.join(tmpdir(), 'xora-chief-noproj-'));
+        const { ui } = await host.start(dataDir);
+        await connectMock(ui, server);
+        expect(await ui.request('project.list', {})).toEqual([]);
+
+        const chat = await ui.request('chief.start', { text: '拆解一个独立产品MVP' });
+        expect(chat.projectId).toBe('_default');
+        expect(chat.title).toBe('拆解一个独立产品MVP');
+        expect(await settled(ui, chat.id)).toBe('turn.completed');
+
+        const roleChat = await ui.request('member.chat', { memberId: 'scout', text: '调研竞品定价' });
+        expect(roleChat.projectId).toBe('_default');
+        expect(roleChat.agentId).toBe('scout');
+        expect(await settled(ui, roleChat.id)).toBe('turn.completed');
+
+        expect(await ui.request('project.list', {})).toEqual([]);
     }, 60_000);
 });

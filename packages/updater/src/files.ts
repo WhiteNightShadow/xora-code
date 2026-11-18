@@ -16,15 +16,20 @@ export function sha256File(file: string): Promise<string> {
     });
 }
 
+const IGNORED_OS_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
+
 /**
- * Every regular file below `dir` as a sorted POSIX relative path, excluding the top-level manifest.
- * Symbolic links and other special files are rejected rather than followed.
+ * Every regular file below `dir` as a sorted POSIX relative path, excluding the top-level manifest and harmless OS
+ * folder metadata. Symbolic links and other special files are rejected rather than followed.
  */
 export async function listBundleFiles(dir: string): Promise<string[]> {
     const files: string[] = [];
     const walk = async (current: string, prefix: string): Promise<void> => {
         const entries = await readdir(current, { withFileTypes: true });
         for (const entry of entries) {
+            if (IGNORED_OS_FILES.has(entry.name)) {
+                continue;
+            }
             const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
             if (entry.isSymbolicLink()) {
                 throw new Error(`symlink-not-allowed:${relative}`);

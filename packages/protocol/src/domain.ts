@@ -93,7 +93,7 @@ export const ThreadMetaSchema = z.object({
     turns: z.number().int().nonnegative(),
     cost: MoneySchema.nullable(),
     /** Tokens of every model request so far: what the thread used, also where no price is known. */
-    tokens: z.object({ input: z.number(), output: z.number() }).optional(),
+    tokens: z.object({ input: z.number(), output: z.number(), cached: z.number().optional() }).optional(),
     /** Prompt tokens of the latest model request and the model's window, for the context meter. */
     context: z.object({ used: z.number(), size: z.number() }).nullable(),
     parent: z.object({ threadId: IdSchema, turnId: z.string() }).optional(),
@@ -156,7 +156,7 @@ export const ToolDisplaySchema = z.discriminatedUnion('kind', [
         truncated: z.boolean(),
         artifactPath: z.string().optional(),
         durationMs: z.number(),
-        background: z.object({ jobId: z.string() }).optional(),
+        background: z.object({ jobId: z.string(), running: z.boolean().optional() }).optional(),
     }),
     z.object({ kind: z.literal('files'), paths: z.array(z.string()), truncated: z.boolean() }),
     z.object({ kind: z.literal('matches'), count: z.number(), files: z.number(), truncated: z.boolean() }),
@@ -297,12 +297,21 @@ export const FileChangesItemSchema = z.object({
     reverted: z.array(z.string()).optional(),
 });
 
+export const MemoryCandidateSchema = z.object({
+    id: z.string().min(1),
+    note: z.string().min(1),
+    scope: z.enum(['project', 'user']),
+    kind: z.enum(['fact', 'deadend', 'constraint']).optional(),
+});
+export type MemoryCandidate = z.infer<typeof MemoryCandidateSchema>;
+
 export const NoticeItemSchema = z.object({
     ...itemBase,
     type: z.literal('notice'),
     severity: z.enum(['info', 'warning', 'error']),
     title: z.string(),
     description: z.string().optional(),
+    candidates: z.array(MemoryCandidateSchema).optional(),
 });
 
 export const ErrorItemSchema = z.object({
@@ -322,6 +331,7 @@ export const CompactionItemSchema = z.object({
     summary: z.string().optional(),
     before: z.number().optional(),
     after: z.number().optional(),
+    candidates: z.array(MemoryCandidateSchema).optional(),
 });
 
 /**

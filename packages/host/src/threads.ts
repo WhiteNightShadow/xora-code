@@ -57,7 +57,7 @@ export interface ThreadExtra {
     tier?: string;
     group?: string;
     goal?: Goal;
-    tokens?: { input: number; output: number };
+    tokens?: { input: number; output: number; cached?: number };
     /** Messages waiting for the running turn to end, oldest first (03). */
     queue?: QueuedMessage[];
 }
@@ -254,7 +254,7 @@ export class ThreadStore {
             turns: number;
             location: ThreadLocation;
             goal: Goal | null;
-            tokens: { input: number; output: number };
+            tokens: { input: number; output: number; cached?: number };
             queue: readonly QueuedMessage[];
         }>,
         options: { touch?: boolean } = {},

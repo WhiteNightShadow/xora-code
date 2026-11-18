@@ -76,8 +76,33 @@ export function sanitizeEnv(env: Readonly<Record<string, string | undefined>>): 
     const clean: Record<string, string> = {};
     for (const [name, value] of Object.entries(env)) {
         if (value !== undefined && !isSecretEnvName(name)) {
-            clean[name] = value;
+            // Normalize `Path` / `PATH` on Windows so merging `{ ...sanitizeEnv(process.env), ...extra }` never
+            // passes two differently-cased PATH keys to `CreateProcessW`.
+            const key = process.platform === 'win32' && name.toUpperCase() === 'PATH' ? 'PATH' : name;
+            clean[key] = value;
         }
     }
     return clean;
+}
+
+/**
+ * Settings for commands nobody sits in front of (21 §4.3): a tool that opens an editor or a pager, or asks for a
+ * password on the terminal, would wait for input that never comes. With these git takes its default message
+ * instead of opening an editor and fails instead of prompting, pagers pass text through, and programs that look at
+ * `TERM` leave out colours and cursor movement. The session's own environment still overrides them.
+ *
+ * On Windows only git's own settings are given: git runs `true` and `cat` in the shell it brings along, while a
+ * program that starts `%EDITOR%` or `%PAGER%` itself would not find them.
+ */
+export function nonInteractiveEnv(platform: NodeJS.Platform = process.platform): Record<string, string> {
+    const git = {
+        TERM: 'dumb',
+        GIT_PAGER: 'cat',
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_EDITOR: 'true',
+        GIT_SEQUENCE_EDITOR: 'true',
+    };
+    return platform === 'win32'
+        ? git
+        : { ...git, PAGER: 'cat', EDITOR: 'true', VISUAL: 'true', DEBIAN_FRONTEND: 'noninteractive' };
 }

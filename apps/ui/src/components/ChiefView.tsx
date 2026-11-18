@@ -1,24 +1,23 @@
 import type { Effort, ItemOf, ModelRef } from '@xora/protocol';
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { host } from '../host.ts';
-import { attempt, isChief, openProject, openRun, selectThread, useApp, useStrings } from '../store.ts';
+import { attempt, loadMembers, openRun, selectThread, useApp, useStrings } from '../store.ts';
 import { format } from '../strings.ts';
 import { startingEffort } from '../thinking.ts';
-import { LogoMark } from './Art.tsx';
 import { EffortChooser, ModelChooser } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
+import { AgentRolePicker } from './MembersView.tsx';
 import { MemberMentionList, useMemberMention } from './Mentions.tsx';
-import { Badge, formatMoney, relativeTime, Spinner } from './primitives.tsx';
+import { Badge, formatMoney, Spinner } from './primitives.tsx';
 import '../chief.css';
 
 const TEAM_ENDED = ['done', 'failed', 'cancelled'];
 const WORKFLOW_ENDED = ['completed', 'failed', 'cancelled'];
-const LISTED = 8;
 
 /**
- * The chief assistant's home (06 §23): say what you need in one place; what is under way in every project and the
- * earlier conversations below. A conversation, once started, shows as a thread.
+ * Codex-style standalone default chat: clean open canvas with the composer docked at the bottom, bound to no project
+ * by default, with direct Agent role selection & creation right inside the composer bar.
  */
 export function ChiefHome() {
     const s = useStrings();
@@ -26,16 +25,25 @@ export function ChiefHome() {
     const models = useApp((state) => state.models);
     const settings = useApp((state) => state.settings);
     const [text, setText] = useState('');
+    const [agentId, setAgentId] = useState('');
     const [busy, setBusy] = useState(false);
-    // `@member` hands the request to a member (06 §19).
+    const areaRef = useRef<HTMLTextAreaElement>(null);
     const mention = useMemberMention(text, setText);
     const threads = useApp((state) => state.threads);
     const teamRuns = useApp((state) => state.teamRuns);
     const workflowRuns = useApp((state) => state.workflowRuns);
-    // A conversation with the chief belongs to no project: no project to pick. What it is picked is the model and
-    // thinking level, the defaults for new conversations until the user picks others, as under a conversation.
     const [picked, setPicked] = useState<ModelRef | undefined>();
     const [effort, setEffort] = useState<Effort | ''>('');
+
+    // biome-ignore lint/correctness/useExhaustiveDependencies: auto-grow textarea as text changes
+    useLayoutEffect(() => {
+        const element = areaRef.current;
+        if (element) {
+            element.style.height = 'auto';
+            element.style.height = `${Math.min(element.scrollHeight, 260)}px`;
+        }
+    }, [text]);
+
     const connected = (ref: ModelRef | null | undefined) =>
         ref && models.some((option) => option.connectionId === ref.connectionId && option.model.id === ref.model)
             ? ref
@@ -45,24 +53,12 @@ export function ChiefHome() {
         (option) => model && option.connectionId === model.connectionId && option.model.id === model.model,
     )?.model.reasoning;
     const effortValue = startingEffort(reasoning, settings?.defaultEffort, effort);
-    // Only the user's: the supervisor answers the rest (06 §24).
     const approvals = useApp((state) => state.approvals).filter((approval) => !approval.reviewer);
-    const history = Object.values(threads)
-        .filter((thread) => isChief(thread) && !thread.archived)
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, LISTED);
-    // Archived ones are only here: a project's list never holds the chief's conversations.
-    const archived = Object.values(threads)
-        .filter((thread) => isChief(thread) && thread.archived)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
-    const [showArchived, setShowArchived] = useState(false);
-    // The examples name the project a new conversation runs in: that of the user's latest conversation of their own,
-    // as the host picks it (chief.ts `#home`).
     const open = projects.filter((project) => !project.missing);
     const latest = Object.values(threads)
         .filter(
             (thread) =>
-                !isChief(thread) &&
+                thread.role !== 'chief' &&
                 !thread.teamRunId &&
                 !thread.workflowRunId &&
                 !thread.parent &&
@@ -78,7 +74,6 @@ export function ChiefHome() {
                 kind: 'team' as const,
                 id: run.id,
                 title: run.title ?? run.goal,
-                projectId: run.projectId,
                 status: s.team.statuses[run.status],
                 updatedAt: run.updatedAt,
             })),
@@ -88,181 +83,136 @@ export function ChiefHome() {
                 kind: 'workflow' as const,
                 id: run.id,
                 title: run.title,
-                projectId: run.projectId,
                 status: s.workflow.statuses[run.status],
                 updatedAt: run.updatedAt,
             })),
     ]
         .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, LISTED);
-    const projectName = (id: string) => projects.find((project) => project.id === id)?.name ?? '';
+        .slice(0, 4);
+
+    const promptSuggestions = example ? s.chief.projectExamples : s.chief.examples;
 
     const send = async () => {
         const value = text.trim();
         if (!value || busy) return;
         setBusy(true);
         const thread = await attempt(() =>
-            host.call(
-                'chief.start',
-                {
-                    text: value,
-                    ...(model ? { model } : {}),
-                    ...(effortValue ? { effort: effortValue } : {}),
-                },
-                { timeoutMs: 120_000 },
-            ),
+            agentId
+                ? host.call(
+                      'member.chat',
+                      {
+                          memberId: agentId,
+                          text: value,
+                          ...(model ? { model: model.model } : {}),
+                          ...(effortValue ? { effort: effortValue } : {}),
+                      },
+                      { timeoutMs: 120_000 },
+                  )
+                : host.call(
+                      'chief.start',
+                      {
+                          text: value,
+                          ...(model ? { model } : {}),
+                          ...(effortValue ? { effort: effortValue } : {}),
+                      },
+                      { timeoutMs: 120_000 },
+                  ),
         );
         setBusy(false);
         if (thread) {
             useApp.setState((state) => ({ threads: { ...state.threads, [thread.id]: thread } }));
+            void loadMembers(useApp.getState().selectedProjectId);
             setText('');
             await selectThread(thread.id);
         }
     };
 
-    if (projects.length === 0) {
-        return (
-            <div className="chief-home">
-                <div className="chief-home__hero">
-                    <LogoMark size={52} className="chief-home__mark" />
-                    <h1>{s.chief.title}</h1>
-                    <p>{s.chief.noProject}</p>
-                    <button type="button" className="button button--primary" onClick={() => void openProject()}>
-                        <Icon name="folderPlus" size={14} /> {s.sidebar.openProject}
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
     return (
-        <div className="chief-home">
-            <div className="chief-home__hero">
-                <LogoMark size={52} className="chief-home__mark" />
-                <h1>{s.chief.title}</h1>
-                <p>{s.chief.subtitle}</p>
-            </div>
-            <div className="chief-home__composer">
-                <MemberMentionList mention={mention} />
-                <textarea
-                    className="chief-home__input"
-                    value={text}
-                    rows={4}
-                    placeholder={s.chief.placeholder}
-                    aria-label={s.chief.title}
-                    onChange={(event) => {
-                        setText(event.target.value);
-                        mention.update(event.target.value, event.target.selectionStart);
-                    }}
-                    onKeyDown={(event) => {
-                        if (mention.keyDown(event)) return;
-                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                            event.preventDefault();
-                            void send();
-                        }
-                    }}
-                />
-                <div className="chief-home__bar">
-                    <ModelChooser placement="down" value={model} onChange={setPicked} empty={s.chief.autoModel} />
-                    <EffortChooser placement="down" model={model} value={effortValue} onChange={setEffort} />
-                    <span className="chief-home__spacer" />
-                    <button
-                        type="button"
-                        className="button button--primary"
-                        disabled={busy || !text.trim()}
-                        onClick={() => void send()}
-                    >
-                        {busy ? <Spinner /> : <Icon name="send" size={14} />} {s.chief.send}
-                    </button>
-                </div>
-            </div>
-            <div className="chief-home__examples">
-                {s.chief.examples.map((line) => {
-                    const shown = format(line, { project: example?.name ?? '' });
-                    return (
-                        <button key={line} type="button" className="chief-home__example" onClick={() => setText(shown)}>
-                            {shown}
-                        </button>
-                    );
-                })}
-            </div>
-            <div className="chief-home__grid">
-                <section className="chief-home__section">
-                    <h3>{s.chief.underway}</h3>
-                    {underway.length === 0 && approvals.length === 0 ? (
-                        <p className="chief-home__empty">{s.chief.nothingUnderway}</p>
-                    ) : (
-                        underway.map((run) => (
-                            <button
-                                key={run.id}
-                                type="button"
-                                className="chief-home__row"
-                                onClick={() => openRun(run.kind, run.id)}
-                            >
-                                <Icon name={run.kind === 'team' ? 'users' : 'bolt'} size={13} />
-                                <span className="chief-home__row-title">{run.title}</span>
-                                <span className="chief-home__row-meta">
-                                    {projects.length > 1 ? `${projectName(run.projectId)} · ` : ''}
-                                    {run.status}
-                                </span>
-                            </button>
-                        ))
-                    )}
+        <div className="thread chief-home">
+            <header className="thread-header chief-home__header">
+                <div className="thread-header__title">
                     {approvals.length > 0 && (
                         <button
                             type="button"
-                            className="chief-home__row is-needs"
+                            className="chief-home__pill is-needs"
                             onClick={() => approvals[0] && void selectThread(approvals[0].threadId)}
                         >
-                            <Icon name="inbox" size={13} />
-                            <span className="chief-home__row-title">{s.chief.needsYou}</span>
-                            <span className="chief-home__row-meta">
-                                {format(s.chief.approvals, { count: approvals.length })}
-                            </span>
+                            <Icon name="inbox" size={12} /> {format(s.chief.approvals, { count: approvals.length })}
                         </button>
                     )}
-                </section>
-                {(history.length > 0 || archived.length > 0) && (
-                    <section className="chief-home__section">
-                        <h3>{s.chief.history}</h3>
-                        {history.map((thread) => (
-                            <button
-                                key={thread.id}
-                                type="button"
-                                className="chief-home__row"
-                                onClick={() => void selectThread(thread.id)}
-                            >
-                                <Icon name="message" size={13} />
-                                <span className="chief-home__row-title">{thread.title}</span>
-                                <span className="chief-home__row-meta">{relativeTime(thread.updatedAt)}</span>
-                                {thread.unread && <span className="chief-home__dot" />}
-                            </button>
-                        ))}
-                        {archived.length > 0 && (
-                            <button
-                                type="button"
-                                className="chief-home__archived"
-                                aria-expanded={showArchived}
-                                onClick={() => setShowArchived(!showArchived)}
-                            >
-                                {s.sidebar.archived} ({archived.length})
-                            </button>
-                        )}
-                        {showArchived &&
-                            archived.map((thread) => (
+                    {underway.map((run) => (
+                        <button
+                            key={run.id}
+                            type="button"
+                            className="chief-home__pill"
+                            onClick={() => openRun(run.kind, run.id)}
+                        >
+                            <Spinner size={10} />
+                            <span>{run.title}</span>
+                            <span className="muted">· {run.status}</span>
+                        </button>
+                    ))}
+                </div>
+            </header>
+            <div className="chief-home__grid chief-home__stage">
+                {!text.trim() && (
+                    <div className="chief-home__examples">
+                        {promptSuggestions.map((line) => {
+                            const shown = format(line, { project: example?.name ?? '' });
+                            return (
                                 <button
-                                    key={thread.id}
+                                    key={line}
                                     type="button"
-                                    className="chief-home__row is-archived"
-                                    onClick={() => void selectThread(thread.id)}
+                                    className="chief-home__example"
+                                    onClick={() => {
+                                        setText(shown);
+                                        areaRef.current?.focus();
+                                    }}
                                 >
-                                    <Icon name="archive" size={13} />
-                                    <span className="chief-home__row-title">{thread.title}</span>
-                                    <span className="chief-home__row-meta">{relativeTime(thread.updatedAt)}</span>
+                                    {shown}
                                 </button>
-                            ))}
-                    </section>
+                            );
+                        })}
+                    </div>
                 )}
+            </div>
+            <div className="composer chief-home__dock">
+                <div className="composer__box chief-home__composer">
+                    <MemberMentionList mention={mention} />
+                    <textarea
+                        ref={areaRef}
+                        className="composer__input"
+                        value={text}
+                        rows={2}
+                        placeholder={s.chief.placeholder}
+                        aria-label={s.chief.title}
+                        onChange={(event) => {
+                            setText(event.target.value);
+                            mention.update(event.target.value, event.target.selectionStart);
+                        }}
+                        onKeyDown={(event) => {
+                            if (mention.keyDown(event)) return;
+                            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                                event.preventDefault();
+                                void send();
+                            }
+                        }}
+                    />
+                    <div className="composer__bar chief-home__bar">
+                        <AgentRolePicker value={agentId} onChange={setAgentId} placement="up" />
+                        <ModelChooser placement="up" value={model} onChange={setPicked} empty={s.chief.autoModel} />
+                        <EffortChooser placement="up" model={model} value={effortValue} onChange={setEffort} />
+                        <span className="composer__spacer chief-home__spacer" />
+                        <button
+                            type="button"
+                            className="button button--primary"
+                            disabled={busy || !text.trim()}
+                            onClick={() => void send()}
+                        >
+                            {busy ? <Spinner /> : <Icon name="send" size={13} />} {s.chief.send}
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     );

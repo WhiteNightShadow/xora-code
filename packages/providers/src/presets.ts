@@ -574,6 +574,22 @@ const MINIMAX_MODELS: readonly ModelInfo[] = [
     minimaxM2('MiniMax-M2.1-highspeed', 'MiniMax M2.1 Highspeed'),
 ];
 
+/** MiniMax business error codes (platform.minimaxi.com / platform.minimax.io error code table). */
+export const MINIMAX_ERROR_CODES: Readonly<Record<string, ErrorClass>> = {
+    '1000': 'server', // unknown error
+    '1001': 'timeout', // vendor timeout
+    '1002': 'rate_limit', // RPM limit triggered
+    '1004': 'auth', // authentication failed
+    '1008': 'quota', // insufficient balance
+    '1013': 'invalid_request', // invalid service parameters
+    '1027': 'content_filter', // output content filtered
+    '1039': 'rate_limit', // TPM limit triggered
+    '2013': 'invalid_request', // invalid input format or parameters
+    '2049': 'auth', // invalid API key
+    '2056': 'quota', // Token Plan usage window exhausted
+    '2064': 'overloaded', // cluster under high load
+};
+
 const MINIMAX_QUIRKS: Quirks = {
     reasoningField: 'reasoning_content',
     // The thinking in `reasoning_content` instead of `<think>` tags in the answer (M3, M2.x; M3.1-Flash always).
@@ -582,6 +598,7 @@ const MINIMAX_QUIRKS: Quirks = {
     reasoningEcho: 'with_tools',
     thinking: { kind: 'minimax', effort: true },
     omitParams: ['temperature', 'top_p'],
+    errorCodes: MINIMAX_ERROR_CODES,
 };
 
 function minimax(region: Region): ProviderPreset {

@@ -3,7 +3,20 @@ import type { ProviderConnection, Quirks, StreamOptions, Wire } from './types.ts
 
 export const ANTHROPIC_VERSION = '2023-06-01';
 export const DEFAULT_USER_AGENT = 'XoraCode';
-export const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
+export const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 180_000;
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 45_000;
+export const DEFAULT_IDLE_TIMEOUT_MS = DEFAULT_FIRST_BYTE_TIMEOUT_MS;
+
+/** Strips invisible clipboard characters, CR/LF, surrounding quotes and accidental `Bearer ` prefixes from API keys. */
+export function sanitizeApiKey(raw: string | undefined): string {
+    if (!raw) return '';
+    return raw
+        .replace(/[\r\n\uFEFF\u200B-\u200D]/g, '')
+        .trim()
+        .replace(/^["']+|["']+$/g, '')
+        .replace(/^bearer\s+/i, '')
+        .trim();
+}
 
 /**
  * Request headers: protocol headers and auth, then preset `extraHeaders`, then the connection's own headers. The
@@ -22,11 +35,19 @@ export function buildHeaders(
     if (wire === 'anthropic_messages') {
         headers['anthropic-version'] = ANTHROPIC_VERSION;
     }
-    const key = connection.apiKey?.trim();
+    const key = sanitizeApiKey(connection.apiKey);
     if (key && connection.preset.auth === 'bearer') {
         headers.authorization = `Bearer ${key}`;
+        if (wire === 'anthropic_messages' && (connection.preset.channel === 'custom' || Boolean(connection.baseUrl))) {
+            headers['x-api-key'] = key;
+        }
     } else if (key && connection.preset.auth === 'x-api-key') {
         headers['x-api-key'] = key;
+        // Custom Anthropic-compatible gateways (MiniMax `/anthropic`, OneAPI/NewAPI relays) often check `Bearer` instead
+        // of `x-api-key`; sending both on custom channels matches `firefox-reverse` while keeping official Anthropic clean.
+        if (connection.preset.channel === 'custom') {
+            headers.authorization = `Bearer ${key}`;
+        }
     }
     for (const extra of [quirks.extraHeaders, connection.headers]) {
         for (const [name, value] of Object.entries(extra ?? {})) {
@@ -38,23 +59,30 @@ export function buildHeaders(
 }
 
 /**
- * Owns one HTTP exchange: forwards the caller's abort signal, enforces the idle timeout (any received byte,
- * including SSE keep-alive comments, restarts it) and turns transport failures into {@link ProviderError}s.
+ * Owns one HTTP exchange: forwards the caller's abort signal, enforces separate pre-first-byte (`firstByteTimeoutMs`)
+ * and mid-stream (`idleTimeoutMs`) stall timeouts (any received byte, including SSE keep-alive comments, restarts the
+ * active timer) and turns transport failures into {@link ProviderError}s.
  */
 export class Exchange {
     readonly #provider: string;
     readonly #fetch: typeof fetch;
-    readonly #idleMs: number;
+    readonly #firstByteMs: number;
+    readonly #streamIdleMs: number;
     readonly #external: AbortSignal | undefined;
     readonly #controller = new AbortController();
     readonly #onAbort = (): void => this.#controller.abort();
     #timer: ReturnType<typeof setTimeout> | undefined;
+    #sawBodyByte = false;
+    #activeTimeoutMs = 0;
     #idleFired = false;
 
-    constructor(provider: string, options: StreamOptions, defaultIdleMs = DEFAULT_IDLE_TIMEOUT_MS) {
+    constructor(provider: string, options: StreamOptions, defaultIdleMs?: number) {
         this.#provider = provider;
         this.#fetch = options.fetch ?? globalThis.fetch;
-        this.#idleMs = options.idleTimeoutMs ?? defaultIdleMs;
+        this.#firstByteMs =
+            options.firstByteTimeoutMs ?? options.idleTimeoutMs ?? defaultIdleMs ?? DEFAULT_FIRST_BYTE_TIMEOUT_MS;
+        this.#streamIdleMs = options.idleTimeoutMs ?? defaultIdleMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+        this.#activeTimeoutMs = this.#firstByteMs;
         this.#external = options.signal;
         this.#external?.addEventListener('abort', this.#onAbort, { once: true });
     }
@@ -75,7 +103,7 @@ export class Exchange {
         } catch (error) {
             throw this.failure(error);
         }
-        // Headers are data too: the body gets a full idle period of its own.
+        // Headers are data too: waiting for the first body chunk gets a full pre-first-byte window of its own.
         this.#touch();
         return response;
     }
@@ -96,6 +124,9 @@ export class Exchange {
                     this.#clearTimer();
                     controller.close();
                     return;
+                }
+                if (result.value.byteLength > 0) {
+                    this.#sawBodyByte = true;
                 }
                 this.#touch();
                 controller.enqueue(result.value);
@@ -120,7 +151,7 @@ export class Exchange {
             return classifyError({ provider: this.#provider, aborted: true, cause: error });
         }
         if (this.#idleFired) {
-            return classifyError({ provider: this.#provider, idleTimeoutMs: this.#idleMs, cause: error });
+            return classifyError({ provider: this.#provider, idleTimeoutMs: this.#activeTimeoutMs, cause: error });
         }
         return classifyError({ provider: this.#provider, cause: error });
     }
@@ -134,11 +165,13 @@ export class Exchange {
 
     #touch(): void {
         this.#clearTimer();
-        if (this.#idleMs > 0 && Number.isFinite(this.#idleMs)) {
+        const ms = this.#sawBodyByte ? this.#streamIdleMs : this.#firstByteMs;
+        this.#activeTimeoutMs = ms;
+        if (ms > 0 && Number.isFinite(ms)) {
             this.#timer = setTimeout(() => {
                 this.#idleFired = true;
                 this.#controller.abort();
-            }, this.#idleMs);
+            }, ms);
             // An abandoned stream must not keep the process alive until the timer fires.
             this.#timer.unref?.();
         }

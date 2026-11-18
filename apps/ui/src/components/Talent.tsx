@@ -9,9 +9,25 @@ import { type Editing, MemberAvatar, MemberEditor } from './MembersView.tsx';
 import { TeamTabs } from './OrgView.tsx';
 import { Badge, Spinner } from './primitives.tsx';
 
+const OPC_PERSONA_IDS = new Set([
+    'opc-lead',
+    'opc-pm',
+    'opc-growth',
+    'opc-researcher',
+    'content-lead',
+    'content-writer',
+]);
+const BUILD_PERSONA_IDS = new Set(['opc-fullstack', 'opc-designer', 'opc-automation', 'opc-qa', 'frontend']);
+
+function marketGroupOf(persona: Persona): 'opc' | 'build' | 'eng' {
+    if (OPC_PERSONA_IDS.has(persona.id)) return 'opc';
+    if (BUILD_PERSONA_IDS.has(persona.id)) return 'build';
+    return 'eng';
+}
+
 /**
- * The talent market (19 §15): every built-in member there is, with its job and its prompt, to search through and
- * hire into an organization. A built-in the user deleted comes back from here too.
+ * The talent market (19 §15): every built-in OPC & software member there is, with its job and its prompt, to search
+ * through and hire into an organization, or create a custom role from scratch.
  */
 export function TalentMarketPage() {
     const s = useStrings();
@@ -21,7 +37,7 @@ export function TalentMarketPage() {
     // Bumped after a hire or a restore, so the market reads the organization again.
     const [version, setVersion] = useState(0);
     const [query, setQuery] = useState('');
-    const [role, setRole] = useState('');
+    const [category, setCategory] = useState<'' | 'opc' | 'build' | 'eng'>('');
     const [shown, setShown] = useState<string | undefined>();
     const [editing, setEditing] = useState<Editing | undefined>();
     useEffect(() => {
@@ -40,12 +56,13 @@ export function TalentMarketPage() {
     const jobOf = (persona: Persona) =>
         (s.members.builtinJobs as Record<string, string | undefined>)[persona.id] ?? persona.description ?? '';
     const roleOf = (persona: Persona) =>
-        (s.members.roles as Record<string, string | undefined>)[persona.role.replace('-', '_')] ?? persona.role;
-    const roles = [...new Set((personas ?? []).map((persona) => persona.role))];
+        persona.role === 'executor' && persona.category
+            ? ((s.members.categories as Record<string, string | undefined>)[persona.category] ?? persona.category)
+            : ((s.members.roles as Record<string, string | undefined>)[persona.role.replace('-', '_')] ?? persona.role);
     const needle = query.trim().toLowerCase();
     const listed = (personas ?? []).filter(
         (persona) =>
-            (!role || persona.role === role) &&
+            (!category || marketGroupOf(persona) === category) &&
             (!needle ||
                 [persona.name, jobOf(persona), persona.prompt, persona.id].some((text) =>
                     text.toLowerCase().includes(needle),
@@ -71,9 +88,22 @@ export function TalentMarketPage() {
         }
         return persona.state === 'removed' ? s.talent.removed : s.talent.available;
     };
+    const filterTabs: Array<{ value: '' | 'opc' | 'build' | 'eng'; label: string }> = [
+        { value: '', label: s.talent.all },
+        { value: 'opc', label: s.talent.groups.opc },
+        { value: 'build', label: s.talent.groups.build },
+        { value: 'eng', label: s.talent.groups.eng },
+    ];
     return (
         <div className="members team-page talent-page">
-            <TeamTabs active="market" />
+            <TeamTabs
+                active="market"
+                actions={
+                    <button type="button" className="button button--primary" onClick={() => setEditing({})}>
+                        <Icon name="plus" size={14} /> {s.members.create}
+                    </button>
+                }
+            />
             <div className="talent-page__body">
                 <p className="muted talent-page__intro">{s.talent.intro}</p>
                 <div className="talent-page__filters">
@@ -85,20 +115,16 @@ export function TalentMarketPage() {
                         onChange={(event) => setQuery(event.target.value)}
                     />
                     <div className="talent-page__roles" role="tablist" aria-label={s.org.position}>
-                        {['', ...roles].map((item) => (
+                        {filterTabs.map((tab) => (
                             <button
-                                key={item || 'all'}
+                                key={tab.value || 'all'}
                                 type="button"
                                 role="tab"
-                                aria-selected={role === item}
-                                className={`chip${role === item ? ' is-active' : ''}`}
-                                onClick={() => setRole(item)}
+                                aria-selected={category === tab.value}
+                                className={`chip${category === tab.value ? ' is-active' : ''}`}
+                                onClick={() => setCategory(tab.value)}
                             >
-                                {item
-                                    ? ((s.members.roles as Record<string, string | undefined>)[
-                                          item.replace('-', '_')
-                                      ] ?? item)
-                                    : s.talent.all}
+                                {tab.label}
                             </button>
                         ))}
                     </div>

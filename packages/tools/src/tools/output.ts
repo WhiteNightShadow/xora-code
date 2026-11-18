@@ -6,7 +6,9 @@ const ToolOutputInput = z.object({
     ref: z.string().min(1).describe('The reference shown in place of the output, such as R123'),
     offset: z.number().int().min(1).optional().describe('First line to return, 1-based'),
     limit: z.number().int().min(1).max(2_000).optional().describe('Lines to return'),
+    tail: z.number().int().min(1).max(2_000).optional().describe('Last N lines to return from the end of the output'),
     grep: z.string().min(1).optional().describe('Only the lines containing this text (case-insensitive), numbered'),
+    context: z.number().int().min(0).max(20).optional().describe('Lines of context before and after each grep match'),
 });
 
 export type ToolOutputInput = z.infer<typeof ToolOutputInput>;
@@ -32,13 +34,37 @@ async function runToolOutput(input: ToolOutputInput, ctx: ToolContext): Promise<
     const lines = found.text.split('\n');
     if (input.grep) {
         const needle = input.grep.toLowerCase();
-        const hits = lines.flatMap((line, index) =>
-            line.toLowerCase().includes(needle) ? [`${index + 1}: ${line}`] : [],
-        );
-        if (hits.length === 0) {
+        const matched: number[] = [];
+        lines.forEach((line, index) => {
+            if (line.toLowerCase().includes(needle)) matched.push(index);
+        });
+        if (matched.length === 0) {
             return { content: `No line of ${ref} (${found.tool}, ${lines.length} lines) contains "${input.grep}".` };
         }
-        return { content: `${ref} (${found.tool}), ${hits.length} matching lines:\n${clip(hits.join('\n'))}` };
+        const around = input.context ?? 0;
+        if (around === 0) {
+            const hits = matched.map((index) => `${index + 1}: ${lines[index] ?? ''}`);
+            return { content: `${ref} (${found.tool}), ${matched.length} matching lines:\n${clip(hits.join('\n'))}` };
+        }
+        const rendered: string[] = [];
+        let next = 0;
+        matched.forEach((index, order) => {
+            const from = Math.max(next, index - around);
+            if (rendered.length > 0 && from > next) rendered.push('--');
+            for (let i = from; i < index; i++) rendered.push(`${i + 1}- ${lines[i] ?? ''}`);
+            rendered.push(`${index + 1}: ${lines[index] ?? ''}`);
+            const to = Math.min(lines.length, index + 1 + around, matched[order + 1] ?? Number.POSITIVE_INFINITY);
+            for (let i = index + 1; i < to; i++) rendered.push(`${i + 1}- ${lines[i] ?? ''}`);
+            next = Math.max(to, index + 1);
+        });
+        return { content: `${ref} (${found.tool}), ${matched.length} matching lines:\n${clip(rendered.join('\n'))}` };
+    }
+    if (input.tail !== undefined && input.offset === undefined) {
+        const start = Math.max(0, lines.length - input.tail);
+        const end = lines.length;
+        const earlier =
+            start > 0 ? `\n[lines ${start + 1}–${end} of ${lines.length}; ask for earlier lines with offset]` : '';
+        return { content: `${clip(lines.slice(start, end).join('\n'))}${earlier}` };
     }
     const start = (input.offset ?? 1) - 1;
     const end = Math.min(lines.length, start + (input.limit ?? DEFAULT_LINES));
@@ -63,6 +89,16 @@ export const toolOutputTool: ToolDefinition<ToolOutputInput> = {
     kind: 'read',
     schema: ToolOutputInput,
     readOnly: true,
+    lenient: {
+        aliases: {
+            ref: ['reference', 'id', 'output', 'name'],
+            offset: ['start_line', 'start', 'line'],
+            limit: ['max_lines', 'lines'],
+            tail: ['last', 'tail_lines'],
+            grep: ['pattern', 'search', 'query', 'filter', 'find'],
+            context: ['context_lines', 'around', 'C'],
+        },
+    },
     targets: () => [],
     title: (input) => `Earlier output ${input.ref}`,
     run: runToolOutput,

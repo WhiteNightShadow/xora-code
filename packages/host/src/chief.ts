@@ -28,6 +28,7 @@ import type { ExtensionService } from './extensions.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
 import { candidateLines, type MemberService } from './members.ts';
+import { ORG_TEMPLATE_IDS, type OrgTemplateId } from './org-groups.ts';
 import type { ProjectService } from './projects.ts';
 import type { SettingsService } from './settings.ts';
 import type { SkillCandidate } from './skill-hub.ts';
@@ -65,7 +66,7 @@ const RECENT_MS = 24 * 3600_000;
 
 const TEXT = bilingual(
     {
-        title: (text: string) => `总助手：${text}`,
+        title: (text: string) => text,
         projectMissing: (folder: string) => `项目文件夹不存在：${folder}`,
         noProject: '先打开一个项目',
         planning: '主管在拆任务',
@@ -83,7 +84,7 @@ const TEXT = bilingual(
         mcpSummary: (name: string, target: string) => `给所有项目加一个MCP服务“${name}”：${target}`,
     },
     {
-        title: (text: string) => `Chief: ${text}`,
+        title: (text: string) => text,
         projectMissing: (folder: string) => `The project folder is missing: ${folder}`,
         noProject: 'Open a project first',
         planning: 'The supervisor is planning',
@@ -323,10 +324,13 @@ const CHIEF_TOOLS: HostToolProvider['tools'] = [
     {
         name: 'org_template',
         description:
-            'Builds a regular software team in one step, as the group 开发组: tech lead, product manager, architect, frontend and backend engineers, QA, DevOps, code reviewer, researcher and principal engineer. replace: true first deletes the other members and groups (the user wants to start over); their memories stay.',
+            'Builds a team in one step from a preset template: opc-studio (OPC full-stack studio: venture lead, product manager, full-stack builder, UI/UX designer, growth operator, market analyst, automation engineer, QA), opc-indie (lean 3-agent indie trio), opc-content (content & growth studio), or dev-team (standard software engineering team). replace: true first deletes the other members and groups; memories stay.',
         parameters: {
             type: 'object',
-            properties: { template: { type: 'string', enum: ['dev-team'] }, replace: { type: 'boolean' } },
+            properties: {
+                template: { type: 'string', enum: [...ORG_TEMPLATE_IDS] },
+                replace: { type: 'boolean' },
+            },
             required: ['template', 'replace'],
             additionalProperties: false,
         },
@@ -607,9 +611,11 @@ export class ChiefService {
                     open.some((project) => project.id === thread.projectId),
             )
             .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-        const home = open.find((project) => project.id === latest?.projectId) ?? open[0];
-        if (!home) throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).noProject);
-        return home;
+        return (
+            open.find((project) => project.id === latest?.projectId) ??
+            open[0] ??
+            this.#deps.projects.defaultWorkspace()
+        );
     }
 
     /**
@@ -1037,8 +1043,10 @@ export class ChiefService {
                     return { content: `Deleted the group ${group.name}; what was in it moved up a level.` };
                 }
                 case 'org_template': {
+                    const picked = stringArg(args, 'template') as OrgTemplateId;
+                    const template = ORG_TEMPLATE_IDS.includes(picked) ? picked : 'opc-studio';
                     const chart = await this.#deps.members.applyTemplate({
-                        template: 'dev-team',
+                        template,
                         replace: args.replace === true,
                     });
                     return {
@@ -1087,6 +1095,7 @@ export class ChiefService {
         const names = all.map((project) => project.name).join(', ');
         if (!wanted) {
             const open = all.filter((project) => !project.missing);
+            if (open.length === 0) return this.#deps.projects.defaultWorkspace();
             if (open.length === 1 && open[0]) return open[0];
             const last = [...this.#cards.values()].filter((card) => card.threadId === threadId).at(-1);
             const recent = last ? this.#projects.get(last.item.projectId) : undefined;
@@ -1109,9 +1118,11 @@ export class ChiefService {
     /** The project this conversation runs in: the context of changes to the organization, which hold in every project. */
     #homeOf(threadId: string): Project {
         const own = this.#projects.get(this.#deps.threads.find(threadId)?.projectId ?? '');
-        const home = own ?? [...this.#projects.values()].find((project) => !project.missing);
-        if (!home) throw new ToolError('No project is open');
-        return home;
+        return (
+            own ??
+            [...this.#projects.values()].find((project) => !project.missing) ??
+            this.#deps.projects.defaultWorkspace()
+        );
     }
 
     async #membersOf(project: Project): Promise<Member[]> {

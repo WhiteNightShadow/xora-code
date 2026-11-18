@@ -168,16 +168,20 @@ export function TeamOrgPage() {
     );
 }
 
-/** A regular software team in one step (06 §24), optionally in place of the members and groups there are. */
+const TEMPLATE_IDS = ['opc-studio', 'opc-indie', 'opc-content', 'dev-team'] as const;
+type TemplateId = (typeof TEMPLATE_IDS)[number];
+
+/** OPC & software team templates in one step (06 §24), optionally replacing existing members and groups. */
 function TemplateDialog({ onClose }: { onClose: () => void }) {
     const s = useStrings();
     const selectedProjectId = useApp((state) => state.selectedProjectId);
+    const [selected, setSelected] = useState<TemplateId>('opc-studio');
     const [replace, setReplace] = useState(false);
     const [busy, setBusy] = useState(false);
     const apply = async () => {
         setBusy(true);
         const org = await attempt(() =>
-            host.call('org.applyTemplate', { template: 'dev-team', replace }, { timeoutMs: 60_000 }),
+            host.call('org.applyTemplate', { template: selected, replace }, { timeoutMs: 60_000 }),
         );
         setBusy(false);
         if (org) {
@@ -191,11 +195,34 @@ function TemplateDialog({ onClose }: { onClose: () => void }) {
         <Modal title={s.org.templateTitle} onClose={onClose}>
             <div className="dialog">
                 <p className="org-template__intro">{s.org.templateIntro}</p>
-                <ul className="org-template__list">
-                    {s.org.templateMembers.map((line) => (
-                        <li key={line}>{line}</li>
-                    ))}
-                </ul>
+                <div className="org-template__cards">
+                    {TEMPLATE_IDS.map((id) => {
+                        const card = s.org.templateCards[id];
+                        const active = selected === id;
+                        return (
+                            <button
+                                key={id}
+                                type="button"
+                                className={`org-template__card${active ? ' is-active' : ''}`}
+                                aria-pressed={active}
+                                onClick={() => setSelected(id)}
+                            >
+                                <div className="org-template__head">
+                                    <strong>{card.title}</strong>
+                                    <span className="org-template__badge">{card.badge}</span>
+                                </div>
+                                <p className="org-template__desc">{card.desc}</p>
+                                <div className="org-template__tags">
+                                    {card.members.map((member) => (
+                                        <span key={member} className="org-template__tag">
+                                            {member}
+                                        </span>
+                                    ))}
+                                </div>
+                            </button>
+                        );
+                    })}
+                </div>
                 <div className="org-template__replace">
                     <Toggle checked={replace} onChange={setReplace} label={s.org.templateReplace} />
                     <p>{s.org.templateReplaceHint}</p>

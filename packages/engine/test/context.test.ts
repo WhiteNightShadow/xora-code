@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Message } from '@xora/providers';
@@ -16,9 +16,16 @@ import {
 } from '../src/context/compaction.ts';
 import { type Judgment, observe, renderState } from '../src/context/ledger.ts';
 import { contextMessages } from '../src/context/messages.ts';
-import { describeCall, maskToolResults, notableLine, placeholder, readOutput } from '../src/context/outputs.ts';
+import {
+    describeCall,
+    maskToolResults,
+    notableLine,
+    placeholder,
+    readOutput,
+    spillToolOutput,
+} from '../src/context/outputs.ts';
 import { userWords } from '../src/context/tokens.ts';
-import { contextBudget, MIN_ROOM } from '../src/context/window.ts';
+import { COMPACT_AT, contextBudget, DEFAULT_WORKING_SET, MIN_ROOM } from '../src/context/window.ts';
 import { EngineSession, resolveTarget } from '../src/session.ts';
 import { SessionFile } from '../src/store.ts';
 
@@ -139,19 +146,30 @@ describe('what the review of 2026-11-11 found', () => {
 
     it('counts the system prompt and the tool definitions, and leaves the conversation room beside them', () => {
         const target = session();
-        // A model with a window of a million: the working set is what limits.
+        // By default, a model uses its full supported context window minus output reserve.
         const model = {
             ...resolveTarget(target.config.model),
             model: { ...resolveTarget(target.config.model).model, contextWindow: 1_000_000, maxOutput: 32_000 },
         };
-        const plain = contextBudget(target, model, 5_000);
-        expect(plain).toBe(160_000 - 32_000);
-        // A thread with many tool definitions still has MIN_ROOM below the compaction line.
-        const heavy = contextBudget(target, model, 120_000);
+        expect(contextBudget(target, model, 5_000)).toBe(1_000_000 - 32_000);
+        const binaryMillion = {
+            ...model,
+            model: { ...model.model, contextWindow: DEFAULT_WORKING_SET, maxOutput: 32_000 },
+        };
+        expect(contextBudget(target, binaryMillion, 5_000)).toBe(DEFAULT_WORKING_SET - 32_000);
+        // Reserve comes out of the hard window on smaller models too.
+        const tight = { ...model, model: { ...model.model, contextWindow: 200_000, maxOutput: 32_000 } };
+        expect(contextBudget(target, tight, 5_000)).toBe(200_000 - 32_000);
+        // When an explicit workingSet cap is configured, heavy fixed tokens still leave MIN_ROOM below COMPACT_AT.
+        const capped = session();
+        capped.config = { ...capped.config, workingSet: 256_000 };
+        const plain = contextBudget(capped, model, 5_000);
+        expect(plain).toBe(256_000);
+        const heavy = contextBudget(capped, model, 210_000);
         expect(heavy).toBeGreaterThan(plain);
-        expect(heavy * 0.8 - 120_000).toBeGreaterThanOrEqual(MIN_ROOM - 1);
+        expect(heavy * COMPACT_AT - 210_000).toBeGreaterThanOrEqual(MIN_ROOM - 1);
         // Shares are of the conversation's room, not of the fixed part.
-        const shares = compactionShares({ budget: heavy, fixed: 120_000, used: 150_000, estimated: 150_000 });
+        const shares = compactionShares({ budget: heavy, fixed: 210_000, used: 240_000, estimated: 240_000 });
         expect(shares.tail).toBeGreaterThan(0);
         expect(shares.tail).toBeLessThanOrEqual(30_000 * 0.25);
     });
@@ -299,6 +317,75 @@ describe('the ledger', () => {
         expect(observed.failures[0]?.line).toBe('Error: lint broke');
     });
 
+    it('follows a command that was left running to how its job ended', () => {
+        const left = (job: string): string =>
+            `building…\n\nThe command is still running after 2m 0s: it was not stopped and carries on in the background as ${job}. What is above is its output so far, not its result. Wait for it with bash_output (jobId "${job}" and waitMs, up to 600000), or stop it with bash_kill.`;
+        const history: Message[] = [
+            user('Run the tests and the build.'),
+            call('a', 'bash', { command: 'pnpm test' }),
+            result('a', 'bash', left('job-1')),
+            call('b', 'bash', { command: 'pnpm build' }),
+            result('b', 'bash', left('job-2')),
+            call('c', 'bash', { command: 'pnpm dev', background: true }),
+            result(
+                'c',
+                'bash',
+                'Started background job job-3. Read its output with bash_output (jobId "job-3") and stop it with bash_kill.',
+            ),
+            call('d', 'bash', { command: 'pnpm lint' }),
+            result('d', 'bash', left('job-4')),
+            call('e', 'bash_output', { jobId: 'job-1', waitMs: 600000 }),
+            result(
+                'e',
+                'bash_output',
+                'Job job-1 is running (started 12m 0s ago).\nNo new output since the last check.',
+            ),
+            call('f', 'bash_output', { jobId: 'job-1', waitMs: 600000 }),
+            result(
+                'f',
+                'bash_output',
+                'Job job-1 exited with code 1 after 14m 2s.\nNew output since the last check:\nFAIL src/a.test.ts',
+                true,
+            ),
+            call('g', 'bash_output', { jobId: 'job-2' }),
+            result(
+                'g',
+                'bash_output',
+                'Job job-2 exited with code 0 after 3m 1s.\nNew output since the last check:\nbuilt in 181s',
+            ),
+            call('h', 'bash_kill', { jobId: 'job-3' }),
+            result('h', 'bash_kill', 'Stopped job job-3.'),
+        ];
+        const observed = observe(history);
+        expect(observed.commands).toEqual([
+            { index: 12, what: 'pnpm test', ok: false, line: 'FAIL src/a.test.ts' },
+            { index: 14, what: 'pnpm build', ok: true, line: 'Job job-2 exited with code 0 after 3m 1s.' },
+            { index: 16, what: 'pnpm dev', ok: true, line: 'Stopped job job-3.', stopped: true },
+            { index: 8, what: 'pnpm lint', ok: true, line: 'building…', job: 'job-4' },
+        ]);
+        // The test run failed, though the call that started it did not.
+        expect(observed.failures).toEqual([
+            { index: 12, what: 'bash "pnpm test"', ok: false, line: 'FAIL src/a.test.ts' },
+        ]);
+        expect(observed.others).toEqual([]);
+        const state = renderState({
+            observed,
+            plan: [],
+            judgments: [],
+            narratives: [],
+            jobs: [],
+            compactions: 1,
+            keptFrom: history.length,
+            requestTokens: 1000,
+        });
+        expect(state).toContain('- #R12 `pnpm test` → failed · FAIL src/a.test.ts');
+        expect(state).toContain('- #R16 `pnpm dev` → stopped · Stopped job job-3.');
+        expect(state).toContain('- #R8 `pnpm lint` → running on as job-4, no result yet · building…');
+        // Masked, the output so far is not passed off as a result either.
+        const masked = history[2] as Extract<Message, { role: 'tool' }>;
+        expect(placeholder(2, masked, undefined)).toContain('#R2 bash · running on as job-1, no result yet · ');
+    });
+
     it('renders the same state for the same records, the newest request first, never dropping the latest', () => {
         const history: Message[] = [user('first request'), answer('done'), user(`second ${'字'.repeat(300)}`)];
         const parts = {
@@ -338,8 +425,8 @@ describe('the ledger', () => {
 describe('masking', () => {
     it('masks older results all at once to references the tool gives back, then holds until a compaction', () => {
         const target = session();
-        work(target, 'run the parts', 12);
-        // 12 results of about 1000 tokens: masking 4 frees too little of a 100k budget.
+        work(target, 'run the parts', 16);
+        // 16 results of about 1000 tokens: masking 4 frees too little of a 100k budget.
         expect(maskToolResults(target, 100_000)).toBe(false);
         expect(maskToolResults(target, 15_000)).toBe(true);
         const messages = contextMessages(target);
@@ -497,5 +584,69 @@ Switched to pnpm after npm broke the lockfile.
         expect(target.rewind('t2')).toBe(true);
         expect(target.compactions).toBe(1);
         expect(target.summary).toBe(restored.summary);
+    });
+
+    it('spills large tool outputs to R<index>.txt with structured preview and lossless recall, and cleans up on rewind', () => {
+        const target = session();
+        target.beginTurn('t1');
+        target.append(user('run full test suite'));
+
+        target.beginTurn('t2');
+        target.append(call('c1', 'bash', { command: 'pnpm test' }));
+        const fullLines = Array.from({ length: 800 }, (_, i) =>
+            i === 419
+                ? 'FATAL Error: port 5432 already in use by orphan container'
+                : `step ${i + 1}: ${'build-output-segment-'.repeat(3)}`,
+        );
+        const fullText = fullLines.join('\n');
+        expect(fullText.length).toBeGreaterThan(40_000);
+
+        const idx = target.history.length;
+        const preview = spillToolOutput(target, idx, 'bash', fullText.slice(0, 30_000), fullText);
+        target.append(result('c1', 'bash', preview));
+
+        expect(preview.length).toBeLessThan(12_000);
+        expect(preview).toContain('step 1:');
+        expect(preview).toContain('L420: FATAL Error: port 5432 already in use by orphan container');
+        expect(preview).toContain('step 800:');
+        expect(preview).toContain(`#R${idx}`);
+        expect(existsSync(path.join(target.outputsDir, `R${idx}.txt`))).toBe(true);
+
+        // readOutput returns the complete un-truncated 800-line text from disk, including ordinary middle lines.
+        const recalled = readOutput(target, `R${idx}`);
+        expect(recalled?.tool).toBe('bash');
+        expect(recalled?.text).toBe(fullText);
+        expect(recalled?.text).toContain('step 350:');
+
+        // Task ledger still observes the failure line accurately from the structured preview.
+        const observed = observe(target.history);
+        expect(observed.commands[0]?.ok).toBe(true);
+
+        // Rewinding t2 cleans up spilled R<idx>.txt on disk.
+        expect(target.rewind('t2')).toBe(true);
+        expect(existsSync(path.join(target.outputsDir, `R${idx}.txt`))).toBe(false);
+    });
+
+    it('surfaces newly validated ledger facts, constraints, and deadends from applyCompaction', () => {
+        const target = session();
+        target.beginTurn('t1');
+        work(target, 'Keep Node 22 compatibility.', 4, 1500);
+        const cut = compactionCut(target, 1_000) ?? target.history.length;
+        const res = applyCompaction(target, cut, {
+            level: 3,
+            answer: [
+                '<narrative>Verified tests.</narrative>',
+                '<ledger>{"add":[',
+                '{"kind":"constraint","text":"Keep Node 22 compatibility","quote":"Keep Node 22 compatibility."},',
+                '{"kind":"deadend","text":"Vitest threads pool hangs with sqlite","why":"switch to forks pool"}',
+                ']}</ledger>',
+            ].join(''),
+            jobs: [],
+            requestTokens: 10_000,
+        });
+        expect(res.added.map((entry) => [entry.kind, entry.text])).toEqual([
+            ['constraint', 'Keep Node 22 compatibility'],
+            ['deadend', 'Vitest threads pool hangs with sqlite'],
+        ]);
     });
 });

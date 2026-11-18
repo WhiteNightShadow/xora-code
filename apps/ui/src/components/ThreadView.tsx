@@ -1,5 +1,5 @@
 import type { Attachment, ThreadMeta } from '@xora/protocol';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { host } from '../host.ts';
 import { ItemView, PlanList, planLine } from '../items/ItemView.tsx';
 import { memberOf } from '../members.ts';
@@ -7,6 +7,7 @@ import {
     attempt,
     CHIEF_PANELS,
     isChief,
+    isStandaloneChat,
     openChief,
     openReview,
     type RightPanel,
@@ -18,7 +19,7 @@ import {
     watchThread,
 } from '../store.ts';
 import { format } from '../strings.ts';
-import { latestPlanOf, planProgress, type TurnView, visibleItems } from '../timeline.ts';
+import { latestPlanOf, partitionTurnItems, planProgress, type TurnView, visibleItems } from '../timeline.ts';
 import { ConversationArt } from './Art.tsx';
 import { confirmDialog } from './Confirm.tsx';
 import { ContextMeter, EffortPicker, ModelPicker, ModePicker, Popover } from './Controls.tsx';
@@ -26,15 +27,7 @@ import { GoalBanner, GoalDialog } from './GoalDialog.tsx';
 import { Icon, type IconName } from './Icon.tsx';
 import { MemberChip } from './MembersView.tsx';
 import { memberMentions } from './Mentions.tsx';
-import {
-    AutoFocusInput,
-    AutoFocusTextarea,
-    formatMoney,
-    formatTokens,
-    IconButton,
-    Spinner,
-    Toggle,
-} from './primitives.tsx';
+import { AutoFocusInput, AutoFocusTextarea, formatTokens, IconButton, Spinner, Toggle } from './primitives.tsx';
 
 /** A subagent's thread links back to the thread whose agent started it. */
 function ParentLink({ threadId }: { threadId: string }) {
@@ -78,7 +71,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
     };
     // The chief hands work on and changes nothing itself, in no project of its own: none of a project's panels and
     // actions (changes, working tree, terminal, preview, files, worktrees, goals, distilling) belong to it.
-    const chief = isChief(thread);
+    const chief = isStandaloneChat(thread);
     const panels: Array<{ panel: RightPanel; icon: IconName; label: string }> = [
         { panel: 'changes' as const, icon: 'diff' as const, label: s.panel.changes },
         ...(project?.git.isRepo
@@ -120,15 +113,9 @@ function Header({ thread }: { thread: ThreadMeta }) {
                     />
                 ) : (
                     <h1 onDoubleClick={() => setEditing(true)} title={s.thread.editTitle}>
-                        {thread.title}
+                        {thread.title.replace(/^(?:总助手：|Chief:\s*)/, '')}
                     </h1>
                 )}
-                {chief && (
-                    <span className="thread-header__chief" title={s.chief.subtitle}>
-                        <Icon name="sparkle" size={12} /> {s.chief.title}
-                    </span>
-                )}
-                {/* A conversation with the chief belongs to no project (06 §23): no project or branch to show. */}
                 {!chief && (
                     <span className="thread-header__project">
                         {project?.name}
@@ -143,7 +130,7 @@ function Header({ thread }: { thread: ThreadMeta }) {
                 {thread.parent && <ParentLink threadId={thread.parent.threadId} />}
             </div>
             <div className="thread-header__controls">
-                {chief && (
+                {chief ? (
                     <button
                         type="button"
                         className="button button--small"
@@ -152,6 +139,31 @@ function Header({ thread }: { thread: ThreadMeta }) {
                     >
                         <Icon name="plus" size={13} /> {s.chief.newChat}
                     </button>
+                ) : (
+                    <>
+                        <button
+                            type="button"
+                            className={`icon-button thread-header__quick${rightPanel === 'changes' ? ' is-active' : ''}`}
+                            title={s.panel.changes}
+                            aria-label={`${s.panel.changes} (${s.thread.panels})`}
+                            onClick={() =>
+                                useApp.setState({ rightPanel: rightPanel === 'changes' ? undefined : 'changes' })
+                            }
+                        >
+                            <Icon name="diff" size={15} />
+                        </button>
+                        <button
+                            type="button"
+                            className={`icon-button thread-header__quick${rightPanel === 'terminal' ? ' is-active' : ''}`}
+                            title={s.panel.terminal}
+                            aria-label={`${s.panel.terminal} (${s.thread.panels})`}
+                            onClick={() =>
+                                useApp.setState({ rightPanel: rightPanel === 'terminal' ? undefined : 'terminal' })
+                            }
+                        >
+                            <Icon name="terminal" size={15} />
+                        </button>
+                    </>
                 )}
                 <Popover
                     label={s.common.more}
@@ -492,18 +504,32 @@ function UserMessage({ thread, turn }: { thread: ThreadMeta; turn: TurnView }) {
     );
 }
 
-function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; thread: ThreadMeta }) {
+const TurnBlock = memo(function TurnBlock({
+    turn,
+    isLast,
+    isRecent,
+    thread,
+}: {
+    turn: TurnView;
+    isLast: boolean;
+    isRecent: boolean;
+    thread: ThreadMeta;
+}) {
     const s = useStrings();
+    const [resuming, setResuming] = useState(false);
+    const [stepsExpanded, setStepsExpanded] = useState(false);
     const running = turn.status === 'running';
+    const historical = !running && !isRecent;
     const items = visibleItems(turn.items);
     const lastItem = items.at(-1);
+    const segments = useMemo(() => partitionTurnItems(items, historical), [items, historical]);
     const compact = COMPACT_COMMAND.exec(turn.input.text.trim());
     // `/compact` changes this thread's context in place: its turn reads as a divider in the conversation, with no
     // message bubble and nothing to rewind to or fork from. A turn that ended without a compaction shows as usual.
     if (compact && (items.length > 0 ? items.every((item) => item.type === 'compaction') : running)) {
         const focus = compact[1]?.trim();
         return (
-            <section className="turn turn--compaction">
+            <section className={`turn turn--compaction${historical ? ' turn--historical' : ''}`}>
                 {items.length === 0 ? (
                     <div className="turn__working">
                         <Spinner /> {s.context.compacting}
@@ -517,7 +543,7 @@ function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; 
     }
     if (turn.rewound) {
         return (
-            <section className="turn turn--rewound">
+            <section className={`turn turn--rewound${historical ? ' turn--historical' : ''}`}>
                 <div className="user-message">
                     <div className="user-message__text">{turn.input.text}</div>
                 </div>
@@ -527,13 +553,91 @@ function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; 
             </section>
         );
     }
+    const capped =
+        turn.status === 'completed' && (turn.stopReason === 'max_turn_requests' || turn.stopReason === 'max_tokens');
+    const ranTools = turn.items.some((item) => item.type === 'tool_call');
+    const canResume = isLast && userDriven(thread) && !isBusy(thread) && (turn.status === 'failed' || capped);
+    const retryFromStart = turn.status === 'failed' && !ranTools && thread.engine === 'xora';
+    const resume = async () => {
+        if (resuming) return;
+        setResuming(true);
+        try {
+            if (retryFromStart) {
+                const rewound = await attempt(() =>
+                    host.call('thread.rewind', { threadId: thread.id, turnId: turn.turnId, files: false }),
+                );
+                if (!rewound) return;
+                const attachments = turn.input.attachments.filter((attachment) => attachment.kind !== 'image');
+                await attempt(() =>
+                    host.call('turn.start', { threadId: thread.id, text: turn.input.text, attachments }),
+                );
+            } else {
+                await attempt(() =>
+                    host.call('turn.start', {
+                        threadId: thread.id,
+                        text: s.thread.continuePrompt,
+                        attachments: [],
+                    }),
+                );
+            }
+        } finally {
+            setResuming(false);
+        }
+    };
+    const turnCacheRate =
+        turn.usage && turn.usage.inputTokens > 0 && turn.usage.cachedTokens > 0
+            ? Math.min(100, Math.round((turn.usage.cachedTokens / turn.usage.inputTokens) * 100))
+            : undefined;
     return (
-        <section className="turn">
+        <section className={`turn${historical ? ' turn--historical' : ''}`}>
             <UserMessage thread={thread} turn={turn} />
             <div className="turn__items">
-                {items.map((item) => (
-                    <ItemView key={item.id} item={item} live={running && item === lastItem} turnRunning={running} />
-                ))}
+                {segments.map((segment) =>
+                    segment.kind === 'item' ? (
+                        <ItemView
+                            key={segment.item.id}
+                            item={segment.item}
+                            live={running && segment.item === lastItem}
+                            turnRunning={running}
+                            threadId={thread.id}
+                        />
+                    ) : !stepsExpanded ? (
+                        <button
+                            key={segment.id}
+                            type="button"
+                            className="turn__folded"
+                            aria-expanded={false}
+                            onClick={() => setStepsExpanded(true)}
+                        >
+                            <Icon name="terminal" size={13} />
+                            <span>{format(s.thread.foldedTools, { count: segment.items.length })}</span>
+                            <span className="turn__folded-action">{s.thread.expandTools}</span>
+                            <Icon name="chevronRight" size={13} className="turn__folded-chevron" />
+                        </button>
+                    ) : (
+                        <div key={segment.id} className="turn__items">
+                            <button
+                                type="button"
+                                className="turn__folded is-open"
+                                aria-expanded={true}
+                                onClick={() => setStepsExpanded(false)}
+                            >
+                                <Icon name="terminal" size={13} />
+                                <span>{format(s.thread.collapseTools, { count: segment.items.length })}</span>
+                                <Icon name="chevronDown" size={13} className="turn__folded-chevron" />
+                            </button>
+                            {segment.items.map((item) => (
+                                <ItemView
+                                    key={item.id}
+                                    item={item}
+                                    live={false}
+                                    turnRunning={false}
+                                    threadId={thread.id}
+                                />
+                            ))}
+                        </div>
+                    ),
+                )}
                 {running &&
                     isLast &&
                     (!lastItem || lastItem.type === 'tool_call' || lastItem.type === 'file_changes') && (
@@ -545,27 +649,51 @@ function TurnBlock({ turn, isLast, thread }: { turn: TurnView; isLast: boolean; 
             {!running && (
                 <div className="turn__footer">
                     {turn.status === 'cancelled' && <span>{s.thread.turnCancelled}</span>}
-                    {turn.durationMs !== undefined && (
-                        <span>{format(s.thread.duration, { seconds: Math.round(turn.durationMs / 1000) })}</span>
+                    {turn.status === 'failed' && <span className="turn__failed">{s.thread.turnFailed}</span>}
+                    {turn.stopReason === 'max_turn_requests' && (
+                        <span className="turn__stopped">{s.thread.turnMaxRequests}</span>
                     )}
-                    {turn.usage?.cost && <span>{formatMoney(turn.usage.cost)}</span>}
-                    {turn.usage && turn.usage.inputTokens > 0 && (
-                        <span>
-                            {formatTokens(turn.usage.inputTokens)}→{formatTokens(turn.usage.outputTokens)}
+                    {turn.stopReason === 'max_tokens' && (
+                        <span className="turn__stopped">{s.thread.turnMaxTokens}</span>
+                    )}
+                    {canResume && (
+                        <button
+                            type="button"
+                            className="button button--small button--primary"
+                            disabled={resuming}
+                            onClick={() => void resume()}
+                        >
+                            {resuming ? <Spinner size={12} /> : <Icon name="refresh" size={12} />}{' '}
+                            {retryFromStart ? s.thread.retry : s.thread.continueWork}
+                        </button>
+                    )}
+                    {turn.durationMs !== undefined && (
+                        <span className="turn__meta">
+                            {format(s.thread.duration, { seconds: Math.round(turn.durationMs / 1000) })}
+                            {turn.usage && turn.usage.inputTokens > 0
+                                ? ` · ${formatTokens(turn.usage.inputTokens)}→${formatTokens(turn.usage.outputTokens)}${
+                                      turnCacheRate !== undefined
+                                          ? ` · ${format(s.thread.cacheBadge, { rate: turnCacheRate })}`
+                                          : ''
+                                  }`
+                                : ''}
                         </span>
                     )}
                     {turn.reverted && <span className="turn__reverted">{s.thread.reverted}</span>}
-                    {turn.changes && !turn.items.some((item) => item.type === 'file_changes') && (
-                        <button type="button" className="link" onClick={() => openReview(turn.turnId)}>
-                            {s.thread.review}
-                        </button>
-                    )}
+                    {turn.changes &&
+                        turn.changes.files.length > 0 &&
+                        !items.some((item) => item.type === 'file_changes') && (
+                            <button type="button" className="turn__diff-chip" onClick={() => openReview(turn.turnId)}>
+                                <span className="add">+{turn.changes.additions}</span>{' '}
+                                <span className="del">−{turn.changes.deletions}</span> · {s.thread.compareDiff}
+                            </button>
+                        )}
                     <TurnHistory thread={thread} turn={turn} isLast={isLast} />
                 </div>
             )}
         </section>
     );
-}
+});
 
 async function readAttachment(file: File): Promise<Attachment> {
     if (file.type.startsWith('image/')) {
@@ -1155,7 +1283,13 @@ export function ThreadView({ thread }: { thread: ThreadMeta }) {
                     </div>
                 )}
                 {turns.map((turn, index) => (
-                    <TurnBlock key={turn.turnId} turn={turn} isLast={index === turns.length - 1} thread={thread} />
+                    <TurnBlock
+                        key={turn.turnId}
+                        turn={turn}
+                        isLast={index === turns.length - 1}
+                        isRecent={index >= turns.length - 2}
+                        thread={thread}
+                    />
                 ))}
             </div>
             {/* A workflow run's own thread is its log: notices and approval cards, nobody to talk to. */}

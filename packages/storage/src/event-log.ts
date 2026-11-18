@@ -1,4 +1,14 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, truncateSync, writeSync } from 'node:fs';
+import {
+    closeSync,
+    existsSync,
+    fstatSync,
+    mkdirSync,
+    openSync,
+    readFileSync,
+    readSync,
+    truncateSync,
+    writeSync,
+} from 'node:fs';
 import path from 'node:path';
 import { crc32 } from 'node:zlib';
 
@@ -78,6 +88,8 @@ export function readEventFile(file: string, afterSeq = 0): ReadReport {
     return { events, corrupt };
 }
 
+const TAIL_CHUNK_BYTES = 64 * 1024;
+
 /**
  * Append-only, per-thread event log (`events.v1.jsonl`). Each line carries a monotonically increasing `seq`
  * and a crc32, so readers skip damaged lines and a torn final line from a crash is cut off on open. A format
@@ -97,26 +109,83 @@ export class EventLog {
     static open(dir: string): EventLog {
         mkdirSync(dir, { recursive: true });
         const file = path.join(dir, EVENT_LOG_FILE);
-        const { events } = readEventFile(file);
-        EventLog.#trimTornTail(file);
+        const lastSeq = EventLog.#prepare(file);
         const fd = openSync(file, 'a');
-        return new EventLog(file, fd, events.at(-1)?.seq ?? 0);
+        return new EventLog(file, fd, lastSeq);
     }
 
     /**
-     * Drops a final line without a newline, left behind by a crash during append. Done by path, before the log is
-     * opened: on Windows an append-only handle cannot truncate.
+     * Cuts off a final line without a newline (left behind by a crash during append) and reads `lastSeq` from the
+     * tail chunk instead of scanning the entire multi-MB log on every open. Done before opening the append handle:
+     * on Windows an append-only handle cannot truncate.
      */
-    static #trimTornTail(file: string): void {
+    static #prepare(file: string): number {
         if (!existsSync(file)) {
-            return;
+            return 0;
         }
-        const content = readFileSync(file, 'utf8');
-        if (content.length === 0 || content.endsWith('\n')) {
-            return;
+        let effectiveSize = 0;
+        let fileSize = 0;
+        let lastSeq = 0;
+        const rfd = openSync(file, 'r');
+        try {
+            fileSize = fstatSync(rfd).size;
+            if (fileSize === 0) {
+                return 0;
+            }
+            effectiveSize = fileSize;
+            const lastByte = Buffer.allocUnsafe(1);
+            readSync(rfd, lastByte, 0, 1, fileSize - 1);
+            if (lastByte[0] !== 0x0a) {
+                effectiveSize = 0;
+                let end = fileSize;
+                while (end > 0) {
+                    const len = Math.min(end, TAIL_CHUNK_BYTES);
+                    const start = end - len;
+                    const buf = Buffer.allocUnsafe(len);
+                    const read = readSync(rfd, buf, 0, len, start);
+                    const nl = buf.subarray(0, read).lastIndexOf(0x0a);
+                    if (nl >= 0) {
+                        effectiveSize = start + nl + 1;
+                        break;
+                    }
+                    end = start;
+                }
+            }
+            let window = TAIL_CHUNK_BYTES;
+            while (effectiveSize > 0) {
+                const len = Math.min(effectiveSize, window);
+                const offset = effectiveSize - len;
+                const buf = Buffer.allocUnsafe(len);
+                const read = readSync(rfd, buf, 0, len, offset);
+                const slice = buf.subarray(0, read);
+                const firstNl = offset > 0 ? slice.indexOf(0x0a) : -1;
+                if (offset === 0 || firstNl >= 0) {
+                    const body = (offset > 0 ? slice.subarray(firstNl + 1) : slice).toString('utf8');
+                    const lines = body.split('\n');
+                    let found: number | undefined;
+                    for (let index = lines.length - 1; index >= 0; index--) {
+                        const line = lines[index] ?? '';
+                        if (line.length === 0) continue;
+                        const event = decode(line);
+                        if (event && event.seq > 0) {
+                            found = event.seq;
+                            break;
+                        }
+                    }
+                    if (found !== undefined || offset === 0) {
+                        lastSeq = found ?? 0;
+                        break;
+                    }
+                }
+                window *= 2;
+            }
+        } finally {
+            closeSync(rfd);
         }
-        const keep = content.lastIndexOf('\n') + 1;
-        truncateSync(file, Buffer.byteLength(content.slice(0, keep), 'utf8'));
+        if (effectiveSize < fileSize) {
+            truncateSync(file, effectiveSize);
+        }
+        return lastSeq;
     }
 
     get lastSeq(): number {

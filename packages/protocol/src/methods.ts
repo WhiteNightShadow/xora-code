@@ -628,7 +628,11 @@ export const methods = {
      */
     'org.applyTemplate': {
         params: z
-            .object({ projectId: IdSchema.optional(), template: z.enum(['dev-team']), replace: z.boolean() })
+            .object({
+                projectId: IdSchema.optional(),
+                template: z.enum(['opc-studio', 'opc-indie', 'opc-content', 'dev-team']),
+                replace: z.boolean(),
+            })
             .strict(),
         result: OrgChartSchema,
     },
@@ -683,6 +687,20 @@ export const methods = {
             .strict(),
         result: ok,
     },
+    /** Saves a confirmed candidate note into the thread's project or user memory. */
+    'memory.remember': {
+        params: z
+            .object({
+                threadId: IdSchema,
+                note: z.string().min(1).max(500),
+                scope: z.enum(['project', 'user']).optional(),
+            })
+            .strict(),
+        result: z.object({
+            outcome: z.enum(['noted', 'already']),
+            message: z.string(),
+        }),
+    },
     'member.saveRoutine': {
         params: z
             .object({
@@ -716,7 +734,7 @@ export const methods = {
     'member.chat': {
         params: z
             .object({
-                projectId: IdSchema,
+                projectId: IdSchema.optional(),
                 memberId: z.string(),
                 text: z.string().min(1).max(20_000),
             })
@@ -826,11 +844,25 @@ export const methods = {
     'rules.remove': { params: z.object({ ruleId: z.string() }).strict(), result: ok },
 
     'review.turn': {
-        params: z.object({ threadId: IdSchema, turnId: z.string() }).strict(),
+        params: z
+            .object({
+                threadId: IdSchema,
+                turnId: z.string(),
+                /** `turn`: changes inside this turn (`before -> after`); `since`: cumulative (`before -> now`). */
+                compare: z.enum(['turn', 'since']).optional(),
+            })
+            .strict(),
         result: z.object({ files: z.array(FileChangeSchema), available: z.boolean() }),
     },
     'review.file': {
-        params: z.object({ threadId: IdSchema, turnId: z.string(), path: z.string() }).strict(),
+        params: z
+            .object({
+                threadId: IdSchema,
+                turnId: z.string(),
+                path: z.string(),
+                compare: z.enum(['turn', 'since']).optional(),
+            })
+            .strict(),
         result: z.object({ oldText: z.string().nullable(), newText: z.string().nullable(), binary: z.boolean() }),
     },
     /** Goes back to before a turn: the xora engine forgets it and the later turns; optionally the files too (M3-3). */
@@ -868,6 +900,7 @@ export const methods = {
                 apiKey: z.string().max(4000).optional(),
                 baseUrl: z.string().max(2000).optional(),
                 enabled: z.boolean().optional(),
+                models: z.array(z.string().min(1).max(200)).max(200).optional(),
             })
             .strict(),
         result: ConnectionSchema,
@@ -880,7 +913,7 @@ export const methods = {
     'provider.refreshModels': { params: z.object({ connectionId: IdSchema }).strict(), result: ConnectionSchema },
     /** Picks which of the connection's models are offered; the user refreshes the list by hand, nothing on a timer. */
     'provider.selectModels': {
-        params: z.object({ connectionId: IdSchema, models: z.array(z.string().min(1).max(200)).max(500) }).strict(),
+        params: z.object({ connectionId: IdSchema, models: z.array(z.string().min(1).max(200)).max(2000) }).strict(),
         result: ConnectionSchema,
     },
     'model.list': { params: empty, result: z.array(ModelOptionSchema) },

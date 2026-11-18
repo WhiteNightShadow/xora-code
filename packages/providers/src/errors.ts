@@ -113,10 +113,10 @@ const STANDARD_TYPES: Readonly<Record<string, ErrorClass>> = {
 const CONTEXT_PATTERN =
     /context[ _-]?(length|window|size)|maximum context|too many tokens|prompt is too long|prompt too long|token length too long|exceeded model token limit|maximum prompt length|exceeds the maximum number of tokens|total message size|超长|超出.{0,8}上下文|上下文.{0,8}(超|过长)/i;
 const QUOTA_PATTERN =
-    /insufficient[_ -]?(quota|balance|funds)|exceeded your current quota|\bquota\b|\bbalance\b|\bcredits?\b|billing|usage limit|limit exhausted|余额|欠费|额度|配额/i;
+    /insufficient[_ -]?(quota|balance|funds)|exceeded your current quota|\bquota\b|\bbalance\b|\bcredits?\b|billing|usage limit|limit exhausted|余额|欠费|额度|配额|用量上限/i;
 const RATE_PATTERN =
     /rate[ _-]?limit|per[ -]?(minute|second)|\b(rpm|tpm|rps|qps)\b|concurren|too many requests|try again in|retry in|retry after/i;
-const OVERLOAD_PATTERN = /overload|capacity|busy|过载|繁忙|访问量过大/i;
+const OVERLOAD_PATTERN = /overload|capacity|busy|过载|繁忙|访问量过大|负载较高|集群负载/i;
 const CONTENT_PATTERN =
     /content[_ ]?(filter|policy)|safety (system|filter)|high risk|unsafe content|sensitive content|敏感|不安全/i;
 

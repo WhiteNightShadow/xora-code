@@ -98,6 +98,33 @@ export interface StoredSessionInfo {
     readonly updatedAt: string;
 }
 
+const META_ENTRY = /"t"\s*:\s*"(?:header|title)"/;
+
+function readSessionMeta(file: string): {
+    header?: Extract<SessionEntry, { t: 'header' }>;
+    title?: Extract<SessionEntry, { t: 'title' }>;
+} {
+    let header: Extract<SessionEntry, { t: 'header' }> | undefined;
+    let title: Extract<SessionEntry, { t: 'title' }> | undefined;
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0 || !META_ENTRY.test(trimmed)) {
+            continue;
+        }
+        try {
+            const entry = JSON.parse(trimmed) as SessionEntry;
+            if (entry.t === 'header' && !header) {
+                header = entry;
+            } else if (entry.t === 'title') {
+                title = entry;
+            }
+        } catch {
+            // A crash mid-append leaves at most one torn line; it is safe to ignore.
+        }
+    }
+    return { header, title };
+}
+
 /** Lists sessions under `<root>/<id>/session.jsonl`, newest first. */
 export function listStoredSessions(root: string, cwd?: string): StoredSessionInfo[] {
     if (!existsSync(root)) {
@@ -109,12 +136,10 @@ export function listStoredSessions(root: string, cwd?: string): StoredSessionInf
         if (!existsSync(file.file)) {
             continue;
         }
-        const entries = file.read();
-        const header = entries.find((entry) => entry.t === 'header');
+        const { header, title } = readSessionMeta(file.file);
         if (!header || (cwd && header.cwd !== cwd)) {
             continue;
         }
-        const title = entries.findLast((entry) => entry.t === 'title');
         sessions.push({
             id: header.id,
             cwd: header.cwd,

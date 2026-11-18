@@ -2,9 +2,10 @@ import type { Member, MemberRoutine, PermissionMode, Persona } from '@xora/proto
 import { type CSSProperties, useEffect, useState } from 'react';
 import { host } from '../host.ts';
 import { avatarHue, choiceOf, cronOf, groupPath, initialOf, memberJob, type SchedulePreset } from '../members.ts';
-import { attempt, loadMembers, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
+import { attempt, loadMembers, openMarket, openMembers, selectThread, toast, useApp, useStrings } from '../store.ts';
 import { format, type Strings } from '../strings.ts';
 import { confirmDialog } from './Confirm.tsx';
+import { Choices, Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
 import { Markdown } from './Markdown.tsx';
 import { Field, IconButton, Modal, relativeTime, Select, Spinner, Toggle } from './primitives.tsx';
@@ -452,43 +453,275 @@ export interface Editing {
     readonly name?: string;
 }
 
-/** What a position of the editor is made from: a built-in member, or a persona of the talent market. */
-type Position = Pick<Member, 'id' | 'name' | 'role' | 'category' | 'tier' | 'mode' | 'prompt' | 'tools'>;
+const CUSTOM_TEMPLATE_ID = '__custom__';
+const ROLE_TYPES = ['executor', 'scout', 'planner', 'reviewer', 'specialist'] as const;
+const PRESET_ORDER = [
+    'opc-pm',
+    'opc-fullstack',
+    'opc-designer',
+    'opc-growth',
+    'opc-researcher',
+    'opc-automation',
+    'content-writer',
+    'opc-qa',
+    'frontend',
+    'coder',
+    'architect',
+    'tester',
+    'reviewer',
+    'scout',
+    'specialist',
+];
+
+/** What a position of the editor is made from: a built-in member, a persona of the talent market, or custom blank. */
+type Position = Pick<Member, 'id' | 'name' | 'role' | 'category' | 'tier' | 'mode' | 'prompt' | 'tools'> & {
+    readonly description?: string;
+    readonly personaState?: Persona['state'];
+};
 
 /**
- * Creates a member from a built-in one, or changes a member (19 §11): name, where it works, its position and its
- * instructions; the rest waits under "more settings".
+ * Direct Agent role selector & creator for chat composers: pick the default chat, any active Agent role in the
+ * organization, or create/browse OPC & custom Agent roles without leaving the composer.
  */
-export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: () => void }) {
+export function AgentRolePicker({
+    value,
+    onChange,
+    placement = 'up',
+}: {
+    value: string;
+    onChange: (memberId: string) => void;
+    placement?: 'up' | 'down';
+}) {
+    const s = useStrings();
+    const members = useApp((state) => state.members);
+    const selectedProjectId = useApp((state) => state.selectedProjectId);
+    const [query, setQuery] = useState('');
+    const [creating, setCreating] = useState(false);
+
+    useEffect(() => {
+        if (useApp.getState().members.length === 0) {
+            void loadMembers(selectedProjectId);
+        }
+    }, [selectedProjectId]);
+
+    const selected = value ? members.find((member) => member.id === value) : undefined;
+    const needle = query.trim().toLowerCase();
+    const filtered = needle
+        ? members.filter(
+              (member) =>
+                  member.name.toLowerCase().includes(needle) ||
+                  (memberJob(member, s) ?? '').toLowerCase().includes(needle) ||
+                  member.id.toLowerCase().includes(needle),
+          )
+        : members;
+
+    return (
+        <>
+            <Popover
+                label={s.chief.pickAgent}
+                className="picker"
+                triggerClassName={`picker__trigger${selected ? ' is-agent-picked' : ''}`}
+                placement={placement}
+                trigger={
+                    <>
+                        <Icon name={selected ? 'user' : 'message'} size={13} />
+                        <span className="picker__value">{selected?.name ?? s.chief.defaultAgent}</span>
+                        <Icon name="chevronDown" size={12} className="picker__chevron" />
+                    </>
+                }
+            >
+                {(close) => (
+                    <>
+                        <div className="popover__title">{s.chief.pickAgent}</div>
+                        {members.length > 6 && (
+                            <div className="picker__search-wrap">
+                                <input
+                                    className="input picker__search"
+                                    value={query}
+                                    placeholder={s.chief.searchAgents}
+                                    onChange={(event) => setQuery(event.target.value)}
+                                />
+                            </div>
+                        )}
+                        <div className="popover__scroll">
+                            <Choices
+                                value={selected ? selected.id : ''}
+                                options={[
+                                    ...(!needle
+                                        ? [
+                                              {
+                                                  value: '',
+                                                  label: s.chief.defaultAgent,
+                                                  hint: s.chief.defaultAgentHint,
+                                                  icon: 'message' as const,
+                                              },
+                                          ]
+                                        : []),
+                                    ...filtered.map((member) => {
+                                        const hint = memberJob(member, s);
+                                        return {
+                                            value: member.id,
+                                            label: member.name,
+                                            ...(hint ? { hint } : {}),
+                                            icon: 'user' as const,
+                                        };
+                                    }),
+                                ]}
+                                onPick={(picked) => {
+                                    close();
+                                    setQuery('');
+                                    onChange(picked);
+                                }}
+                            />
+                        </div>
+                        <button
+                            type="button"
+                            className="popover__footer"
+                            onClick={() => {
+                                close();
+                                setCreating(true);
+                            }}
+                        >
+                            <Icon name="plus" size={13} /> {s.chief.createAgent}
+                        </button>
+                        <button
+                            type="button"
+                            className="popover__footer"
+                            onClick={() => {
+                                close();
+                                openMarket();
+                            }}
+                        >
+                            <Icon name="sparkle" size={13} /> {s.chief.browseAgents}
+                        </button>
+                    </>
+                )}
+            </Popover>
+            {creating && (
+                <MemberEditor
+                    editing={{ groupId: null }}
+                    onCreated={(saved) => onChange(saved.id)}
+                    onClose={() => setCreating(false)}
+                />
+            )}
+        </>
+    );
+}
+
+/**
+ * Creates a member from an OPC/engineering preset or blank custom role, or changes an existing member (19 §11).
+ */
+export function MemberEditor({
+    editing,
+    onClose,
+    onCreated,
+}: {
+    editing: Editing;
+    onClose: () => void;
+    onCreated?: (member: Member) => void;
+}) {
     const s = useStrings();
     const members = useApp((state) => state.members);
     const selectedProjectId = useApp((state) => state.selectedProjectId);
     const groups = useApp((state) => state.org?.groups ?? []);
-    const currentGroup = editing.member
-        ? (groups.find((group) => group.memberIds.includes(editing.member?.id ?? ''))?.id ?? '')
+    const existing = editing.member;
+    const currentGroup = existing
+        ? (groups.find((group) => group.memberIds.includes(existing.id))?.id ?? '')
         : editing.groupId === null
           ? ''
           : (editing.groupId ?? groups[0]?.id ?? '');
     const [groupId, setGroupId] = useState(currentGroup);
     // 19 §4: a supervisor leads, so its position is there only for a group that has no lead yet.
     const openLead = groups.find((group) => group.id === groupId)?.leaderId === '';
-    const templates: Position[] = members.filter(
-        (member) => member.source === 'builtin' && (member.role !== 'supervisor' || openLead),
-    );
+    const [catalog, setCatalog] = useState<Persona[]>([]);
+
+    useEffect(() => {
+        if (existing) return;
+        let live = true;
+        void host
+            .call('member.catalog', selectedProjectId ? { projectId: selectedProjectId } : {})
+            .then((read) => {
+                if (live) setCatalog([...read.personas]);
+            })
+            .catch(() => undefined);
+        return () => {
+            live = false;
+        };
+    }, [existing, selectedProjectId]);
+
+    const presetMap = new Map<string, Position>();
     const persona = editing.template;
-    if (persona && !templates.some((item) => item.id === persona.id)) {
-        templates.unshift({
+    if (persona) {
+        presetMap.set(persona.id, {
             id: persona.id,
             name: persona.name,
             role: persona.role,
             ...(persona.category ? { category: persona.category } : {}),
+            ...(persona.description ? { description: persona.description } : {}),
             tier: persona.tier,
             mode: persona.mode,
             prompt: persona.prompt,
+            personaState: persona.state,
         });
     }
+    for (const item of catalog) {
+        if ((item.role === 'supervisor' && !openLead) || presetMap.has(item.id)) continue;
+        presetMap.set(item.id, {
+            id: item.id,
+            name: item.name,
+            role: item.role,
+            ...(item.category ? { category: item.category } : {}),
+            ...(item.description ? { description: item.description } : {}),
+            tier: item.tier,
+            mode: item.mode,
+            prompt: item.prompt,
+            personaState: item.state,
+        });
+    }
+    for (const member of members) {
+        if (member.source !== 'builtin' || (member.role === 'supervisor' && !openLead) || presetMap.has(member.id)) {
+            continue;
+        }
+        const job = descriptionOf(member, s);
+        presetMap.set(member.id, {
+            id: member.id,
+            name: member.name,
+            role: member.role,
+            ...(member.category ? { category: member.category } : {}),
+            ...(job ? { description: job } : {}),
+            tier: member.tier,
+            mode: member.mode,
+            prompt: member.prompt,
+            ...(member.tools ? { tools: member.tools } : {}),
+        });
+    }
+
+    const orderedPresets = [...presetMap.values()].sort((a, b) => {
+        if (persona) {
+            if (a.id === persona.id) return -1;
+            if (b.id === persona.id) return 1;
+        }
+        const ai = PRESET_ORDER.indexOf(a.id);
+        const bi = PRESET_ORDER.indexOf(b.id);
+        if (ai !== -1 || bi !== -1) {
+            return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+        }
+        return 0;
+    });
+
+    const [customRole, setCustomRole] = useState<string>('executor');
+    const customPosition: Position = {
+        id: CUSTOM_TEMPLATE_ID,
+        name: s.org.customBlank,
+        role: customRole,
+        tier: 'standard',
+        mode: 'ask',
+        prompt: '',
+    };
+    const templates: Position[] = [customPosition, ...orderedPresets];
+
     // 06 §27: the MCP servers it works with, from the ones configured in settings.
-    const [mcp, setMcp] = useState<string[]>([...(editing.member?.mcp ?? [])]);
+    const [mcp, setMcp] = useState<string[]>([...(existing?.mcp ?? [])]);
     const [servers, setServers] = useState<string[]>([]);
     useEffect(() => {
         void host
@@ -500,17 +733,16 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
         setMcp((current) =>
             current.includes(server) ? current.filter((item) => item !== server) : [...current, server],
         );
-    const existing = editing.member;
-    const start: Position | undefined =
-        existing ??
-        (persona ? templates.find((member) => member.id === persona.id) : undefined) ??
-        templates.find((member) => member.id === 'coder') ??
-        templates[0];
-    const [template, setTemplate] = useState(start?.id ?? '');
-    const [name, setName] = useState(existing?.name ?? editing.name ?? '');
-    const [description, setDescription] = useState(existing ? (descriptionOf(existing, s) ?? '') : '');
-    const [prompt, setPrompt] = useState(start?.prompt ?? '');
-    const [tier, setTier] = useState(start?.tier ?? 'standard');
+
+    const start: Position =
+        existing ?? (persona ? orderedPresets.find((member) => member.id === persona.id) : undefined) ?? customPosition;
+    const [template, setTemplate] = useState(start.id);
+    const [name, setName] = useState(existing?.name ?? editing.name ?? (persona ? persona.name : ''));
+    const [description, setDescription] = useState(
+        existing ? (descriptionOf(existing, s) ?? '') : (persona?.description ?? ''),
+    );
+    const [prompt, setPrompt] = useState(start.prompt);
+    const [tier, setTier] = useState(start.tier);
     // 06 §21: a model of its own, tried before the tier's chain; '' leaves it to the tier.
     const [model, setModel] = useState(existing?.model ?? '');
     const connected = useApp((state) => state.models);
@@ -521,24 +753,55 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
             ? [{ value: model, label: `${model}（${s.members.modelMissing}）` }]
             : []),
     ];
-    const [mode, setMode] = useState<PermissionMode>(start?.mode ?? 'ask');
+    const [mode, setMode] = useState<PermissionMode>(start.mode);
     // 06 §26: a member belongs to the organization and works in every project; one a project defined stays there.
     const scope: 'user' | 'project' = existing?.source === 'project' ? 'project' : 'user';
     const [busy, setBusy] = useState(false);
     const [more, setMore] = useState(false);
+
+    const jobForPreset = (item: Position | undefined): string => {
+        if (!item || item.id === CUSTOM_TEMPLATE_ID) return '';
+        return (s.members.builtinJobs as Record<string, string | undefined>)[item.id] ?? item.description ?? '';
+    };
+
     const pick = (id: string) => {
+        const previous = templates.find((member) => member.id === template);
+        const prevName = previous && previous.id !== CUSTOM_TEMPLATE_ID ? previous.name : '';
+        const prevJob = jobForPreset(previous);
+        const prevPrompt = previous?.prompt ?? '';
         const next = templates.find((member) => member.id === id);
         setTemplate(id);
         if (!next) return;
+        if (id === CUSTOM_TEMPLATE_ID) {
+            if (name === prevName) setName('');
+            if (description === prevJob) setDescription('');
+            if (prompt === prevPrompt) setPrompt('');
+            return;
+        }
+        if (!name.trim() || name === prevName) {
+            setName(next.personaState === 'hired' ? `${next.name}2` : next.name);
+        }
+        const nextJob = jobForPreset(next);
+        if (!description.trim() || description === prevJob) {
+            setDescription(nextJob);
+        }
         setPrompt(next.prompt);
         setTier(next.tier);
         setMode(next.mode);
     };
-    // A position that went away with the organization picked stays out of the new member.
-    const base: Position | undefined = existing ?? templates.find((member) => member.id === template) ?? templates[0];
-    const leads = base?.role === 'supervisor';
+
+    const base: Position = existing ?? templates.find((member) => member.id === template) ?? customPosition;
+    const isCustom = !existing && base.id === CUSTOM_TEMPLATE_ID;
+    const effectiveRole = isCustom ? customRole : base.role;
+    const leads = effectiveRole === 'supervisor';
+    const adoptPersonaId =
+        !existing &&
+        !isCustom &&
+        base.personaState !== undefined &&
+        base.personaState !== 'hired' &&
+        !members.some((member) => member.id === base.id);
+
     const save = async () => {
-        if (!base) return;
         setBusy(true);
         const saved = await attempt(() =>
             host.call('member.save', {
@@ -546,26 +809,21 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                 scope,
                 member: {
                     ...(existing ? { id: existing.id } : {}),
-                    // A persona not in the organization keeps its own id, so the market knows it is hired (19 §15).
-                    ...(!existing && persona && persona.state !== 'hired' && base.id === persona.id
-                        ? { id: persona.id }
-                        : {}),
+                    ...(adoptPersonaId ? { id: base.id } : {}),
                     name: name.trim(),
-                    role: base.role,
-                    ...(base.category ? { category: base.category } : {}),
+                    role: effectiveRole,
+                    ...(!isCustom && base.category ? { category: base.category } : {}),
                     tier,
                     ...(model ? { model } : {}),
                     mode,
                     ...(description.trim() ? { description: description.trim() } : {}),
                     prompt,
-                    ...(base.tools ? { tools: [...base.tools] } : {}),
+                    ...(!isCustom && base.tools ? { tools: [...base.tools] } : {}),
                     // The form does not edit skills: a member keeps the ones it has (06 §21).
                     ...(existing?.skills ? { skills: [...existing.skills] } : {}),
                     ...(mcp.length > 0 ? { mcp } : {}),
                 },
-                ...(!existing && persona && persona.state !== 'hired' && base.id === persona.id
-                    ? { allowNewId: true }
-                    : {}),
+                ...(adoptPersonaId ? { allowNewId: true } : {}),
                 // A new lead takes the group it is made in; the leads there are change in the group's dialog.
                 ...(leads
                     ? !existing && groupId
@@ -580,23 +838,88 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
         if (saved) {
             await loadMembers(selectedProjectId);
             toast(existing ? s.members.saved : format(s.members.created, { name: saved.name }), 'success');
-            onClose();
-            openMembers(saved.id);
+            if (onCreated) {
+                onCreated(saved);
+                onClose();
+            } else {
+                onClose();
+                openMembers(saved.id);
+            }
         }
     };
+
+    const roleChoices = [...ROLE_TYPES, ...(openLead ? (['supervisor'] as const) : [])];
+    const quickChips = templates.slice(0, 11);
+
     return (
         <Modal
             title={existing ? format(s.members.editTitle, { name: existing.name }) : s.members.create}
             onClose={onClose}
         >
             <div className="dialog member-editor">
-                <Field label={s.members.name}>
+                {!existing && (
+                    <Field label={s.org.position} hint={s.org.positionHint}>
+                        <div className="role-preset-list">
+                            {quickChips.map((item) => (
+                                <button
+                                    key={item.id}
+                                    type="button"
+                                    className={`role-preset-chip${base.id === item.id ? ' is-active' : ''}`}
+                                    onClick={() => pick(item.id)}
+                                >
+                                    {item.id === CUSTOM_TEMPLATE_ID ? `+ ${item.name}` : item.name}
+                                </button>
+                            ))}
+                        </div>
+                        {templates.length > quickChips.length && (
+                            <Select
+                                label={s.org.position}
+                                value={base.id}
+                                options={templates.map((member) => ({
+                                    value: member.id,
+                                    label: member.name,
+                                    ...(jobForPreset(member) ? { hint: jobForPreset(member) } : {}),
+                                }))}
+                                onChange={pick}
+                            />
+                        )}
+                    </Field>
+                )}
+                <div className="member-editor__row">
+                    <Field label={s.members.name}>
+                        <input
+                            className="input"
+                            value={name}
+                            placeholder={s.members.namePlaceholder}
+                            maxLength={60}
+                            onChange={(event) => setName(event.target.value)}
+                        />
+                    </Field>
+                    {isCustom && (
+                        <Field
+                            label={s.org.customRoleType}
+                            hint={(s.org.roleTypeHints as Record<string, string | undefined>)[customRole]}
+                        >
+                            <Select
+                                label={s.org.customRoleType}
+                                value={customRole}
+                                options={roleChoices.map((role) => ({
+                                    value: role,
+                                    label: (s.members.roles as Record<string, string | undefined>)[role] ?? role,
+                                    hint: (s.org.roleTypeHints as Record<string, string | undefined>)[role],
+                                }))}
+                                onChange={setCustomRole}
+                            />
+                        </Field>
+                    )}
+                </div>
+                <Field label={s.members.job} hint={s.members.jobHint}>
                     <input
                         className="input"
-                        value={name}
-                        placeholder={s.members.namePlaceholder}
-                        maxLength={60}
-                        onChange={(event) => setName(event.target.value)}
+                        value={description}
+                        placeholder={s.members.jobPlaceholder}
+                        maxLength={500}
+                        onChange={(event) => setDescription(event.target.value)}
                     />
                 </Field>
                 {!(existing && leads) && groups.length > 0 && (
@@ -612,20 +935,10 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                         />
                     </Field>
                 )}
-                {!existing && (
-                    <Field label={s.org.position} hint={s.org.positionHint}>
-                        <Select
-                            label={s.org.position}
-                            value={base?.id ?? ''}
-                            options={templates.map((member) => ({ value: member.id, label: member.name }))}
-                            onChange={pick}
-                        />
-                    </Field>
-                )}
                 <Field label={s.members.prompt} hint={s.members.promptHint}>
                     <textarea
                         className="textarea"
-                        rows={7}
+                        rows={6}
                         value={prompt}
                         onChange={(event) => setPrompt(event.target.value)}
                     />
@@ -641,15 +954,6 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                 </button>
                 {more && (
                     <>
-                        <Field label={s.members.job} hint={s.members.jobHint}>
-                            <input
-                                className="input"
-                                value={description}
-                                placeholder={s.members.jobPlaceholder}
-                                maxLength={500}
-                                onChange={(event) => setDescription(event.target.value)}
-                            />
-                        </Field>
                         <div className="member-editor__row">
                             <Field label={s.members.tier} hint={s.members.tierHint}>
                                 <Select
@@ -708,7 +1012,7 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
                     <button
                         type="button"
                         className="button button--primary"
-                        disabled={busy || !name.trim() || !base}
+                        disabled={busy || !name.trim()}
                         onClick={() => void save()}
                     >
                         {busy ? <Spinner /> : null} {s.members.save}
@@ -722,13 +1026,13 @@ export function MemberEditor({ editing, onClose }: { editing: Editing; onClose: 
     );
 }
 
-/** Hands a member work: a new thread in the chosen project where it works as itself. */
+/** Hands a member work: a new thread in the chosen project (or standalone workspace) where it works as itself. */
 export function DispatchDialog({ memberId }: { memberId: string }) {
     const s = useStrings();
     const member = useApp((state) => state.members.find((item) => item.id === memberId));
     const projects = useApp((state) => state.projects);
     const selectedProjectId = useApp((state) => state.selectedProjectId);
-    const [projectId, setProjectId] = useState(selectedProjectId ?? projects[0]?.id ?? '');
+    const [projectId, setProjectId] = useState(selectedProjectId ?? '');
     const [text, setText] = useState('');
     const [busy, setBusy] = useState(false);
     // 06 §22: what it works with on this job, set here; left as it is, the member's own.
@@ -738,13 +1042,13 @@ export function DispatchDialog({ memberId }: { memberId: string }) {
     const [mode, setMode] = useState('');
     const close = () => useApp.setState({ dispatchTo: undefined });
     const send = async () => {
-        if (!text.trim() || !projectId || busy) return;
+        if (!text.trim() || busy) return;
         setBusy(true);
         const thread = await attempt(() =>
             host.call(
                 'member.chat',
                 {
-                    projectId,
+                    ...(projectId ? { projectId } : {}),
                     memberId,
                     text: text.trim(),
                     ...(model ? { model } : {}),
@@ -787,7 +1091,10 @@ export function DispatchDialog({ memberId }: { memberId: string }) {
                     <Select
                         label={s.members.dispatchProject}
                         value={projectId}
-                        options={projects.map((project) => ({ value: project.id, label: project.name }))}
+                        options={[
+                            { value: '', label: s.members.noProjectChat },
+                            ...projects.map((project) => ({ value: project.id, label: project.name })),
+                        ]}
                         onChange={setProjectId}
                     />
                 </Field>
@@ -836,7 +1143,7 @@ export function DispatchDialog({ memberId }: { memberId: string }) {
                     <button
                         type="button"
                         className="button button--primary"
-                        disabled={busy || !text.trim() || !projectId}
+                        disabled={busy || !text.trim()}
                         onClick={() => void send()}
                     >
                         {busy ? <Spinner /> : null} {s.members.dispatchSend}

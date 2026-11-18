@@ -33,11 +33,12 @@ import type { ExtensionService, SessionExtras } from './extensions.ts';
 import { readMention } from './files.ts';
 import { newId } from './ids.ts';
 import type { Logger } from './log.ts';
+import type { MemoryService } from './memory/service.ts';
 import { type CallFacts, graveOf, highRiskLabel, highRiskOf, type PolicyResult } from './policy.ts';
 import type { ProjectService } from './projects.ts';
 import type { PromptService } from './prompts.ts';
 import type { ReviewService } from './review.ts';
-import type { SettingsService } from './settings.ts';
+import { DEFAULT_SETTINGS, type SettingsService } from './settings.ts';
 import type { ShellApi } from './shell.ts';
 import { hostLanguage, textOf } from './text.ts';
 import { type ThreadStore, workerOf } from './threads.ts';
@@ -118,8 +119,9 @@ const BUSY_ERROR_CODE = -32051;
 
 const READ_KINDS: ReadonlySet<string> = new Set(['read', 'search', 'think']);
 
-/** Model requests the engine makes in one turn at most. */
+/** Model requests the engine makes in one turn at most (higher on user-started threads than background runs). */
 const MAX_TURN_REQUESTS = 200;
+const USER_MAX_TURN_REQUESTS = 500;
 
 /**
  * How long after a turn ended by itself the oldest waiting message starts the next one (03): long enough for a team
@@ -175,6 +177,8 @@ export interface TurnDeps {
     readonly extensions?: ExtensionService;
     /** Host tools threads get beside their own: the `agent` tool of subagents.ts. */
     readonly sharedTools?: () => SharedTools | undefined;
+    /** Filters candidate notes distilled during compaction before saving them onto the compaction item. */
+    readonly memory?: Pick<MemoryService, 'filterCandidates'>;
 }
 
 /** A call to a shared host tool, from the turn that made it. */
@@ -419,6 +423,9 @@ class RunningTurn {
      * the next.
      */
     readonly matched = new Set<string>();
+    runPromise: Promise<void> | undefined;
+    readonly pendingDeltas = new Map<'agent_message' | 'reasoning', { itemId: string; text: string }>();
+    deltaTimer: ReturnType<typeof setTimeout> | undefined;
 
     constructor(thread: ThreadMeta, cwd: string, engine: EngineDefinition, turnId: string) {
         this.threadId = thread.id;
@@ -584,6 +591,11 @@ export class TurnService {
     ): Promise<string> {
         const { threads, projects, connections, settings } = this.#deps;
         let thread = threads.get(threadId);
+        const stopping = this.#running.get(threadId);
+        if (stopping?.abort.signal.aborted && stopping.runPromise) {
+            await Promise.race([stopping.runPromise, new Promise<void>((resolve) => setTimeout(resolve, 10_000))]);
+            thread = threads.get(threadId);
+        }
         if (this.#running.has(threadId)) {
             throw new RpcError(RpcErrorCode.Rejected, textOf(TEXT).busy);
         }
@@ -675,6 +687,7 @@ export class TurnService {
                 ...notes.map((note) => ({ type: 'text' as const, text: `<host_note>\n${note}\n</host_note>` })),
             ];
         });
+        running.runPromise = run;
         this.#runs.add(run);
         void run.then(
             () => this.#runs.delete(run),
@@ -776,6 +789,11 @@ export class TurnService {
                 fallbacks.push({ connection, model: ref.model });
             }
         }
+        const mainModelWindow = connections.model(modelRef)?.contextWindow ?? 0;
+        const defaultCap = Math.max(DEFAULT_SETTINGS.softContextWindow, mainModelWindow);
+        const softCap =
+            current.softContextWindow === DEFAULT_SETTINGS.softContextWindow ? defaultCap : current.softContextWindow;
+        const workingCap = current.workingSet === DEFAULT_SETTINGS.workingSet ? defaultCap : current.workingSet;
         return {
             model: { connection: await connections.engineConfig(modelRef.connectionId), model: modelRef.model },
             fallbacks,
@@ -785,16 +803,13 @@ export class TurnService {
             effort: thread.effort,
             mode: thread.mode,
             layers,
-            softContextWindow: Math.min(
-                current.softContextWindow,
-                provider?.softContextWindow ?? current.softContextWindow,
-            ),
-            workingSet: current.workingSet,
+            softContextWindow: Math.min(softCap, provider?.softContextWindow ?? softCap),
+            workingSet: workingCap,
             language: hostLanguage(),
-            maxTurnRequests: Math.max(
-                1,
-                Math.min(MAX_TURN_REQUESTS, provider?.maxTurnRequests?.() ?? MAX_TURN_REQUESTS),
-            ),
+            maxTurnRequests: (() => {
+                const cap = queues(thread) ? USER_MAX_TURN_REQUESTS : MAX_TURN_REQUESTS;
+                return Math.max(1, Math.min(cap, provider?.maxTurnRequests?.() ?? cap));
+            })(),
             userAgent: this.#deps.userAgent,
             env:
                 thread.location.kind === 'worktree' && this.#deps.portFor
@@ -1250,6 +1265,7 @@ export class TurnService {
                 await this.#fail(running, error);
             }
         } finally {
+            this.#flushDeltas(running);
             if (running.sessionId) {
                 engines.unregister(running.sessionId);
             }
@@ -1373,7 +1389,50 @@ export class TurnService {
         return undefined;
     }
 
+    #flushDeltas(running: RunningTurn): void {
+        if (running.deltaTimer !== undefined) {
+            clearTimeout(running.deltaTimer);
+            running.deltaTimer = undefined;
+        }
+        if (running.pendingDeltas.size === 0) {
+            return;
+        }
+        for (const [stream, pending] of running.pendingDeltas) {
+            if (pending.text.length > 0) {
+                this.#deps.bus.toThread(running.threadId, 'thread.delta', {
+                    threadId: running.threadId,
+                    turnId: running.turnId,
+                    itemId: pending.itemId,
+                    stream,
+                    text: pending.text,
+                });
+            }
+        }
+        running.pendingDeltas.clear();
+    }
+
+    #queueDelta(running: RunningTurn, stream: 'agent_message' | 'reasoning', itemId: string, text: string): void {
+        if (text.length === 0) {
+            return;
+        }
+        const existing = running.pendingDeltas.get(stream);
+        if (existing && existing.itemId === itemId) {
+            existing.text += text;
+        } else {
+            if (existing) this.#flushDeltas(running);
+            running.pendingDeltas.set(stream, { itemId, text });
+        }
+        if (running.deltaTimer === undefined) {
+            running.deltaTimer = setTimeout(() => {
+                running.deltaTimer = undefined;
+                this.#flushDeltas(running);
+            }, 16);
+            running.deltaTimer.unref?.();
+        }
+    }
+
     #persist(running: RunningTurn, item: Item, kind: 'item.started' | 'item.completed' = 'item.completed'): void {
+        this.#flushDeltas(running);
         this.#deps.threads.append(running.threadId, kind, { item }, { turnId: running.turnId, itemId: item.id });
         if (kind === 'item.completed') {
             running.live.delete(item.id);
@@ -1389,6 +1448,7 @@ export class TurnService {
     }
 
     #closeText(running: RunningTurn): void {
+        this.#flushDeltas(running);
         if (running.text) {
             const item = running.text;
             running.text = undefined;
@@ -1410,6 +1470,7 @@ export class TurnService {
         }
         if (stream === 'agent_message') {
             if (running.reasoning) {
+                this.#flushDeltas(running);
                 const item = running.reasoning;
                 running.reasoning = undefined;
                 if (item.text.length > 0) this.#persist(running, item);
@@ -1423,15 +1484,10 @@ export class TurnService {
             };
             running.text = { ...running.text, text: running.text.text + text };
             running.live.set(running.text.id, running.text);
-            this.#deps.bus.toThread(running.threadId, 'thread.delta', {
-                threadId: running.threadId,
-                turnId: running.turnId,
-                itemId: running.text.id,
-                stream,
-                text,
-            });
+            this.#queueDelta(running, stream, running.text.id, text);
         } else {
             if (running.text) {
+                this.#flushDeltas(running);
                 const item = running.text;
                 running.text = undefined;
                 running.lastText = item.text || running.lastText;
@@ -1446,13 +1502,7 @@ export class TurnService {
             };
             running.reasoning = { ...running.reasoning, text: running.reasoning.text + text };
             running.live.set(running.reasoning.id, running.reasoning);
-            this.#deps.bus.toThread(running.threadId, 'thread.delta', {
-                threadId: running.threadId,
-                turnId: running.turnId,
-                itemId: running.reasoning.id,
-                stream,
-                text,
-            });
+            this.#queueDelta(running, stream, running.reasoning.id, text);
         }
     }
 
@@ -1508,17 +1558,27 @@ export class TurnService {
                 const meta = xoraMeta(update._meta);
                 const id = `compaction-${update.compactionId}`;
                 const summary = update.summary?.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+                const status =
+                    update.status === 'completed' ? 'completed' : update.status === 'failed' ? 'failed' : 'started';
+                const thread =
+                    status === 'completed' && Array.isArray(meta?.candidates)
+                        ? this.#deps.threads.find(running.threadId)
+                        : undefined;
+                const candidates =
+                    thread && Array.isArray(meta?.candidates)
+                        ? (this.#deps.memory?.filterCandidates(thread, meta.candidates) ?? [])
+                        : [];
                 const item: ItemOf<'compaction'> = {
                     id,
                     turnId: running.turnId,
                     ts: Date.now(),
                     type: 'compaction',
-                    status:
-                        update.status === 'completed' ? 'completed' : update.status === 'failed' ? 'failed' : 'started',
+                    status,
                     level: typeof meta?.level === 'number' ? Math.min(4, Math.max(1, meta.level)) : 3,
                     ...(summary ? { summary } : {}),
                     ...(typeof meta?.before === 'number' ? { before: meta.before } : {}),
                     ...(typeof meta?.after === 'number' ? { after: meta.after } : {}),
+                    ...(candidates.length > 0 ? { candidates } : {}),
                 };
                 this.#persist(running, item, item.status === 'started' ? 'item.started' : 'item.completed');
                 return;
@@ -1670,6 +1730,7 @@ export class TurnService {
         running.cost = money(running.cost, cost);
         const thread = threads.get(running.threadId);
         const used = request?.usage;
+        const nextCached = used ? (thread.tokens?.cached ?? 0) + used.cachedTokens : undefined;
         threads.update(
             running.threadId,
             {
@@ -1680,6 +1741,7 @@ export class TurnService {
                           tokens: {
                               input: (thread.tokens?.input ?? 0) + used.inputTokens,
                               output: (thread.tokens?.output ?? 0) + used.outputTokens,
+                              ...(nextCached && nextCached > 0 ? { cached: nextCached } : {}),
                           },
                       }
                     : {}),

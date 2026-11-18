@@ -6,6 +6,7 @@ import { effortsOf, startingEffort } from '../thinking.ts';
 import { ConversationArt } from './Art.tsx';
 import { Popover } from './Controls.tsx';
 import { Icon } from './Icon.tsx';
+import { AgentRolePicker } from './MembersView.tsx';
 import { MemberMentionList, useMemberMention } from './Mentions.tsx';
 import { AutoFocusTextarea, IconButton, Select, Spinner } from './primitives.tsx';
 
@@ -42,6 +43,7 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
     const efforts = effortsOf(chosen?.model.reasoning);
     const effortValue = startingEffort(chosen?.model.reasoning, settings?.defaultEffort, effort);
     const [text, setText] = useState('');
+    const [agentId, setAgentId] = useState('');
     // `@member` hands the first message to a member (06 §19); only Xora's own engine hands work on.
     const mention = useMemberMention(text, setText);
     // Best-of-n: the same task on several models, each in a worktree.
@@ -88,6 +90,30 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
             return;
         }
         const ref = parse(model);
+        if (engine === 'xora' && agentId) {
+            const thread = await attempt(() =>
+                host.call(
+                    'member.chat',
+                    {
+                        projectId,
+                        memberId: agentId,
+                        text: text.trim(),
+                        ...(ref ? { model: ref.model } : {}),
+                        ...(effortValue ? { effort: effortValue } : {}),
+                        mode,
+                    },
+                    { timeoutMs: 120_000 },
+                ),
+            );
+            setBusy(false);
+            if (!thread) return;
+            useApp.setState((state) => ({
+                threads: { ...state.threads, [thread.id]: thread },
+                newThreadFor: undefined,
+            }));
+            await selectThread(thread.id);
+            return;
+        }
         const thread = await attempt(() =>
             host.call(
                 'thread.create',
@@ -151,6 +177,9 @@ export function NewThreadPage({ projectId }: { projectId: string }) {
                     }}
                 />
                 <div className="new-thread__bar">
+                    {engine === 'xora' && !best && (
+                        <AgentRolePicker value={agentId} onChange={setAgentId} placement="up" />
+                    )}
                     <Select
                         compact
                         label={s.thread.mode}

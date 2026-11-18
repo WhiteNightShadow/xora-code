@@ -226,3 +226,57 @@ export function planProgress(
         state: !running ? 'stopped' : current ? 'now' : 'next',
     };
 }
+
+export type TurnSegment =
+    | { readonly kind: 'item'; readonly item: Item }
+    | { readonly kind: 'folded'; readonly id: string; readonly items: readonly Item[] };
+
+const MIN_FOLD_STEPS = 6;
+const MIN_FOLD_TOOLS = 4;
+
+function isFoldableStep(item: Item, keepLastReasoning: boolean): boolean {
+    if (item.type === 'tool_call') {
+        return item.status === 'completed' && !isTodoCall(item);
+    }
+    if (item.type === 'reasoning') {
+        return !keepLastReasoning;
+    }
+    return false;
+}
+
+/**
+ * In finished historical turns, folds dense contiguous runs of completed intermediate tool calls & reasoning so long
+ * sessions stay easy to scan and mount far fewer DOM nodes until expanded.
+ */
+export function partitionTurnItems(items: readonly Item[], fold: boolean): TurnSegment[] {
+    if (!fold || items.length < MIN_FOLD_STEPS) {
+        return items.map((item) => ({ kind: 'item', item }));
+    }
+    const hasAgentReply = items.some((item) => item.type === 'agent_message' && item.text.trim().length > 0);
+    const lastItem = items.at(-1);
+    const segments: TurnSegment[] = [];
+    let buffer: Item[] = [];
+    const flush = () => {
+        if (buffer.length === 0) return;
+        const toolCount = buffer.filter((item) => item.type === 'tool_call').length;
+        if (buffer.length >= MIN_FOLD_STEPS && toolCount >= MIN_FOLD_TOOLS) {
+            segments.push({ kind: 'folded', id: buffer[0]?.id ?? 'folded', items: buffer });
+        } else {
+            for (const item of buffer) {
+                segments.push({ kind: 'item', item });
+            }
+        }
+        buffer = [];
+    };
+    for (const item of items) {
+        const keepLastReasoning = !hasAgentReply && item === lastItem && item.type === 'reasoning';
+        if (isFoldableStep(item, keepLastReasoning)) {
+            buffer.push(item);
+        } else {
+            flush();
+            segments.push({ kind: 'item', item });
+        }
+    }
+    flush();
+    return segments;
+}

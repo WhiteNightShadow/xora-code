@@ -183,11 +183,18 @@ export async function attempt<T>(work: () => Promise<T>): Promise<T | undefined>
     }
 }
 
-function touchView(threadId: string, view: ThreadView): void {
+function touchView(threadId: string, view: ThreadView, changedTurnId?: string): void {
     set((state) => ({
         views: {
             ...state.views,
-            [threadId]: { ...view, turns: view.turns.map((turn) => ({ ...turn, items: [...turn.items] })) },
+            [threadId]: {
+                ...view,
+                turns: changedTurnId
+                    ? view.turns.map((turn) =>
+                          turn.turnId === changedTurnId ? { ...turn, items: [...turn.items] } : turn,
+                      )
+                    : view.turns.map((turn) => ({ ...turn, items: [...turn.items] })),
+            },
         },
     }));
 }
@@ -280,26 +287,73 @@ function listen(): void {
             };
         }),
     );
+    const dirtyDeltas = new Map<string, Set<string>>();
+    let deltaFrame = 0;
+    const flushDeltas = () => {
+        if (deltaFrame !== 0 && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(deltaFrame);
+            deltaFrame = 0;
+        }
+        if (dirtyDeltas.size === 0) return;
+        const snapshot = new Map(dirtyDeltas);
+        dirtyDeltas.clear();
+        set((state) => {
+            const nextViews = { ...state.views };
+            let changed = false;
+            for (const [threadId, turnIds] of snapshot) {
+                const view = nextViews[threadId];
+                if (!view) continue;
+                changed = true;
+                nextViews[threadId] = {
+                    ...view,
+                    turns: view.turns.map((turn) =>
+                        turnIds.has(turn.turnId) ? { ...turn, items: [...turn.items] } : turn,
+                    ),
+                };
+            }
+            return changed ? { views: nextViews } : state;
+        });
+    };
+    const scheduleDeltaFlush = () => {
+        if (deltaFrame !== 0) return;
+        if (typeof requestAnimationFrame === 'function') {
+            deltaFrame = requestAnimationFrame(() => {
+                deltaFrame = 0;
+                flushDeltas();
+            });
+        } else {
+            flushDeltas();
+        }
+    };
+
     host.on('thread.event', ({ event }) => {
+        flushDeltas();
         const view = get().views[event.threadId];
         if (!view) return;
         if (!applyEvent(view, event)) {
             void resync(event.threadId);
             return;
         }
-        touchView(event.threadId, view);
+        touchView(event.threadId, view, event.kind === 'thread.rewound' ? undefined : event.turnId);
     });
     host.on('thread.delta', (delta) => {
         const view = get().views[delta.threadId];
         if (!view) return;
         applyDelta(view, delta);
-        touchView(delta.threadId, view);
+        let turns = dirtyDeltas.get(delta.threadId);
+        if (!turns) {
+            turns = new Set<string>();
+            dirtyDeltas.set(delta.threadId, turns);
+        }
+        turns.add(delta.turnId);
+        scheduleDeltaFlush();
     });
     host.on('thread.item', ({ threadId, item }) => {
+        flushDeltas();
         const view = get().views[threadId];
         if (!view) return;
         applyLiveItem(view, item);
-        touchView(threadId, view);
+        touchView(threadId, view, item.turnId);
     });
     host.on('project.changed', ({ project }) =>
         set((state) => {
@@ -454,19 +508,34 @@ export function openNewThread(projectId: string): void {
     });
 }
 
+export const DEFAULT_WORKSPACE_ID = '_default';
+
 /** Whether a thread is a conversation with the chief assistant (06 §23). */
 export function isChief(thread: Pick<ThreadMeta, 'role'> | undefined): boolean {
     return thread?.role === 'chief';
 }
 
+/** Whether a thread is a standalone conversation not bound to any user project folder. */
+export function isStandaloneChat(thread: Pick<ThreadMeta, 'role' | 'projectId'> | undefined): boolean {
+    return Boolean(thread && (thread.role === 'chief' || thread.projectId === DEFAULT_WORKSPACE_ID));
+}
+
 /**
- * The chief assistant: its latest conversation, or its home (`fresh`, or when there is none) to start one.
+ * Standalone default chat: opens the latest standalone conversation, or the fresh bottom-composer chat view (`fresh`,
+ * or when there is none yet).
  */
 export function openChief(fresh = false): void {
     const latest = fresh
         ? undefined
         : Object.values(get().threads)
-              .filter((thread) => isChief(thread) && !thread.archived)
+              .filter(
+                  (thread) =>
+                      isStandaloneChat(thread) &&
+                      !thread.archived &&
+                      !thread.parent &&
+                      !thread.teamRunId &&
+                      !thread.workflowRunId,
+              )
               .sort((a, b) => b.updatedAt - a.updatedAt)[0];
     if (latest) {
         void selectThread(latest.id);
@@ -498,9 +567,7 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         return;
     }
     const thread = threadId ? current.threads[threadId] : undefined;
-    // A conversation with the chief belongs to no project (06 §23): it selects none, and a project's panel left open
-    // from another conversation closes.
-    const chief = isChief(thread);
+    const standalone = isStandaloneChat(thread);
     set({
         selectedThreadId: threadId,
         teamRunId: undefined,
@@ -510,8 +577,10 @@ export async function selectThread(threadId: string | undefined): Promise<void> 
         chiefOpen: false,
         newThreadFor: undefined,
         reviewTurnId: undefined,
-        ...(thread && !chief ? { selectedProjectId: thread.projectId } : {}),
-        ...(chief && current.rightPanel && !CHIEF_PANELS.includes(current.rightPanel) ? { rightPanel: undefined } : {}),
+        ...(thread && !standalone ? { selectedProjectId: thread.projectId } : {}),
+        ...(standalone && current.rightPanel && !CHIEF_PANELS.includes(current.rightPanel)
+            ? { rightPanel: undefined }
+            : {}),
     });
     if (threadId && thread?.unread) {
         await attempt(() => host.call('thread.markRead', { threadId }));

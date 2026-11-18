@@ -93,9 +93,13 @@ function assistantMessage(message: AssistantMessage, echo: boolean, field: strin
             ? [{ id: part.id, type: 'function', function: { name: part.name, arguments: part.arguments } }]
             : [],
     );
-    const out: JsonObject = { role: 'assistant', content: text || (calls.length > 0 ? null : '') };
+    const hasReasoning = echo && message.content.some((part) => part.type === 'reasoning');
+    // An interrupted turn with only reasoning and no tool calls must not send `content: ""`, which MiniMax, GLM and
+    // strict relays reject with 400.
+    const fallbackText = calls.length > 0 ? null : hasReasoning ? '[Interrupted]' : '';
+    const out: JsonObject = { role: 'assistant', content: text || fallbackText };
     // Never fabricate reasoning: a message without recorded reasoning goes back without the field.
-    if (echo && message.content.some((part) => part.type === 'reasoning')) {
+    if (hasReasoning) {
         out[field] = joinText(message.content, 'reasoning');
     }
     if (calls.length > 0) {

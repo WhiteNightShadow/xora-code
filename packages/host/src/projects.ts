@@ -1,4 +1,5 @@
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { bilingual, type ModelRef, type PermissionMode, type Project, RpcError, RpcErrorCode } from '@xora/protocol';
 import { fromJson, toJson, type XoraDatabase } from '@xora/storage';
@@ -6,6 +7,9 @@ import { currentBranch, isGitRepo } from '@xora/workspace';
 import type { Bus } from './bus.ts';
 import { newId } from './ids.ts';
 import { textOf } from './text.ts';
+
+/** Synthetic project ID used by standalone default conversations not bound to any user project folder. */
+export const DEFAULT_WORKSPACE_ID = '_default';
 
 const TEXT = bilingual(
     {
@@ -32,11 +36,25 @@ interface ProjectRow {
 export class ProjectService {
     readonly #db: XoraDatabase;
     readonly #bus: Bus;
+    readonly #workspaceDir: string;
     readonly #git = new Map<string, { isRepo: boolean; branch?: string; at: number }>();
 
-    constructor(db: XoraDatabase, bus: Bus) {
+    constructor(db: XoraDatabase, bus: Bus, workspaceDir?: string) {
         this.#db = db;
         this.#bus = bus;
+        this.#workspaceDir = workspaceDir ?? path.join(tmpdir(), 'xora-default-workspace');
+    }
+
+    defaultWorkspace(): Project {
+        mkdirSync(this.#workspaceDir, { recursive: true });
+        return {
+            id: DEFAULT_WORKSPACE_ID,
+            name: '默认工作区',
+            path: this.#workspaceDir,
+            addedAt: 0,
+            trusted: false,
+            git: { isRepo: false },
+        };
     }
 
     async #gitInfo(dir: string): Promise<{ isRepo: boolean; branch?: string }> {
@@ -89,15 +107,25 @@ export class ProjectService {
     }
 
     async get(projectId: string): Promise<Project> {
+        if (projectId === DEFAULT_WORKSPACE_ID) {
+            return this.defaultWorkspace();
+        }
         return this.#toProject(this.#row(projectId));
     }
 
     rootOf(projectId: string): string {
+        if (projectId === DEFAULT_WORKSPACE_ID) {
+            mkdirSync(this.#workspaceDir, { recursive: true });
+            return this.#workspaceDir;
+        }
         return this.#row(projectId).path;
     }
 
     /** The project's name, for text built where only its id is at hand. */
     nameOf(projectId: string): string {
+        if (projectId === DEFAULT_WORKSPACE_ID) {
+            return '默认工作区';
+        }
         return this.#row(projectId).name;
     }
 
@@ -128,6 +156,7 @@ export class ProjectService {
     }
 
     touch(projectId: string): void {
+        if (projectId === DEFAULT_WORKSPACE_ID) return;
         this.#db.run('update projects set last_opened_at = ? where id = ?', [Date.now(), projectId]);
     }
 

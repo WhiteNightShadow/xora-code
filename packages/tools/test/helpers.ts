@@ -4,6 +4,8 @@ import path from 'node:path';
 import { afterEach } from 'vitest';
 import {
     createJobRegistry,
+    type FileLedger,
+    type FileStamp,
     type ManagedJobRegistry,
     sanitizeEnv,
     type TodoItem,
@@ -90,6 +92,12 @@ export async function makeContext(
         todoItems: () => todos,
         ...overrides,
     };
+}
+
+/** A session's record of the files it has seen, as the engine keeps it; pass it as `files` to check for it. */
+export function fileLedger(): FileLedger {
+    const seen = new Map<string, FileStamp>();
+    return { seen: (file) => seen.get(file), note: (file, stamp) => void seen.set(file, stamp) };
 }
 
 /** Validates `input` with the tool's schema, as the engine does, and runs the tool. */

@@ -2,6 +2,7 @@ import {
     type BootState,
     consumeSafeModeRequest,
     decideBoot,
+    factoryId,
     loadState,
     markBad,
     reconcile,
@@ -89,6 +90,22 @@ export async function boot(deps: BootDeps): Promise<void> {
         const inventory = await readInventory(sources);
         if (!inventory.factory) {
             log.error(`factory bundle is missing or unreadable at ${deps.factoryDir}`);
+        } else if (round === 0) {
+            // If an earlier broken/merged install marked this factory version bad with `verify:...`, re-check on fresh
+            // launch so reinstalling a clean copy of the same version self-heals instead of staying stuck in safe mode.
+            const fId = factoryId(inventory.factory.version);
+            if (state.bad.some((mark) => mark.id === fId && mark.reason.startsWith('verify:'))) {
+                const recheck = await verifyCandidate(sources, {
+                    id: fId,
+                    kind: 'factory',
+                    version: inventory.factory.version,
+                });
+                if (recheck.ok) {
+                    log.info(`${fId} now passes verification after reinstall; clearing stale bad mark`);
+                    state = { ...state, bad: state.bad.filter((mark) => mark.id !== fId) };
+                    await saveState(paths.stateFile, state);
+                }
+            }
         }
         state = reconcile(state, inventory);
         const { decision, exhausted } = decideBoot(state, inventory, { maxAttempts: MAX_ATTEMPTS, forceSafeMode });

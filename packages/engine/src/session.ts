@@ -1,9 +1,9 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { McpManager } from '@xora/mcp';
 import type { Message, ModelInfo, ProviderConnection } from '@xora/providers';
 import { findModel, getPreset } from '@xora/providers';
-import type { BackgroundJob, JobRegistry, TodoItem } from '@xora/tools';
+import type { BackgroundJob, FileStamp, JobRegistry, TodoItem } from '@xora/tools';
 import { type ConnectionConfig, type ModelTarget, publicConfig, type SessionConfig } from './config.ts';
 import type { Judgment } from './context/ledger.ts';
 import { type SessionEntry, SessionFile } from './store.ts';
@@ -102,8 +102,14 @@ export class EngineSession {
     readonly roots: readonly string[];
     readonly dir: string;
     readonly artifactsDir: string;
+    readonly outputsDir: string;
     readonly file: SessionFile;
     readonly jobs = new Jobs();
+    /**
+     * The files this session read or wrote, by real path, each as it was then (21 §4.4). Kept in memory only: after
+     * a restart a file counts as unseen until it is read again.
+     */
+    readonly files = new Map<string, FileStamp>();
     config: SessionConfig;
     /** Full history, never shortened. */
     readonly history: Message[] = [];
@@ -151,6 +157,7 @@ export class EngineSession {
         this.roots = options.roots;
         this.dir = options.dir;
         this.artifactsDir = path.join(options.dir, 'artifacts');
+        this.outputsDir = path.join(options.dir, 'outputs');
         this.file = new SessionFile(options.dir);
         this.config = options.config;
     }
@@ -309,6 +316,14 @@ export class EngineSession {
             return false;
         }
         this.history.splice(mark.length);
+        if (existsSync(this.outputsDir)) {
+            for (const entry of readdirSync(this.outputsDir)) {
+                const index = /^R(\d+)\.txt$/.exec(entry);
+                if (index && Number(index[1]) >= mark.length) {
+                    rmSync(path.join(this.outputsDir, entry), { force: true });
+                }
+            }
+        }
         this.contextStart = mark.contextStart;
         this.summary = mark.summary;
         this.base = mark.base;
@@ -344,6 +359,25 @@ export class EngineSession {
         const file = path.join(this.artifactsDir, `${Date.now()}-${this.#artifactCounter}-${safe}.txt`);
         writeFileSync(file, content, 'utf8');
         return file;
+    }
+
+    /** Persists the full text of a large tool output at history index `index`, keyed as `R<index>.txt`. */
+    saveSpilledOutput(index: number, content: string): void {
+        mkdirSync(this.outputsDir, { recursive: true });
+        writeFileSync(path.join(this.outputsDir, `R${index}.txt`), content, 'utf8');
+    }
+
+    /** Reads back a spilled tool output saved at history index `index`, if any. */
+    readSpilledOutput(index: number): string | undefined {
+        const file = path.join(this.outputsDir, `R${index}.txt`);
+        if (!existsSync(file)) {
+            return undefined;
+        }
+        try {
+            return readFileSync(file, 'utf8');
+        } catch {
+            return undefined;
+        }
     }
 
     /** Whether the user message being added is the first one, which carries the environment block. */

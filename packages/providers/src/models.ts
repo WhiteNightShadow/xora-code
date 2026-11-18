@@ -1,4 +1,4 @@
-import { endpointFor, findModel, operationUrl } from './catalog.ts';
+import { alternateOperationUrl, endpointFor, findModel, operationUrl } from './catalog.ts';
 import { lowestEffort } from './effort.ts';
 import { classifyError, ProviderError, requestIdFrom } from './errors.ts';
 import { buildHeaders, Exchange } from './http.ts';
@@ -23,7 +23,7 @@ async function getJson(
     url: string,
     exchange: Exchange,
     headers: Record<string, string>,
-): Promise<JsonObject> {
+): Promise<unknown> {
     const provider = connection.preset.id;
     const response = await exchange.fetch(url, { method: 'GET', headers });
     const text = await exchange.text(response);
@@ -39,14 +39,21 @@ async function getJson(
         });
     }
     const payload = parseJson(text);
-    if (!isRecord(payload)) {
+    if (!isRecord(payload) && !Array.isArray(payload)) {
         throw new ProviderError('the model list is not a JSON object', { errorClass: 'server', provider });
     }
     return payload;
 }
 
-function remoteModel(entry: JsonObject): RemoteModel | undefined {
-    const id = asString(entry.id);
+function remoteModel(entry: unknown): RemoteModel | undefined {
+    if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        return trimmed ? { id: trimmed } : undefined;
+    }
+    if (!isRecord(entry)) {
+        return undefined;
+    }
+    const id = asString(entry.id) ?? asString(entry.model);
     if (!id) {
         return undefined;
     }
@@ -62,9 +69,18 @@ function remoteModel(entry: JsonObject): RemoteModel | undefined {
     };
 }
 
+function extractEntries(payload: unknown): unknown[] {
+    if (Array.isArray(payload)) return payload;
+    if (isRecord(payload)) {
+        if (Array.isArray(payload.data)) return payload.data;
+        if (Array.isArray(payload.models)) return payload.models;
+    }
+    return [];
+}
+
 /**
- * Lists the models an endpoint serves: `GET /models` on the openai wire, `GET /v1/models` with pagination on the
- * anthropic wire.
+ * Lists the models an endpoint serves: `GET /models` (falling back to `/v1/models` on 404 when a bare host was
+ * configured) on the openai wire, `GET /v1/models` with pagination on the anthropic wire.
  */
 export async function listModels(connection: ProviderConnection, options: StreamOptions = {}): Promise<RemoteModel[]> {
     const endpoint = endpointFor(connection);
@@ -75,21 +91,42 @@ export async function listModels(connection: ProviderConnection, options: Stream
     });
     const exchange = new Exchange(connection.preset.id, options, LIST_TIMEOUT_MS);
     const url = operationUrl(endpoint, 'models');
+    const fallbackUrl = alternateOperationUrl(endpoint, 'models');
     const models: RemoteModel[] = [];
     try {
         if (endpoint.wire === 'openai_chat') {
-            const payload = await getJson(connection, url, exchange, headers);
-            const data = Array.isArray(payload.data) ? payload.data : [];
-            return data.filter(isRecord).flatMap((entry) => remoteModel(entry) ?? []);
+            let payload: unknown;
+            try {
+                payload = await getJson(connection, url, exchange, headers);
+            } catch (error) {
+                if (fallbackUrl && error instanceof ProviderError && error.status === 404) {
+                    payload = await getJson(connection, fallbackUrl, exchange, headers);
+                } else {
+                    throw error;
+                }
+            }
+            return extractEntries(payload).flatMap((entry) => remoteModel(entry) ?? []);
         }
+        let activeUrl = url;
         let after: string | undefined;
         for (let page = 0; page < MAX_PAGES; page++) {
             const query = new URLSearchParams({ limit: '1000', ...(after ? { after_id: after } : {}) });
-            const payload = await getJson(connection, `${url}?${query}`, exchange, headers);
-            const data = Array.isArray(payload.data) ? payload.data.filter(isRecord) : [];
+            let payload: unknown;
+            try {
+                payload = await getJson(connection, `${activeUrl}?${query}`, exchange, headers);
+            } catch (error) {
+                if (page === 0 && fallbackUrl && error instanceof ProviderError && error.status === 404) {
+                    activeUrl = fallbackUrl;
+                    payload = await getJson(connection, `${activeUrl}?${query}`, exchange, headers);
+                } else {
+                    throw error;
+                }
+            }
+            const data = extractEntries(payload);
             models.push(...data.flatMap((entry) => remoteModel(entry) ?? []));
-            const last = asString(payload.last_id) ?? models[models.length - 1]?.id;
-            if (payload.has_more !== true || last === undefined || last === after || data.length === 0) {
+            const record: JsonObject = isRecord(payload) ? payload : {};
+            const last = asString(record.last_id) ?? models[models.length - 1]?.id;
+            if (record.has_more !== true || last === undefined || last === after || data.length === 0) {
                 break;
             }
             after = last;

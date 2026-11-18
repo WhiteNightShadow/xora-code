@@ -30,7 +30,7 @@ export function PreviewPanel({ thread }: { thread: ThreadMeta }) {
     const [current, setCurrent] = useState<{ url: string; title: string; canGoBack: boolean } | undefined>();
     const [opened, setOpened] = useState(false);
     const [picking, setPicking] = useState(false);
-    const modalOpen = useApp((state) => Boolean(state.settingsOpen || state.usageOpen || state.newThreadFor));
+    const modalOpen = useApp((state) => Boolean(state.settingsOpen || state.newThreadFor));
 
     useEffect(() => {
         if (!api) return;

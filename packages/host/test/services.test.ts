@@ -112,6 +112,13 @@ describe('SettingsService', () => {
         const reloaded = new SettingsService(db).get();
         expect(reloaded.theme).toBe('system');
         expect(reloaded.density).toBe('compact');
+
+        // Legacy profile without `workingSet` inherits `softContextWindow` verbatim.
+        db.run('update settings set value_json = ? where key = ?', [
+            JSON.stringify({ softContextWindow: 512_000 }),
+            'settings',
+        ]);
+        expect(new SettingsService(db).get().workingSet).toBe(512_000);
     });
 
     it('keeps team concurrency between 1 and 8, 3 by default', () => {

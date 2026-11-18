@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -71,26 +71,33 @@ function encodePowerShell(command: string): string {
     return Buffer.from(prelude + command, 'utf16le').toString('base64');
 }
 
+/** How much of a command's output is kept: its first `head` characters and its newest `tail`. */
+export interface OutputLimits {
+    readonly head: number;
+    readonly tail: number;
+}
+
 /**
- * Collects a stream of text up to `limit` characters. Past the limit it keeps the first and the last halves, so a
- * runaway command cannot exhaust memory and the end of its output is still there.
+ * The output of a command as it arrives. Only the first `head` characters and the newest `tail` are kept, so a
+ * runaway command cannot exhaust memory, while the start of the output (what ran) and its end (the error, the
+ * summary) are still there; what came after an earlier point can be asked for, for jobs read bit by bit.
  */
-export class OutputCapture {
-    readonly #half: number;
+export class OutputLog {
+    readonly #limits: OutputLimits;
     #head = '';
     #tail: string[] = [];
     #tailLength = 0;
     #total = 0;
 
-    constructor(limit: number) {
-        this.#half = Math.max(1, Math.floor(limit / 2));
+    constructor(limits: OutputLimits) {
+        this.#limits = limits;
     }
 
     append(text: string): void {
         this.#total += text.length;
         let rest = text;
-        if (this.#head.length < this.#half) {
-            const room = this.#half - this.#head.length;
+        if (this.#head.length < this.#limits.head) {
+            const room = this.#limits.head - this.#head.length;
             this.#head += rest.slice(0, room);
             rest = rest.slice(room);
         }
@@ -99,8 +106,13 @@ export class OutputCapture {
         }
         this.#tail.push(rest);
         this.#tailLength += rest.length;
-        while (this.#tail.length > 1 && this.#tailLength - (this.#tail[0]?.length ?? 0) >= this.#half) {
+        while (this.#tail.length > 1 && this.#tailLength - (this.#tail[0]?.length ?? 0) >= this.#limits.tail) {
             this.#tailLength -= this.#tail.shift()?.length ?? 0;
+        }
+        const only = this.#tail[0];
+        if (this.#tail.length === 1 && only !== undefined && only.length > this.#limits.tail) {
+            this.#tail[0] = only.slice(only.length - this.#limits.tail);
+            this.#tailLength = this.#limits.tail;
         }
     }
 
@@ -109,15 +121,34 @@ export class OutputCapture {
         return this.#total;
     }
 
-    /** The output; when more than the limit arrived, the dropped middle is replaced by a marker. */
+    /** Whether some of the output is no longer kept. */
+    get dropped(): boolean {
+        return this.#head.length + this.#tailLength < this.#total;
+    }
+
+    /** The output; where its middle was dropped, a marker says how much. */
     text(): string {
         let tail = this.#tail.join('');
         if (this.#head.length + tail.length === this.#total) {
             return this.#head + tail;
         }
-        tail = tail.slice(Math.max(0, tail.length - this.#half));
+        tail = tail.slice(Math.max(0, tail.length - this.#limits.tail));
         const dropped = this.#total - this.#head.length - tail.length;
         return `${this.#head}\n[... ${dropped} characters not kept ...]\n${tail}`;
+    }
+
+    /** What arrived after the first `from` characters; `dropped` counts those of them that are no longer kept. */
+    since(from: number): { readonly text: string; readonly dropped: number } {
+        if (from >= this.#total) {
+            return { text: '', dropped: 0 };
+        }
+        const tail = this.#tail.join('');
+        const tailStart = this.#total - tail.length;
+        if (from >= tailStart) {
+            return { text: tail.slice(from - tailStart), dropped: 0 };
+        }
+        const head = from < this.#head.length ? this.#head.slice(from) : '';
+        return { text: head + tail, dropped: tailStart - Math.max(from, this.#head.length) };
     }
 }
 
@@ -137,9 +168,16 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
     }
 }
 
+function taskkillPath(): string {
+    const root = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+    const full = path.win32.join(root, 'System32', 'taskkill.exe');
+    return existsSync(full) ? full : 'taskkill';
+}
+
 /**
  * Stops a child started by `spawnShell` together with everything it started: on unix SIGTERM to its process group
- * and SIGKILL after a grace period; on Windows `taskkill /T /F`.
+ * and SIGKILL after a grace period; on Windows `taskkill /T /F` plus pipe teardown so grandchildren holding inherited
+ * named pipes open cannot wedge `waitForExit` after Stop.
  */
 export function terminateTree(child: ChildProcess): void {
     const pid = child.pid;
@@ -147,12 +185,51 @@ export function terminateTree(child: ChildProcess): void {
         return;
     }
     if (process.platform === 'win32') {
-        const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-        killer.on('error', () => child.kill());
+        const killer = spawn(taskkillPath(), ['/pid', String(pid), '/T', '/F'], {
+            stdio: 'ignore',
+            windowsHide: true,
+        });
+        killer.on('error', () => {
+            try {
+                child.kill();
+            } catch {
+                // Already gone.
+            }
+        });
+        setTimeout(() => {
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+            try {
+                child.kill();
+            } catch {
+                // Already gone.
+            }
+        }, 1200).unref();
         return;
     }
     signalGroup(pid, 'SIGTERM');
     setTimeout(() => signalGroup(pid, 'SIGKILL'), KILL_GRACE_MS).unref();
+}
+
+/** {@link terminateTree} for the moment the process exits, where nothing asynchronous runs any more: at once, for good. */
+export function terminateTreeNow(child: ChildProcess): void {
+    const pid = child.pid;
+    if (pid === undefined) {
+        return;
+    }
+    try {
+        if (process.platform === 'win32') {
+            spawnSync(taskkillPath(), ['/pid', String(pid), '/T', '/F'], {
+                stdio: 'ignore',
+                windowsHide: true,
+                timeout: 3000,
+            });
+        } else {
+            signalGroup(pid, 'SIGKILL');
+        }
+    } catch {
+        // Already gone.
+    }
 }
 
 export interface SpawnShellOptions {
@@ -248,89 +325,4 @@ export function waitForExit(child: ChildProcess): Promise<ChildExit> {
         });
         child.once('close', (code, signal) => finish(exit ?? { code, signal }));
     });
-}
-
-export interface RunCommandOptions extends SpawnShellOptions {
-    readonly timeoutMs: number;
-    readonly signal: AbortSignal;
-    readonly onOutput?: ((chunk: string) => void) | undefined;
-    /** Characters kept in memory; see `OutputCapture`. */
-    readonly captureLimit: number;
-}
-
-export interface CommandRun {
-    /** stdout and stderr interleaved in arrival order. */
-    readonly output: string;
-    /** Characters produced in total, more than `output.length` when the capture limit dropped some. */
-    readonly outputChars: number;
-    readonly exitCode: number | null;
-    readonly signal: NodeJS.Signals | null;
-    readonly timedOut: boolean;
-    readonly aborted: boolean;
-    /** Set when the shell could not be started. */
-    readonly error?: string;
-    readonly durationMs: number;
-}
-
-/** Runs a command to completion, killing its process tree on timeout or abort. */
-export async function runCommand(options: RunCommandOptions): Promise<CommandRun> {
-    const started = Date.now();
-    const capture = new OutputCapture(options.captureLimit);
-    let child: ChildProcess;
-    try {
-        child = spawnShell(options);
-    } catch (error) {
-        return failedRun(error, started);
-    }
-    const flush = readOutput(child, (text) => {
-        capture.append(text);
-        try {
-            options.onOutput?.(text);
-        } catch {
-            // A failing listener must not break the command.
-        }
-    });
-    let timedOut = false;
-    let aborted = false;
-    const timer = setTimeout(() => {
-        timedOut = true;
-        terminateTree(child);
-    }, options.timeoutMs);
-    const onAbort = (): void => {
-        aborted = true;
-        terminateTree(child);
-    };
-    options.signal.addEventListener('abort', onAbort, { once: true });
-    if (options.signal.aborted) {
-        onAbort();
-    }
-    const exit = await waitForExit(child);
-    clearTimeout(timer);
-    options.signal.removeEventListener('abort', onAbort);
-    flush();
-    if (exit.error !== undefined && child.pid === undefined) {
-        return failedRun(exit.error, started);
-    }
-    return {
-        output: capture.text(),
-        outputChars: capture.total,
-        exitCode: exit.code,
-        signal: exit.signal,
-        timedOut,
-        aborted: aborted && !timedOut,
-        durationMs: Date.now() - started,
-    };
-}
-
-function failedRun(error: unknown, started: number): CommandRun {
-    return {
-        output: '',
-        outputChars: 0,
-        exitCode: null,
-        signal: null,
-        timedOut: false,
-        aborted: false,
-        error: error instanceof Error ? error.message : String(error),
-        durationMs: Date.now() - started,
-    };
 }

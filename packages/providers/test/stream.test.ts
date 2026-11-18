@@ -1,11 +1,16 @@
-import { errorTurn, openaiText, sseFrame, startMockModelServer } from '@xora/test-kit';
+import { anthropicText, errorTurn, openaiText, sseFrame, startMockModelServer } from '@xora/test-kit';
 import { describe, expect, it } from 'vitest';
 import {
+    buildAnthropicBody,
     completeModel,
+    endpointFor,
+    inferModelInfo,
     type ModelEvent,
     type ProviderConnection,
     ProviderError,
     type ProviderPreset,
+    resolveQuirks,
+    sanitizeApiKey,
     streamModel,
 } from '../src/index.ts';
 import { collect, connect, preset, request, useMockServer } from './helpers.ts';
@@ -208,6 +213,67 @@ describe('cancellation and idle timeout', () => {
         expect(Date.now() - started).toBeGreaterThan(300);
         expect(done.message.content).toEqual([{ type: 'text', text: 'queued answer' }]);
     });
+
+    it('separates firstByteTimeoutMs (headers flushed, slow thinking) from mid-stream idleTimeoutMs', async () => {
+        const frames = openaiText('deep thought answer').events ?? [];
+        const encoder = new TextEncoder();
+        // Simulate a reverse proxy that flushes 200 OK headers immediately, waits 180ms (> 70ms idleTimeoutMs,
+        // < 500ms firstByteTimeoutMs) while the reasoning model thinks, then streams fast.
+        const slowFirstByteFetch: typeof fetch = async (_input, init) => {
+            const signal = init?.signal;
+            const stream = new ReadableStream<Uint8Array>({
+                async start(controller) {
+                    await new Promise<void>((resolve, reject) => {
+                        const timer = setTimeout(resolve, 180);
+                        signal?.addEventListener(
+                            'abort',
+                            () => {
+                                clearTimeout(timer);
+                                reject(signal.reason ?? new Error('aborted'));
+                            },
+                            { once: true },
+                        );
+                    });
+                    for (const frame of frames) {
+                        controller.enqueue(typeof frame === 'string' ? encoder.encode(frame) : frame);
+                    }
+                    controller.close();
+                },
+            });
+            return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        };
+        const done = await completeModel(connect('deepseek', server()), request('deepseek-flash'), {
+            fetch: slowFirstByteFetch,
+            firstByteTimeoutMs: 500,
+            idleTimeoutMs: 70,
+        });
+        expect(done.message.content).toEqual([{ type: 'text', text: 'deep thought answer' }]);
+
+        // Once the first body chunk arrives, mid-stream silence aborts at idleTimeoutMs (~70ms), not firstByteTimeoutMs (800ms).
+        const stallMidStreamFetch: typeof fetch = async (_input, init) => {
+            const signal = init?.signal;
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    const first = frames[0] ?? 'data: {}\n\n';
+                    controller.enqueue(typeof first === 'string' ? encoder.encode(first) : first);
+                    signal?.addEventListener('abort', () => controller.error(signal.reason ?? new Error('aborted')), {
+                        once: true,
+                    });
+                },
+            });
+            return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        };
+        const started = Date.now();
+        const error = await failure(
+            completeModel(connect('deepseek', server()), request('deepseek-flash'), {
+                fetch: stallMidStreamFetch,
+                firstByteTimeoutMs: 800,
+                idleTimeoutMs: 70,
+            }),
+        );
+        expect(error).toMatchObject({ errorClass: 'timeout', retryable: true });
+        expect(Date.now() - started).toBeLessThan(400);
+    });
 });
 
 describe('SSE over HTTP', () => {
@@ -240,5 +306,90 @@ describe('SSE over HTTP', () => {
         server().enqueue(openaiText('again'));
         const done = await collect(streamModel(connect('deepseek', server()), request('deepseek-flash')));
         expect(done[done.length - 1]).toMatchObject({ type: 'done' });
+    });
+});
+
+describe('MiniMax custom endpoints & relay compatibility', () => {
+    it('sanitizes Windows clipboard API keys and sends dual x-api-key + Bearer on custom Anthropic endpoints', async () => {
+        expect(sanitizeApiKey('  "Bearer \uFEFFsk-win-key\u200B\r\n" ')).toBe('sk-win-key');
+
+        // Auto-switches custom/MiniMax `/anthropic` base URLs to anthropic_messages wire with dual headers.
+        expect(endpointFor({ preset: preset('minimax-cn'), baseUrl: 'https://api.minimaxi.com/anthropic/' })).toEqual({
+            wire: 'anthropic_messages',
+            baseUrl: 'https://api.minimaxi.com/anthropic',
+        });
+
+        server().enqueue(anthropicText('hello from minimax anthropic'));
+        const customAnthropic: ProviderConnection = {
+            preset: preset('custom-anthropic'),
+            apiKey: 'Bearer \uFEFFsk-cp-minimax\r\n',
+            baseUrl: server().url,
+        };
+        const done = await completeModel(customAnthropic, request('MiniMax-M2.7'));
+        expect(done.message.content).toEqual([{ type: 'text', text: 'hello from minimax anthropic' }]);
+        expect(server().requests[0]?.path).toBe('/v1/messages');
+        expect(server().requests[0]?.headers).toMatchObject({
+            'x-api-key': 'sk-cp-minimax',
+            authorization: 'Bearer sk-cp-minimax',
+        });
+    });
+
+    it('infers MiniMax quirks (omit temperature/top_p, reasoning_split) for custom MiniMax model IDs', () => {
+        const m27 = inferModelInfo('MiniMax-M2.7');
+        expect(m27.family).toBe('minimax');
+        expect(m27.quirks?.omitParams).toEqual(['temperature', 'top_p']);
+        expect(m27.quirks?.extraBody).toEqual({ reasoning_split: true });
+
+        const m3 = inferModelInfo('MiniMax-M3');
+        expect(m3.contextWindow).toBe(1_000_000);
+        expect(m3.quirks?.omitParams).toEqual(['temperature', 'top_p']);
+    });
+
+    it('falls back to /v1/chat/completions on 404 and retries without stream_options on 400', async () => {
+        const customOpenAi: ProviderConnection = {
+            preset: preset('custom-openai'),
+            apiKey: 'relay-key',
+            // User omitted `/v1` on a relay / MiniMax host.
+            baseUrl: server().url,
+        };
+        server().enqueue(
+            errorTurn(404, { error: { message: 'Not Found' } }),
+            errorTurn(400, { error: { message: 'Unsupported parameter: stream_options' } }),
+            openaiText('relay ok'),
+        );
+        const done = await completeModel(customOpenAi, request('MiniMax-M2.7'));
+        expect(done.message.content).toEqual([{ type: 'text', text: 'relay ok' }]);
+        expect(server().requests[0]?.path).toBe('/chat/completions');
+        expect(server().requests[1]?.path).toBe('/v1/chat/completions');
+        expect(server().requests[1]?.body).toHaveProperty('stream_options');
+        expect(server().requests[2]?.path).toBe('/v1/chat/completions');
+        expect(server().requests[2]?.body).not.toHaveProperty('stream_options');
+    });
+
+    it('drops unsigned partial reasoning blocks when replaying interrupted Anthropic turns', () => {
+        const customAnthropic: ProviderConnection = { preset: preset('custom-anthropic'), baseUrl: 'https://relay/v1' };
+        const model = inferModelInfo('claude-sonnet-4-5');
+        const body = buildAnthropicBody({
+            preset: customAnthropic.preset,
+            model,
+            quirks: resolveQuirks(customAnthropic.preset, model),
+            request: request('claude-sonnet-4-5', {
+                messages: [
+                    { role: 'user', content: [{ type: 'text', text: 'first' }] },
+                    {
+                        role: 'assistant',
+                        provider: 'custom-anthropic',
+                        model: 'claude-sonnet-4-5',
+                        content: [
+                            { type: 'reasoning', text: 'interrupted thinking without signature' },
+                            { type: 'text', text: '[Stopped by user]' },
+                        ],
+                    },
+                    { role: 'user', content: [{ type: 'text', text: 'second' }] },
+                ],
+            }),
+        });
+        const assistantMsg = (body.messages as Array<{ role: string; content: Array<{ type: string }> }>)[1];
+        expect(assistantMsg?.content.map((block) => block.type)).toEqual(['text']);
     });
 });

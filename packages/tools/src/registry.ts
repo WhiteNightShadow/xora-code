@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { type LenientInput, lenientInput } from './lenient.ts';
 import { applyPatchTool } from './tools/apply-patch.ts';
 import { bashKillTool, bashOutputTool, bashTool } from './tools/bash.ts';
 import { editTool, multiEditTool } from './tools/edit.ts';
@@ -48,11 +49,27 @@ export interface ToolSpec {
     readonly parameters: Record<string, unknown>;
 }
 
+const parameters = new WeakMap<AnyTool, Record<string, unknown>>();
+
+/** The JSON Schema of a built-in tool's input, worked out once per tool. */
+export function toolParameters(tool: AnyTool): Record<string, unknown> {
+    let schema = parameters.get(tool);
+    if (schema === undefined) {
+        // The input side: what the model sends, before defaults or transforms apply.
+        schema = tidySchema(z.toJSONSchema(tool.schema, { io: 'input' })) as Record<string, unknown>;
+        delete schema.$schema;
+        parameters.set(tool, schema);
+    }
+    return schema;
+}
+
 export function toolSpec(tool: AnyTool): ToolSpec {
-    // The input side: what the model sends, before defaults or transforms apply.
-    const schema = tidySchema(z.toJSONSchema(tool.schema, { io: 'input' })) as Record<string, unknown>;
-    delete schema.$schema;
-    return { name: tool.name, description: tool.description, parameters: schema };
+    return { name: tool.name, description: tool.description, parameters: toolParameters(tool) };
+}
+
+/** A built-in tool's input as sent by a model, in the shape its schema asks for (21 §4.1). */
+export function lenientToolInput(tool: AnyTool, raw: unknown): LenientInput {
+    return lenientInput(toolParameters(tool), raw, { ...tool.lenient, strict: true });
 }
 
 /** Drops the safe-integer bounds zod puts on every integer, and closes objects to unknown keys. */

@@ -30,13 +30,13 @@
 
 ## 3. 工具集
 
-以下是xora engine内置的工具。外部agent用它们自己的工具，审批同样走host。
+以下是xora engine内置的工具。外部agent用它们自己的工具，审批同样走host。2026-11-12对这些工具做了一轮审查和改进，细节见[21](21-agent-tools.md)；表里已经按改后的写。
 
 | 工具 | 说明 | 默认权限 |
 |---|---|---|
-| read、list、glob、grep | 读文件、列目录、按模式找文件、ripgrep搜索 | 放行 |
-| edit、write、apply_patch | 精确替换、写文件、兼容codex的patch格式 | 询问；自动编辑模式下放行 |
-| bash | 在pty里执行，支持超时和后台任务；输出过长时截断，完整输出存为artifact | 询问；只读命令白名单放行 |
+| read、list、glob、grep | 读文件、列目录、按模式找文件、ripgrep搜索。read和grep认utf-8、带bom的utf-16和gb18030（gbk），和改写工具用同一个判定；认不出编码的照旧显示并说明 | 放行 |
+| edit、multi_edit、write、apply_patch | 精确替换、写文件、兼容codex的patch格式。edit精确匹配不上时，只差行号、行尾空白、整块缩进或缩进单位并且全文唯一的那一处也算，结果里说明；找不到时给出文件里最像的几行。write覆盖已有文件前要求本会话读过它、读后没被别人改过。都保持文件原来的编码和换行，认不出编码的文件不改写 | 询问；自动编辑模式下放行 |
+| bash、bash_output、bash_kill | 每次调用一个新shell（不是pty，没有输入）；输出按终端显示的样子整理（进度条只留最后一帧，去掉颜色码，重复行合并），过长时截掉中间、全文存为artifact。给了`timeoutMs`的到时间就停；没给的等满2分钟不杀，转成后台任务继续跑。转后台的命令随这一轮的停止而停止。`bash_output`读任务的新输出，可以用`waitMs`等它结束，任务失败时结果标成失败；`bash_kill`停任务 | bash：询问，只读命令白名单放行；bash_output、bash_kill：放行 |
 | web_fetch、web_search | web_fetch抓http(s)网页：html转成markdown（有main或article时只取它们，去掉脚本、样式和导航），json格式化，其他文本原样，图片、pdf等二进制文件不读；一次最多返回约2万字符，更长的整篇存为artifact，可以用read、grep看，或带start接着取；拒绝本机和内网地址（跳转后的地址也查）和带账号密码的网址。web_search不用key：先查bing rss，失败、没有结果或结果跟查询不沾边时改查duckduckgo。还没做：配置的搜索api、厂商的服务端搜索工具 | 按域名询问；全权模式下放行 |
 | browser | 驱动内置预览：打开、截图、点击、读dom、看控制台 | 询问 |
 | git | status、diff、log、commit、branch；危险操作单独询问 | 只读部分放行 |
